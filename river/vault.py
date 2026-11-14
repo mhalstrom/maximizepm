@@ -142,10 +142,11 @@ def _log(conn, name, actor, action, detail=None):
                  (name, core.iso(core.now()), actor or "a person", action, detail, held["id"] if held else None))
 
 
-def put(conn, name, data, actor=None, project=None, note=None, how="stdin"):
+def put(conn, name, data, actor=None, project=None, note=None, how="stdin", var=None):
     """Save a value under a name (a new value replaces the old one). Replies with the name, never the value."""
     check_name(name)
     data = clean(data)
+    var = check_var(var) if var else None
     pid = core._project(conn, project)["id"] if project else None
     if conn.execute("SELECT 1 FROM secrets WHERE name=?", (name,)).fetchone():
         _require(conn, name, actor, "replace")  # a new value in a set changes what every grant of the set gives
@@ -155,22 +156,36 @@ def put(conn, name, data, actor=None, project=None, note=None, how="stdin"):
         old = conn.execute("SELECT name FROM secrets WHERE name=?", (name,)).fetchone()
         if old:
             conn.execute("UPDATE secrets SET updated_at=?, updated_by=?, project_id=COALESCE(?, project_id), "
-                         "note=COALESCE(?, note) WHERE name=?", (at, actor, pid, note, name))
+                         "note=COALESCE(?, note), var=COALESCE(?, var) WHERE name=?", (at, actor, pid, note, var, name))
         else:
             conn.execute("INSERT INTO secrets (name, project_id, note, created_by, created_at, updated_by, updated_at,"
-                         " uses) VALUES (?,?,?,?,?,?,?,0)", (name, pid, note, actor, at, actor, at))
+                         " uses, var) VALUES (?,?,?,?,?,?,?,0,?)", (name, pid, note, actor, at, actor, at, var))
         _log(conn, name, actor, "replace" if old else "put", how)
-    return {"secret": name, "saved": True, "replaced": bool(old), "bytes": len(data), "store": backend().name}
+        level = conn.execute("SELECT level FROM secrets WHERE name=?", (name,)).fetchone()["level"]
+    return {"secret": name, "saved": True, "replaced": bool(old), "bytes": len(data), "store": backend().name,
+            "level": level}
 
 
-def get(conn, name, actor=None, use=None):
-    """The value, for a use that the log names (pipe: the command; env: the file). Only the CLI's pipe and env call
-    it; their replies carry the name, never the value."""
+def get(conn, name, actor=None, use=None, how=None, argv=None):
+    """The value, for a use that the log names (pipe or run: the command; env: the file). Only the CLI's pipe, run
+    and env call it; their replies carry the name, never the value. how (pipe, run, env) and argv: the use that the
+    secret's protection level checks (check_level)."""
     check_name(name)
-    if not conn.execute("SELECT 1 FROM secrets WHERE name=?", (name,)).fetchone():
+    row = conn.execute("SELECT * FROM secrets WHERE name=?", (name,)).fetchone()
+    if not row:
         raise RiverError(f"no secret {name}: maxpm secret list shows the names; a person saves one with "
                          f"maxpm secret put {name} (it asks for the value)")
     ok = _require(conn, name, actor, "use", use)
+    if how:
+        why = check_level(row, how, argv or [])
+        if why:
+            with core.tx(conn):
+                _log(conn, name, actor, "refused", f"{use or how}: {why}")
+            held = core._held_item(conn, actor)
+            raise RiverError(f"{why}. Ask the manager: " + _ask_line(
+                conn, f"Allow {how} of the secret {name}"
+                + (f" for {' '.join(argv[:2])}" if argv else "") + ": " + level_hint(name, how, argv or []),
+                held["id"] if held else None))
     data = backend().get(conn, name)
     if data is None:
         raise RiverError(f"the secret {name} is listed but its value is gone from the {backend().name} store: save it "
@@ -196,7 +211,8 @@ def delete(conn, name, actor=None):
 
 def listing(conn, project=None):
     q = ("SELECT s.name, p.name AS project, s.note, s.created_by, s.created_at, s.updated_by, s.updated_at, s.used_at, s.used_by, "
-         "s.uses FROM secrets s LEFT JOIN projects p ON p.id=s.project_id")
+         "s.uses, s.level, s.allow_commands, s.allow_hosts, s.allow_env, s.var "
+         "FROM secrets s LEFT JOIN projects p ON p.id=s.project_id")
     args = []
     if project:
         q += " WHERE s.project_id=?"
@@ -246,6 +262,138 @@ def set_env_line(path, key, data):
         os.close(os.open(p, os.O_WRONLY | os.O_CREAT, 0o600))
     p.write_text("\n".join(new) + "\n")
     return {"replaced": done}
+
+
+# ---- protection levels (#5825)
+
+# locked: only the commands that the person named; hidden (the default): any command; open: as before #5825.
+# Locked and hidden: maxpm secret pipe and run mask the value in the command's output, and env needs allow_env.
+LEVELS = ("locked", "hidden", "open")
+MASK = b"***"
+MASK_MIN = 4  # a shorter value is masked too, but only as itself: its encodings would match ordinary text
+
+
+def check_var(var):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", var or ""):
+        raise RiverError(f"a variable name is letters, digits and _, not starting with a digit, not {var!r}: "
+                         f"for example GH_TOKEN")
+    return var
+
+
+def _lines(text):
+    return [x.strip() for x in (text or "").splitlines() if x.strip()]
+
+
+def _command_allowed(entries, argv):
+    """Whether argv starts with one of the entries: each is the first words of a command (wrangler, npx wrangler),
+    the first one compared by its file name, so /opt/homebrew/bin/wrangler is wrangler."""
+    words = [os.path.basename(argv[0])] + list(argv[1:]) if argv else []
+    for e in entries:
+        want = e.split()
+        if want and words[:len(want)] == want:
+            return True
+    return False
+
+
+def check_level(row, how, argv):
+    """Why the secret's level refuses this use (how: pipe, run, env), or None."""
+    level = row["level"] or "hidden"
+    if level == "open":
+        return None
+    if how == "env":
+        if not row["allow_env"]:
+            return f"the secret {row['name']} is {level}: writing it into a file is off for it"
+        return None
+    if level == "locked" and not _command_allowed(_lines(row["allow_commands"]), argv):
+        named = ", ".join(_lines(row["allow_commands"])) or "none yet"
+        return (f"the secret {row['name']} is locked to the commands {named}; "
+                f"{os.path.basename(argv[0]) if argv else 'this command'} is not one of them")
+    return None
+
+
+def level_hint(name, how, argv):
+    """The command a person runs to allow what check_level refused."""
+    if how == "env":
+        return f"maxpm secret level {name} --env on"
+    return f"maxpm secret level {name} --command {os.path.basename(argv[0]) if argv else '<command>'}"
+
+
+def protection(conn, name):
+    """What the CLI needs to give the value: the level (masked or not) and the variable for run."""
+    r = conn.execute("SELECT level, var FROM secrets WHERE name=?", (name,)).fetchone()
+    return {"level": r["level"] if r else "hidden", "var": r["var"] if r else None}
+
+
+def set_level(conn, name, level=None, add_commands=(), remove_commands=(), add_hosts=(), remove_hosts=(),
+              env=None, var=None, actor=None):
+    """Change a secret's level, its allowed commands and hosts, whether env may write it, and its variable. Only a
+    person."""
+    check_name(name)
+    if not session_of(conn, actor)["person"]:
+        raise RiverError("only a person changes a secret's protection. Ask the manager to bring it to the person: "
+                         + _ask_line(conn, f"Please change the protection of the secret {name}: <what, why>"))
+    r = conn.execute("SELECT * FROM secrets WHERE name=?", (name,)).fetchone()
+    if not r:
+        raise RiverError(f"no secret {name}: maxpm secret list shows the names")
+    if level is not None and level not in LEVELS:
+        raise RiverError(f"a level is one of {', '.join(LEVELS)}, not {level!r}")
+    cmds = [c for c in _lines(r["allow_commands"]) if c not in [" ".join(x.split()) for x in remove_commands]]
+    cmds += [" ".join(c.split()) for c in add_commands if c.strip() and " ".join(c.split()) not in cmds]
+    hosts = [h for h in _lines(r["allow_hosts"]) if h not in [x.strip().lower() for x in remove_hosts]]
+    hosts += [h.strip().lower() for h in add_hosts if h.strip() and h.strip().lower() not in hosts]
+    new = {"level": level or r["level"], "allow_commands": "\n".join(cmds) or None,
+           "allow_hosts": "\n".join(hosts) or None,
+           "allow_env": int(env) if env is not None else r["allow_env"],
+           "var": check_var(var) if var else r["var"]}
+    with core.tx(conn):
+        conn.execute("UPDATE secrets SET level=?, allow_commands=?, allow_hosts=?, allow_env=?, var=? WHERE name=?",
+                     (new["level"], new["allow_commands"], new["allow_hosts"], new["allow_env"], new["var"], name))
+        changed = [k for k in new if new[k] != r[k]]
+        if changed:
+            _log(conn, name, actor, "level", "; ".join(f"{k} {new[k]!r}" for k in changed))
+    return {"secret": name, "level": new["level"], "commands": cmds, "hosts": hosts, "env": bool(new["allow_env"]),
+            "var": new["var"], "changed": changed}
+
+
+def mask_forms(data):
+    """The byte strings that show the value in output: itself, its base64 (standard and URL-safe, with no '='), its
+    hex (lower and upper case), and for a value of several lines each long line. Longest first, so that a longer
+    form is masked before a shorter one inside it."""
+    if not data:
+        return []
+    forms = {data}
+    if len(data) >= MASK_MIN:
+        b = base64.b64encode(data).rstrip(b"=")
+        forms |= {b, base64.urlsafe_b64encode(data).rstrip(b"="), data.hex().encode(), data.hex().upper().encode()}
+        forms |= {ln.strip() for ln in data.splitlines() if len(ln.strip()) >= 16}
+    return sorted(forms, key=len, reverse=True)
+
+
+class Masker:
+    """Masks the value's forms in a stream of chunks. It holds back the last (longest form - 1) bytes until more
+    comes, so a form that two chunks split is still masked; flush() gives the rest at the end."""
+
+    def __init__(self, data):
+        self.forms = mask_forms(data)
+        self.keep = max((len(f) for f in self.forms), default=1) - 1
+        self.buf = b""
+
+    def _mask(self, b):
+        for f in self.forms:
+            b = b.replace(f, MASK)
+        return b
+
+    def feed(self, chunk):
+        self.buf = self._mask(self.buf + chunk)
+        if len(self.buf) <= self.keep:
+            return b""
+        cut = len(self.buf) - self.keep
+        out, self.buf = self.buf[:cut], self.buf[cut:]
+        return out
+
+    def flush(self):
+        out, self.buf = self._mask(self.buf), b""
+        return out
 
 
 # ---- sets and grants (#5822)

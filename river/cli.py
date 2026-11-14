@@ -1175,10 +1175,28 @@ def build_parser(only=None):
     x.add_argument("--in", dest="within", help="with --from-browser: the text of the row or card around the element")
     x.add_argument("--project", help="the project it belongs to (default: this folder's)")
     x.add_argument("--note", help="what it is and where it came from (never the value)")
+    x.add_argument("--var", help="the variable that maxpm secret run puts it in: for example GH_TOKEN")
     x = ses.add_parser("pipe", help="run a command with the value on its stdin: maxpm secret pipe <name> -- wrangler "
                        "secret put GOOGLE_CLIENT_SECRET")
     x.add_argument("name")
     x.add_argument("command", nargs=argparse.REMAINDER, help="the command, after --")
+    x = ses.add_parser("run", help="run a command with the value in its variable: maxpm secret run gh-token -- gh pr "
+                       "list (the variable: --var, else the secret's own, else the name in capitals)")
+    x.add_argument("name")
+    x.add_argument("--var", help="the variable for this run")
+    x.add_argument("command", nargs=argparse.REMAINDER, help="the command, after --")
+    x = ses.add_parser("level", help="a secret's protection (a person only): locked (only the named commands), "
+                       "hidden (any command; the default), open (the value shows in output)")
+    x.add_argument("name")
+    x.add_argument("level", nargs="?", choices=("locked", "hidden", "open"))
+    x.add_argument("--command", action="append", default=[], metavar="WORDS",
+                   help="allow a command when locked: its first words (wrangler, 'npx wrangler'); repeat it")
+    x.add_argument("--no-command", dest="no_command", action="append", default=[], metavar="WORDS",
+                   help="take an allowed command away")
+    x.add_argument("--host", action="append", default=[], help="a site where the browser may fill it (repeat it)")
+    x.add_argument("--no-host", dest="no_host", action="append", default=[], help="take a site away")
+    x.add_argument("--env", choices=("on", "off"), help="on: maxpm secret env may write it into a file")
+    x.add_argument("--var", help="the variable that maxpm secret run puts it in")
     x = ses.add_parser("env", help="write NAME=value into a .env file (replaces that key's line, or adds it)")
     x.add_argument("name")
     x.add_argument("file", help="the .env file")
@@ -5348,9 +5366,58 @@ def _secret_op(conn, args, actor, timeout=30):
     return secrets.act(conn, args, actor)
 
 
-def _secret_value(conn, name, actor, use):
+def _secret_value(conn, name, actor, use, how=None, argv=None):
+    """The value and its protection ({'level', 'var'}); the level of the secret may refuse the use (#5825)."""
     import base64
-    return base64.b64decode(_secret_op(conn, {"action": "get", "name": name, "use": use}, actor)["value_b64"])
+    res = _secret_op(conn, {"action": "get", "name": name, "use": use, "how": how, "argv": argv}, actor)
+    return base64.b64decode(res["value_b64"]), {"level": res.get("level") or "hidden", "var": res.get("var")}
+
+
+def _env_key(name):
+    """The variable for a secret with none of its own: the name in capitals, '-' and '.' as '_'."""
+    import re
+    key = re.sub(r"[^A-Za-z0-9_]", "_", name).upper()
+    return "_" + key if key[:1].isdigit() else key
+
+
+def _run_masked(argv, data, stdin=None, env=None):
+    """Run argv; its stdout and stderr pass through here with every form of data masked (vault.Masker), chunk by
+    chunk, so a long command still shows its output as it runs. stdin: bytes to give it, else this terminal's.
+    Returns the exit code."""
+    import subprocess
+    import threading
+    from . import vault
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None else None, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env)
+
+    def pump(src, dst):
+        m = vault.Masker(data)
+        out = getattr(dst, "buffer", None)
+
+        def write(b):
+            if b:
+                out.write(b) if out else dst.write(b.decode(errors="replace"))
+                dst.flush()
+        while True:
+            chunk = os.read(src.fileno(), 65536)
+            if not chunk:
+                break
+            write(m.feed(chunk))
+        write(m.flush())
+    threads = [threading.Thread(target=pump, args=(p.stdout, sys.stdout), daemon=True),
+               threading.Thread(target=pump, args=(p.stderr, sys.stderr), daemon=True)]
+    for t in threads:
+        t.start()
+    if stdin is not None:
+        try:
+            p.stdin.write(stdin)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+    rc = p.wait()
+    for t in threads:
+        t.join()
+    return rc
 
 
 def _secret_cmd(conn, a, actor):
@@ -5367,7 +5434,7 @@ def _secret_cmd(conn, a, actor):
         if not project:
             here = core.projects_for_dir(conn, os.getcwd())
             project = here[0] if len(here) == 1 else None
-        args = {"action": "put", "name": a.name, "project": project, "note": a.note}
+        args = {"action": "put", "name": a.name, "project": project, "note": a.note, "var": a.var}
         if a.from_browser is not None:
             return _secret_op(conn, {**args, "from_browser": a.from_browser, "match": a.match, "within": a.within,
                                      "cwd": os.getcwd()}, actor, timeout=60)
@@ -5380,23 +5447,43 @@ def _secret_cmd(conn, a, actor):
             raise RiverError("no value came: a person types it at the prompt of maxpm secret put <name> in a terminal; "
                              "a session pipes it in (... | maxpm secret put <name>) or uses --from-browser")
         return _secret_op(conn, {**args, "value_b64": base64.b64encode(data).decode(), "how": how}, actor)
-    if cmd == "pipe":
-        argv = a.command[1:] if a.command[:1] == ["--"] else a.command
+    if cmd in ("pipe", "run"):
+        argv = a.command
+        if cmd == "run" and "--" in argv and argv[0] != "--":
+            # argparse gives everything after the name to the command: '--var X' before '--' is this command's.
+            pre, argv = argv[:argv.index("--")], argv[argv.index("--"):]
+            if len(pre) != 2 or pre[0] != "--var":
+                raise RiverError(f"before -- only --var <NAME> goes, not {' '.join(pre)}")
+            a.var = pre[1]
+        argv = argv[1:] if argv[:1] == ["--"] else argv
         if not argv:
-            raise RiverError("name the command after --: maxpm secret pipe <name> -- gh secret set <NAME>")
-        data = _secret_value(conn, a.name, actor, "pipe: " + shlex.join(argv))
+            raise RiverError(f"name the command after --: maxpm secret {cmd} <name> -- "
+                             + ("gh secret set <NAME>" if cmd == "pipe" else "gh pr list"))
+        if cmd == "run" and a.var:
+            vault.check_var(a.var)
+        data, prot = _secret_value(conn, a.name, actor, f"{cmd}: " + shlex.join(argv), cmd, argv)
+        var = (a.var or prot["var"] or _env_key(a.name)) if cmd == "run" else None
+        env = {**os.environ, var: data.decode(errors="replace")} if var else None
         try:
-            rc = subprocess.run(argv, input=data).returncode
+            if prot["level"] == "open":
+                rc = subprocess.run(argv, input=data if cmd == "pipe" else None, env=env).returncode
+            else:
+                rc = _run_masked(argv, data, data if cmd == "pipe" else None, env)
         except OSError as e:
             raise RiverError(f"the command did not start: {e.strerror or e}")
+        where = "on its stdin" if cmd == "pipe" else f"in {var}"
         if rc:
-            raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} on its stdin")
-        return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc}
+            raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} {where}")
+        return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc, "where": where,
+                "masked": prot["level"] != "open"}
+    if cmd == "level":
+        from .routes import secrets
+        return secrets.act(conn, {"action": "level", "name": a.name, "level": a.level, "add_commands": a.command,
+                                  "remove_commands": a.no_command, "add_hosts": a.host, "remove_hosts": a.no_host,
+                                  "env": None if a.env is None else a.env == "on", "var": a.var}, actor)
     if cmd == "env":
-        key = a.key or re.sub(r"[^A-Za-z0-9_]", "_", a.name).upper()
-        if key[:1].isdigit():
-            key = "_" + key
-        data = _secret_value(conn, a.name, actor, f"env: {a.file} {key}")
+        key = a.key or _env_key(a.name)
+        data, _ = _secret_value(conn, a.name, actor, f"env: {a.file} {key}", "env")
         out = vault.set_env_line(a.file, key, data)
         return {"secret": a.name, "file": a.file, "key": key, **out}
     if cmd == "list":
@@ -5433,10 +5520,20 @@ def render_secret(a, res):
     cmd = a.secmd
     if cmd == "put":
         print(f"saved secret {res['secret']}" + (" (it replaced the old value)" if res["replaced"] else "")
-              + f": {res['bytes']} bytes in the {res['store']} store. Give it to a command with "
+              + f": {res['bytes']} bytes in the {res['store']} store, level {res.get('level') or 'hidden'}. "
+              "Give it to a command with "
               f"maxpm secret pipe {res['secret']} -- <command>")
-    elif cmd == "pipe":
-        print(f"gave secret {res['secret']} to {res['piped_to']} on its stdin (exit 0)")
+    elif cmd in ("pipe", "run"):
+        print(f"gave secret {res['secret']} to {res['piped_to']} {res['where']} (exit 0"
+              + ("; its value is masked as *** in the output)" if res["masked"] else ")"))
+    elif cmd == "level":
+        print(f"secret {res['secret']}: {res['level']}"
+              + (f"; commands {', '.join(res['commands'])}" if res["commands"] else
+                 "; no command allowed yet (--command <words>)" if res["level"] == "locked" else "")
+              + (f"; sites {', '.join(res['hosts'])}" if res["hosts"] else "")
+              + ("; env may write it into a file" if res["env"] or res["level"] == "open" else "; env is off")
+              + (f"; run puts it in {res['var']}" if res["var"] else "")
+              + ("" if res["changed"] else " (no change)"))
     elif cmd == "env":
         print(f"{'replaced' if res['replaced'] else 'added'} {res['key']} in {res['file']} from secret {res['secret']}")
     elif cmd == "delete":
@@ -5448,7 +5545,7 @@ def render_secret(a, res):
         for r in rows:
             used = f"used {r['uses']}x, last {core.show_time(r['used_at'])} by {r['used_by'] or 'a person'}" \
                 if r["uses"] else "never used"
-            print(f"  {r['name']:<28} {r['project'] or '-':<14} saved {core.show_time(r['updated_at'])} by "
+            print(f"  {r['name']:<28} {r['level']:<7} {r['project'] or '-':<14} saved {core.show_time(r['updated_at'])} by "
                   f"{r['updated_by'] or 'a person'}; {used}" + (f"; sets {', '.join(r['sets'])}" if r.get("sets")
                                                                  else "; in no set")
                   + (f"  ({r['note']})" if r["note"] else ""))

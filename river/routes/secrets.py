@@ -57,9 +57,13 @@ def act(conn, a, who):
             data, how = from_browser(conn, a, who), "browser"
         else:
             data, how = base64.b64decode(a.get("value_b64") or ""), a.get("how") or "stdin"
-        return vault.put(conn, name, data, who, a.get("project"), a.get("note"), how)
+        return vault.put(conn, name, data, who, a.get("project"), a.get("note"), how, a.get("var"))
     if action == "get":
-        return {"secret": name, "value_b64": base64.b64encode(vault.get(conn, name, who, a.get("use"))).decode()}
+        data = vault.get(conn, name, who, a.get("use"), a.get("how"), a.get("argv"))
+        return {"secret": name, "value_b64": base64.b64encode(data).decode(), **vault.protection(conn, name)}
+    if action == "level":  # #5825
+        return vault.set_level(conn, name, a.get("level"), a.get("add_commands") or (), a.get("remove_commands") or (),
+                               a.get("add_hosts") or (), a.get("remove_hosts") or (), a.get("env"), a.get("var"), who)
     if action == "delete":
         return vault.delete(conn, name, who)
     if action == "list":

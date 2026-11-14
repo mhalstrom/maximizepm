@@ -504,8 +504,11 @@ command prints a value; never print one yourself.
 
 - Save: `maxpm secret put <name> --from-browser "<field name>" [--match '<regex>']` (from the project's browser),
   or pipe it in: `<command> | maxpm secret put <name>`. Add `--note "<what it is>"`.
-- Use: `maxpm secret pipe <name> -- wrangler secret put <VAR>` (the value on the command's stdin), or
-  `maxpm secret env <name> <file> [--key VAR]` (a `.env` line). `maxpm secret list` shows the names.
+- Use: `maxpm secret pipe <name> -- wrangler secret put <VAR>` (the value on the command's stdin),
+  `maxpm secret run <name> [--var GH_TOKEN] -- gh pr list` (the value in a variable), or
+  `maxpm secret env <name> <file> [--key VAR]` (a `.env` line). `maxpm secret list` shows the names and levels.
+- Each secret has a level: hidden (the default; the output shows `***` for it), locked (only the commands the
+  person named), open. A locked command or a `.env` file that the level refuses: send the request it prints.
 - A secret in a set needs a grant that covers you (your task, its goal, kind or project, or you):
   `maxpm secret grants --for <you>`. A refusal names the set and the request to the manager; send it.
   A secret in no set: only the session that saved it uses it.

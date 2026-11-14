@@ -98,6 +98,7 @@ class Vault(Base):
 
     def test_env_adds_then_replaces_the_line(self):
         self.run_cli(["secret", "put", "google-client-secret"], b"GOCSPX-abc def")
+        vault.set_level(self.c, "google-client-secret", env=True)  # a person allows the file (#5825)
         env = os.path.join(self.dir.name, ".env")
         with open(env, "w") as f:
             f.write("A=1\nGOOGLE_CLIENT_SECRET=old\nB=2\n")
@@ -308,6 +309,94 @@ class Grants(Base):
         rc, out = self.run_cli(["--as", "mark", "secret", "set", "stripe-live", "--delete"])
         self.assertIn("deleted set stripe-live", out)
         self.assertEqual(vault.grants(self.c, ended=True)["grants"], [])
+
+
+class Levels(Base):
+    """Protection levels (#5825): locked, hidden (the default), open."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli(["secret", "put", "gh-token", "--var", "GH_TOKEN"], TOKEN)
+
+    def py(self, code):
+        return ["--", sys.executable, "-c", code]
+
+    def test_hidden_masks_the_value_and_its_forms_in_the_output(self):
+        rc, out = self.run_cli(["secret", "pipe", "gh-token"] + self.py(
+            "import sys, base64; v = sys.stdin.buffer.read(); print(v.decode()); print(base64.b64encode(v).decode());"
+            " print(v.hex()); print('err', v.decode(), file=sys.stderr)"))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(TOKEN.decode(), out)
+        self.assertNotIn(TOKEN.hex(), out)
+        self.assertNotIn(__import__("base64").b64encode(TOKEN).decode().rstrip("="), out)
+        self.assertGreaterEqual(out.count("***"), 4)
+        self.assertIn("masked", out)
+
+    def test_run_puts_it_in_its_variable(self):
+        rc, out = self.run_cli(["secret", "run", "gh-token"] + self.py(
+            "import os; print('len', len(os.environ['GH_TOKEN'])); print(os.environ['GH_TOKEN'])"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"len {len(TOKEN)}", out)
+        self.assertNotIn(TOKEN.decode(), out)
+        self.assertIn("in GH_TOKEN", out)
+        rc, out = self.run_cli(["secret", "run", "gh-token", "--var", "OTHER"] + self.py(
+            "import os; print('OTHER' in os.environ)"))
+        self.assertIn("True", out)
+
+    def test_open_shows_it(self):
+        vault.set_level(self.c, "gh-token", "open")
+        got = os.path.join(self.dir.name, "got")
+        rc, out = self.run_cli(["secret", "pipe", "gh-token"] + self.py(
+            f"import sys; open({got!r}, 'wb').write(sys.stdin.buffer.read())"))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(Path(got).read_bytes(), TOKEN)
+        self.assertNotIn("masked", out)
+
+    def test_locked_allows_only_the_named_commands(self):
+        vault.set_level(self.c, "gh-token", "locked", add_commands=["gh"])
+        rc, out = self.run_cli(["secret", "pipe", "gh-token"] + self.py("print(1)"))
+        self.assertEqual(rc, 2)
+        self.assertIn("locked to the commands gh", out)
+        self.assertIn("maxpm secret level gh-token --command", out)
+        self.assertEqual(vault.log(self.c, "gh-token")["log"][0]["action"], "refused")
+        exe = os.path.basename(sys.executable)
+        vault.set_level(self.c, "gh-token", add_commands=[f"{exe} -c"])  # its first words; the path does not count
+        rc, out = self.run_cli(["secret", "pipe", "gh-token"] + self.py("import sys; print(sys.stdin.read())"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("***", out)
+        self.assertTrue(vault._command_allowed(["npx wrangler"], ["/usr/local/bin/npx", "wrangler", "deploy"]))
+        self.assertFalse(vault._command_allowed(["npx wrangler"], ["npx", "cowsay"]))
+
+    def test_env_is_a_permission(self):
+        f = os.path.join(self.dir.name, ".env")
+        rc, out = self.run_cli(["secret", "env", "gh-token", f])
+        self.assertEqual(rc, 2)
+        self.assertIn("writing it into a file is off", out)
+        self.assertIn("maxpm secret level gh-token --env on", out)
+        self.assertFalse(os.path.exists(f))
+        core.register(self.c, "mark", human=True)
+        rc, out = self.run_cli(["--as", "mark", "secret", "level", "gh-token", "--env", "on"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("env may write it", out)
+        rc, out = self.run_cli(["secret", "env", "gh-token", f])
+        self.assertEqual(rc, 0, out)
+
+    def test_only_a_person_changes_the_level(self):
+        rc, out = self.run_cli(["secret", "level", "gh-token", "open"])
+        self.assertEqual(rc, 2)
+        self.assertIn("only a person", out)
+        rc, out = self.run_cli(["secret", "list"])
+        self.assertIn("hidden", out)
+
+    def test_masker_masks_a_value_that_two_chunks_split(self):
+        m = vault.Masker(TOKEN)
+        half = len(TOKEN) // 2
+        out = m.feed(b"before " + TOKEN[:half]) + m.feed(TOKEN[half:] + b" after") + m.flush()
+        self.assertEqual(out, b"before *** after")
+        pem = b"-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----\n"
+        self.assertEqual(vault.Masker(pem).feed(b"x MIIEvQIBADANBgkqhkiG9w0BAQEFAASC y") + b"", b"")
+        m = vault.Masker(pem)
+        self.assertEqual(m.feed(b"x MIIEvQIBADANBgkqhkiG9w0BAQEFAASC y") + m.flush(), b"x *** y")
 
 
 if __name__ == "__main__":

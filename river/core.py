@@ -1127,7 +1127,17 @@ CREATE TABLE IF NOT EXISTS secrets (
   updated_at  TEXT,
   used_by     TEXT,
   used_at     TEXT,
-  uses        INTEGER NOT NULL DEFAULT 0
+  uses        INTEGER NOT NULL DEFAULT 0,
+  -- The protection level (#5825, vault.LEVELS): locked (only allow_commands), hidden (any command), open (as
+  -- before). Locked and hidden: the value is masked in the output of pipe and run, and env needs allow_env.
+  -- allow_commands and allow_hosts: one per line (a command is its first words: wrangler, npx wrangler); the hosts
+  -- are for the browser sign-in fill (#5826). var: the variable that maxpm secret run puts the value in.
+  -- Readers: vault.get (every use), maxpm secret list and level.
+  level           TEXT NOT NULL DEFAULT 'hidden',
+  allow_commands  TEXT,
+  allow_hosts     TEXT,
+  allow_env       INTEGER NOT NULL DEFAULT 0,
+  var             TEXT
 );
 -- Each put, use and delete of a secret, by name, with who and the item they held (#5757). Reader: maxpm secret log.
 CREATE TABLE IF NOT EXISTS secret_log (
@@ -1870,6 +1880,13 @@ def _migrate(conn):
         conn.execute("ALTER TABLE hook_runs ADD COLUMN pid INTEGER")
     if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
+    # Protection levels of secrets (#5825): a secret saved before them is hidden, the default for a new one.
+    if "level" not in {r["name"] for r in conn.execute("PRAGMA table_info(secrets)")}:
+        conn.execute("ALTER TABLE secrets ADD COLUMN level TEXT NOT NULL DEFAULT 'hidden'")
+        conn.execute("ALTER TABLE secrets ADD COLUMN allow_commands TEXT")
+        conn.execute("ALTER TABLE secrets ADD COLUMN allow_hosts TEXT")
+        conn.execute("ALTER TABLE secrets ADD COLUMN allow_env INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE secrets ADD COLUMN var TEXT")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
     # Operations checks (#5430): a check of the form beat keeps its last beat; a run keeps each subject's status.
