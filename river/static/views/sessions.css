@@ -106,6 +106,14 @@ button.srow-it { cursor: pointer; }
 .sess-mgrp { display: flex; flex-direction: column; }
 .sess-mgrp:empty, .sess-mitem, .sess-mlists { display: none; }
 .sess-mgrp:not(:empty):not(.sess-mitem):not(.sess-mlists) ~ .sess-mgrp:not(:empty) { border-top: var(--hair) solid var(--line); margin-top: var(--sp-1); padding-top: var(--sp-1); }
+/* A chat column too narrow for the head's tabs (a wide side panel; it can take 60% of the window): Items, Artifacts,
+   Browser and Changes become rows of the ⋯ menu, as on a phone. The tabs did not shrink, and they ran under the side
+   panel's own row of tabs (#5887). After the rules above: the same weight, so the later one holds. */
+@container (max-width: 34em) {
+  .sess-head .sess-lists { display: none; }
+  .sess-mlists { display: flex; }
+  .sess-mlists ~ .sess-mgrp:not(:empty) { border-top: var(--hair) solid var(--line); margin-top: var(--sp-1); padding-top: var(--sp-1); }
+}
 .sess-menu .sess-mi, .sess-menu .sess-ml { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; border: 0; background: none;
   color: var(--ink); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s); font-size: var(--fs-m); text-decoration: none; white-space: normal; }
 .sess-menu .sess-mi:hover:not(:disabled), .sess-menu .sess-ml:hover { background: var(--bubble); }
