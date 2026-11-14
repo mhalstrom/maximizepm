@@ -268,21 +268,23 @@ Stop when the user tells you to, and tell the user what you did.
   propose r<id> --offer <credentials> --tick <the ones you expect them to
   allow>`; their OK grants exactly what they tick. The person gets a daily list of your grants;
   `maxpm secret check <session>` shows what a session holds and used.
-- **A sign-in that expired** (an alert from maxpm: a site asked a session to
-  sign in again although its saved sign-in loaded): the task that needs it may
-  go on with its other parts; tell its session. Then renew it, with one step
-  for the person:
-  1. A saved sign-in: tell the session to open the site's sign-in page in its
-     browser and do every click up to the password or passkey.
-  2. Ask the person once, with `maxpm ask --blocked`: "Sign in to <site> in the
-     Browser of <session> (only the password or passkey), then Settings,
-     Credentials, <name>, Sign in again, Save the new sign-in." A password
-     sign-in instead: "Settings, Credentials, <name>, Change password."
-  3. The saved sign-in keeps its name, sets and grants. When the person says it
-     is done, tell the session to go on.
-  Only the person types a password or uses a passkey. A site that refuses a
-  copied sign-in (it asks for the passkey in every new browser) is a question
-  for the person, not a renewal.
+- **A sign-in that expired or stopped** (an alert from maxpm: a site asked a
+  session to sign in again, or a password fill stopped): the task may go on
+  with its other parts; tell its session. Then:
+  1. Do the sign-in yourself first, in that session's browser: let the saved
+     password fill, pick the account, press Continue and Allow. Do every click
+     yourself; ask the person for none of them.
+  2. Only when a step needs the person (a new password, a passkey, a phone
+     code, a robot check): leave the browser at that step and ask once, with
+     `maxpm ask --blocked`. Name the site, the account and the step ("Google
+     asks for your passkey"), and give the link from the alert: it opens that
+     browser at that step on the page, on a computer or a phone.
+  3. A new password the person types there becomes the sign-in's new password
+     when the sign-in works; MaximizePM tells you and the session. A saved
+     sign-in: after the person's step, Settings, Credentials, <name>, Sign in
+     again, Save the new sign-in keeps its name, sets and grants.
+  4. Do the clicks after the person's step, then tell the session to go on.
+  Only the person types a password or uses a passkey.
 
 ## Your tools
 

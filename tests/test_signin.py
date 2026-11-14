@@ -65,7 +65,9 @@ class Base(unittest.TestCase):
         old = vault.BACKEND
         vault.BACKEND = vault.Files()
         self.addCleanup(setattr, vault, "BACKEND", old)
-        for k, v in (("POLL", 0), ("SUBMIT_WAIT", 0.01)):
+        self.watched = []  # #5849: the watch for a new password, as a record (no thread in a test)
+        for k, v in (("POLL", 0), ("SUBMIT_WAIT", 0.01),
+                     ("WATCHER", lambda b, name, site: self.watched.append((name, site)))):
             p = mock.patch.object(signin, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -117,8 +119,11 @@ class SignIn(Base):
         self.assertEqual(r["fail_why"], "Incorrect username or password.")
         msg = self.c.execute("SELECT * FROM messages WHERE kind='alert' ORDER BY id DESC").fetchone()
         self.assertEqual(msg["to_agent"], "mark")  # no manager is active
-        self.assertIn("tries no more", msg["body"])
-        self.assertIn("--reset", msg["body"])
+        # #5849: the alert names the site, the account and the step, and links the page to that browser
+        self.assertIn("github.com (mark-gh) in the browser of dev: Incorrect username or password. Type the new "
+                      "password there: http://127.0.0.1:", msg["body"])
+        self.assertIn("/sessions/dev/browser", msg["body"])
+        self.assertEqual(self.watched, [("gh", "github.com")])  # the browser waits for the new password
         shots = os.listdir(os.path.join(self.dir.name, "signin"))
         self.assertEqual(len(shots), 1)
         b2 = FakeBrowser([page("https://github.com/login", pw=True, user=True)])
@@ -450,6 +455,32 @@ class SigninRequests(Base):
         self.assertEqual([x["grant"] for x in vault.grants(self.c, "gh-saved")["grants"]], [g["grant"]])  # stays
 
 
+class NewPasswordInTheBrowser(Base):
+    """#5849 (mark 2026-11-14): after a stopped fill the person types the new password in the session's browser; when
+    the sign-in works, MaximizePM saves it as the sign-in's new password, and the session goes on."""
+
+    def test_the_typed_password_becomes_the_new_one_when_the_form_goes(self):
+        vault.signin_failed(self.c, "gh", "Incorrect username or password.")
+        b = CookieBrowser(GH, [page("https://github.com/session", pw=True)], owner="dev")
+        b.field_values = ["n3w-pass-4567"]
+        step = signin.watch_step(b, "gh", "github.com", None)
+        self.assertEqual(step, {"value": "n3w-pass-4567", "saved": False})
+        b.pages, b.i = [page("https://example.org/")], 0  # another site: nothing changes
+        self.assertEqual(signin.watch_step(b, "gh", "github.com", step["value"]), {"value": "n3w-pass-4567", "saved": False})
+        b.pages = [page("https://github.com/")]  # the form is gone on the site: the sign-in worked
+        self.assertEqual(signin.watch_step(b, "gh", "github.com", step["value"]), {"value": None, "saved": True})
+        self.assertEqual(vault.Files().get(self.c, "gh"), b"n3w-pass-4567")
+        self.assertIsNone(self.c.execute("SELECT fail_why FROM secrets WHERE name='gh'").fetchone()[0])
+        bodies = [r[0] for r in self.c.execute("SELECT body FROM messages")]
+        self.assertTrue(any("The sign-in gh works again" in x for x in bodies))
+        self.assertFalse(any("n3w-pass-4567" in x for x in bodies))  # never in a message
+
+    def test_no_password_is_saved_when_none_was_typed(self):
+        b = CookieBrowser(GH, [page("https://github.com/")], owner="dev")
+        self.assertEqual(signin.watch_step(b, "gh", "github.com", None), {"value": None, "saved": False})
+        self.assertEqual(vault.Files().get(self.c, "gh"), b"hunter2-pw")
+
+
 class ExpiredSignIns(Base):
     """#5849: a session's browser that loaded a saved sign-in arrives at the site's sign-in page: one alert to the
     person with where to renew it, then none for EXPIRED_AGAIN."""
@@ -464,7 +495,8 @@ class ExpiredSignIns(Base):
         self.assertEqual(signin.expired(b, "https://github.com/login", self.c), [])  # once
         body = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' ORDER BY id DESC").fetchone()[0]
         self.assertIn("The saved sign-in gh-cookies for github.com no longer works", body)
-        self.assertIn("Settings, Credentials, gh-cookies, Sign in again", body)
+        self.assertIn("Sign in there: http://127.0.0.1:", body)
+        self.assertIn("/sessions/dev/browser; then Settings, Credentials, gh-cookies, Sign in again", body)
         other = CookieBrowser(owner="dev")  # a browser that never loaded it says nothing
         self.assertEqual(signin.expired(other, "https://github.com/login", self.c), [])
 
@@ -478,12 +510,13 @@ class ExpiredSignIns(Base):
             self.assertEqual(signin.expired(b, "https://github.com/login", self.c), ["gh-cookies"])
         to, body = self.c.execute("SELECT to_agent, body FROM messages ORDER BY id DESC").fetchone()
         self.assertEqual(to, "boss")
-        self.assertIn("maxpm guide manager, section 'A sign-in that expired'", body)
+        self.assertIn("maxpm guide manager, section 'A sign-in that expired or stopped'", body)
+        self.assertIn("/sessions/dev/browser", body)  # #5849: the browser that waits at the sign-in page
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.run(["guide", "manager"])
-        self.assertIn("**A sign-in that expired**", out.getvalue())
+        self.assertIn("**A sign-in that expired or stopped**", out.getvalue())
 
 
 if __name__ == "__main__":

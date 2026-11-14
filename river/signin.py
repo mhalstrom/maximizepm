@@ -125,17 +125,20 @@ def expired(b, url, conn=None):
                             (name, since)).fetchone():
                 continue
             # mark 2026-11-14: 'if the credential requires re-sign in, then we need to raise it to the manager. And
-            # then. Do next steps.' The manager gets it (its steps: maxpm guide manager, 'A sign-in that expired');
-            # with no manager active, the person.
+            # then. Do next steps.' The manager gets it (its steps: maxpm guide manager, 'A sign-in that expired or
+            # stopped'); with no manager active, the person. The link opens that browser, which waits at the sign-in.
             manager = core.active_manager(conn)
             people = vault._people(conn)
             to = manager or (people[0] if people else None)
             from . import notify
+            link = notify.page_url(conn, terminal=b.owner, browser=True)
             with core.tx(conn):
                 vault._log(conn, name, b.owner, "expired", f"{host} showed its sign-in page in the browser of {b.owner}")
                 if to:
-                    nxt = ("Next steps: maxpm guide manager, section 'A sign-in that expired'." if manager else
-                           f"Renew it: Settings, Credentials, {name}, Sign in again. {notify.page_url(conn)}settings")
+                    nxt = (f"Next steps: maxpm guide manager, section 'A sign-in that expired or stopped'. The browser "
+                           f"waits at the sign-in page: {link}" if manager else
+                           f"Sign in there: {link}; then Settings, Credentials, {name}, Sign in again, Save the new "
+                           f"sign-in.")
                     core._send(conn, "alert", "maxpm", f"The saved sign-in {name} for {site} no longer works: "
                                f"{host} asked {b.owner} to sign in. {nxt}", to=to)
             said.append(name)
@@ -293,17 +296,103 @@ def _fail(conn, b, cred, why, person=False):
     if not person:
         vault.signin_failed(conn, cred["name"], why)
     held = core._held_item(conn, b.owner)
+    # #5849 (mark 2026-11-14: 'raised to me with it at the exact step where I can provide the new credential'): the
+    # browser waits AT the step: the password field empty and focused; the alert names the site, the account and the
+    # step, and links the page to that browser. The manager gets a failure first (it tries the sign-in itself, 'maxpm
+    # guide manager', 'A sign-in that expired or stopped'); a step only the person passes (a code, a passkey) goes to
+    # the person.
+    if not person:
+        try:
+            b.evaluate("(() => { const e = document.querySelector('[data-maxpm-signin=pw]'); if (!e) return false; "
+                       "e.value = ''; e.focus(); return true; })()", 5)
+        except Exception:  # noqa: BLE001 - a page that went away: the link still opens the browser
+            pass
+    from . import notify
+    why = why.rstrip(". ")
+    if not person:
+        watch_new_password(b, cred["name"], cred["site"])
     humans = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC")]
-    to = (humans[0] if humans else None) if person else (core.active_manager(conn) or (humans[0] if humans else None))
-    body = (f"The browser sign-in {cred['name']} ({cred['account']} on {cred['site']}) for {b.owner} "
-            + ("waits for you" if person else "stopped") + f": {why}. "
-            + (f"Screenshot: {shot}. " if shot else "")
-            + ("Pass the step in the session's browser pane (Sessions tab)." if person else
-               f"MaximizePM tries no more. A person checks the account, then: maxpm secret signin {cred['name']} --reset"))
+    manager = None if person else core.active_manager(conn)
+    to = manager or (humans[0] if humans else None)
+    link = notify.page_url(conn, terminal=b.owner, browser=True)
+    what = f"{cred['site']} ({cred['account']}) in the browser of {b.owner}"
+    if person:
+        body = f"{what}: {why}. Pass this step there: {link}"
+    elif manager:
+        body = (f"The sign-in {cred['name']} stopped: {what}: {why}. The browser waits at that step. Next steps: maxpm "
+                f"guide manager, section 'A sign-in that expired or stopped'. The person's step, when it comes to "
+                f"that: {link}")
+    else:
+        body = (f"{what}: {why}. Type the new password there: {link} (MaximizePM saves it as the new password of "
+                f"{cred['name']})")
+    body += f" Screenshot: {shot}." if shot else ""
     if to:
         with core.tx(conn):
-            core._send(conn, "alert", "maxpm", body, to=to, item_id=held["id"] if held else None)
-    return {"failed": why, "screenshot": str(shot) if shot else None, "to": to}
+            core._send(conn, "alert", "maxpm", body, to=to, item_id=held["id"] if held else None,
+                       blocked="item" if held else None)
+    return {"failed": why, "screenshot": str(shot) if shot else None, "to": to, "link": link}
+
+
+WATCH_FOR = 1800.0  # seconds that a stopped sign-in waits for the person's new password in its browser
+WATCH_EVERY = 1.0
+WATCHER = None      # tests: fn(b, name, site) instead of a thread
+
+
+def watch_new_password(b, name, site):
+    """#5849: after a stopped fill, the person types the new password in the browser (the alert's link). While the
+    site's password form shows, the value of its password field is kept in serve's memory; when the form is gone on
+    that site (the sign-in worked), the value becomes the sign-in's new password (Change password), the new sign-in is
+    saved back, and the session hears that it may go on. Nothing is kept when the form never goes away."""
+    if WATCHER:
+        return WATCHER(b, name, site)
+    if b.__dict__.get("signin_watching") == name:
+        return None
+    b.signin_watching = name
+    threading.Thread(target=_watch, args=(b, name, site, time.time() + WATCH_FOR), daemon=True,
+                     name=f"browser-signin-watch-{b.project}").start()
+    return None
+
+
+def _watch(b, name, site, until):
+    try:
+        last = None
+        while time.time() < until and b.running():
+            time.sleep(WATCH_EVERY)
+            if done := watch_step(b, name, site, last):
+                if done["saved"]:
+                    return
+                last = done["value"]
+    finally:
+        b.signin_watching = None
+
+
+def watch_step(b, name, site, last):
+    """One look of the watch: {'value': the last password typed, 'saved': True when it was saved}, or None."""
+    f = _fields(b)
+    host = _host(f.get("url")) if f else None
+    if not host or not _on(host, site):
+        return {"value": last, "saved": False}
+    if f["pw"]:
+        vals = [v for v in (b.evaluate(VALUES_JS, 5) or []) if isinstance(v, str) and v]
+        return {"value": vals[0] if vals else last, "saved": False}
+    if not last:
+        return {"value": None, "saved": False}
+    conn = core.connect()
+    try:
+        vault.signin_save(conn, name, password=last.encode(), actor=None)
+        b.__dict__.setdefault("signin_values", set()).add(last)  # scrub() keeps it out of every reply
+        save_back(conn, b, host)
+        with core.tx(conn):
+            vault._log(conn, name, "a person", "replace", f"new password typed in the browser of {b.owner}")
+            core._send(conn, "notice", "maxpm", f"The sign-in {name} works again ({site}): the new password is saved. "
+                       "Go on with the task.", to=b.owner)
+            manager = core.active_manager(conn)
+            if manager:
+                core._send(conn, "notice", "maxpm", f"The sign-in {name} for {site} works again in the browser of "
+                           f"{b.owner}: the person typed a new password, and it is saved.", to=manager)
+    finally:
+        conn.close()
+    return {"value": None, "saved": True}
 
 
 def scrub(b, out):

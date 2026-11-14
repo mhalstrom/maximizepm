@@ -10,7 +10,7 @@ import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
-import { browserOpens } from "./components/browserTool.js";
+import { browserOpens, openBrowser } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { installMics } from "./components/dictate.js";
@@ -400,7 +400,8 @@ function readUrl() {
   const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length,
               pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
-    if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
+    if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3];
+    r.browser = parts[2] === "browser"; }  // #5849: /sessions/<name>/browser opens that session's Browser (a sign-in step)
   if (pane === "arts") r.art = parts[1] || null;
   // Plan (#5102): /plan/<view>?project=<p>&goal=<g>. The old paths (/board, /projects, ...) answer "not found".
   if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
@@ -784,6 +785,7 @@ async function openFromUrl() {
     if (r.tab === "sessions" && r.session) {
       sessionsTab.pick(r.session);
       if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
+      if (r.browser) await openBrowser(r.session).catch(() => {});
     }
     // No item in the address (Back after opening one): the drawer closes.
     if (r.item != null) { if (r.item !== openItem || !drawer.isOpen()) await openDrawer(r.item); }
