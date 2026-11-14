@@ -2648,9 +2648,19 @@ def _run(args, conn):
                f"{res['system']} starts it at the next login (an agent is loaded already)" if res["agent_loaded"] else
                f"a maxpm serve already answers on port {res['port']}, so {res['system']} starts it at the next login")
         print(f"maxpm serve starts at login and again after a crash: {res['file']} ({how}). Its output goes to "
-              f"{res['log']}. Undo: maxpm serve --remove-login"
-              + (". To start it at boot before anyone logs in: loginctl enable-linger" if res["system"] == "systemd"
-                 else ""))
+              f"{res['log']}. Undo: maxpm serve --remove-login")
+        # With nobody logged in (#5875): a server after its SSH session ends, a Mac mini after a restart.
+        linger = res.get("linger")
+        if linger in ("on", "turned_on"):
+            print("It also runs with nobody logged in, from boot on (systemd linger is "
+                  + ("on)." if linger == "on" else "now on)."))
+        elif linger == "off":
+            print(f"It stops when you log out, because systemd linger is off and loginctl could not turn it on"
+                  f"{': ' + res['linger_error'] if res.get('linger_error') else ''}. To keep it running with nobody "
+                  f"logged in, run once: {res['linger_command']}")
+        elif res["system"] == "launchd":
+            print("On a Mac that nobody logs in to (a Mac mini), it starts only after a login: turn on automatic "
+                  "login in System Settings, Users & Groups (it needs FileVault off).")
         return 0
     if args.cmd == "serve":
         from . import server

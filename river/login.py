@@ -2,8 +2,9 @@
 --remove-login, the watchdog: maxpm serve --install-watchdog and --remove-watchdog, and maxpm serve --kick, which
 starts serve again through its login agent (the repair of the serve check).
 
-The person's computer stays at home while they reach it through the relay, so maxpm serve must run after a
-restart without anyone at the keyboard: a launchd agent in ~/Library/LaunchAgents starts it at login and again
+The person's computer stays at home while they reach it over Tailscale or the relay, so maxpm serve must run after a
+restart without anyone at the keyboard. On Linux the units run with nobody logged in when linger is on for the user,
+which --install-login turns on (#5875). On macOS a launchd agent in ~/Library/LaunchAgents starts it at login and again
 when it stops with an error. The watchdog (#5441) is a second launchd job that runs maxpm ops check --outside every
 minute, with no maxpm serve: it runs the checks that serve cannot run about itself, starts their repairs, and sends
 a notice when serve is down. Standard library only.
@@ -34,6 +35,7 @@ WATCHDOG_LABEL = "com.maximizepm.watchdog"
 WATCHDOG_EVERY = 60  # seconds between two runs of maxpm ops check --outside
 LAUNCHCTL = None  # test hook: (argv) -> (returncode, output)
 SYSTEMCTL = None  # test hook: (argv) -> (returncode, output)
+LOGINCTL = None  # test hook: (argv) -> (returncode, output)
 SERVE_UNIT = "maxpm-serve.service"  # the Linux names (#5520)
 WATCHDOG_UNIT = "maxpm-watchdog"  # .service and .timer
 
@@ -210,7 +212,33 @@ def _install_systemd(conn) -> dict:
     if code:
         raise RiverError(f"systemctl --user enable failed: {out}; the file is {path}")
     return {"file": str(path), "port": port, "started_now": not running, "already_running": running,
-            "agent_loaded": False, "log": log, "system": "systemd"}
+            "agent_loaded": False, "log": log, "system": "systemd", **_linger()}
+
+
+def _loginctl(*args) -> tuple[int, str]:
+    argv = ["loginctl", *args]
+    if LOGINCTL is not None:
+        return LOGINCTL(argv)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def _linger() -> dict:
+    """systemd stops a user's units when the user's last session ends (the SSH session to a server), unless linger is
+    on for the user; with it, they also start at boot before anyone logs in (#5875). Turns it on when it is off.
+    linger: on (it was), turned_on, or off with linger_command, the command that a person with sudo runs."""
+    import pwd
+    user = pwd.getpwuid(os.getuid()).pw_name
+    code, out = _loginctl("show-user", user, "--property=Linger")
+    if code == 0 and out.strip() == "Linger=yes":
+        return {"linger": "on"}
+    code, out = _loginctl("enable-linger", user)
+    if code == 0:
+        return {"linger": "turned_on"}
+    return {"linger": "off", "linger_command": f"sudo loginctl enable-linger {user}", "linger_error": out}
 
 
 def _serve_spec(conn) -> dict:

@@ -844,6 +844,7 @@ class LoginAgent(Base):
         self.assertEqual(spec["EnvironmentVariables"]["MAXPM_DB"], os.environ["MAXPM_DB"])
         self.assertIn("bootstrap", self.calls)
         self.assertIn("it runs now", out.getvalue())
+        self.assertIn("turn on automatic login in System Settings", out.getvalue())  # #5875: a Mac mini
 
         # Loaded already (it may run this very serve): the file changes, launchd is left alone.
         self.calls.clear()
@@ -1033,6 +1034,16 @@ class LoginSystemd(Base):
             return 0, ""
         login.SYSTEMCTL = systemctl
         self.addCleanup(setattr, login, "SYSTEMCTL", None)
+        self.linger = {"now": "no", "enable": (0, "")}
+        self.loginctl_calls = []
+
+        def loginctl(argv):  # #5875: loginctl show-user <me> --property=Linger, loginctl enable-linger <me>
+            self.loginctl_calls.append(argv[1])
+            if argv[1] == "show-user":
+                return 0, f"Linger={self.linger['now']}"
+            return self.linger["enable"]
+        login.LOGINCTL = loginctl
+        self.addCleanup(setattr, login, "LOGINCTL", None)
         self.units = os.path.join(self.tmp.name, "config")
         patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.units})
         patch.start()
@@ -1054,7 +1065,8 @@ class LoginSystemd(Base):
         self.assertIn(f"Environment=MAXPM_DB={os.environ['MAXPM_DB']}\n", text)
         self.assertIn("WantedBy=default.target", text)
         self.assertEqual(self.calls, ["daemon-reload", "enable --now maxpm-serve.service"])
-        self.assertIn("loginctl enable-linger", out.getvalue())
+        self.assertEqual(self.loginctl_calls, ["show-user", "enable-linger"])
+        self.assertIn("with nobody logged in, from boot on (systemd linger is now on)", out.getvalue())
         self.calls.clear()
         self.assertEqual(self.login.kick()["how"], "restarted")
         self.assertEqual(self.calls, ["restart maxpm-serve.service"])
@@ -1064,6 +1076,25 @@ class LoginSystemd(Base):
         self.assertFalse(os.path.exists(os.path.join(self.units, "systemd", "user", "maxpm-serve.service")))
         with self.assertRaisesRegex(core.RiverError, "install one first"):
             self.login.kick()
+
+    def test_linger_on_already_is_left_as_it_is(self):
+        """#5875: no enable-linger when it is on."""
+        self.linger["now"] = "yes"
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--install-login"])
+        self.assertEqual(self.loginctl_calls, ["show-user"])
+        self.assertIn("(systemd linger is on)", out.getvalue())
+
+    def test_linger_refused_names_the_sudo_command(self):
+        """#5875: polkit may refuse enable-linger over SSH; the person gets the one command that works."""
+        import pwd
+        self.linger["enable"] = (1, "Could not enable linger: Access denied")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--install-login"])
+        text = out.getvalue()
+        self.assertIn("It stops when you log out", text)
+        self.assertIn("Access denied", text)
+        self.assertIn(f"run once: sudo loginctl enable-linger {pwd.getpwuid(os.getuid()).pw_name}", text)
 
     def test_the_watchdog_is_a_timer_every_minute(self):
         res = self.login.install_watchdog(self.conn)
