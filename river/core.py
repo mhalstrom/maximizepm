@@ -456,6 +456,9 @@ DEFAULT_SETTINGS = {
     # runs in the holder's session. busy_max: how long after an agent's last river command these signs still
     # count (a server that an agent left running would hold an item for ever). 0s: only river commands renew.
     "busy_max": "4h",
+    # maxpm serve reads the shell commands that run in each session (foreground and background) every shells_every:
+    # maxpm who and the Sessions tab show how many, since when, and a short label (#5830). 0s: none are read.
+    "shells_every": "5s",
     # maxpm serve records the state of each live session (working, waiting_person, waiting_work, manager, expert)
     # in session_samples at most once per sample_every, so the share of session time spent idle has a history
     # (#5352, decision 5 of the canvas does-maxpm-work). 0s: no samples. sample_keep: rows older than this go.
@@ -825,6 +828,8 @@ CREATE TABLE IF NOT EXISTS agents (
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
   watch_seen     TEXT,                       -- the last poll or return of the manager's watch (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
+  shells         TEXT,                       -- the shell commands that run in its session now, JSON (record_shells, #5830)
+  shells_at      TEXT,                       -- when maxpm serve last read them
   activity_at     TEXT,                      -- the last state report (maxpm report: its hooks or its pane)
   activity_event  TEXT,                      -- that state: report:working, report:idle, report:blocked, report:gone
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
@@ -2015,7 +2020,8 @@ def _migrate(conn):
     for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
-    for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at"):
+    for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at",
+                "shells", "shells_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "pid" not in acols:
@@ -2336,7 +2342,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
@@ -12715,6 +12721,106 @@ def keep_busy(conn, names, waiting=()):
     return kept
 
 
+SHELL_RUNNER = None  # tests: returns the lines "pid ppid elapsed command" of every process, as ps prints them
+SHELL_NAMES = ("sh", "bash", "zsh", "dash", "ksh", "fish")
+SHELL_LABEL = 80  # characters of a command in a label
+SHELLS_FRESH = timedelta(minutes=2)  # a shell list older than this is unknown: maxpm serve does not read them now
+
+
+def _shell_label(command):
+    """The command that a shell process runs (a ps command line: '/bin/zsh -c <text>'), in one short line; None for
+    a process that is no shell with -c (an MCP server, caffeinate, a hook). Claude Code wraps each command:
+    'source <snapshot> && ... && eval '<command>' < /dev/null && pwd -P >| <file>'; the label is the command."""
+    parts = command.split()
+    if not parts or os.path.basename(parts[0]).lstrip("-") not in SHELL_NAMES:
+        return None
+    i, run = 1, False
+    while i < len(parts) and parts[i].startswith("-"):
+        run = run or "c" in parts[i]
+        i += 1
+    if not run or i >= len(parts):
+        return None
+    text = " ".join(parts[i:]).replace("\\012", " ")  # ps shows a new line as \012
+    m = re.search(r"\beval '((?:[^']|'\"'\"')*)'", text)
+    if m:
+        text = m.group(1).replace("'\"'\"'", "'")
+    text = " ".join(text.split())
+    text = re.sub(r"^cd \S+\s*(&&|;)\s*", "", text)  # 'cd <folder> && make test': the command is the label
+    if re.match(r"(\S*/)?maxpm report\b", text):
+        return None  # the agent's own hook (maxpm report --hook), not a command of the session
+    return text if len(text) <= SHELL_LABEL else text[:SHELL_LABEL - 1] + "…"
+
+
+def session_shells(text, pids, t=None):
+    """{agent: [{"pid", "started", "label"}]} from one process list (ps: pid ppid elapsed command): the shells right
+    below each agent CLI (pids: {agent: pid}), one for each command that runs in its session, in the foreground or
+    the background, oldest first. An agent whose CLI is not in the list is left out."""
+    t = t or now()
+    below, alive = {}, set()
+    for line in text.splitlines():
+        f = line.split(None, 3)
+        try:
+            pid, ppid, age = int(f[0]), int(f[1]), _elapsed(f[2])
+        except (IndexError, ValueError):
+            continue
+        alive.add(pid)
+        label = _shell_label(f[3]) if len(f) > 3 else None
+        if label:
+            below.setdefault(ppid, []).append({"pid": pid, "started": iso(t - timedelta(seconds=age)), "label": label})
+    return {name: sorted(below.get(pid, []), key=lambda s: (s["started"], s["pid"]))
+            for name, pid in pids.items() if pid in alive}
+
+
+def _shell_list():
+    """One ps call with the command of every process, or None with no ps (a sandbox that blocks it)."""
+    import subprocess
+    try:
+        return SHELL_RUNNER() if SHELL_RUNNER else subprocess.run(
+            ["ps", "-A", "-ww", "-o", "pid=,ppid=,etime=,command="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def record_shells(conn):
+    """maxpm serve, every shells_every (#5830): store the shell commands that run in each session on this computer
+    (session_shells) in agents.shells, so maxpm who and the Sessions tab read them with no ps of their own (a ps
+    with the commands takes about 80 ms). A row is written when its commands change, and at least each half of
+    SHELLS_FRESH, so a reader knows that the list is current. Returns {agent: shells}, or None with no ps."""
+    rows = conn.execute("SELECT name, pid, shells, shells_at FROM agents WHERE kind='ai' AND pid IS NOT NULL "
+                        "AND host=?", (this_host(),)).fetchall()
+    if not rows:
+        return {}
+    text = _shell_list()
+    if not text:
+        return None
+    t = now()
+    found = session_shells(text, {r["name"]: r["pid"] for r in rows}, t)
+    key = lambda shells: [(s["pid"], s["label"]) for s in shells]  # noqa: E731  (a start time moves by a second)
+    with tx(conn):
+        for r in rows:
+            new = found.get(r["name"], [])
+            try:
+                old = json.loads(r["shells"]) if r["shells"] else []
+            except ValueError:
+                old = None
+            if old is not None and key(old) == key(new) and r["shells_at"] \
+                    and t - parse_iso(r["shells_at"]) < SHELLS_FRESH / 2:
+                continue
+            conn.execute("UPDATE agents SET shells=?, shells_at=? WHERE name=?", (json.dumps(new), iso(t), r["name"]))
+    return found
+
+
+def _shells_of(a):
+    """The shells of an agent row (record_shells): a list, or None when maxpm serve has not read them lately."""
+    at = a.get("shells_at")
+    if not at or now() - parse_iso(at) >= SHELLS_FRESH:
+        return None
+    try:
+        return json.loads(a.get("shells") or "[]")
+    except ValueError:
+        return None
+
+
 def _lease_lost(conn):
     """{item: (agent row, when)} for the open items whose lease ran out and that nobody claimed since, when the
     agent is registered on this computer and is not asked to stop."""
@@ -13202,6 +13308,7 @@ def _agent_status(conn, a, holds, owns, pins):
     a["holds"] = [{k: r[k] for k in r.keys() if k != "assignee"} for r in holds]
     a["owns"] = [{k: r[k] for k in r.keys() if k != "owner"} for r in owns]
     a["pinned_by"] = [r["person"] for r in pins]
+    a["shells"] = _shells_of(a) if a.get("kind") == "ai" else None
     return a
 
 

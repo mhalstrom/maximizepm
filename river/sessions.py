@@ -830,6 +830,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"], **_place(conn, h["id"])}
                           for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
+                # The shell commands that run in it now (#5830): [{pid, started, label}], None when not known.
+                "shells": a.get("shells"),
                 # End (#5041): who asked it to stop and why, and End now for a process on this computer.
                 "stop_by": a.get("stop_by"), "stop_reason": a.get("stop_reason"), "pid": a.get("pid"),
                 # A session that ran no maxpm command records no process: End now ends the program in its own tmux

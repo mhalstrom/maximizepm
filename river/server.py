@@ -2134,6 +2134,29 @@ def wake_loop(stop):
         stop.wait(WAKE_LOOP_STEP)
 
 
+def shells_loop(stop):
+    """The thread of maxpm serve that reads the shell commands of each session (core.record_shells) every
+    shells_every (#5830): a pass of the loop comes only every notify_interval, too late to show that a session
+    runs a command now. 0s: it reads none and looks at the setting again each minute. No error ends it."""
+    conn = None
+    while not stop.is_set():
+        every = 60.0
+        try:
+            if conn is None:
+                conn = core.connect()
+            step = core.parse_duration(core.setting(conn, "shells_every")).total_seconds()
+            if step:
+                core.record_shells(conn)
+                every = step
+        except Exception:  # noqa: BLE001 - the next pass tries again, with a new connection
+            try:
+                conn and conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            conn = None
+        stop.wait(every)
+
+
 def _prompt_parts(tail, layout=None):
     """What a person needs to answer a prompt, read from a pane's last lines (_prompt_tail): {"question": the
     sentence that asks (up to its question mark), or None; "options": [(text, selected)]: a menu, with the line
@@ -5573,6 +5596,7 @@ def serve(port: int, open_browser=False, dev=False):
     # The listener for the sessions that serve brings messages into (Hermes, #5704): a thread of its own, since a pass
     # of the loop comes only every notify_interval.
     threading.Thread(target=wake_loop, args=(stop,), daemon=True, name="maxpm-wake").start()
+    threading.Thread(target=shells_loop, args=(stop,), daemon=True, name="maxpm-shells").start()
     conn = core.connect()
     try:
         runners = core.setting(conn, "serve_runners") == "on"

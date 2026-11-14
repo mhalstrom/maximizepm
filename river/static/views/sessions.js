@@ -138,6 +138,16 @@ function provTag(p) {
   return tagged(p) ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
 }
 
+// The shell commands that run in a session now, foreground and background (#5830; maxpm serve reads them): a chip
+// with their number, and each one's age and command in the hover of the row and of the chip.
+export function shellLines(s) {
+  return (s.shells || []).map(x => `${ago(x.started).replace(" ago", "")}: ${x.label}`);
+}
+export function shellChip(s) {
+  const n = (s.shells || []).length;
+  return n ? chip("c-in_progress shchip", `${n} running`, shellLines(s).join("\n")) : "";
+}
+
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
@@ -182,6 +192,7 @@ function rowHover(s) {
   const h = s.holds && s.holds[0];
   return [s.name + (s.provider ? " · " + s.provider.label : ""), s.state_label,
     h ? `#${h.id} ${h.title}` : "", ownNames(s).length ? "Owns target " + ownNames(s).join(", ") : "",
+    ...shellLines(s).map(x => "Runs " + x),
     lastText ? "Last: " + clip(lastText, 300) : ""].filter(Boolean).join("\n");
 }
 // The kind of agent, only when it is not the main one (Claude Code): a small letter mark (Codex: C).
@@ -197,7 +208,7 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${shellChip(s)}${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
       <span class="srow-acts">${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</span>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
@@ -381,7 +392,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function drawState() {
     if (!agent || !lastRead || lastRead.agent !== agent) return;
     const row = list.find(x => x.name === agent), st = headState(row, lastRead, listRead);
-    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st));
+    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st) + (row ? shellChip(row) : ""));
     const s = { ...(row || {}), provider: lastRead.provider, running: !!row, terminal: lastRead.terminal };
     // Stop and Send now are in the message bar (#5587): the square while the box is empty, the bolt with text.
     $("#sessBar").classList.toggle("can-now", canStop(s, st.state) && stopKeys(s).length > 0);

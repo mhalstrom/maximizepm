@@ -7131,6 +7131,94 @@ class Manager(Base):
         self.assertIn("took over as manager", core.inbox_wait(self.c, "boss", "0s")["messages"][0]["body"])
 
 
+class Shells(Base):
+    """#5830: mark could not see that the manager ran an 8-minute test suite in the foreground while his messages
+    waited. maxpm serve reads the shell commands of each session; maxpm who and the Sessions tab show them."""
+    WRAP = ("/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && export A='b'"
+            "\\012export C='d'\\012: && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval {} < /dev/null "
+            "&& pwd -P >| /tmp/claude-501/cwd-0b91")
+
+    def setUp(self):
+        super().setUp()
+        for n, name in enumerate(("w1", "w2")):
+            core.register(self.c, name)
+            self.c.execute("UPDATE agents SET pid=?, host=? WHERE name=?", (1000 + n, core.this_host(), name))
+        self.c.commit()
+        self.clock = [core.now()]
+        fake_now = mock.patch.object(core, "now", lambda: self.clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+        self.procs = {1000: (1, "2:00:00", "claude --model opus"), 1001: (1, "1:00:00", "codex"),
+                      2000: (1000, "1:59:58", "node /x/mcp.mjs"), 2001: (1000, "00:05", "caffeinate -i -t 300"),
+                      2002: (1000, "00:03", "python3 -S /x/bin/maxpm report --wake claude"),
+                      2003: (1000, "08:00", self.WRAP.format("'python3 -m unittest discover -s tests -t .'")),
+                      2004: (1000, "00:40", self.WRAP.format("'maxpm --as w1 wait 2>&1 | tail -20'")),
+                      2005: (1001, "00:10", "/bin/zsh -lc make test"),
+                      2006: (2003, "07:59", "python3 -m unittest discover")}  # below a shell: no shell of its own
+        core.SHELL_RUNNER = lambda: "".join(f"{pid:>6} {ppid:>6} {age:>12} {cmd}\n"
+                                            for pid, (ppid, age, cmd) in self.procs.items())
+        self.addCleanup(setattr, core, "SHELL_RUNNER", None)
+
+    def test_a_shell_label_is_the_command_that_it_runs(self):
+        self.assertEqual(core._shell_label(self.WRAP.format("'git log --grep '\"'\"'#12'\"'\"' -1'")),
+                         "git log --grep '#12' -1")
+        self.assertEqual(core._shell_label("/bin/bash -l -c make  check"), "make check")
+        self.assertEqual(core._shell_label(self.WRAP.format("'cd /x/y && maxpm who'")), "maxpm who")
+        for cmd in ("node /x/mcp.mjs", "caffeinate -i -t 300", "/bin/zsh", "/bin/zsh -l",
+                    "/bin/sh -c /Users/x/.local/bin/maxpm report --hook claude"):
+            self.assertIsNone(core._shell_label(cmd), cmd)
+        self.assertEqual(len(core._shell_label("/bin/sh -c " + "x" * 200)), core.SHELL_LABEL)
+
+    def test_serve_records_the_shells_and_who_shows_them(self):
+        from river import cli
+        self.assertIsNone(core.agent_status(self.c, "w1")["shells"])  # serve has not read them: not known
+        got = core.record_shells(self.c)
+        self.assertEqual({k: [s["label"] for s in v] for k, v in got.items()},
+                         {"w1": ["python3 -m unittest discover -s tests -t .", "maxpm --as w1 wait 2>&1 | tail -20"],
+                          "w2": ["make test"]})
+        a = core.agent_status(self.c, "w1")
+        self.assertEqual([(s["pid"], s["started"]) for s in a["shells"]],
+                         [(2003, core.iso(self.clock[0] - timedelta(minutes=8))),
+                          (2004, core.iso(self.clock[0] - timedelta(seconds=40)))])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render(argparse.Namespace(cmd="who", json=False), [a])
+        self.assertIn("    runs 2 shell commands now:\n      since ", out.getvalue())
+        self.assertIn("(8m): python3 -m unittest discover -s tests -t .", out.getvalue())
+        # The same commands a second later: no write (a start time moves by a second in ps).
+        at = self.c.execute("SELECT shells_at FROM agents WHERE name='w1'").fetchone()[0]
+        self.clock[0] += timedelta(seconds=5)
+        self.procs[2003] = (1000, "08:06", self.procs[2003][2])
+        core.record_shells(self.c)
+        self.assertEqual(self.c.execute("SELECT shells_at FROM agents WHERE name='w1'").fetchone()[0], at)
+        # A command ends: written at once.
+        del self.procs[2003], self.procs[2006]
+        core.record_shells(self.c)
+        self.assertEqual([s["pid"] for s in core.agent_status(self.c, "w1")["shells"]], [2004])
+        # Serve stops reading: after SHELLS_FRESH the list is not known any more; nothing is printed.
+        self.clock[0] += core.SHELLS_FRESH
+        self.assertIsNone(core.agent_status(self.c, "w1")["shells"])
+        self.assertEqual(cli.shells_lines(None), [])
+        # The agent CLI ended: no shells; no ps (a sandbox): nothing changes.
+        del self.procs[1001]
+        core.record_shells(self.c)
+        self.assertEqual(core.agent_status(self.c, "w2")["shells"], [])
+        core.SHELL_RUNNER = lambda: ""
+        self.assertIsNone(core.record_shells(self.c))
+
+    def test_the_sessions_tab_gets_the_shells(self):
+        from river import sessions
+        core.record_shells(self.c)
+        with mock.patch.object(core, "pid_alive", lambda pid: True):  # its pids live only in the fake ps
+            cards = {c["name"]: c for c in sessions.views(self.c, root=self.dir.name, croot=self.dir.name)}
+        self.assertEqual([s["label"] for s in cards["w2"]["shells"]], ["make test"])
+        self.assertEqual(len(cards["w1"]["shells"]), 2)
+        self.assertEqual(core.DEFAULT_SETTINGS["shells_every"], "5s")
+        core.config_set(self.c, "shells_every", "0s")
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "shells_every", "often")
+
+
 class BusyLease(Base):
     """A lease does not run out while a command runs in the agent's session, and no second agent takes an item
     whose first agent still works on it."""

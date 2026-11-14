@@ -4766,6 +4766,18 @@ def _tmux_line():
             "inside tmux: tmux new -A -s maxpm"]
 
 
+def shells_lines(shells):
+    """The lines of maxpm who for the shell commands that run in a session (#5830): how many, then each one with its
+    start and age; none when it runs none, or when maxpm serve has not read them lately (None)."""
+    if not shells:
+        return []
+    t = core.now()
+    age = lambda d: f"{int(d.total_seconds())}s" if d.total_seconds() < 60 else core._short(d)  # noqa: E731
+    return [f"runs {len(shells)} shell command{'s' if len(shells) > 1 else ''} now:"] + [
+        f"  since {core.show_time(s['started'])} ({age(t - core.parse_iso(s['started']))}): {s['label']}"
+        for s in shells]
+
+
 def cache_text(c, name=None):
     """One line on an expert's prompt cache (#5023): warm with the minutes left, or cold; the context; and what the
     next message costs."""
@@ -7226,7 +7238,8 @@ def render(a, res):
                   + (f"\n    chat over MCP: {ag['via']}" if ag.get("via") else "") + f"\n    holds: {holds}"
                   + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else "")
                   + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else "")
-                  + (f"\n    {cache_text(ag['cache'], ag['name'])}" if "cache" in ag else ""))
+                  + (f"\n    {cache_text(ag['cache'], ag['name'])}" if "cache" in ag else "")
+                  + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells"))))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
         return
