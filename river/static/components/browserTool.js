@@ -15,12 +15,20 @@
 // at any time, also while a session controls the browser.
 // #5866: when the page waits at a password or code field, a masked field of the device shows above the page, with
 // Fill (secretFill.js): an iPhone pastes into it, which it cannot do into the frames.
+// #5885: the size menu sets a fixed page size (a preset or a custom width and height) that holds through the person's
+// clicks and keys until Fit to panel; the frame then shows scaled to fit the stage, and the menu's button names the
+// size, its density and the scale.
 import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
 import { secretFillHtml, wireSecretFill } from "./secretFill.js";
 import { button } from "./button.js";
 import { makeSuggest } from "./suggestList.js";
 import { openTool, panelSession } from "./sidePanel.js";
 import { makeAnnotate } from "./browserAnnotate.js";
+import { makeMenu } from "./menu.js";
+
+// The fixed sizes of the size menu (river/browser.py SIZES): name -> [title, width, height]
+const SIZES = { phone: ["Phone", 390, 844], tablet: ["Tablet", 820, 1180], laptop: ["Laptop", 1280, 800],
+  desktop: ["Desktop", 1440, 900] };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -79,6 +87,18 @@ function render(box, project, session) {
     <div class="br-ctl"><span class="br-who muted t-s"></span>
       <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span>
       <span class="br-wby hidden muted t-s"></span><span class="br-sp"></span>
+      <span class="br-size hidden">${button("Fit", { cls: "br-sizebtn", title: "Page size", attrs: 'aria-haspopup="true" aria-expanded="false"' })}
+        <span class="br-sizes" role="menu" aria-label="Page size">
+          ${button("Fit to panel", { cls: "br-sz", data: { br: "size", size: "fit" }, attrs: 'role="menuitemradio"' })}
+          ${Object.entries(SIZES).map(([k, [t, w, h]]) => button(`${t} <span class="muted">${w} × ${h}</span>`,
+            { cls: "br-sz", data: { br: "size", size: k }, attrs: 'role="menuitemradio"' })).join("")}
+          <form class="br-szc" autocomplete="off">
+            <input class="br-szw" type="number" min="200" max="3000" inputmode="numeric" aria-label="Width" placeholder="Width">
+            <span class="muted">×</span>
+            <input class="br-szh" type="number" min="150" max="3000" inputmode="numeric" aria-label="Height" placeholder="Height">
+            ${button("Set", { cls: "br-szset", type: "submit" })}
+          </form>
+        </span></span>
       ${button("Annotate", { cls: "br-annbtn hidden", title: "Mark up the page", pressed: false, data: { br: "annotate" } })}
       ${button("Record steps", { cls: "br-rec hidden", title: "Record my steps", pressed: false, data: { br: "rec" } })}
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
@@ -178,6 +198,11 @@ function render(box, project, session) {
     win.classList.toggle("hidden", !j.modes || !!v.noChrome);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
     $$(".br-save").classList.toggle("hidden", !(j.running && j.owner));  // a session's browser (#5633, #5634)
     win.classList.toggle("primary", !!j.refused && !j.window);
+    v.forced = j.forced || null;  // #5885: a fixed size; a window has its own size
+    $$(".br-size").classList.toggle("hidden", !j.running || !!j.window);
+    stage.classList.toggle("br-fixed", !!v.forced && !j.window);
+    if (!j.running || j.window) sizeMenu.set(false);
+    sizeLine();
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     // #5650: who opened the window and when; it goes back into the panel by itself, and the pane says why.
     const hm = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -245,7 +270,19 @@ function render(box, project, session) {
     urls.push(u);
     img.src = u;
     v.w = f.w || v.w; v.h = f.h || v.h;
+    layout();
     msg.classList.add("hidden");
+  }
+  // #5885: the frame at the page's size, scaled down to fit the stage (never up), its aspect kept. The pointer maps to
+  // the page by the frame's shown box (at), so a click lands at the same point of the page at any scale.
+  function layout() {
+    const r = stage.getBoundingClientRect();
+    if (!v.w || !v.h || r.width < 50 || r.height < 50) return;
+    const s = Math.min(1, r.width / v.w, r.height / v.h);
+    img.style.width = Math.floor(v.w * s) + "px";
+    img.style.height = Math.floor(v.h * s) + "px";
+    v.scale = s;
+    sizeLine();
   }
   img.addEventListener("load", () => { const keep = img.src; urls = urls.filter(u => u === keep || URL.revokeObjectURL(u)); });
   const ann = makeAnnotate({ box, stage, img, view: v, project, session, call, typeAction,
@@ -320,7 +357,40 @@ function render(box, project, session) {
     call("resize", { project, pane, w, h, dpr, screen: [window.screen.width, window.screen.height] }).catch(() => { sized = ""; });
   };
   const fit = (again) => { if (fitting && !again) return; clearTimeout(fitting); fitting = setTimeout(fitNow, 150); };
-  const ro = new ResizeObserver(() => fit(true)); ro.observe(stage);
+  const ro = new ResizeObserver(() => { fit(true); layout(); }); ro.observe(stage);
+
+  // #5885: the size menu. Its button names the size: "Fit 612 × 700", or "Phone 390 × 844, 2x, 64%" (the density
+  // when it is not 1, the scale when the frame shows smaller than the page).
+  const sizeBtn = $$(".br-sizebtn"), sizeBox = $$(".br-size");
+  const sizeMenu = makeMenu(sizeBtn, sizeBox, { cls: "br-sizeon", outside: sizeBox, closeOn: [$$(".br-sizes")] });
+  function sizeLine() {
+    const f = v.forced, s = v.scale || 1;
+    const name = !f ? "Fit" : (SIZES[f.name] || ["Custom"])[0];
+    const w = f ? f.w : v.w, h = f ? f.h : v.h;
+    const text = name + (w && h ? ` ${w} × ${h}` : "") + (f && f.dsf && f.dsf !== 1 ? `, ${f.dsf}x` : "")
+      + (f && s < 0.995 ? `, ${Math.round(s * 100)}%` : "");
+    if (text === sizeBtn.textContent) return;  // layout() calls it for each frame
+    sizeBtn.textContent = text;
+    for (const b of box.querySelectorAll(".br-sz"))
+      b.setAttribute("aria-checked", String(b.dataset.size === (f ? f.name : "fit")));
+  }
+  // The density of a fixed size: this screen's (at most 2) times the scale it shows at, so a large page shown small
+  // sends no frames larger than the stage can show.
+  async function pickSize(spec) {
+    const r = stage.getBoundingClientRect(), p = SIZES[spec], m = /^(\d+)x(\d+)$/.exec(spec);
+    const w = p ? p[1] : m ? +m[1] : 0, h = p ? p[2] : m ? +m[2] : 0;
+    const s = w && h && r.width > 50 ? Math.min(1, r.width / w, r.height / h) : 1;
+    const dpr = Math.round(Math.max(1, Math.min(2, (window.devicePixelRatio || 1) * s)) * 100) / 100;
+    try { show(await call("size", { project, pane, size: spec, dpr })); } catch (err) { return; /* call showed it */ }
+    if (spec === "fit") { sized = ""; fit(); }
+  }
+  $$(".br-szc").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const w = parseInt($$(".br-szw").value, 10), h = parseInt($$(".br-szh").value, 10);
+    if (!(w >= 200 && w <= 3000 && h >= 150 && h <= 3000)) return toast("A width from 200 to 3000 and a height from 150 to 3000", true);
+    sizeMenu.set(false);
+    pickSize(`${w}x${h}`);
+  });
 
   // The frames (#5637): binary answers (bin=1: the length of a JSON head, the head, the JPEG). Over a long link (a
   // phone through the relay) each poll costs a round trip, so the pane keeps one poll open for each 30 ms of it, at
@@ -416,6 +486,7 @@ function render(box, project, session) {
     e.preventDefault();
     const what = b.dataset.br;
     if (what === "annotate") return ann.toggle();
+    if (what === "size") return pickSize(b.dataset.size);  // #5885
     if (what === "dialog_yes" || what === "dialog_no") {  // the answer to the page's box (#5674)
       const args = { project, pane, accept: what === "dialog_yes" };
       if (what === "dialog_yes" && !din.classList.contains("hidden")) args.text = din.value;

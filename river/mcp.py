@@ -206,8 +206,8 @@ def browser_argv(a):
         pos = ["accept" if accept else "dismiss"] + ([text] if accept and text is not None else [])
     elif act == "find":
         pos = [need("the words (text)", text)]
-    elif act == "size":  # #5676: phone, desktop, pane, or <w>x<h>
-        pos = [need("the size (text): phone, desktop, pane or <width>x<height>", text)]
+    elif act == "size":  # #5676, #5885: fit, phone, tablet, laptop, desktop, or <w>x<h>
+        pos = [need("the size (text): fit, phone, tablet, laptop, desktop or <width>x<height>", text)]
     elif act == "record":  # #5682: start, stop, status, step <n>
         pos = (text or "status").split()
     elif act == "image":  # #5688

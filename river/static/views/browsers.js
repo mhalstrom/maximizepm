@@ -63,6 +63,15 @@ function ctlText(c) {
   return c.kind === "person" ? `${esc(c.who)} controls it` : `${esc(nameOf(c.who))} drives it`;
 }
 
+// #5885: the page's size: a fixed one by its name, else Fit (the size of the panel that shows it)
+const SIZE_NAMES = { phone: "Phone", tablet: "Tablet", laptop: "Laptop", desktop: "Desktop" };
+function sizeText(b) {
+  if (b.window) return "in a window";
+  const f = b.forced;
+  if (f) return `${SIZE_NAMES[f.name] || "Custom"} ${f.w} × ${f.h}`;
+  return "Fit" + (b.w && b.h ? ` ${b.w} × ${b.h}` : "");
+}
+
 function tile(b) {
   const k = keyOf(b);
   const who = b.session ? `<b>${esc(nameOf(b.session))}</b>` : `<b class="muted">No session</b>`;
@@ -71,7 +80,7 @@ function tile(b) {
       <span class="brw-site">${esc(site(b.url) || "New tab")}${b.tabs > 1 ? ` <span class="muted t-s">+${b.tabs - 1} tab${b.tabs > 2 ? "s" : ""}</span>` : ""}</span>
       ${b.title ? `<span class="brw-title muted t-s">${esc(b.title)}</span>` : ""}
       <span class="brw-who t-s">${who} <span class="muted">· ${esc(b.project)}</span></span>
-      <span class="brw-ctl muted t-s">${ctlText(b.controller)}${b.window ? " · in a window" : ""}<span class="spacer"></span><span class="sago" data-at="${esc(b.last || "")}"></span></span>
+      <span class="brw-ctl muted t-s">${ctlText(b.controller)} · ${esc(sizeText(b))}<span class="spacer"></span><span class="sago" data-at="${esc(b.last || "")}"></span></span>
     </span>`;
   return button(html, { kind: "card", cls: "brw-tile" + (b.controller && b.controller.kind === "person" ? " brw-person" : ""),
     title: b.session ? `Open ${b.session} and its browser` : `Open the project ${b.project}`, data: { "brw-key": k } });

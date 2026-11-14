@@ -1132,9 +1132,15 @@ class Browser:
             self.call("Page.startScreencast", {"format": "jpeg", "quality": q, "everyNthFrame": 1}, session=self.session)
         self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
 
+    def _page_size(self):
+        """The page's size in CSS pixels: the fixed size when one holds (#5885), else the panel's (None: no panel)."""
+        f = self.forced
+        return (f["w"], f["h"]) if f else self.size
+
     def _cast_quality(self):
         """Smaller screencast frames when a sharp frame follows them (#5658)."""
-        return MOVING_QUALITY if self.dsf > 1 and self.size and not self._windowed() else STILL_QUALITY
+        dsf = self.forced["dsf"] if self.forced else self.dsf
+        return MOVING_QUALITY if dsf > 1 and self._page_size() and not self._windowed() else STILL_QUALITY
 
     def _refit(self):
         try:
@@ -1160,7 +1166,7 @@ class Browser:
             while self.sharp_due > time.time():  # each new frame moves the time on: the page still moves
                 time.sleep(max(0.01, self.sharp_due - time.time()))
             self.sharp.clear()  # the frames of the wait ask for this one screenshot; a frame after now asks again
-            s, size, due = self.session, self.size, self.sharp_due
+            s, size, due = self.session, self._page_size(), self.sharp_due
             if due > time.time():  # a frame came just now
                 self.sharp.set()
                 continue
@@ -1170,7 +1176,7 @@ class Browser:
                 data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 70}, session=s, timeout=10)["data"]
             except (RiverError, KeyError):
                 continue
-            if s != self.session or size != self.size or self.sharp_due != due:
+            if s != self.session or size != self._page_size() or self.sharp_due != due:
                 continue  # another tab or size, or a new frame came while it ran: the next quiet time asks again
             with self.cond:
                 self.seq += 1
@@ -1452,7 +1458,8 @@ class Browser:
                 "window_end": self.state.get("window_end"),
                 "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
                 # #5676: the size a session set by command, which holds until the person uses the pane
-                "forced": {k: self.forced[k] for k in ("w", "h", "name", "by")} if self.forced else None,
+                # #5885: and its density and mobile flag, for the pane's size menu and line
+                "forced": {k: self.forced[k] for k in ("w", "h", "dsf", "mobile", "name", "by")} if self.forced else None,
                 "dialog": dialog_info(self.dialog),  # a box of the page that waits for an answer (#5674)
                 # #5845: whether the session's last command was confirmed as its own (#5823); saved sign-ins load
                 # only while it is, so a session that finds no sign-in reads why here
@@ -1693,13 +1700,10 @@ class Browser:
         _notify(self)
 
     def drive(self, pane):
-        """A person clicked, typed or took control in this panel: its size is the page's size from now on (#5676:
-        also over a size that a session set by command)."""
-        if pane and self.forced:
-            self.forced = None
-            self.driver = str(pane)[:40]
-            self._choose(again=True)
-        elif pane and pane != self.driver:
+        """A person clicked, typed or took control in this panel: its size is the page's size from now on. A fixed size
+        (maxpm browser size, the pane's size menu) holds over it until someone picks fit (#5885, mark 2026-11-14: 'if
+        we need to test layout sizes they need to not just conform to our window'); the pane shows the page scaled."""
+        if pane and pane != self.driver:
             self.driver = str(pane)[:40]
             self._choose()
 
@@ -2239,6 +2243,7 @@ def get(project, owner=None, conn=None):
         b = BROWSERS.get((project, owner))
         if b is None:
             b = BROWSERS[(project, owner)] = Browser(project, owner)
+            b.forced = default_size(project)  # #5885: the project's browser_size; each browser keeps its own after
         b.used = time.time()
         return b
 
@@ -2271,7 +2276,9 @@ def listing():
                     "tabs": len(b.targets), "controller": {"who": c.get("who"), "kind": c.get("kind")} if c else None,
                     "window": b._windowed(), "attached": bool(b.attached),
                     "last": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last)) if last else None,
-                    "seq": f["seq"] if f else 0, "w": f["w"] if f else None, "h": f["h"] if f else None, "_at": last})
+                    "seq": f["seq"] if f else 0, "w": f["w"] if f else None, "h": f["h"] if f else None, "_at": last,
+                    # #5885: the fixed size the tile names (None: the page fits its panel)
+                    "forced": {k: b.forced[k] for k in ("w", "h", "name")} if b.forced else None})
     out.sort(key=lambda x: -x.pop("_at"))
     return out
 
@@ -5286,16 +5293,50 @@ def element_shot(b, target, grid=False, cursor=False):
                         "picture": [round(box["w"] * scale), round(box["h"] * scale)]}}
 
 
-SIZES = {"phone": (390, 844, True), "desktop": (VIEW[0], VIEW[1], False)}  # #5676: name -> (w, h, mobile)
+# #5676, #5885: name -> (w, h, mobile). Phone and Tablet carry the mobile and touch flags. The Browser pane's size menu
+# offers the same list (browserTool.js SIZES).
+SIZES = {"phone": (390, 844, True), "tablet": (820, 1180, True), "laptop": (1280, 800, False),
+         "desktop": (1440, 900, False)}
+FIT = ("fit", "pane")  # the panel's size again
+SIZE_HELP = "fit, phone, tablet, laptop, desktop, or <width>x<height> such as 390x844"
+
+
+def size_spec(spec, dpr=None, who=None):
+    """The fixed size that a spec names, as Browser.forced holds it, or None for fit (#5885: the pane's menu, maxpm
+    browser size, and the project setting browser_size read it the same way)."""
+    spec = (spec or "").strip().lower()
+    if spec in FIT:
+        return None
+    if spec in SIZES:
+        w, h, mobile = SIZES[spec]
+    else:
+        m = re.fullmatch(r"(\d{2,4})\s*[x×]\s*(\d{2,4})", spec)
+        if not m:
+            raise RiverError(f"a size is {SIZE_HELP}, not {spec!r}")
+        w, h, mobile = max(200, min(int(m.group(1)), 3000)), max(150, min(int(m.group(2)), 3000)), False
+    try:
+        dsf = round(max(1.0, min(float(dpr or 1), 3.0)), 2)
+    except (TypeError, ValueError):
+        raise RiverError(f"--dpr is a number from 1 to 3, not {dpr!r}")
+    return {"w": w, "h": h, "dsf": dsf, "mobile": mobile, "name": spec if spec in SIZES else f"{w}x{h}", "by": who}
+
+
+def default_size(project):
+    """#5885: the size that a new browser of the project starts with (its setting browser_size); None: fit."""
+    try:
+        return size_spec(setting_of(project, "browser_size"), who="the project's browser_size")
+    except RiverError:
+        return None  # config_set refuses a bad value; one written before that check counts as fit
 
 
 def set_size(b, spec, who=None, dpr=None):
-    """#5676: the page's size by command: phone (390x844, the mobile and touch flags), desktop, <w>x<h>, or pane
-    (the panel's size again). It holds until the person clicks or types in a pane; status says who set it."""
+    """#5676: the page's size by command or from the pane's size menu (#5885): phone (390x844, the mobile and touch
+    flags), tablet, laptop, desktop, <w>x<h>, or fit (pane: the panel's size again). A fixed size holds through the
+    person's clicks and keys in a pane until someone picks fit; status says who set it."""
     spec = (spec or "").strip().lower()
     if b._windowed():
         raise RiverError("the browser shows as a window: the window sets the size (maxpm browser headless first)")
-    if spec == "pane":
+    if spec in FIT:
         b.forced = None
         b.start()
         if b.size:
@@ -5306,18 +5347,7 @@ def set_size(b, spec, who=None, dpr=None):
                 b.touch = False
                 b.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=b.session)
         return b.info()
-    if spec in SIZES:
-        w, h, mobile = SIZES[spec]
-    else:
-        m = re.fullmatch(r"(\d{2,4})\s*[x×]\s*(\d{2,4})", spec)
-        if not m:
-            raise RiverError(f"a size is phone, desktop, pane, or <width>x<height> such as 390x844, not {spec!r}")
-        w, h, mobile = max(200, min(int(m.group(1)), 3000)), max(150, min(int(m.group(2)), 3000)), False
-    try:
-        dsf = round(max(1.0, min(float(dpr or 1), 3.0)), 2)
-    except (TypeError, ValueError):
-        raise RiverError(f"--dpr is a number from 1 to 3, not {dpr!r}")
-    b.forced = {"w": w, "h": h, "dsf": dsf, "mobile": mobile, "name": spec if spec in SIZES else f"{w}x{h}", "by": who}
+    b.forced = size_spec(spec, dpr, who)
     b.start()
     b._fit()
     return {**b.info(), "view": b.evaluate("[innerWidth, innerHeight]", 5)}

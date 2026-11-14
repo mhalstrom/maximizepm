@@ -2242,14 +2242,22 @@ class PageSize(Base):
         self.assertEqual(_struct.unpack(">II", png[16:24]), (390, 844))  # the PNG's width and height
         b.resize(1000, 700, 1, None, pane="p1")  # a pane opens: the size stays the session's
         self.assertEqual(b.evaluate("innerWidth"), 390)
-        b.drive("p1")  # the person clicks in the pane: the pane's size again
-        self.assertEqual((b.forced, b.evaluate("innerWidth"), b.evaluate("matchMedia('(pointer: coarse)').matches")),
-                         (None, 1000, False))
+        b.drive("p1")  # #5885: the person clicks in the pane: the fixed size holds
+        self.assertEqual((b.forced["name"], b.evaluate("innerWidth"),
+                          b.evaluate("matchMedia('(pointer: coarse)').matches")), ("phone", 390, True))
         self.assertEqual(act(action="size", size="800x600")["view"], [800, 600])
-        self.assertIn("size 800x600, set by ag1", self._status(b))
-        act(action="size", size="pane")
+        self.assertIn("size 800x600 (800x600), set by ag1", self._status(b))
+        out = act(action="size", size="tablet")
+        self.assertEqual((out["view"], out["forced"]["mobile"]), ([820, 1180], True))
+        self.assertEqual(act(action="size", size="desktop")["view"], [1440, 900])
+        self.assertFalse(b.evaluate("matchMedia('(pointer: coarse)').matches"))
+        act(action="size", size="fit")
+        self.assertEqual((b.forced, b.evaluate("innerWidth")), (None, 1000))
+        self.assertIn("size: fit, the side panel's (1000x700)", self._status(b))
+        act(action="size", size="phone")
+        act(action="size", size="pane")  # pane is still the word of #5676 for fit
         self.assertEqual(b.evaluate("innerWidth"), 1000)
-        with self.assertRaisesRegex(RiverError, "a size is phone, desktop, pane, or <width>x<height>"):
+        with self.assertRaisesRegex(RiverError, "a size is fit, phone, tablet, laptop, desktop, or <width>x<height>"):
             act(action="size", size="huge")
 
     def _status(self, b):
@@ -2257,6 +2265,38 @@ class PageSize(Base):
         with contextlib.redirect_stdout(out):
             cli.render_browser(type("A", (), {"bcmd": "status"})(), b.info())
         return out.getvalue()
+
+
+class SizeRule(Base):
+    """#5885 with no Chrome: the presets, the project's browser_size for a new browser, one size per browser, and a
+    fixed size that a person's use of a pane keeps."""
+
+    def test_presets_and_custom(self):
+        self.assertIsNone(browser.size_spec("fit"))
+        self.assertIsNone(browser.size_spec("pane"))
+        for name, wh, mobile in (("phone", (390, 844), True), ("tablet", (820, 1180), True),
+                                 ("laptop", (1280, 800), False), ("desktop", (1440, 900), False)):
+            s = browser.size_spec(name.upper(), 2, "mark")
+            self.assertEqual(((s["w"], s["h"]), s["mobile"], s["name"], s["dsf"], s["by"]), (wh, mobile, name, 2, "mark"))
+        s = browser.size_spec("1024 x 768")
+        self.assertEqual((s["w"], s["h"], s["name"], s["mobile"], s["dsf"]), (1024, 768, "1024x768", False, 1))
+        with self.assertRaisesRegex(RiverError, "a size is fit, phone"):
+            browser.size_spec("big")
+
+    def test_project_default_for_a_new_browser_only(self):
+        with self.assertRaisesRegex(RiverError, "a size is fit"):
+            core.config_set(self.c, "browser_size", "huge", project="web")
+        core.config_set(self.c, "browser_size", "phone", project="web")
+        b = browser.get("web", "ag1")
+        self.assertEqual((b.forced["name"], b.forced["by"]), ("phone", "the project's browser_size"))
+        self.assertIsNone(browser.get("other", "ag1").forced)  # another project: fit
+        b.forced = browser.size_spec("laptop")
+        self.assertEqual(browser.get("web", "ag1").forced["name"], "laptop")  # the browser keeps its own
+        self.assertEqual(browser.get("web", "ag2").forced["name"], "phone")  # each browser its own
+        b.drive("pane1")  # the person clicks in a pane: the size holds
+        self.assertEqual((b.forced["name"], b.driver), ("laptop", "pane1"))
+        self.assertEqual(b.info()["forced"], {"w": 1280, "h": 800, "dsf": 1, "mobile": False, "name": "laptop",
+                                              "by": None})
 
 
 ERRS = (b"<title>Err</title><button onclick=\"fetch('/api/fail')\">Load</button>"

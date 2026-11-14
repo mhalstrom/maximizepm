@@ -216,6 +216,10 @@ DEFAULT_SETTINGS = {
     # (#5650, mark 2026-11-12: 'I thought the browser worked without opening a separate chrome window?'). A session
     # opens it as a window only when the person asked in its chat within this time.
     "browser_window_idle": "10m",
+    # The page size that a new browser of the project starts with (#5885): fit (the side panel's size), phone
+    # (390x844, touch), tablet (820x1180, touch), laptop (1280x800), desktop (1440x900), or <width>x<height>. The
+    # Browser pane's size menu and maxpm browser size change it for one browser.
+    "browser_size": "fit",
     # on: a screenshot that a session takes with the Playwright tools has the session's pointer and its last click
     # ring drawn in (#5616), as maxpm browser screenshot --cursor; off: a clean picture of the page.
     "browser_shot_cursor": "off",
@@ -2496,6 +2500,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "browser_mcp":
         from .browser import mcp_command
         mcp_command(value)
+    elif key == "browser_size":  # #5885
+        from .browser import size_spec
+        size_spec(value)
     elif key == "browser_pace" and value not in ("watch", "person", "fast"):
         raise RiverError("browser_pace is watch (a person's pace while the panel shows the browser), person or fast")
     elif key == "browser_shot_cursor" and value not in ("on", "off"):

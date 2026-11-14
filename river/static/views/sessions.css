@@ -324,6 +324,22 @@ button.srow-it { cursor: pointer; }
 .br-stage { position: relative; flex: 1 1 0; min-height: var(--h-pre); overflow: hidden; background: var(--bg); outline: none; }
 .br-stage:focus-within { box-shadow: inset 0 0 0 var(--hair-2) var(--accent); }
 .br-img { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; user-select: none; cursor: default; }
+.br-fixed .br-img { box-shadow: 0 0 0 var(--hair) var(--line); }  /* #5885: a fixed size shows its page's edge */
+/* #5885: the size menu, a card under its button (menu.js); it holds the presets and a custom width and height */
+.br-size { position: relative; }
+.br-sizes { display: none; }
+.br-size.br-sizeon .br-sizes { display: flex; flex-direction: column; position: absolute; top: 100%; right: 0; z-index: 7;
+  width: max-content; min-width: var(--w-l); max-width: calc(100vw - var(--sp-7)); margin-top: var(--sp-1); padding: var(--sp-2);
+  box-sizing: border-box; background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-xl);
+  box-shadow: var(--shadow-pop); }
+.br-ctl .br-sizes .br-sz { display: flex; justify-content: space-between; gap: var(--sp-5); width: 100%; text-align: left;
+  border: 0; background: none; padding: var(--sp-2) var(--sp-3); font-weight: 400; }
+.br-sizes .br-sz:hover { background: var(--bubble); }
+.br-sizes .br-sz[aria-checked="true"] { font-weight: 600; color: var(--accent); }
+.br-szc { display: flex; align-items: center; gap: var(--sp-1); margin-top: var(--sp-1); padding-top: var(--sp-2);
+  border-top: var(--hair) solid var(--line); }
+.br-szc input { width: var(--w-xs); min-width: 0; font-size: var(--fs-s); }
+@media (max-width: 759px) { .br-ctl .br-sizes .br-sz { min-height: var(--tap); } }
 .br-locked .br-img { cursor: not-allowed; opacity: .85; }
 /* Annotate (#5655, browserAnnotate.js): the tools under the controls, the note of the shape drawn last, the sets sent
    before; the drawing layer lies over the frozen page and takes the pointer (touch-action none: a finger draws). */
