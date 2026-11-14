@@ -5332,7 +5332,8 @@ class Handler(BaseHTTPRequestHandler):
                     # #5823: a credential check confirms the session from the process that holds this connection.
                     from . import vault
                     srv = getattr(getattr(self, "server", None), "server_address", None)
-                    vault.PEER.value = ((self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid"))
+                    vault.PEER.value = (vault.RELAY_PAGE if relay.page_request(self.headers) else
+                                        (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid"))
                                         if srv and len(self.client_address) > 1 else (None, None, None))
                     result = op(conn, body.get("args", {}), actor)
                 finally:

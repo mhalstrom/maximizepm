@@ -372,6 +372,20 @@ class Identity(Base):
             self.who(actor)
         return str(e.exception)
 
+    def test_the_page_through_the_relay_is_the_person(self):
+        """#5840: mark's Allow on his phone came through the relay, whose connection serve's own thread holds: no
+        process tells, and the check refused it. The relay's header secret marks it as the person's page act."""
+        from river import relay, server
+        vault.PEER.value = vault.RELAY_PAGE
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        self.assertEqual(self.who("mark"), {"name": "mark", "person": True, "how": "the page through the relay"})
+        self.assertIn("acts as a person, not as the session dev", self.refused("dev"))
+        vault.PEER.value = (None, None, None)  # any other request that no process holds is still refused
+        self.assertIn("cannot read which session", self.refused("mark"))
+        self.assertTrue(relay.page_request({"X-Maxpm-Relay": relay.PAGE_SECRET}))
+        self.assertFalse(relay.page_request({"X-Maxpm-Relay": "guess"}))
+        self.assertIn("relay.page_request(self.headers)", Path(server.__file__).read_text(encoding="utf-8"))
+
     def test_the_session_above_the_command_is_who_asks(self):
         self.chain = [(900, 800, "Python", 1), (800, 500, "zsh", 1), (500, 400, "2.1.325", 111), (400, 1, "tmux", 1)]
         self.assertEqual(self.who("dev")["name"], "dev")

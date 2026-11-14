@@ -568,6 +568,7 @@ GRANT_KINDS = ("work", "operational", "review", "fixes", "deploy", "monitor")
 
 IDENTITY = None  # tests: fn(conn, actor) -> {'name', 'person'} in place of the process tree
 PEER = threading.local()  # serve: (client port, serve port, the pid the CLI says) of the request that runs now
+RELAY_PAGE = "relay-page"  # PEER.value of a request from the page through the relay (relay.page_request, #5840)
 # The programs of agent CLIs (the adapters' DETECT process, river/agents) and node, which runs pi, Gemini and the Codex
 # wrapper. Claude Code's process has its version as its name (2.1.325): VERSION_NAME.
 AGENT_PROGRAMS = {"claude", "codex", "copilot", "cursor-agent", "gemini", "goose", "grok", "hermes", "opencode", "amp",
@@ -603,6 +604,13 @@ def session_of(conn, actor):
     command outside its sandbox that reads the Keychain itself (#5824)."""
     if IDENTITY is not None:
         return IDENTITY(conn, actor)
+    if getattr(PEER, "value", None) == RELAY_PAGE:
+        # The page through the relay (#5840: mark's Allow on his phone): serve's own relay thread holds the
+        # connection, so no process tells; the relay's header secret, which only this serve knows, marks the request
+        # as the person's act from the relay page, behind the relay's sign-in.
+        if actor and not core._is_person(conn, actor):
+            raise RiverError(f"the page through the relay acts as a person, not as the session {actor}")
+        return {"name": actor, "person": True, "how": "the page through the relay"}
     ch = _chain_now(conn)
     if not ch:
         raise RiverError("MaximizePM cannot read which session runs this command (a sandbox hides its processes): "
