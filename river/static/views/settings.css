@@ -18,8 +18,7 @@
 .set-setup { margin-bottom: var(--sp-4); }
 .set-form { margin-top: var(--sp-3); max-width: var(--w-form); }
 @media (max-width: 759px) {  /* a phone: one row of tabs that scrolls sideways, each at the size of a tap */
-  .set-tabs { flex-wrap: nowrap; overflow-x: auto; margin-left: calc(-1 * var(--sp-6)); margin-right: calc(-1 * var(--sp-6));
-    padding: 0 var(--sp-6) var(--sp-1); scrollbar-width: none; }
+  .set-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: var(--sp-1); scrollbar-width: none; }
   .set-tab { flex: none; min-height: var(--tap); }
 }
 /* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
