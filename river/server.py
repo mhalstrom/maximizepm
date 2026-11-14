@@ -2271,6 +2271,13 @@ def _prompt_parts(tail, layout=None):
         for n in range(top - 1, -1, -1):
             if "?" in lines[n]:
                 question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
+                # A question that the pane wrapped (#5862: Claude Code's trust question in a narrow pane read only
+                # "trust?"): a line that goes on in lower case, at the indent of the line above, goes on that line.
+                ind = lambda x: len(x) - len(x.lstrip())
+                while qat > 0 and n - qat < 3 and question[:1].islower() \
+                        and lines[qat - 1].strip() and ind(lines[qat - 1]) == ind(lines[qat]):
+                    qat -= 1
+                    question = lines[qat].strip() + " " + question
                 break
     if question is None and row is None and options and framed.match(tail[at]):
         question = _frame_title(tail, lines, at, framed)  # a dialog with a title, not a question (Amp, #5226)
