@@ -438,6 +438,50 @@ class Identity(Base):
             self.assertFalse(core.set_process(self.c, "dev", os.getppid(), "zsh", env={"MAXPM_AGENT": "dev"}))
 
 
+class CredentialsPanel(Base):
+    """#5829: the Credentials panel of Settings reads names, levels, sets and grants in one GET, never a value; its
+    changes are op secret, as the person on the page."""
+
+    class Handler:
+        def __init__(self, path):
+            self.path, self.sent = path, None
+
+        def _send(self, code, body, *a, **k):
+            self.sent = (code, body)
+
+    def test_the_read_shows_names_and_never_a_value_and_the_page_s_actions_work(self):
+        import base64
+        import json
+        core.project_add(self.c, "site")
+        core.register(self.c, "mark", human=True)
+        act = routes_secrets.act
+        act(self.c, {"action": "signin", "name": "google-mark", "site": "https://accounts.google.com/x",
+                     "account": "me@gmail.com", "value_b64": base64.b64encode("pässwörd-123".encode()).decode()}, "mark")
+        vault.put(self.c, "cf-token", TOKEN, None)
+        act(self.c, {"action": "set", "name": "google", "manager_may_grant": True}, "mark")
+        act(self.c, {"action": "set", "name": "google", "add": ["google-mark"]}, "mark")
+        g = act(self.c, {"action": "grant", "name": "google", "scope": "project", "value": "site", "until": None}, "mark")
+        act(self.c, {"action": "level", "name": "cf-token", "level": "locked"}, "mark")
+        h = self.Handler("/api/credentials")
+        self.assertTrue(any(r[0]("/api/credentials") and r[1] is routes_secrets.credentials for r in routes_secrets.GET))
+        routes_secrets.credentials(h, h.path)
+        code, body = h.sent
+        self.assertEqual(code, 200)
+        text = json.dumps(body, ensure_ascii=False)
+        for secret in ("pässwörd-123", TOKEN.decode(), base64.b64encode(TOKEN).decode()):
+            self.assertNotIn(secret, text)
+        rows = {r["name"]: r for r in body["credentials"]}
+        self.assertEqual((rows["google-mark"]["kind"], rows["google-mark"]["account"], rows["google-mark"]["sets"]),
+                         ("signin", "me@gmail.com", ["google"]))
+        self.assertEqual(rows["cf-token"]["level"], "locked")
+        self.assertEqual([(s["name"], s["manager_may_grant"]) for s in body["sets"]], [("google", True)])
+        self.assertEqual([x["grant"] for x in body["grants"]], [g["grant"]])
+        self.assertEqual(body["levels"], list(vault.LEVELS))
+        act(self.c, {"action": "revoke", "grant": g["id"]}, "mark")
+        routes_secrets.credentials(h, h.path)
+        self.assertEqual(h.sent[1]["grants"], [])
+
+
 class Levels(Base):
     """Protection levels (#5825): locked, hidden (the default), open."""
 

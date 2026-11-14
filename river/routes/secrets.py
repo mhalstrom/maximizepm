@@ -1,16 +1,36 @@
 """Op "secret" (#5757, river/vault.py): maxpm secret from inside an agent's sandbox, which refuses the macOS
 Keychain, and maxpm secret put --from-browser, which reads the value from the project's browser here, so it never
-leaves maxpm serve. Also the sets and grants (#5822). The CLI is the only caller for now; the page shows no value.
+leaves maxpm serve. Also the sets and grants (#5822), and the Credentials panel of Settings (#5829), which shows
+names and never a value: a password that the person types there goes to the Keychain and never comes back.
 
-GET: none. OPS: page actions, merged into server.OPS."""
+GET: /api/credentials. OPS: page actions, merged into server.OPS."""
 
 import base64
 import re
 
-from .. import vault
+from .. import core, vault
 from ..core import RiverError
 
-GET = []
+# What the Credentials panel shows of a credential: names, levels, use; never a value.
+SHOWN = ("name", "kind", "site", "account", "two_step", "fail_why", "level", "var", "allow_env", "allow_commands",
+         "allow_hosts", "used_at", "used_by", "uses", "sets", "note", "project")
+
+
+def credentials(h, path):
+    """GET /api/credentials: the credentials (names only), the sets, the grants that hold now, and the choices of a
+    grant, in one read (#5829). It changes nothing, so a read of the page refreshes nothing."""
+    conn = core.connect()
+    try:
+        rows = [{k: r.get(k) for k in SHOWN} for r in vault.listing(conn)["secrets"]]
+        out = {"credentials": rows, "sets": vault.sets(conn)["sets"], "grants": vault.grants(conn)["grants"],
+               "levels": list(vault.LEVELS), "scopes": list(vault.GRANT_SCOPES), "kinds": list(vault.GRANT_KINDS),
+               "store": vault.backend().name}
+    finally:
+        conn.close()
+    return h._send(200, out)
+
+
+GET = [(lambda path: path == "/api/credentials", credentials)]
 
 # The value of an element: a field's value, else its text.
 READ_JS = ("(el) => (typeof el.value === 'string' && el.tagName !== 'BUTTON' ? el.value"

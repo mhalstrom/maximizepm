@@ -1,5 +1,17 @@
 <!-- The settings tab of the page (#4656). maxpm serve puts it into index.html, at view: settings. -->
 <section id="tab-settings" class="hidden">
+  <!-- Credentials (#5829, design: canvas credential-vault), first: the settings table under it is long. Each credential
+       by name (never its value), its level and last use; the sets and their grants; Add a sign-in (the password field
+       goes to the Keychain through maxpm serve and never comes back), New set, Grant, Revoke. views/credentials.js
+       draws it from GET /api/credentials. -->
+  <div class="panel" id="credPanel">
+    <h2 title="Passwords and tokens">Credentials</h2>
+    <div class="muted t-s">The values stay in this Mac's Keychain. This page shows only their names.</div>
+    <div id="credList"></div>
+    <div class="cred-sub">Sets</div>
+    <div id="credSets"></div>
+    <div id="credForms"></div>
+  </div>
   <div class="panel">
     <details class="muted t-s" style="margin-bottom:var(--sp-3)"><summary>Help</summary>The most specific value wins: item, then agent, then project, then global, then the built-in default.<br>
       <b>launch_agents</b> lists the agents the Start button offers, as <code>Label=command</code> entries separated by <code>;</code>. The first is the default.

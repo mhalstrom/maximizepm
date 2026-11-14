@@ -8,3 +8,20 @@
    and the form under them, not 6 and 13 px right of it. */
 #tab-settings > .panel > details > summary { padding-left: 0; }
 #openSetup { margin-left: var(--btn-inset); }
+/* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
+.cred-sub { font-weight: 600; margin: var(--sp-6) 0 var(--sp-2); }
+.cred, .cred-set { padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+.cred { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: flex-start; justify-content: space-between; }
+.cred-main { flex: 1; min-width: var(--w-l); }
+.cred-level { display: flex; gap: var(--sp-2); align-items: center; }
+.cred-grants { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-2) 0; }
+.cred-grant { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.cred-grantform { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cred-grantform .cred-value { flex: 1; min-width: var(--w-m); }
+.cred-grantform .cred-until { width: var(--w-l); max-width: 100%; }
+.cred-form { max-width: var(--w-form); }
+.cred-form .cred-check { display: flex; flex-direction: row; gap: var(--sp-2); align-items: center; }
+.cred-form .cred-check input { width: auto; flex: none; margin: 0; }
+@media (max-width: 759px) {  /* a phone: each field of a grant on its own line, full width */
+  .cred-grantform > input, .cred-grantform > select { flex: 1 1 100%; width: 100%; max-width: none; }
+}
