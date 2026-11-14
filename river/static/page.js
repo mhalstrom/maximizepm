@@ -7,7 +7,7 @@ export let S = null, tab = "sessions";  // Sessions is the first page (#5102 ste
 export function setState(v) { S = v; }
 export function setTabName(v) { tab = v; }
 export const nav = { openDrawer: async () => {}, setTab: async () => {}, openReady: () => {}, openSession: async () => {},
-  openYou: async () => {}, openPlan: async () => {} };
+  openYou: async () => {}, openPlan: async () => {}, openProject: async () => {} };
 
 // Plan (#5102 step 4): the view on screen (overview, items, graph, done; more come), and the scope that the left bar sets for
 // every view: all projects (""), one project, or one goal of a project. Only the frame writes them (setPlan).

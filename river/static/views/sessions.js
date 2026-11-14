@@ -263,9 +263,10 @@ function renderList(el, list, picked, empty) {
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
   let list = [], busy = false, again = false, proposals = [], listRead = false;
   // A pane in place of a session's chat (#5102): "you" (what waits on the person), "status" (every session by its
-  // state, #5852), "arts" (the artifacts of all sessions) or "cost" (what they used, #5857); null while a session shows.
+  // state, #5852), "arts" (the artifacts of all sessions), "cost" (what they used, #5857) or "browsers" (every browser
+  // that runs, #5879); null while a session shows.
   let pane = null;
-  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts", cost: "#sessCost" };
+  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts", cost: "#sessCost", browsers: "#sessBrowsers" };
   let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
   const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
   // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
@@ -386,7 +387,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  for (const b of ["#youBack", "#statusBack", "#artsBack", "#costBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  for (const b of ["#youBack", "#statusBack", "#artsBack", "#costBack", "#brwBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head (#4903; at every width since #5115): a card under it at the right with Open session,
   // Give work, Settings, the links to Plan and End (on a phone also the item). A choice, Esc, or a click outside closes it.
   const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
@@ -456,6 +457,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status"));
     if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
     document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
+    const nb = (S && S.browsers) || 0;  // the Browsers row (#5879): how many run now, from the state
+    $("#sessBrwRow .sub").textContent = nb ? `${nb} open` : "None open";
   }
   // The person has this session's chat open while its turn has ended (#5852): it is seen, and moves from Done to Idle.
   // Once for each turn end (its row's time), and only while the page shows.
@@ -548,6 +551,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
     $("#sessCostRow .srow").classList.toggle("on", pane === "cost");
+    $("#sessBrwRow .srow").classList.toggle("on", pane === "browsers");
     if (pane !== "status") closeReply();
     drawStatus();
   }
@@ -584,6 +588,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     markPane();
     phoneChat(true);
     if (kind === "cost") import("./cost.js").then(m => m.showCost());  // read on each opening, not every 3 s (#5857)
+    if (kind === "browsers") import("./browsers.js").then(m => m.showBrowsers());  // it reads while it shows (#5879)
     onPane(kind, byPerson);
   }
   function pick(name, remember = true) {
@@ -1049,6 +1054,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (e.target.closest("[data-status]")) return showPane("status");
     if (e.target.closest("[data-arts]")) return showPane("arts");
     if (e.target.closest("[data-cost]")) return showPane("cost");
+    if (e.target.closest("[data-brw]")) return showPane("browsers");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
@@ -1063,10 +1069,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts], [data-cost]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts], [data-cost], [data-brw]")) {
       e.preventDefault();
       return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status"
-        : e.target.closest("[data-cost]") ? "cost" : "arts");
+        : e.target.closest("[data-cost]") ? "cost" : e.target.closest("[data-brw]") ? "browsers" : "arts");
     }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
@@ -1129,5 +1135,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
            showStatus: (byPerson = true) => showPane("status", byPerson),
            showArts: (byPerson = true) => showPane("arts", byPerson),
-           showCost: (byPerson = true) => showPane("cost", byPerson), pane: () => pane };
+           showCost: (byPerson = true) => showPane("cost", byPerson),
+           showBrowsers: (byPerson = true) => showPane("browsers", byPerson), pane: () => pane };
 }

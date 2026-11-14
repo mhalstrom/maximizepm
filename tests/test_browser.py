@@ -4143,3 +4143,57 @@ class HiddenMatches(Base):
         ref = lines[0].split()[0]
         out = routes.act(self.c, {"project": "web", "action": "click", "selector": ref}, None)
         self.assertTrue(out["url"].endswith("/s"), out["url"])  # the visible one, the first time
+
+
+class BrowsersView(Base):
+    """#5879 (mark 2026-11-14): the Browsers view of Sessions lists every browser that runs, with a small picture."""
+
+    def _running(self, project, owner, url, title, seq, at):
+        b = browser.get(project, owner)
+        b.running = lambda: True
+        b.target = "t1"
+        b.targets = {"t1": {"url": url, "title": title}}
+        b.frame = {"seq": seq, "data": base64.b64encode(b"JPEG" + bytes([seq])).decode(), "w": 480, "h": 800}
+        b.active_at, b.used, b.watched = at, 0.0, 0.0
+        return b
+
+    def test_the_list_holds_the_running_browsers_newest_first_and_marks_no_use(self):
+        core.register(self.c, "ag1")
+        self._running("web", "ag1", "https://example.com/a", "Example", 3, time.time() - 60)
+        b2 = self._running("web", None, "https://shop.test/", "Shop", 5, time.time())
+        b2.state["controller"] = {"who": "mark", "kind": "person", "sub": None, "since": "x"}  # a person controls it
+        browser.get("web", "ag9")  # in the registry, not running: not listed
+        got = browser.listing()
+        self.assertEqual([(x["project"], x["session"], x["url"], x["seq"]) for x in got],
+                         [("web", None, "https://shop.test/", 5), ("web", "ag1", "https://example.com/a", 3)])
+        self.assertEqual(got[0]["controller"], {"who": "mark", "kind": "person"})
+        self.assertIsNone(got[1]["controller"])
+        self.assertEqual((got[1]["title"], got[1]["tabs"], got[1]["w"], got[1]["h"]), ("Example", 1, 480, 800))
+        data, seq = browser.thumb("web", "ag1")
+        self.assertEqual((data, seq), (b"JPEG\x03", 3))
+        self.assertEqual(browser.thumb("web", "ag9"), (None, 0))
+        self.assertEqual(browser.thumb("none", None), (None, 0))
+        # Neither read is a use: browser_idle_end and the pace stay as the panes make them.
+        self.assertEqual((browser.BROWSERS[("web", "ag1")].used, browser.BROWSERS[("web", "ag1")].watched), (0.0, 0.0))
+
+    def test_the_routes_need_the_page_token(self):
+        core.register(self.c, "ag1")
+        self._running("web", "ag1", "https://example.com/", "Example", 7, time.time())
+        h = FakeHandler("/api/browsers")
+        routes.browsers(h, "/api/browsers")
+        self.assertEqual(h.sent[0], 403)
+        h = FakeHandler(f"/api/browsers?token={server.PAGE_TOKEN}")
+        routes.browsers(h, "/api/browsers")
+        self.assertEqual([x["session"] for x in h.sent[1]["browsers"]], ["ag1"])
+        h = FakeHandler("/api/browser/thumb?project=web&session=ag1")
+        routes.thumb(h, "/api/browser/thumb")
+        self.assertEqual(h.sent[0], 403)
+        h = FakeHandler(f"/api/browser/thumb?project=web&session=ag1&token={server.PAGE_TOKEN}")
+        routes.thumb(h, "/api/browser/thumb")
+        self.assertEqual(h.sent, (200, b"JPEG\x07"))
+        h = FakeHandler(f"/api/browser/thumb?project=web&session=ag2&token={server.PAGE_TOKEN}")
+        routes.thumb(h, "/api/browser/thumb")
+        self.assertEqual(h.sent[0], 204)
+        self.assertEqual([fn for p in ("/api/browsers", "/api/browser/thumb") for m, fn in routes.GET if m(p)],
+                         [routes.browsers, routes.thumb])
+        self.assertIn("browsers", server.PAGE_VIEWS)  # /browsers gets the page, which opens the Browsers view

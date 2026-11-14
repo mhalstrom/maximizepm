@@ -38,10 +38,11 @@ const showTool = (project, session) => openTool("browser:" + project + ":" + (se
   (box) => render(box, project, session));
 
 // The browser of the session's project: the tab "Browser · <project>" in the panel; with url, it opens that address
-// (an outside address of the side panel, #5628).
-export async function openBrowser(session, url) {
+// (an outside address of the side panel, #5628). project: the browser's project when the caller knows it (a tile of the
+// Browsers view, #5879: a session that holds no item has no project of its own).
+export async function openBrowser(session, url, project) {
   session = session || panelSession();
-  const info = await callOp("status", session ? { agent: session, session } : {});
+  const info = await callOp("status", { ...(session ? { agent: session, session } : {}), ...(project ? { project } : {}) });
   showTool(info.project, session);
   if (url) await callOp("open", { project: info.project, session, url });
 }

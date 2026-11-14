@@ -24,6 +24,10 @@
       <div id="sessCostRow" class="slist-cost" aria-label="Cost"><div class="srow srow-cost" data-cost="1">
         <div class="srow-main" tabindex="0" role="button" title="What the sessions used" aria-label="Cost of all sessions">
           <div class="srow-h"><b class="srow-t">Cost</b></div><div class="sub">What the sessions used</div></div></div></div>
+      <!-- The Browsers row (#5879): every browser that runs now; it opens the Browsers view. -->
+      <div id="sessBrwRow" class="slist-brw" aria-label="Browsers"><div class="srow srow-brw" data-brw="1">
+        <div class="srow-main" tabindex="0" role="button" title="Every browser that runs now" aria-label="Browsers of all sessions">
+          <div class="srow-h"><b class="srow-t">Browsers</b></div><div class="sub">None open</div></div></div></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
       <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
         <div class="slist-h">Experts</div>
@@ -73,6 +77,7 @@
     <!-- view: status -->
     <!-- view: artifacts -->
     <!-- view: cost -->
+    <!-- view: browsers -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
       <!-- The tabs and the panel's ✕ share one line: the ✕ never stands alone under the address bar (#5323). -->

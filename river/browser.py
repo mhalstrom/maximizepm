@@ -2188,6 +2188,36 @@ def find(project, owner=None):
     return b
 
 
+def listing():
+    """The browsers of this serve that run now (#5879: the Browsers view of Sessions), the newest activity first: the
+    project, the session (None: the project's own browser, for page walks), the shown tab's site and title, the
+    controller, the last change, and the seq of the newest frame (the view asks for a picture only when it changed).
+    It reads memory only and marks no use: a list that someone watches keeps no browser from browser_idle_end."""
+    out = []
+    for (project, owner), b in list(BROWSERS.items()):
+        if not b.running():
+            continue
+        cur = b.targets.get(b.target) or {}
+        c = b.state.get("controller") or {}
+        f = b.frame
+        last = max(b.active_at or 0, b.person_at or 0, b.agent_at or 0)
+        out.append({"project": project, "session": owner, "url": cur.get("url", ""), "title": cur.get("title", ""),
+                    "tabs": len(b.targets), "controller": {"who": c.get("who"), "kind": c.get("kind")} if c else None,
+                    "window": b._windowed(), "attached": bool(b.attached),
+                    "last": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last)) if last else None,
+                    "seq": f["seq"] if f else 0, "w": f["w"] if f else None, "h": f["h"] if f else None, "_at": last})
+    out.sort(key=lambda x: -x.pop("_at"))
+    return out
+
+
+def thumb(project, owner=None):
+    """The newest frame of a browser as JPEG bytes and its seq, or (None, 0). Like listing(), it marks no use and no
+    watcher: the browser's pace and idle end stay as its pane makes them."""
+    b = BROWSERS.get((project, owner or None))
+    f = b.frame if b is not None and b.running() else None
+    return (base64.b64decode(f["data"]), f["seq"]) if f else (None, 0)
+
+
 def sweep(conn, at=None):
     """A pass of maxpm serve (#5636): stop each session's browser whose session is gone (unregistered), or that nobody
     used for browser_idle_end. A stopped browser starts again at its next use. Returns the (project, session) pairs

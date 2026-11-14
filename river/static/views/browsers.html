@@ -1,0 +1,12 @@
+<!-- The Browsers view of the Sessions tab (#5879, mark 2026-11-14): every browser that runs now (each session's own and
+     a project's own), as tiles with a small live picture, the site, the session and who controls it. A tile opens
+     that session with its Browser in the side panel. The Browsers row of the session list opens it; so does /browsers.
+     views/browsers.js draws it from GET /api/browsers and GET /api/browser/thumb. maxpm serve puts it into
+     sessions.html, at view: browsers. -->
+<div class="panel sess-main sess-brw hidden" id="sessBrowsers">
+  <div class="sess-head">
+    <button class="btn" type="button" id="brwBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
+    <h2 class="sess-h2" title="Every browser that runs now">Browsers</h2>
+  </div>
+  <div class="brw-body"><div id="brwView"></div></div>
+</div>

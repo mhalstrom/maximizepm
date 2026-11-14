@@ -56,7 +56,8 @@ def static_file(path, root=None):
 # The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
 # with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
 # its relative addresses (app.js, api/state) work at any depth, here and on the relay's tunnel.
-PAGE_VIEWS = ("sessions", "you", "status", "plan", "artifacts", "settings", "terminal", "cost")  # status: #5852, cost: #5857
+PAGE_VIEWS = ("sessions", "you", "status", "plan", "artifacts", "settings", "terminal", "cost",
+              "browsers")  # status: #5852, cost: #5857, browsers: #5879
 # The tabs before Sessions and Plan (#5102, design #4657): nothing forwards; each answers "not found" with a link to /.
 OLD_VIEWS = ("board", "projects", "targets", "capacity", "graph", "done")
 OLD_VIEW_PAGE = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'>"
@@ -5092,6 +5093,8 @@ def page_state(closed, timing=None):
                 "SELECT id FROM secret_requests WHERE state='asked' AND sites IS NOT NULL ORDER BY id")]
             from .routes import browser as browser_routes
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
+            # #5879: how many browsers run now, for the Browsers row of the session list (its view reads the list)
+            st["browsers"] = sum(1 for b in list(browser_routes.browser.BROWSERS.values()) if b.running())
             from . import review
             st["changes"] = review.counts()  # #5855: changed files of each session (counted in a thread, never here)
             st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late

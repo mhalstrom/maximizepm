@@ -71,6 +71,31 @@ def frame(h, path):
     return h._send(200, out)
 
 
+def _query(h):
+    from urllib.parse import parse_qs, urlsplit
+    return {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
+
+
+def browsers(h, path):
+    """GET /api/browsers?token=<page token> (#5879): every browser that runs now (browser.listing), for the Browsers
+    view of Sessions. The page's token, as for the frames: a page's title and address can be private."""
+    if not hmac.compare_digest(_query(h).get("token", ""), server.PAGE_TOKEN):
+        return h._send(403, {"error": "this needs the page's token: reload the page"})
+    return h._send(200, {"browsers": browser.listing()})
+
+
+def thumb(h, path):
+    """GET /api/browser/thumb?project=<name>&session=<agent>&token=<t> (#5879): the newest frame of that browser as a
+    JPEG, the picture of its tile; 204 with no frame. The view asks again only when the list shows a new seq."""
+    q = _query(h)
+    if not hmac.compare_digest(q.get("token", ""), server.PAGE_TOKEN):
+        return h._send(403, {"error": "this needs the page's token: reload the page"})
+    data, seq = browser.thumb(q.get("project", ""), q.get("session") or None)
+    if data is None:
+        return h._send(204, b"", "image/jpeg")
+    return h._send(200, data, "image/jpeg", {"X-Frame-Seq": str(seq)})
+
+
 def _person(conn, who):
     if not who:
         return True  # the page with no "You are" chosen: a person at this computer
@@ -933,6 +958,8 @@ def cdp(h, path):
 
 GET = [
     (lambda path: path == "/api/browser/frame", frame),
+    (lambda path: path == "/api/browsers", browsers),
+    (lambda path: path == "/api/browser/thumb", thumb),
     (lambda path: path.startswith("/cdp/"), cdp),
 ]
 

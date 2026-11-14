@@ -1,0 +1,24 @@
+/* The Browsers view of Sessions (#5879, views/browsers.js): in place of a session's chat, a tile for each browser that
+   runs now; the body scrolls. Its row in the session list sits under Cost. A phone: two tiles in a row. */
+.sess-brw.hidden { display: none; }
+.slist-brw { flex: none; }
+.slist-brw .srow-t { font-weight: 700; }
+.sess-brw .brw-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-4); }
+.brw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--w-l), 1fr)); gap: var(--sp-5); }
+.brw-tile { display: flex; flex-direction: column; min-width: 0; text-align: left; border: var(--hair) solid var(--line);
+  border-radius: var(--r-l); background: var(--panel); overflow: hidden; color: var(--ink); }
+.brw-tile:hover, .brw-tile:focus-visible { border-color: var(--accent); }
+.brw-tile.brw-person { border-color: var(--human); }
+/* The picture: the top of the page, at one shape for every tile (the pane that sets the size may be tall or wide). */
+.brw-pic { display: block; aspect-ratio: 4 / 3; background: var(--frame-bg); border-bottom: var(--hair) solid var(--line); overflow: hidden; }
+.brw-pic img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: left top; }
+.brw-info { display: flex; flex-direction: column; gap: var(--sp-0); padding: var(--sp-3) var(--sp-4); min-width: 0; }
+.brw-site { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brw-title, .brw-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brw-ctl { display: flex; gap: var(--sp-2); align-items: baseline; }
+@media (max-width: 759px) {  /* a phone: two tiles in a row, the whole tile at the size of a tap at least */
+  .brw-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
+  .sess-brw .brw-body { padding: var(--sp-3) var(--sp-2); }
+  .brw-info { padding: var(--sp-2) var(--sp-3); }
+  .brw-ctl { flex-wrap: wrap; }
+}
