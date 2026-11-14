@@ -271,9 +271,10 @@ Stop when the user tells you to, and tell the user what you did.
 - **A sign-in that expired or stopped** (an alert from maxpm: a site asked a
   session to sign in again, or a password fill stopped): the task may go on
   with its other parts; tell its session. Then:
-  1. Do the sign-in yourself first, in that session's browser: let the saved
-     password fill, pick the account, press Continue and Allow. Do every click
-     yourself; ask the person for none of them.
+  1. Get the sign-in done without the person first. A session's browser takes
+     only that session's commands, so tell the session: open the site, let the
+     saved password fill, pick the account, press Continue and Allow. It does
+     every click; ask the person for none of them.
   2. Only when a step needs the person (a new password, a passkey, a phone
      code, a robot check): leave the browser at that step and ask once, with
      `maxpm ask --blocked`. Name the site, the account and the step ("Google
