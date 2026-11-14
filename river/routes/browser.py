@@ -449,7 +449,10 @@ def _act(conn, a, who):
             b.signin_unconfirmed_why = None if b.signin_confirmed else f"the command came from {s['name']} ({s['how']})"
         except RiverError as e:
             b.signin_confirmed = False
-            b.signin_unconfirmed_why = str(e)[:200]  # #5845: the secret log says why a granted sign-in did not load
+            # #5845: the secret log says why a granted sign-in did not load, with what serve knew of the connection
+            # (client port, serve port, the pid the CLI said, the action), so a failed lookup can be traced
+            b.signin_unconfirmed_why = (str(e)[:160] + f" [peer {getattr(vault.PEER, 'value', None)}, "
+                                        f"action {a.get('action') or 'status'}]")
         if b.running():  # #5827: a grant that ended takes its saved sign-in out before this action
             from .. import signin
             try:
