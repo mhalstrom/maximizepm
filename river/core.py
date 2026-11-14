@@ -4492,6 +4492,62 @@ _RELEASE_LOOP_EVENTS = (
     "COALESCE((SELECT MAX(k.id) FROM events k WHERE k.item_id=e.item_id AND k.actor=e.actor AND k.id<e.id AND "
     "k.change LIKE 'claimed%'), 0)))")
 
+# What an item waits on, as a release note names it ("waits on #12", "blocked by #12", "needs #12").
+_WAITS_ON = re.compile(r"\b(?:wait(?:s|ing)?\s+(?:on|for)|blocked\s+(?:on|by)|needs?|depends\s+on)\s+#(\d+)", re.I)
+
+
+def _release_blocker(change, blocked):
+    """The blocker of one release or reopen event for the release-loop probe (#5708), or None when it names none.
+    A loop is the same blocker again: the same new prerequisites, the same blocked reason, the same item that the note
+    waits on, or a reopen by a person or a session. A hand-off (a release for a fresh session, part done, a note) names
+    no blocker, and a check's reopen of its own fault item (actor maxpm) is the check's fault coming back, which the
+    check reports itself. blocked: the reason of a 'blocked:' event since the claim before the release, or None."""
+    if change == "reopened":
+        return "reopened"
+    text = change.split(":", 1)[1].strip() if ":" in change else ""
+    if text.startswith("new prerequisites") or "open prerequisites" in change:
+        ids = sorted(set(re.findall(r"#(\d+)", text)), key=int)
+        return "prerequisites " + ", ".join("#" + i for i in ids) if ids else "prerequisites"
+    if blocked:
+        return "blocked: " + " ".join(blocked.lower().split())[:80]
+    m = _WAITS_ON.search(text)
+    return f"waits on #{m.group(1)}" if m else None
+
+
+def _release_loops(conn):
+    """The release-loop probe (#5708): (n, window, rows) where each row is {item_id, n, title, blocker}: an item with
+    n or more releases or reopens for the same blocker (_release_blocker) within the window of ops_release_loop."""
+    n, win = count_window(setting(conn, "ops_release_loop"), "ops_release_loop")
+    since = iso(now() - win)
+    evs = conn.execute(f"SELECT e.id, e.item_id, e.actor, e.change, i.title FROM events e JOIN items i "
+                       f"ON i.id=e.item_id WHERE e.at>=? AND ({_RELEASE_LOOP_EVENTS}) ORDER BY e.id", (since,)).fetchall()
+    evs = [e for e in evs if not (e["change"] == "reopened" and e["actor"] == "maxpm")]
+    marks = {}  # item -> [(event id, 'claim'|'blocked', reason)]
+    ids = sorted({e["item_id"] for e in evs})
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for r in conn.execute(f"SELECT id, item_id, change FROM events WHERE item_id IN ({','.join('?' * len(part))}) "
+                              f"AND (change LIKE 'claimed%' OR change LIKE 'blocked:%') ORDER BY id", part):
+            kind = "claim" if r["change"].startswith("claimed") else "blocked"
+            marks.setdefault(r["item_id"], []).append((r["id"], kind, r["change"][len("blocked:"):].strip()))
+    counts, titles = {}, {}
+    for e in evs:
+        blocked = None
+        for mid, kind, reason in marks.get(e["item_id"], ()):  # the last blocked reason since the claim before it
+            if mid >= e["id"]:
+                break
+            blocked = reason if kind == "blocked" else None
+        key = _release_blocker(e["change"], blocked)
+        if key:
+            counts[(e["item_id"], key)] = counts.get((e["item_id"], key), 0) + 1
+            titles[e["item_id"]] = e["title"]
+    best = {}
+    for (item, key), c in counts.items():
+        if c >= n and c > best.get(item, ("", 0))[1]:
+            best[item] = (key, c)
+    rows = [{"item_id": i, "n": c, "title": titles[i], "blocker": k} for i, (k, c) in best.items()]
+    return n, win, sorted(rows, key=lambda r: (-r["n"], r["item_id"]))
+
 
 def _probe_fault_prefixes(conn, name):
     """The title starts of the fault items of the checks that run probe `name` (ops:<scope>:<check> and a space or a
@@ -4553,14 +4609,16 @@ def ops_probe(conn, name):
         bad = bool(subjects)
     else:
         loop = name == "lease-loop"
-        n, win, rows = _item_loops(conn, "e.change LIKE 'lease expired (was %'" if loop else _RELEASE_LOOP_EVENTS,
-                                   "ops_lease_loop" if loop else "ops_release_loop")
-        what = "lease expiries" if loop else "releases or reopens"
-        if not loop:
+        if loop:
+            n, win, rows = _item_loops(conn, "e.change LIKE 'lease expired (was %'", "ops_lease_loop")
+        else:  # #5708: only releases or reopens for the same blocker
+            n, win, rows = _release_loops(conn)
             own = _probe_fault_prefixes(conn, name)
             rows = [r for r in rows if not r["title"].startswith(own)]
+        what = "lease expiries" if loop else "releases or reopens"
         for r in rows:
-            subjects[f"#{r['item_id']}"] = f"{r['n']} {what} in {_short(win)}: {r['title'][:80]}"
+            why = f" ({r['blocker']})" if not loop else ""
+            subjects[f"#{r['item_id']}"] = f"{r['n']} {what}{why} in {_short(win)}: {r['title'][:80]}"
         perf = {"items": len(subjects)}
         summary = (f"{len(subjects)} item(s) with {n} or more {what} in {_short(win)}" if subjects
                    else f"no item with {n} {what} in {_short(win)}")

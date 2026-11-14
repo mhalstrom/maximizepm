@@ -10217,11 +10217,12 @@ class OpsProbes(Base):
         self.assertEqual(core.ops_probe(self.c, "lease-loop")["status"], "ok")
         core.register(self.c, "w1")
         for _ in range(3):
-            core.claim(self.c, b, "w1"); core.release(self.c, b, actor="w1", note="later")
+            core.claim(self.c, b, "w1"); core.release(self.c, b, actor="w1", note=f"waits on #{a}")
         self.assertEqual(core.ops_probe(self.c, "release-loop")["status"], "ok")  # 3 of 4
-        core.claim(self.c, b, "w1"); core.done(self.c, b, "w1"); core.reopen(self.c, b, actor="w1")
+        core.claim(self.c, b, "w1"); core.release(self.c, b, actor="w1", note=f"Waiting on #{a} still")
         res = core.ops_probe(self.c, "release-loop")
         self.assertEqual(list(res["subjects"]), [f"#{b}"])
+        self.assertIn(f"4 releases or reopens (waits on #{a})", res["subjects"][f"#{b}"])
         core._event(self.c, None, "w1", "released goal g; its items are open to every agent")  # no item: not counted
         self.assertEqual(len(core.ops_probe(self.c, "release-loop")["subjects"]), 1)
         for bad in ("3", "0/6h", "3/soon"):
@@ -10230,7 +10231,8 @@ class OpsProbes(Base):
 
     def test_release_loop_skips_its_own_fault_items_and_releases_after_a_stop(self):
         """#5710: the check's own fault items reopen at each run, and a session that a person stopped releases its
-        item; neither is a loop. A fault item of another check still counts."""
+        item; neither is a loop. #5708: a check's reopen of any fault item of its own (actor maxpm) is no loop either:
+        the check reports its fault itself (#5550, #5551)."""
         core.project_add(self.c, "web")
         core.register(self.c, "mark", human=True)
         core.ops_add(self.c, "web", "release-loop", "plugin", {"command": "maxpm ops probe release-loop"}, actor="mark")
@@ -10239,19 +10241,54 @@ class OpsProbes(Base):
         for _ in range(4):
             core._event(self.c, own, "maxpm", "reopened")
             core._event(self.c, other, "maxpm", "reopened")
-        self.assertEqual(list(core.ops_probe(self.c, "release-loop")["subjects"]), [f"#{other}"])
+        self.assertEqual(list(core.ops_probe(self.c, "release-loop")["subjects"]), [])
         core.register(self.c, "w1")
         i = self.add("web", "Stopped often")
         core.claim(self.c, i, "w1")
         core.stop_agent(self.c, "w1", "nothing to do", actor="mark")
-        core.release(self.c, i, actor="w1", note="stopped")  # after the stop: not counted
+        core.release(self.c, i, actor="w1", note=f"stopped; waits on #{other}")  # after the stop: not counted
         for _ in range(3):
             core._event(self.c, i, "w1", "claimed (lease 30m)")
-            core._event(self.c, i, "w1", "released: later")  # a later claim: the stop does not cover these
+            core._event(self.c, i, "w1", f"released: waits on #{other}")  # a later claim: the stop does not cover it
         self.assertNotIn(f"#{i}", core.ops_probe(self.c, "release-loop")["subjects"])  # 3 of 4
         core._event(self.c, i, "w1", "claimed (lease 30m)")
-        core._event(self.c, i, "w1", "released: again")
+        core._event(self.c, i, "w1", f"released: waits on #{other}")
         self.assertIn("4 releases or reopens", core.ops_probe(self.c, "release-loop")["subjects"][f"#{i}"])
+
+    def test_release_loop_counts_only_the_same_blocker(self):
+        """#5708: hand-offs to a fresh session, part-done notes and new prerequisites that change each time are no
+        loop (#5419, #5522, #5597); the same blocker four times is."""
+        core.project_add(self.c, "web")
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        probe = lambda: core.ops_probe(self.c, "release-loop")["subjects"]  # noqa: E731
+        hand = self.add("web", "Handed on")
+        for note in ("Not started. Released for a fresh session: its context is long",
+                     "Part done, 325e90d on local main", "Released again for a fresh session",
+                     "Findings so far, see #5637 and #5619"):
+            core._event(self.c, hand, "w1", "claimed (lease 30m)")
+            core._event(self.c, hand, "w1", f"released: {note}")
+        prereq = self.add("web", "New prerequisites each time")
+        for n in (11, 12, 13, 14):
+            core._event(self.c, prereq, "w1", "claimed (lease 30m)")
+            core._event(self.c, prereq, "maxpm", f"released: new prerequisites #{n}")
+        self.assertEqual(probe(), {})
+        same = self.add("web", "The same prerequisite")
+        for _ in range(4):
+            core._event(self.c, same, "w1", "claimed (lease 30m)")
+            core._event(self.c, same, "maxpm", "released: new prerequisites #12, #11")
+        self.assertIn("(prerequisites #11, #12)", probe()[f"#{same}"])
+        blocked = self.add("web", "Blocked on the vendor")
+        for _ in range(4):
+            core._event(self.c, blocked, "w1", "claimed (lease 30m)")
+            core._event(self.c, blocked, "w1", "blocked: Waiting on the Stripe review")
+            core._event(self.c, blocked, "w1", "released: see the note")
+        self.assertIn("(blocked: waiting on the stripe review)", probe()[f"#{blocked}"])
+        reopened = self.add("web", "Done but not done")
+        for _ in range(4):
+            core._event(self.c, reopened, "mark", "reopened")
+        self.assertIn("4 releases or reopens (reopened)", probe()[f"#{reopened}"])
+        self.assertEqual(set(probe()), {f"#{same}", f"#{blocked}", f"#{reopened}"})
 
     def test_the_command_prints_a_plugin_answer_and_its_exit_code(self):
         core.project_add(self.c, "web")
