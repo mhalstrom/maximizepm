@@ -193,11 +193,14 @@ try {
   await until(() => location.pathname === "/settings" && !q("header").classList.contains("more")
     && q("#setTabs [data-set-tab]"), "the settings from the ⋯, at /settings, the menu closed");
   q('#setTabs [data-set-tab="sessions"]').click();
-  await until(() => q("#settingsTable").textContent.includes("lease_ttl")
-    && !q("#settingsTable").textContent.includes("ntfy_topic") && !q("#setPanel").classList.contains("hidden")
+  await until(() => q("#setRows").textContent.includes("lease_ttl")
+    && !q("#setRows").textContent.includes("ntfy_topic") && !q("#setPanel").classList.contains("hidden")
     && q("#credPanel").classList.contains("hidden"), "Settings > Sessions shows only its keys");
   check([...q("#setKey").options].some(o => o.value === "lease_ttl")
     && ![...q("#setKey").options].some(o => o.value === "ntfy_topic"), "the form lists the keys of the tab");
+  // #5850: each key a row with its plain label, its field and the key small under it
+  check(q("#setRows").textContent.includes("How long a claim lasts") && q('#setRows [data-set-input="lease_ttl"]'),
+    "Settings > Sessions: lease_ttl is a row with its label and field");
   q('#setTabs [data-set-tab="people"]').click();
   await until(() => !q("#peoplePanel").classList.contains("hidden") && q("#setPanel").classList.contains("hidden"),
     "Settings > People");

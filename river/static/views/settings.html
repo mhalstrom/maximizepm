@@ -27,20 +27,22 @@
       <code>Claude Code=@claude-code; Plan first=@claude-code permission_mode=plan; Codex=@codex; Grok=grok "run maxpm go in this folder and follow the briefing"</code>.
       Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</details>
     <div class="set-setup" id="setSetupRow"><button class="btn" id="openSetup">Open setup guide</button></div>
-    <div id="settingsTable"></div>
-    <div class="cred-sub">Change a setting</div>
-    <div class="muted t-s">The most specific value wins: item, then agent, then project, then every project, then the default.</div>
-    <div class="form set-form">
-      <div class="two">
-        <label>Setting<select id="setKey"></select></label>
-        <label>Value<input id="setValue" placeholder="45m, 7d, 2"></label>
+    <!-- #5850: one row per setting: its label, its value for every project, the values for one project, agent or item. -->
+    <div id="setRows" class="set-rows"></div>
+    <details class="set-scoped"><summary>Set one for a single project, agent or item</summary>
+      <div class="muted t-s">The most specific value wins: item, then agent, then project, then every project, then the default.</div>
+      <div class="form set-form">
+        <div class="two">
+          <label>Setting<select id="setKey"></select></label>
+          <label>Value<input id="setValue" placeholder="45m, 7d, 2"></label>
+        </div>
+        <div class="two">
+          <label>For<select id="setScope"><option value="project">one project</option><option value="agent">one agent</option><option value="item">one item</option><option value="global">every project</option></select></label>
+          <label>Name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
+        </div>
+        <button class="btn primary" id="setGo">Save setting</button>
       </div>
-      <div class="two">
-        <label>For<select id="setScope"><option value="global">every project</option><option value="project">one project</option><option value="agent">one agent</option><option value="item">one item</option></select></label>
-        <label>Name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
-      </div>
-      <button class="btn primary" id="setGo">Save setting</button>
-    </div>
+    </details>
   </div>
   <!-- Policies (#5308): the rules sessions follow, each with its scope, source and reason; maxpm go, manage and the
        expert briefing print the ones that apply. -->

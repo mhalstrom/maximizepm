@@ -210,22 +210,33 @@ function choices(scope) {
   return names.map(n => `<option value="${esc(n)}">`).join("");
 }
 
+// #5850 (the manager's review of #5848): the list of credentials and sets comes first; each form opens behind its
+// button, one at a time.
+let formOpen = null;
+const FORMS = [["signin", "Add a sign-in"], ["browser", "Save a browser's sign-in"], ["set", "New set"]];
 function forms() {
+  const btns = `<div class="actions cred-adds">${FORMS.map(([k, label]) =>
+    button(label, { pressed: formOpen === k, data: { "cred-form": k } })).join(" ")}</div>`;
+  return btns + (formOpen === "signin" ? signinForm() : formOpen === "browser" ? browserForm()
+    : formOpen === "set" ? setForm() : "");
+}
+
+function setForm() {
+  return `<div class="form cred-form">
+    <label>Name of the new set<input id="setName" placeholder="stripe-live" autocomplete="off"></label>
+    <div class="actions">${button("Make set", { kind: "primary", id: "credMakeSet" })}</div>
+  </div>`;
+}
+
+function signinForm() {
   const sets = (C.sets || []).map(s => `<option>${esc(s.name)}</option>`).join("");
-  return `<div class="cred-sub">Add a sign-in</div>
-  <div class="form cred-form" id="credSignin">
+  return `<div class="form cred-form" id="credSignin">
     <div class="two"><label>Name<input id="credName" placeholder="google-mark" autocomplete="off"></label>
       <label>Site<input id="credSite" placeholder="google.com" autocomplete="off"></label></div>
     <div class="two"><label>Account<input id="credAccount" placeholder="me@gmail.com" autocomplete="off"></label>
       <label>Password<input id="credPassword" type="password" autocomplete="new-password"></label></div>
     <label>Add to set<select id="credSet"><option value="">no set</option>${sets}</select></label>
     <div class="actions">${button("Save sign-in", { kind: "primary", id: "credSave" })}</div>
-  </div>
-  ${browserForm()}
-  <div class="cred-sub">New set</div>
-  <div class="form cred-form">
-    <label>Name<input id="setName" placeholder="stripe-live" autocomplete="off"></label>
-    <div class="actions">${button("Make set", { id: "credMakeSet" })}</div>
   </div>`;
 }
 
@@ -234,12 +245,10 @@ function forms() {
 // name that does not exist yet makes the set.
 function browserForm() {
   const list = C.browsers || [];
-  if (!list.length) return `<div class="cred-sub">Save a browser's sign-in</div>`
-    + `<div class="muted t-s">No session browser runs now. Sign in to the site in a session's Browser pane first.</div>`;
+  if (!list.length) return `<div class="muted t-s">No session browser runs now. Sign in to the site in a session's Browser pane first.</div>`;
   const opts = list.map(b => `<option value="${esc(b.session)}|${esc(b.project)}">${esc(b.session)} · ${esc(b.project)}</option>`).join("");
   const sets = (C.sets || []).map(s => `<option value="${esc(s.name)}">`).join("");
-  return `<div class="cred-sub">Save a browser's sign-in</div>
-  <div class="form cred-form" id="credCookies">
+  return `<div class="form cred-form" id="credCookies">
     <div class="two"><label>Browser of<select id="ckBrowser">${opts}</select></label>
       <label>Site<input id="ckSite" placeholder="google.com" autocomplete="off"></label></div>
     <div class="two"><label>Name<input id="ckName" placeholder="gmail-mark" autocomplete="off"></label>
@@ -257,7 +266,7 @@ async function saveCookies() {
     const r = await act("secret", { action: "cookies", name, site, session, agent: session, project, set: set || null });
     toast(`Saved ${name}: ${r.cookies} cookies of ${r.site}` + (set ? ` in ${set}` : ""));
   } catch (err) { return; }
-  ["#ckName", "#ckSite", "#ckSet"].forEach(s => { $(s).value = ""; });
+  formOpen = null;
   renderCredentials(true);
 }
 
@@ -319,6 +328,10 @@ panel.addEventListener("click", async (e) => {
     } catch (err) { return; }
     return renderCredentials(true);
   }
+  if (t.dataset.credForm) {  // #5850: one form at a time, behind its button
+    formOpen = formOpen === t.dataset.credForm ? null : t.dataset.credForm;
+    return draw();
+  }
   if (t.id === "credSave") return saveSignin();
   if (t.id === "ckSave") return saveCookies();
   if (t.id === "credMakeSet") {
@@ -326,6 +339,7 @@ panel.addEventListener("click", async (e) => {
     if (!name) return toast("Type the set's name", true);
     try { await act("secret", { action: "set", name }); toast(`Made the set ${name}`); }
     catch (err) { return; }
+    formOpen = null;
     return renderCredentials(true);
   }
 });
@@ -340,7 +354,7 @@ async function saveSignin() {
     await act("secret", { action: "signin", name, site, account, value_b64 });
     if (set) await act("secret", { action: "set", name: set, add: [name] });
   } catch (err) { return; }
-  ["#credName", "#credSite", "#credAccount"].forEach(s => { $(s).value = ""; });
   toast(`Saved the sign-in ${name}` + (set ? ` in ${set}` : ""));
+  formOpen = null;
   renderCredentials(true);
 }

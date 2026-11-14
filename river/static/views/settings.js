@@ -5,9 +5,9 @@
 import { $, esc, toast, act, ago, store, hooks } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { button, iconButton } from "../components/button.js";
-import { makeTable } from "../components/table.js";
 import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
+import { labelOf, programOf } from "./settingLabels.js";
 
 const AGENT_CLIS = /^(aider|amp|claude|codex|copilot|cursor|gemini|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -53,8 +53,26 @@ function renderTabs() {
     p.classList.toggle("hidden", p.dataset.setPane !== (keys ? "keys" : current)));
 }
 
-// Settings: one row per key of the chosen group; an override chip's × removes that override.
-let settingsTable = null, tableGroup = null;
+// Settings (#5850, the manager's review of #5848): one row per key of the chosen group: its plain label with the key
+// small under it, its value for every project in a field (empty: the default, which the field shows greyed), and the
+// values for one project, agent or item as chips whose × removes them. Enter or leaving the field saves it. On/off
+// keys have a select. The Agents tab puts each agent program's options under its own heading.
+const ONOFF = new Set(["on", "off"]);
+let tableGroup = null;
+function settingRow(k, d, ov, now) {
+  const glob = ov.find(x => x.scope === "global"), rest = ov.filter(x => x.scope !== "global");
+  const def = String(d[k]);
+  const ctl = ONOFF.has(def)
+    ? `<select data-set-input="${esc(k)}" aria-label="${esc(labelOf(k))}">${["on", "off"].map(v =>
+        `<option value="${v}"${(glob ? glob.value : def) === v ? " selected" : ""}>${v}${v === def ? " (default)" : ""}</option>`).join("")}</select>`
+    : `<input data-set-input="${esc(k)}" value="${esc(glob ? glob.value : "")}" placeholder="${esc(def || "empty")}" aria-label="${esc(labelOf(k))}">`;
+  return `<div class="set-row">
+    <div class="set-label">${esc(labelOf(k))}<div class="muted t-s set-key">${esc(k)}${now[k] ? ` · now ${esc(now[k])}` : ""}</div></div>
+    <div class="set-ctl">${ctl}${glob ? iconButton("↺", `Back to the default for ${k}`, { data: { unset: k, scope: "global" } }) : ""}</div>
+    ${rest.length ? `<div class="set-ov">${rest.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(k)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ")}</div>` : ""}
+  </div>`;
+}
+
 export function renderSettings() {
   renderTabs();
   const g = KEY_GROUPS.find(x => x[0] === current);
@@ -63,30 +81,45 @@ export function renderSettings() {
   $("#setGroupNote").textContent = g[2];
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
-  const d = S.settings.defaults, o = S.settings.overrides;
-  const keys = Object.keys(d).filter(k => groupOf(k) === current).sort();
-  settingsTable ||= makeTable($("#settingsTable"), { key: "settings", index: "key", sort: [{ column: "key", dir: "asc" }],
-    placeholder: "No settings.",
-    columns: [
-      { title: "Setting", field: "key", width: 200 },
-      { title: "Default", field: "default", width: 240, cssClass: "muted wrap" },
-      { title: "Set to", field: "overrides", cssClass: "wrap", html: (r) => r.ov.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(r.key)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ") },
-    ] });
-  const now = S.settings.now || {};  // a size limit shows the size now (#5711)
-  settingsTable.set(keys.map(k => {
-    const ov = o.filter(x => x.key === k);
-    return { key: k, default: String(d[k]) + (now[k] ? ` · ${now[k]}` : ""), overrides: ov.map(x => `${x.scope}=${x.value}`).join(" "), ov };
-  }));
-  // The form's list holds the keys of this group; the key chosen before stays when it is in the group.
+  const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
+  const keys = Object.keys(d).filter(k => groupOf(k) === current)
+    .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
+  let html = "", head = undefined;
+  for (const k of keys) {
+    const p = current === "agents" ? programOf(k) : null;
+    if (current === "agents" && p !== head) { html += `<div class="cred-sub">${esc(p || "Every agent")}</div>`; head = p; }
+    html += settingRow(k, d, o.filter(x => x.key === k), now);
+  }
+  // A field the person types in keeps its text: the rows are not drawn again while one has focus.
+  const rows = $("#setRows");
+  if (!rows.contains(document.activeElement) && rows.dataset.sig !== html) { rows.innerHTML = html; rows.dataset.sig = html; }
+  // The form for one project, agent or item lists the keys of this group; the key chosen before stays when it is in it.
   const sel = $("#setKey"), sig = keys.join("|");
   if (sel.dataset.sig !== sig || tableGroup !== current) {
     const keep = sel.value;
-    sel.innerHTML = keys.map(k => `<option>${esc(k)}</option>`).join("");
+    sel.innerHTML = keys.map(k => `<option value="${esc(k)}">${esc(labelOf(k))}</option>`).join("");
     if (keys.includes(keep)) sel.value = keep;
     sel.dataset.sig = sig;
     tableGroup = current;
   }
 }
+
+// A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
+async function saveRow(el) {
+  const key = el.dataset.setInput, v = el.value.trim();
+  const glob = S.settings.overrides.find(x => x.key === key && x.scope === "global");
+  if (v === (glob ? glob.value : "")) return;
+  if (el.tagName === "SELECT" && !glob && v === String(S.settings.defaults[key])) return;
+  try {
+    if (v) await act("config_set", { key, value: v });
+    else await act("config_unset", { key });
+    toast(v ? `${labelOf(key)}: ${v}` : `${labelOf(key)}: back to the default`);
+  } catch (e) { el.value = glob ? glob.value : ""; }  // act showed the error
+}
+$("#setRows").addEventListener("change", (e) => { if (e.target.dataset.setInput) saveRow(e.target); });
+$("#setRows").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.dataset.setInput) { e.preventDefault(); e.target.blur(); }
+});
 
 $("#setTabs").addEventListener("click", (e) => {
   const t = e.target.closest("[data-set-tab]");

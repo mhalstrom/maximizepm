@@ -17,9 +17,22 @@
 .set-help { margin-bottom: var(--sp-3); }
 .set-setup { margin-bottom: var(--sp-4); }
 .set-form { margin-top: var(--sp-3); max-width: var(--w-form); }
+/* #5850: a row per setting: the label (the key small under it) on the left, the field on the right; the values for
+   one project, agent or item under them. A phone puts the field under the label, full width. */
+.set-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--w-l); gap: var(--sp-1) var(--sp-5); align-items: center;
+  padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+.set-label { min-width: 0; overflow-wrap: anywhere; }
+.set-ctl { display: flex; gap: var(--sp-1); align-items: center; min-width: 0; }
+.set-ctl input, .set-ctl select { flex: 1; min-width: 0; width: 100%; }
+.set-ov { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.set-scoped { margin-top: var(--sp-6); }
+.cred-adds { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-6) 0 var(--sp-3); }
+.set-scoped > summary { cursor: pointer; font-weight: 600; padding-left: 0; }
 @media (max-width: 759px) {  /* a phone: one row of tabs that scrolls sideways, each at the size of a tap */
   .set-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: var(--sp-1); scrollbar-width: none; }
   .set-tab { flex: none; min-height: var(--tap); }
+  .set-row { grid-template-columns: minmax(0, 1fr); }
+  .set-ctl input, .set-ctl select { min-height: var(--tap); }
 }
 /* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
 .cred-sub { font-weight: 600; margin: var(--sp-6) 0 var(--sp-2); }
