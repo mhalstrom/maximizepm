@@ -69,6 +69,45 @@ START_WAIT = 20      # seconds for Chrome to write its DevToolsActivePort
 CALL_WAIT = 20       # seconds for one CDP answer
 LOAD_WAIT = 15       # seconds that open() waits for the page's load
 CLOSE_WAIT = 5       # seconds that a close waits for Chrome to end by itself (it writes its cookies), then stops it
+
+# A passkey step (#5814): the page's script reports each passkey request through this binding. In the panel (headless)
+# the request ends at once with NotAllowedError, so the page does not wait for a sheet that cannot show; serve then opens
+# the page in a window over the panel. In that window the request runs, and the script says done or ended. Autofill
+# requests (mediation conditional) run as they are.
+PASSKEY_BINDING = "__maxpmPasskey"
+PASSKEY_PERSON = 60      # seconds: a request opens the window only this soon after the person's own input in the panel
+PASSKEY_SKIP = 60        # seconds: after a step with no passkey (Cancel, the time limit), the same page opens no window
+PASSKEY_DONE_WAIT = 8    # seconds after the touch for the page to go to its next page before the window closes
+PASSKEY_SETTLE = 1.0     # seconds more for that page to set its cookies
+PASSKEY_WINDOW_MAX = 120  # seconds: the window closes by itself when nobody touched or cancelled in this time
+PASSKEY_JS = """(() => {
+  const c = navigator.credentials, B = %s, win = %s, mark = Symbol.for("maxpm.passkey");
+  if (!c || !window.PublicKeyCredential || c[mark]) return;
+  Object.defineProperty(c, mark, { value: true });
+  const say = (k) => { try { window[B](k); } catch (e) {} };
+  for (const name of ["get", "create"]) {
+    const orig = c[name].bind(c);
+    Object.defineProperty(c, name, { configurable: true, writable: true, value: function (o) {
+      if (!o || !o.publicKey || o.mediation === "conditional") return orig(o);
+      say(name);
+      if (!win) return Promise.reject(new DOMException("The passkey step opens in a window over the panel.", "NotAllowedError"));
+      const p = orig(o);
+      p.then(() => say("done"), () => say("ended"));
+      return p;
+    } });
+  }
+})();"""
+
+
+def parse_place(text):
+    """'x,y,w,h' of a panel on its screen (#5814): (x, y, w, h) in screen points, or None."""
+    try:
+        x, y, w, h = (int(float(v)) for v in str(text or "").split(","))
+    except ValueError:
+        return None
+    if not (200 <= w <= 10000 and 150 <= h <= 10000 and -20000 < x < 20000 and -20000 < y < 20000):
+        return None
+    return (x, y, w, h)
 VIEW = (1280, 860)   # the size of the page before the panel says its own
 # The screen that the page sees, when the panel's screen is smaller than the window (a phone through the relay): a
 # headless Chrome says 800x600, smaller than its own window, which no Chrome with a window says (#5625).
@@ -694,6 +733,8 @@ class Browser:
         self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
         self.watching = 0    # frame polls that wait now
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
+        self.passkey_at = None    # #5814: when the window of a passkey step opened (None: no such window)
+        self.passkey_skip = None  # (url, time) of a passkey step that ended with no passkey: no window again there
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
         self.cast_quality = None  # the JPEG quality of the running screencast (#5658)
@@ -855,6 +896,9 @@ class Browser:
                 "--disable-blink-features=AutomationControlled", *NO_DOWNLOADS,
                 f"--proxy-server=http://127.0.0.1:{self.proxy.port}", "--proxy-bypass-list=<-loopback>",
                 f"--window-size={w},{h}", "about:blank"]
+        place = self.passkey_place() if self.state.get("window") and self.passkey_at else None
+        if place:  # #5814: the window of a passkey step lies over the panel where the person works
+            args[-2:-1] = [f"--window-size={place[2]},{place[3]}", f"--window-position={place[0]},{place[1]}"]
         if not self.state.get("window"):
             args[1:1] = ["--headless=new", "--hide-scrollbars", "--mute-audio"]
             ua = user_agent(chrome)
@@ -939,6 +983,7 @@ class Browser:
                 self.call(m, session=s)
             except RiverError:
                 pass
+        self._hook_passkeys(s)
         self.call("Network.setBlockedURLs", {"urls": ["file://*", "chrome://*", "chrome-extension://*"]}, session=s)
         self._fit()
         self.cast_quality = self._cast_quality()
@@ -1133,6 +1178,11 @@ class Browser:
         fn = self.listeners.get(session) if session else None
         if fn:
             fn(method, p)
+            return
+        if method == "Runtime.bindingCalled" and p.get("name") == PASSKEY_BINDING:  # #5814: the page asks for a passkey
+            if session == self.session:
+                threading.Thread(target=self.passkey, args=(p.get("payload") or "",), daemon=True,
+                                 name=f"browser-passkey-{self.project}").start()
             return
         if method == "Page.screencastFrame":
             self.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]}, session=session)
@@ -1381,14 +1431,107 @@ class Browser:
         if self.running():
             self._fit()
 
-    def pane_seen(self, pane):
-        """A panel polls for frames: it is open. True when serve knows its size."""
+    def pane_seen(self, pane, place=None):
+        """A panel polls for frames: it is open. True when serve knows its size. place (#5814): 'x,y,w,h', where the
+        panel's page area lies on its screen, for the window of a passkey step."""
         with self.pane_lock:
             p = self.panes.get(pane)
             if p:
                 p["at"] = time.time()
+                xy = parse_place(place)
+                if xy:
+                    p["place"] = xy
         self._choose()
         return p is not None
+
+    # ---- a passkey step (#5814, mark 2026-11-13: A). macOS shows the Touch ID sheet of a passkey only on a real
+    # browser window, and a headless Chrome waits for that sheet for ever. So a passkey request in the panel opens
+    # the same profile as a window over the panel; after the touch, or Cancel, the window closes and the panel goes on
+    # with the same page and cookies. A window never stays: PASSKEY_WINDOW_MAX at most.
+
+    def _hook_passkeys(self, s):
+        if self.attached:  # a Chrome that serve did not start (browser_source): its own window rules
+            return
+        try:
+            js = PASSKEY_JS % (json.dumps(PASSKEY_BINDING), "true" if self._windowed() else "false")
+            self.call("Runtime.addBinding", {"name": PASSKEY_BINDING}, session=s)
+            self.call("Page.addScriptToEvaluateOnNewDocument", {"source": js}, session=s)
+            self.call("Runtime.evaluate", {"expression": js}, session=s)
+        except RiverError:
+            pass
+
+    def passkey_place(self):
+        """Where the panel that the person used last lies on the screen: (x, y, w, h), or None."""
+        with self.pane_lock:
+            p = self.panes.get(self.driver) or max((p for p in self.panes.values() if p.get("place")), default=None,
+                                                   key=lambda p: p["at"])
+            return (p or {}).get("place")
+
+    def passkey(self, kind):
+        """The page's script says: get or create (a passkey request), done (it got the passkey), ended (Cancel, or an
+        error). A request in the panel opens the window only after the person's own input in the panel within
+        PASSKEY_PERSON: a session that meets a passkey page opens no window on the person's screen."""
+        now = time.time()
+        if kind in ("get", "create"):
+            if self._windowed():  # a window shows already: the request runs there
+                return
+            url = self.info()["url"]
+            if self.passkey_skip and self.passkey_skip[0] == url and now - self.passkey_skip[1] < PASSKEY_SKIP:
+                return
+            if now - self.person_at > PASSKEY_PERSON:
+                self.said = getattr(self, "said", []) + [
+                    "the page asks for a passkey: only the person signs in; ask them in the panel"]
+                return
+            self.passkey_at = now
+            self.state["window_by"] = {"who": "A passkey step", "person": True, "passkey": True, "at": core.iso(core.now())}
+            self._switch_keep(True, url)
+            threading.Thread(target=self._passkey_limit, args=(now,), daemon=True,
+                             name=f"browser-passkey-limit-{self.project}").start()
+        elif kind in ("done", "ended") and self.passkey_at and self._windowed():
+            url = self.info()["url"]
+            if kind == "done":  # the page sends the signed answer and goes on: give it that time, then close
+                end = time.time() + PASSKEY_DONE_WAIT
+                while time.time() < end and self.running() and self.info()["url"] == url:
+                    time.sleep(0.2)
+                time.sleep(PASSKEY_SETTLE)
+            else:
+                self.passkey_skip = (url, now)
+            self.passkey_back()
+
+    def _passkey_limit(self, at):
+        time.sleep(PASSKEY_WINDOW_MAX)
+        if self.passkey_at == at:
+            self.passkey_skip = (self.info()["url"] if self.running() else "", time.time())
+            self.passkey_back()
+
+    def passkey_back(self):
+        """Close the window of a passkey step: the panel goes on, headless, at the window's page, with its cookies."""
+        if not self.passkey_at:
+            return
+        url = self.info()["url"] if self.running() else ""
+        self.passkey_at = None
+        self.state.pop("window_by", None)
+        self._switch_keep(False, url)
+        _notify(self)
+
+    def _switch_keep(self, window, url):
+        """Start Chrome again with or without a window; its cookies, those of this run too, and the page go along."""
+        cookies = []
+        if self.running():
+            try:
+                cookies = cookie_params(self.call("Storage.getCookies").get("cookies") or [])
+            except RiverError:
+                pass
+        self.start(window=window)
+        self._save()
+        if cookies:
+            try:
+                self.call("Storage.setCookies", {"cookies": cookies})
+            except RiverError:
+                pass
+        if url and url != "about:blank":
+            self.open(url)
+        _notify(self)
 
     def drive(self, pane):
         """A person clicked, typed or took control in this panel: its size is the page's size from now on (#5676:
@@ -2377,14 +2520,15 @@ def window_sweep(conn, at=None):
 
 # ---- the panel's frames and input
 
-def frame(b, after, timeout=8, pane=None, many=False):
+def frame(b, after, timeout=8, pane=None, many=False, place=None):
     """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only. pane: the
     panel that asks; pane_known says whether serve has its size (after a restart of serve it has none).
     many (#5637): the panel keeps several polls open at once (a phone over the relay, where each poll costs a round
     trip). Each answer then moves the pane's cursor, so the next poll that waits gets the next change, never one that
     another poll took; at most as many frames as polls are on the way, each the newest when it left. A poll that
-    waits the whole timeout gets the frame after `after` itself, in case an answer was lost."""
-    known = b.pane_seen(pane) if pane else None
+    waits the whole timeout gets the frame after `after` itself, in case an answer was lost. place: where the panel
+    lies on its screen (#5814)."""
+    known = b.pane_seen(pane, place) if pane else None
     start = time.time()
     end = start + timeout
     again = not b.watching and start - b.watched > WATCH_GAP

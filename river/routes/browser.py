@@ -61,7 +61,7 @@ def frame(h, path):
     else:
         try:
             out = browser.frame(b, int(q.get("after") or 0), min(float(q.get("wait") or 8), 20), q.get("pane") or None,
-                                many=binary)
+                                many=binary, place=q.get("place"))
         except (RiverError, ValueError) as e:
             return h._send(409, {"error": str(e)})
     if binary:

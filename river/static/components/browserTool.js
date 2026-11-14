@@ -178,7 +178,8 @@ function render(box, project, session) {
     const hm = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const wb = j.window && j.window_by, we = !j.window && j.window_end;
     const wby = $$(".br-wby");
-    wby.textContent = wb ? `${wb.who} opened it as a window at ${hm(wb.at)}. It comes back here after ${j.window_idle} with no input in it, or when the window closes.`
+    wby.textContent = wb && wb.passkey ? "Passkey: press Continue in the window over this panel, then touch the sensor. The window closes by itself after the touch."
+      : wb ? `${wb.who} opened it as a window at ${hm(wb.at)}. It comes back here after ${j.window_idle} with no input in it, or when the window closes.`
       : we && Date.now() - Date.parse(we.at) < 600000 ? `Back in the panel at ${hm(we.at)}: ${we.why}.` : "";
     wby.classList.toggle("hidden", !wby.textContent);
     stage.classList.toggle("br-locked", !v.mine);
@@ -304,13 +305,18 @@ function render(box, project, session) {
   // phone through the relay) each poll costs a round trip, so the pane keeps one poll open for each 30 ms of it, at
   // most four; serve gives each one the next change, so at most that many frames are on the way, never a backlog.
   let slots = 1, trips = [];
+  // #5814: where the stage lies on the screen, so the window of a passkey step opens over it
+  const place = () => {
+    const r = stage.getBoundingClientRect(), top = window.screenY + Math.max(0, window.outerHeight - window.innerHeight);
+    return [window.screenX + r.left, top + r.top, r.width, r.height].map(Math.round).join(",");
+  };
   async function poll(i) {
     while (alive()) {
       if (document.hidden || i >= slots) { await sleep(i ? 250 : 1000); continue; }
       try {
         token = token || await pageToken();
         const t = performance.now();
-        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}&after=${v.seq}&pane=${pane}&bin=1&token=${encodeURIComponent(token)}`);
+        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}&after=${v.seq}&pane=${pane}&place=${place()}&bin=1&token=${encodeURIComponent(token)}`);
         if (r.status === 403) { token = await pageToken(true); continue; }
         if (!r.ok) { await sleep(2000); continue; }
         const buf = await r.arrayBuffer();

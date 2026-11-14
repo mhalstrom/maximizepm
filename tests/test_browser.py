@@ -996,6 +996,99 @@ class SaveSignins(Base):
         self.assertIn("signed_in", names)
 
 
+class Passkey(Base):
+    """#5814 (mark 2026-11-13: A): a passkey request in the panel opens the page in a window over the panel, only after
+    the person's own input there; after the touch or Cancel the window closes, and the page and cookies go along."""
+
+    def fake(self):
+        b = browser.get("web", "ag1")
+        st = {"url": "https://accounts.google.com/challenge/pk", "jar": [{"name": "sid", "value": "1", "domain": ".google.com",
+                                                                        "path": "/", "session": True, "size": 4}]}
+        log = []
+        b.running = lambda: True
+        b.info = lambda: {"url": st["url"]}
+        b._save = lambda: None
+
+        def start(window=None):
+            log.append(("start", window, b.passkey_place() if window and b.passkey_at else None))
+            b.state["window"] = window
+        b.start = start
+        b.open = lambda url: log.append(("open", url))
+
+        def call(method, params=None, **k):
+            if method == "Storage.getCookies":
+                return {"cookies": st["jar"]}
+            log.append((method, [c["name"] for c in params["cookies"]]))
+            return {}
+        b.call = call
+        b.panes["p1"] = {"size": (800, 600), "dsf": 2, "screen": (1512, 982), "at": time.time()}
+        b.pane_seen("p1", "300,120,800,600")
+        b.driver = "p1"
+        return b, st, log
+
+    def test_the_person_s_request_opens_a_window_over_the_panel_and_the_touch_closes_it(self):
+        b, st, log = self.fake()
+        b.person_at = time.time()
+        b.passkey("get")
+        self.assertEqual(log, [("start", True, (300, 120, 800, 600)), ("Storage.setCookies", ["sid"]),
+                               ("open", st["url"])])
+        self.assertTrue(b.state["window_by"]["passkey"])
+        b.passkey("get")  # the request again, in the window: it runs there
+        self.assertEqual(len(log), 3)
+        log.clear()
+        st["url"] = "https://myaccount.google.com/"  # after the touch the page goes on
+        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+            b.passkey("done")
+        self.assertEqual(log, [("start", False, None), ("Storage.setCookies", ["sid"]), ("open", st["url"])])
+        self.assertIsNone(b.passkey_at)
+        self.assertNotIn("window_by", b.state)
+
+    def test_cancel_closes_it_and_the_same_page_opens_no_window_again_soon(self):
+        b, st, log = self.fake()
+        b.person_at = time.time()
+        b.passkey("get")
+        log.clear()
+        b.passkey("ended")
+        self.assertEqual(log[0], ("start", False, None))
+        log.clear()
+        b.person_at = time.time()
+        b.passkey("get")  # a page that asks again at its load: no window again
+        self.assertEqual(log, [])
+
+    def test_a_session_s_request_opens_no_window_and_a_window_closes_by_itself(self):
+        b, st, log = self.fake()
+        b.passkey("get")  # nobody used the panel: a session meets the passkey page
+        self.assertEqual(log, [])
+        self.assertIn("only the person signs in", b.said[-1])
+        b.person_at = time.time()
+        with mock.patch.object(browser, "PASSKEY_WINDOW_MAX", 0.2):
+            b.passkey("get")
+            timing.wait_for(lambda: b.passkey_at is None, what="the window's close after PASSKEY_WINDOW_MAX")
+        self.assertEqual(log[-3][:2], ("start", False))
+
+    def test_a_place_is_four_numbers_in_range(self):
+        self.assertEqual(browser.parse_place("300.4,120,800,600"), (300, 120, 800, 600))
+        for bad in ("", "1,2,3", "a,b,c,d", "0,0,10,10", "0,0,800,600,1"):
+            self.assertIsNone(browser.parse_place(bad), bad)
+
+    def test_a_headless_page_s_passkey_request_ends_at_once(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        kinds = []
+        b.passkey = kinds.append
+        b.open("https://example.com/")
+        got = b.evaluate("""(async () => { const t = Date.now(); try {
+            await navigator.credentials.get({publicKey: {challenge: new Uint8Array(16), timeout: 60000}});
+            return 'credential'; } catch (e) { return e.name + ' ' + (Date.now() - t < 1000); } })()""", 10)
+        self.assertEqual(got, "NotAllowedError true")  # no wait for a sheet that a headless Chrome cannot show
+        timing.wait_for(lambda: kinds, what="the passkey report of the page's script")
+        self.assertEqual(kinds, ["get"])
+
+
 class Reattach(Base):
     """#5816: when serve starts, a Chrome of the last start that still runs gets its proxy again on its own port."""
 
