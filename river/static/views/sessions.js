@@ -257,6 +257,13 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts" };
   let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
   const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
+  // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
+  let replyTo = null, replyDict = null;
+  function closeReply() {
+    if (replyDict) replyDict.stop();
+    replyTo = null;
+    $("#statusReply").classList.add("hidden");
+  }
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
   // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
   let waiting = [];
@@ -527,6 +534,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function markPane() {
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
+    if (pane !== "status") closeReply();
     drawStatus();
   }
   // Scrolling up reads the earlier lines (#5120), a page at a time, across compactions and into the transcript of the
@@ -1053,8 +1061,49 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   setInterval(refresh, 3000);
   // The Status view (#5852): a row opens its session, with what waits for the person first, as a row of the list does;
   // Push turns the notices of that state on or off.
+  // Under a row (#5853): Answer opens what waits in its dialog; Esc goes to its tmux pane; Reply opens the sheet.
+  const rForm = $("#stReplyForm"), byName = (n) => list.find(x => x.name === n);
+  rForm.innerHTML = composerHtml("stR", { placeholder: "Message", label: "Message for the session", attachTitle: "Attach files", sendTitle: "Send" });
+  const rText = $("#stRText"), rState = () => composerState(rForm, rText.value.trim());
+  replyDict = makeDictation({ button: $("#stRMic"), input: rText, status: $("#stReplyDictate"), changed: rState });
+  function openReply(name) {
+    replyTo = name;
+    const s = byName(name) || {};
+    $("#stReplyName").textContent = s.title || name;
+    $("#statusReply").classList.remove("hidden");
+    replyDict.showFor(true);
+    rState();
+    rText.focus();
+  }
+  rText.addEventListener("input", rState);
+  rText.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); rForm.requestSubmit(); } });
+  rForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (replyDict.listening()) await replyDict.finish();
+    const to = replyTo, text = rText.value.trim();
+    if (!to || !text) return;
+    const s = byName(to) || {};
+    try {
+      // While its turn runs, maxpm serve holds the message and types it when the turn has ended (#5587).
+      const r = await typeAction("session_send", { agent: to, text, hold: s.status === "working" });
+      toast(r && r.waiting ? `${s.title || to}: it gets it when its turn ends` : `Sent to ${s.title || to}`);
+      rText.value = ""; rState(); closeReply();
+    } catch (err) { return toast(err.message, true); }
+    await refresh();
+  });
+  $("#stReplyClose").addEventListener("click", closeReply);
+  $("#stReplyChat").addEventListener("click", () => { const n = replyTo; closeReply(); if (n) pick(n); });
+  async function sendEsc(name) {
+    try { await typeAction("terminal_keys", { agent: name, keys: [{ key: "Escape" }] }); } catch (err) { return toast(err.message, true); }
+    toast(`Esc sent to ${(byName(name) || {}).title || name}`);
+    await refresh();
+  }
   $("#statusList").addEventListener("click", (e) => {
     const p = e.target.closest("[data-status-push]"); if (p) return setPush(p.dataset.statusPush);
+    const an = e.target.closest("[data-st-answer]");
+    if (an) { const s = byName(an.dataset.stAnswer); return s && showWaiting(s); }
+    const es = e.target.closest("[data-st-esc]"); if (es) return sendEsc(es.dataset.stEsc);
+    const rp = e.target.closest("[data-st-reply]"); if (rp) return openReply(rp.dataset.stReply);
     const r = e.target.closest("[data-status-go]"); if (!r) return;
     pick(r.dataset.statusGo);
     const s = list.find(x => x.name === r.dataset.statusGo);

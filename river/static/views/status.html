@@ -1,5 +1,7 @@
 <!-- The Status view of the Sessions tab (#5852): every running session of every project in one list, in four groups by
-     its state: Needs you, Done, Working, Idle. The Status row of the session list opens it; so does /status.
+     its state: Needs you, Done, Working, Idle. The Status row of the session list opens it; so does /status, and on a
+     phone the page opens on it (#5853). Under a session row: Answer, Esc and Reply. Reply opens the sheet at the foot:
+     a message box with the microphone, outside the list, so a read of the list every 3 s keeps the typed text.
      maxpm serve puts it into sessions.html, at view: status. -->
 <div class="panel sess-main sess-status hidden" id="sessStatus">
   <div class="sess-head">
@@ -7,4 +9,11 @@
     <h2 class="sess-h2" title="All sessions by state">Status</h2>
   </div>
   <div class="status-body"><div id="statusList"></div></div>
+  <div class="st-sheet hidden" id="statusReply" aria-label="Reply to a session">
+    <div class="st-sheet-h"><span class="muted t-s">Reply to</span> <b id="stReplyName" class="st-t"></b><span class="spacer"></span>
+      <button class="btn" type="button" id="stReplyChat" title="Open its chat">Chat</button>
+      <button class="iconbtn" type="button" id="stReplyClose" title="Close" aria-label="Close the reply">✕</button></div>
+    <div id="stReplyDictate" class="muted t-s hidden" aria-live="polite"></div>
+    <form id="stReplyForm" class="composer st-reply" autocomplete="off"></form>
+  </div>
 </div>

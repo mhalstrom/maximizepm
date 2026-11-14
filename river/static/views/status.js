@@ -49,8 +49,21 @@ function row(s) {
   const n = (s.waiting || []).length;
   const html = `<span class="st-h">${tag}${head ? `<b class="st-t">${esc(head)}</b>` : ""}${s.project ? projectChip(s.project) : ""}<span class="spacer"></span>${n ? `<span class="wbadge">! ${n}</span>` : ""}<span class="dot ${DOT[s.status] || "away"}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></span>
     <span class="sub st-sub">${esc(clip(s.doing || s.state_label || "", 140))}</span>`;
-  return button(html, { kind: "card", cls: "st-row", data: { "status-go": s.name }, title: `${s.name}: ${s.state_label || ""}`,
+  const card = button(html, { kind: "card", cls: "st-row", data: { "status-go": s.name }, title: `${s.name}: ${s.state_label || ""}`,
     label: `Open session ${head || s.name}` });
+  const acts = rowActions(s, head || s.name);
+  return `<div class="st-item">${card}${acts ? `<div class="st-acts">${acts}</div>` : ""}</div>`;
+}
+
+// What the person does from a row (#5853), without the chat: Answer (the prompt or question that waits, in its dialog),
+// Esc (the key, to its tmux pane: a prompt goes away, a turn stops) and Reply (the message sheet). Esc and Reply need a
+// tmux pane here (s.terminal); a tap on the row opens the chat.
+export function rowActions(s, name) {
+  const out = [];
+  if ((s.waiting || []).some(w => !w.old)) out.push(button("Answer", { kind: "primary", data: { "st-answer": s.name }, title: "Answer it", label: `Answer ${name}` }));
+  if (s.terminal && ["needs_you", "working"].includes(s.status)) out.push(button("Esc", { data: { "st-esc": s.name }, title: "Send Esc", label: `Send Esc to ${name}` }));
+  if (s.terminal) out.push(button("Reply", { data: { "st-reply": s.name }, title: "Send a message", label: `Reply to ${name}` }));
+  return out.join("");
 }
 
 // The four groups. push: the value of notify_status ("off", or a comma list of states).

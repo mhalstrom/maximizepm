@@ -9,7 +9,19 @@
 .st-gh { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-base); margin: 0 0 var(--sp-2); }
 .st-gh .st-push { font-size: var(--fs-s); }
 .st-none { padding: var(--sp-1) var(--sp-3); }
-button.st-row { display: flex; flex-direction: column; gap: var(--sp-0); border: 0; border-top: var(--hair) solid var(--line); background: none; padding: var(--sp-3); min-width: 0; min-height: var(--tap); border-radius: 0; }
+.st-item { border-top: var(--hair) solid var(--line); }
+button.st-row { display: flex; flex-direction: column; gap: var(--sp-0); border: 0; background: none; padding: var(--sp-3); min-width: 0; min-height: var(--tap); border-radius: 0; }
+/* Answer, Esc and Reply under the row (#5853): each a tap target on a phone. */
+.st-acts { display: flex; gap: var(--sp-2); flex-wrap: wrap; padding: 0 var(--sp-3) var(--sp-3); }
+.st-acts .btn { min-height: var(--tap); min-width: var(--tap); }
+@media (min-width: 760px) { .st-acts .btn { min-height: 0; min-width: 0; } }
+/* The reply sheet at the foot of the view (#5853): the name, Chat, ✕, and the message box with the microphone. */
+.sess-status { position: relative; }
+.st-sheet { flex: none; border-top: var(--hair) solid var(--line); background: var(--panel); padding: var(--sp-3) var(--sp-1) var(--sp-1); }
+.st-sheet.hidden { display: none; }
+.st-sheet-h { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; margin-bottom: var(--sp-2); }
+.st-sheet-h b.st-t { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-reply .cmp-plus { display: none; }
 button.st-row:hover { background: var(--bubble); }
 .st-h { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .st-h b.st-t { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

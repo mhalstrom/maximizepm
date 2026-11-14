@@ -390,7 +390,7 @@ const TABS = ["sessions", "plan", "settings", "terminal"];
 //   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
 //   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
-//   /status (the Status view of Sessions: every session by its state, #5852)
+//   /status (the Status view of Sessions: every session by its state, #5852; a phone's / opens it, #5853)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
 //   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
@@ -818,8 +818,11 @@ async function openFromUrl() {
     if (r.pane === "you") sessionsTab.showYou(false);
     if (r.pane === "status") sessionsTab.showStatus(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
-    // The first page (#5102 step 5, design #4657): the You view when something waits on the person.
-    if (r.root && !r.item) { firstPage = true; await needsYou.pollNeedsYou().catch(() => {}); firstYou(); }
+    // The first page (#5102 step 5, design #4657): the You view when something waits on the person. On a phone (#5853):
+    // the Status view, every session by its state, where the person answers, sends Esc or a reply. A phone is under
+    // 600 px (the page's breakpoint; phones are 360-430 px): a narrow desktop window keeps its first page.
+    if (r.root && !r.item && matchMedia("(max-width: 599px)").matches) sessionsTab.showStatus(false);
+    else if (r.root && !r.item) { firstPage = true; await needsYou.pollNeedsYou().catch(() => {}); firstYou(); }
     if (r.tab === "sessions" && r.session) {
       sessionsTab.pick(r.session);
       if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
