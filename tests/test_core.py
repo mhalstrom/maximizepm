@@ -6811,8 +6811,17 @@ class Manager(Base):
         core.send(self.c, "alert", "old", to="boss", actor="w1", blocked=True)
         core.send(self.c, "note", "unread", to="boss", actor="w1")
         self.c.execute("UPDATE messages SET read_at='2026-11-01T00:00:00Z' WHERE body='old'")
-        for col in ("delivered_at", "delivered_via", "shown_at", "answered_at"):
-            self.c.execute(f"ALTER TABLE messages DROP COLUMN {col}")
+        # The table of the code before: a copy without the new columns. Not ALTER TABLE DROP COLUMN: the SQLite of
+        # GitHub's runners refuses it on this table ('error in table messages after drop column: incomplete input',
+        # #5713), the SQLite of a Mac with Homebrew accepts it.
+        new = ("delivered_at", "delivered_via", "shown_at", "answered_at")
+        cols = [r["name"] for r in self.c.execute("PRAGMA table_info(messages)") if r["name"] not in new]
+        self.c.commit()
+        self.c.execute("PRAGMA foreign_keys=OFF")
+        self.c.execute(f"CREATE TABLE messages_before AS SELECT {', '.join(cols)} FROM messages")
+        self.c.execute("DROP TABLE messages")
+        self.c.execute("ALTER TABLE messages_before RENAME TO messages")
+        self.c.commit()
         self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # a database of the code before
         self.c.close()
         self.c = core.connect(self.path)
