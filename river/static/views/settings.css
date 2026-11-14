@@ -24,7 +24,8 @@
 .set-label { min-width: 0; overflow-wrap: anywhere; }
 .set-ctl { display: flex; gap: var(--sp-1); align-items: center; min-width: 0; }
 .set-ctl input, .set-ctl select { flex: 1; min-width: 0; width: 100%; }
-.set-ov { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.set-ov { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--sp-2); min-width: 0; }
+.set-ov .chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }  /* a long value wraps (a prompt) */
 .set-scoped { margin-top: var(--sp-6); }
 .cred-adds { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-6) 0 var(--sp-3); }
 .set-scoped > summary { cursor: pointer; font-weight: 600; padding-left: 0; }
