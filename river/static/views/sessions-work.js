@@ -1,26 +1,28 @@
 // The work controls of the Sessions tab (#5102 step 2, design #4657), moved from the Board's strip and Agents:
-// Start an agent and the open session slots at the top of the list (where the new session shows), Give work in the
+// Start an agent and Capacity at the top of the list (where the new session shows), Give work in the
 // ⋯ menu of the head of a session that waits for work (#5115), and at the foot of the list the ended sessions (read only) and Close N
 // finished (the tmux panes of sessions that are done). Drawn from the page's state (S) on each refresh.
 import { $, esc, act, toast, ago, clip, shortTitle } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { agentStart, newSession, queueOn, queueAnywhere } from "../components/agentStart.js";
+import { agentStart, queueOn, queueAnywhere } from "../components/agentStart.js";
 import { button } from "../components/button.js";
+import { capacityHtml } from "./overview.js";
 import { S } from "../page.js";
 
 const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
 
-// Start an agent, with the open slots (max_sessions less the sessions that run) and the ready items for agents; and
-// New session (#5851), an agent in a folder with no item. With the queue off everywhere, only New session.
+// The one Start an agent button (#5883) and the Capacity block of Plan's Overview under it. The dialog picks the work: the
+// next ready item, a project, an item, or a plain session in a folder with no item (#5851). With nothing ready for an
+// agent (or the queue off everywhere) it opens on the plain session.
 export function renderStart() {
   if (!S) return;
   const q = queueAnywhere(S);
   const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)
     && queueOn(S, i.project)).length;
-  const slots = S.capacity ? S.capacity.spare_slots : 0;
-  const line = q ? `<span class="muted t-s" title="Open slots and ready items">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>` : "";
-  put($("#sessStart"), line + newSession(S, !(q && ready)) + (q && ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
-    title: "Start an agent on the top ready item" }) : ""));
+  put($("#sessStart"), agentStart(S.launch_agents, { label: "Start an agent", cls: "primary",
+    attrs: `data-launch="${q && ready ? 1 : "plain"}"`,
+    title: q && ready ? "Start an agent" : "Start an agent in a folder" }));
+  put($("#sessCap"), capacityHtml(S, "stats-narrow"));
 }
 
 // The ended sessions (stopped or gone agents with no running session), newest first; a click shows the chat read only.

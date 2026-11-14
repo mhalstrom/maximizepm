@@ -1,8 +1,6 @@
 /* The Browsers view of Sessions (#5879, views/browsers.js): in place of a session's chat, a tile for each browser that
-   runs now; the body scrolls. Its row in the session list sits under Cost. A phone: two tiles in a row. */
+   runs now; the body scrolls. The Browsers tab of the session list opens it (#5883). A phone: two tiles in a row. */
 .sess-brw.hidden { display: none; }
-.slist-brw { flex: none; }
-.slist-brw .srow-t { font-weight: 700; }
 .sess-brw .brw-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-4); }
 .brw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--w-l), 1fr)); gap: var(--sp-5); }
 .brw-tile { display: flex; flex-direction: column; min-width: 0; text-align: left; border: var(--hair) solid var(--line);

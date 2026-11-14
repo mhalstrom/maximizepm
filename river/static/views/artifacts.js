@@ -72,6 +72,8 @@ export function makeArtifacts({ isShown, openBeside }) {
         if (names.includes(cur)) sel.value = cur;
       }
       render();
+      // The rows of the Artifacts tab of the session list (#5883): one for each of these sessions.
+      document.dispatchEvent(new CustomEvent("maxpm-artifacts", { detail: { names } }));
     } catch (e) {
       $("#artList").innerHTML = `<div class="muted">Could not read the artifacts: ${esc(e.message)}</div>`; $("#artList")._html = null;
     } finally { busy = false; }

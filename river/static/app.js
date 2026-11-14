@@ -4,7 +4,7 @@ import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
 import { makeDialog, ASK_AGAIN_MS } from "./components/dialog.js";
 import { agentStart, newSession } from "./components/agentStart.js";
-import { chooseLaunch, launchArgs } from "./components/launchDialog.js";
+import { chooseLaunch, launchArgs, PLAIN } from "./components/launchDialog.js";
 import { archiveProject, restoreProject } from "./components/archiveProject.js";
 import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
@@ -287,21 +287,26 @@ document.addEventListener("click", async (e) => {
     return; }
   if (t.dataset.terminal) return openTerminal(t.dataset.terminal);
   if (t.dataset.qremove) { await act("queue_remove", { agent: t.dataset.qremove, ref: t.dataset.ref }).catch(() => {}); return; }
-  // New session (#5851): an agent in a folder with no item; its chat opens on the Sessions tab.
-  const ns = t.closest("[data-new-session]"); if (ns) {
-    if (ns.dataset.busy) return; ns.dataset.busy = "1"; setTimeout(() => delete ns.dataset.busy, 4000);
-    const ch = await chooseLaunch(S, { title: "New session", go: "Start", pickFolder: true });
-    if (!ch) { delete ns.dataset.busy; return; }
+  // New session (#5851): an agent in a folder with no item; its chat opens on the Sessions tab. Start an agent with the
+  // work "A plain session" does the same (#5883).
+  const plainSession = async (ch) => {
     try {
       const r = await act("start_session", { folder: ch.folder, prompt: ch.prompt.trim() || undefined, ...launchArgs(ch) });
       toast(`Started ${r.agent} in ${r.folder.replace(/^\/(Users|home)\/[^/]+/, "~")}`);
       if (r.session_name) nav.openSession(r.session_name);
     } catch (e) { /* toast shown */ }
-    return; }
+  };
+  const ns = t.closest("[data-new-session]"); if (ns) {
+    if (ns.dataset.busy) return; ns.dataset.busy = "1"; setTimeout(() => delete ns.dataset.busy, 4000);
+    const ch = await chooseLaunch(S, { title: "New session", go: "Start", pickFolder: true });
+    if (!ch) { delete ns.dataset.busy; return; }
+    return plainSession(ch); }
   const la = t.closest("[data-launch]"); if (la) {
     if (la.dataset.busy) return; la.dataset.busy = "1"; setTimeout(() => delete la.dataset.busy, 4000);
-    const ch = await chooseLaunch(S, { title: "Start an agent", go: "Start", pickWork: true });
+    // data-launch="plain": nothing is ready for an agent, so the dialog opens on a plain session.
+    const ch = await chooseLaunch(S, { title: "Start an agent", go: "Start", pickWork: true, work: la.dataset.launch === PLAIN ? PLAIN : "" });
     if (!ch) { delete la.dataset.busy; return; }  // closed with no start: the next click opens it again at once
+    if (ch.work === PLAIN) return plainSession(ch);
     try { const w = ch.work || "";
       const r = w.startsWith("i:") ? await act("dispatch_item", { id: +w.slice(2), ...launchArgs(ch) })
         : await act("launch_agent", { project: w.startsWith("p:") ? w.slice(2) : undefined, ...launchArgs(ch) });

@@ -59,7 +59,8 @@ function renderTabs() {
 // keys have a select. The Agents tab puts each agent program's options under its own heading.
 const ONOFF = new Set(["on", "off"]);
 let tableGroup = null;
-function settingRow(k, d, ov, now) {
+// Also in the settings dialog of the Sessions list (components/listSettings.js, #5883).
+export function settingRow(k, d, ov, now) {
   const glob = ov.find(x => x.scope === "global"), rest = ov.filter(x => x.scope !== "global");
   const def = String(d[k]);
   const ctl = ONOFF.has(def)
@@ -105,7 +106,7 @@ export function renderSettings() {
 }
 
 // A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
-async function saveRow(el) {
+export async function saveRow(el) {
   const key = el.dataset.setInput, v = el.value.trim();
   const glob = S.settings.overrides.find(x => x.key === key && x.scope === "global");
   if (v === (glob ? glob.value : "")) return;

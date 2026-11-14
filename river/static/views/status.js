@@ -69,7 +69,7 @@ export function rowActions(s, name) {
 // The four groups. push: the value of notify_status ("off", or a comma list of states).
 export function statusHtml(list, push) {
   const g = byStatus(list), on = new Set(String(push || "off").split(",").map(x => x.trim()));
-  if (!list.length) return empty("No session runs now. Start one with New session.");
+  if (!list.length) return empty("No session runs now. Start one with Start an agent.");
   return GROUPS.map(([k, name, , tip]) => `<section class="st-group" data-group="${k}">
       <h3 class="st-gh"><span title="${esc(tip)}">${esc(name)}</span> ${chip("c-p", String(g[k].length))}<span class="spacer"></span>${
         button("Push", { cls: "st-push", pressed: on.has(k), data: { "status-push": k }, title: "Push notice" })}</h3>

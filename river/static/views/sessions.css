@@ -126,6 +126,7 @@ button.srow-it { cursor: pointer; }
   .sess-layout { grid-template-columns: minmax(0, 1fr); }
   .sess-layout > .sess-side { border-right-width: 0; border-bottom-width: var(--hair); }
   .sess-side .slist { flex: none; max-height: 40vh; }
+  .sess-side .sess-tp, .sess-side .slist-tab { flex: none; }  /* the list has the page's height: the page scrolls (#5883) */
   .sess-main { height: 75vh; }
 }
 /* The chat view of a session (#4604): a middle column of readable width. It grows with the pane (#5155, mark: 'we need
@@ -558,7 +559,38 @@ button.srow-it { cursor: pointer; }
 #coldDlg .cold-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-5); }
 /* The work controls of the list (#5102 step 2): Start an agent at the top, the ended sessions and Close N finished
    at the foot; Give work in the head of a waiting session; the queue and + item in the Items list. */
-.sess-start { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin: 0 0 var(--sp-4); }
+/* #5883: the heading is Capacity with Start an agent at its right; under it the five numbers in one narrow row, the
+   sessions that wait for work, and the advice in a small font. */
+.sess-start { display: flex; flex: none; margin-left: auto; }
+.sess-side h2 .sess-start + .sess-fold { margin-left: var(--sp-2); }
+.sess-layout.side-folded .sess-start { display: none; }
+.sess-cap { flex: none; margin-bottom: var(--sp-4); }
+.stats.stats-narrow { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-1); }
+.stats-narrow .stat { padding: var(--sp-1) var(--sp-2); min-width: 0; }
+.stats-narrow .stat .n { font-size: var(--fs-l); }
+.stats-narrow .stat .l { font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.sess-cap .ov-idle { margin-top: var(--sp-2); }
+.sess-cap .advice { margin-top: var(--sp-1); font-size: var(--fs-s); }
+.sess-cap .advice li { padding: var(--sp-1) var(--sp-3); }
+/* The tabs Agents, Artifacts, Browsers (#5883): a line of three equal tabs; the chosen one is underlined. Each tab's list
+   scrolls under them; Cost and the ⚙ stay at the foot. */
+.sess-tabs { flex: none; display: flex; border-bottom: var(--hair) solid var(--line); margin: 0 0 var(--sp-3); }
+.sess-tabs .sess-ltab { flex: 1 1 0; min-width: 0; border: 0; border-bottom: var(--hair-2) solid transparent; border-radius: 0; background: none;
+  color: var(--muted); padding: var(--sp-2) var(--sp-1); margin-bottom: calc(-1 * var(--hair)); }
+.sess-tabs .sess-ltab:hover { color: var(--ink); }
+.sess-tabs .sess-ltab.on { color: var(--ink); border-bottom-color: var(--accent); }
+#sessSettings { font-size: var(--fs-l); }
+.sess-ltab .sp-count { color: var(--muted); font-size: var(--fs-xs); margin-left: var(--sp-1); }
+/* The Agents tab keeps the list of #4723: the session rows scroll, the Status row, the manager and the foot stay. */
+.sess-tp { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.slist-tab { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-2); }
+.sess-bottom { flex: none; display: flex; align-items: center; gap: var(--sp-2); border-top: var(--hair) solid var(--line); padding-top: var(--sp-2); margin-top: var(--sp-2); }
+.sess-bottom .slist-cost { flex: 1 1 auto; min-width: 0; }
+.sess-bottom .srow { border-bottom: 0; }
+.sess-bottom .srow-h { display: flex; gap: var(--sp-3); align-items: baseline; }
+.sess-bottom .srow-h .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#listSetDlg { --dlg-w: var(--w-dlg-m); }
+#listSetDlg .ls-rows { max-height: 60vh; overflow-y: auto; }
 .sess-foot { display: flex; gap: var(--sp-3); flex-wrap: wrap; padding-top: var(--sp-3); flex: none; }
 .sess-foot:empty { display: none; }
 .slist-ended { display: flex; flex-direction: column; gap: var(--sp-1); max-height: 30vh; overflow-y: auto; flex: none; padding-top: var(--sp-3); border-top: var(--hair) solid var(--line); }

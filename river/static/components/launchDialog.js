@@ -80,6 +80,9 @@ export function pickEffort(opt, it, last) {
 }
 
 let dlg = null, resolve = null, ctx = null, S = null;
+// The work choice of Start an agent that starts a plain session: no item, in a folder, with an optional first
+// prompt (#5883: the one Start button does what New session did, #5851).
+export const PLAIN = "plain";
 
 function el() {
   let d = $("#launchDlg");
@@ -99,7 +102,7 @@ function el() {
       const fam = famOf(v.agent);
       store("river.launch.model." + fam, v.model);
       store("river.launch.effort." + fam, v.effort);
-      if (ctx.pickFolder) {
+      if (ctx.pickFolder || v.work === PLAIN) {
         if (!v.folder) { const o = $("#lFolderOther"); if (o) o.focus(); return; }  // Other folder… with none typed
         store("river.launch.folder", v.folderPick);
       }
@@ -143,7 +146,7 @@ function values() {
 
 // The item the work choice points at (its recommendation and limits pick the model).
 function workItem(work) {
-  if (!ctx.pickWork) return ctx.item || null;
+  if (!ctx.pickWork || work === PLAIN) return ctx.pickWork ? null : ctx.item || null;
   const rows = startable(S);
   if (work.startsWith("i:")) return rows.find(i => i.id === +work.slice(2)) || null;
   if (work.startsWith("p:")) return rows.find(i => i.project === work.slice(2)) || null;
@@ -175,9 +178,10 @@ function draw(prev) {
   const note = [other, rec, limits, noPlace].filter(Boolean).join(" ");
   const work = ctx.pickFolder ? folderFields(prev) : ctx.pickWork ? field("Work", `<select id="lWork">
           <option value="">${S.start_next ? `Next: #${S.start_next.id} ${esc(S.start_next.title)} (${esc(S.start_next.why || S.start_next.project)})` : "Nothing is ready"}</option>
+          <option value="${PLAIN}" ${workSel === PLAIN ? "selected" : ""}>A plain session: no item, in a folder</option>
           ${projects.length > 1 ? `<optgroup label="Project (its most important ready item)">${projects.map(p => `<option value="p:${esc(p)}" ${workSel === "p:" + p ? "selected" : ""}>${esc(p)}</option>`).join("")}</optgroup>` : ""}
           <optgroup label="Item">${rows.slice(0, 30).map(i => `<option value="i:${i.id}" ${workSel === "i:" + i.id ? "selected" : ""}>#${i.id} ${esc(i.title)}</option>`).join("")}</optgroup>
-        </select>`) : `<div class="ld-work"><span class="muted">Work:</span> ${esc(ctx.what || "")}</div>`;
+        </select>`) + (workSel === PLAIN ? folderFields(prev) : "") : `<div class="ld-work"><span class="muted">Work:</span> ${esc(ctx.what || "")}</div>`;
   // The model's name only: the ladder's note on each model is its tooltip. A long list (OpenCode) shows the
   // adapter's own models and the current choice; "Other model…" finds the rest by typing (#5238).
   const { shown, all } = modelChoices(models, model);

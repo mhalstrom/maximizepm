@@ -31,9 +31,14 @@ import { renderGive } from "./sessions-work.js";
 import { queueAnywhere } from "../components/agentStart.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 import { statusRowHtml, statusHtml, togglePush } from "./status.js";
+import { openBrowserRow } from "./browsers.js";
+import { openListSettings } from "../components/listSettings.js";
 
 const PICKED = "river.session";
 const FOLD = "river.sessFold";  // "1": the person folded the list of sessions (#5626)
+const TAB = "river.sessTab";  // the tab of the list (#5883)
+const TABS = { agents: "Agents", arts: "Artifacts", browsers: "Browsers" };
+const TAB_PANE = { arts: "arts", browsers: "browsers" };  // a tab whose view shows beside the list
 
 // The list of sessions folds to a thin strip, so the chat and the side panel get its width (#5626, mark: 'we need to be
 // able to collape the running session left panel'). The button at the list's top, or Cmd+\ (Ctrl+\ off a Mac), folds
@@ -267,6 +272,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // that runs, #5879); null while a session shows.
   let pane = null;
   const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts", cost: "#sessCost", browsers: "#sessBrowsers" };
+  // The tab of the list (#5883), kept in this browser; loaded: the first draw ran (the tab's view shows at load).
+  let tab = TABS[store(TAB)] ? store(TAB) : "agents", loaded = false;
   let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
   const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
   // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
@@ -426,6 +433,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
 
   // The rows from the list as it is now: refresh after each read, and a pin at once (#5400).
   function draw() {
+    // At load with no session in the address: the tab chosen last (#5883) shows its view beside the list. A phone shows
+    // the list first, on that tab.
+    if (!loaded && !pane && !agent && TAB_PANE[tab] && window.innerWidth >= 760) showPane(TAB_PANE[tab], false);
+    loaded = true;
     // At load: the session chosen last, else the first. A session that ended gives way to the first.
     if (!pane && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
       const want = store(PICKED);
@@ -442,8 +453,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const workers = list.filter(x => !["manager", "expert", "assistant"].includes(x.role));
     workers.sort((a, b) => isPinned(b) - isPinned(a));
     renderList(side, workers, agent,
-      `<div class="muted">No other agent session runs now. Start one with New session${queueAnywhere(S)
-        ? ", or Start an agent for the next ready item" : ""}.</div>`);
+      `<div class="muted">No other agent session runs now. Start one with Start an agent${queueAnywhere(S)
+        ? ": the next ready item, or a plain session in a folder" : ""}.</div>`);
+    drawTabs();
     drawStatus();
     drawState();
     proposeCard();
@@ -457,9 +469,46 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status"));
     if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
     document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
-    const nb = (S && S.browsers) || 0;  // the Browsers row (#5879): how many run now, from the state
-    $("#sessBrwRow .sub").textContent = nb ? `${nb} open` : "None open";
   }
+
+  // The tabs of the list (#5883, mark 2026-11-14: 'there should be tabs. Agents, artifacts, browsers'). Agents: the
+  // Status row, the manager, the experts and the sessions. Artifacts and Browsers show their view beside the list and,
+  // in the list, a row for each session that made something or each browser that runs. A session that the person
+  // opens shows on Agents; this browser keeps the tab.
+  function drawTabs() {
+    const n = { agents: list.filter(x => x.role !== "assistant").length, arts: 0, browsers: (S && S.browsers) || 0 };
+    putHtml($("#sessTabs"), Object.entries(TABS).map(([k, label]) => button(esc(label) + (n[k] ? ` <span class="sp-count">${n[k]}</span>` : ""),
+      { cls: "sess-ltab", pressed: tab === k, data: { "sess-tab": k }, attrs: `role="tab" aria-selected="${tab === k}"` })).join(""));
+    bar.querySelectorAll(".sess-tp").forEach(p => p.classList.toggle("hidden", p.dataset.tp !== tab));
+  }
+  function setTab(k) {
+    if (tab === k) return;
+    tab = k; store(TAB, k);
+    drawTabs();
+  }
+  // The rows of the Artifacts tab: All sessions, then each session that made or named something (artifacts.js sends the
+  // names after each read). A row sets the session filter of the view.
+  let artNames = [];
+  function drawArtRows() {
+    const cur = pane === "arts" ? $("#artSession").value : null;
+    const row = (v, label, sub) => `<div class="srow${cur === v ? " on" : ""}" data-art-session="${esc(v)}">
+      <div class="srow-main" tabindex="0" role="button" aria-label="${esc(label)}"><div class="srow-h"><b class="srow-t">${esc(label)}</b></div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div></div>`;
+    putHtml($("#sessArtRows"), row("", "All sessions", "What the sessions made or named")
+      + artNames.map(n => row(n, ((S && S.session_names) || {})[n] || n, n)).join(""));
+  }
+  document.addEventListener("maxpm-artifacts", (e) => { artNames = e.detail.names; drawArtRows(); });
+  $("#artSession").addEventListener("change", drawArtRows);  // the view's own filter marks its row too
+  // The rows of the Browsers tab: one for each browser that runs (browsers.js sends its list after each read).
+  let brwRows = [];
+  function drawBrwRows() {
+    putHtml($("#sessBrwRows"), brwRows.length ? brwRows.map(b => `<div class="srow" data-brw-row="${esc(b.key)}">
+      <div class="srow-main" tabindex="0" role="button" aria-label="${esc(b.who)}: ${esc(b.site)}"><div class="srow-h"><b class="srow-t">${esc(b.who)}</b></div>
+        <div class="sub">${esc(b.site)} · ${esc(b.project)}</div></div></div>`).join("")
+      : `<div class="muted sl-none">No browser runs now.</div>`);
+  }
+  document.addEventListener("maxpm-browsers", (e) => { brwRows = e.detail.rows; drawBrwRows(); });
+  drawBrwRows();
+  drawArtRows();
   // The person has this session's chat open while its turn has ended (#5852): it is seen, and moves from Done to Idle.
   // Once for each turn end (its row's time), and only while the page shows.
   function markSeen(s) {
@@ -549,11 +598,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // no session polls.
   function markPane() {
     markYou(pane === "you");
-    $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
     $("#sessCostRow .srow").classList.toggle("on", pane === "cost");
-    $("#sessBrwRow .srow").classList.toggle("on", pane === "browsers");
+    if (pane === "arts" || pane === "browsers") setTab(pane);
+    else if (pane === "status") setTab("agents");
     if (pane !== "status") closeReply();
     drawStatus();
+    drawArtRows();
   }
   // Scrolling up reads the earlier lines (#5120), a page at a time, across compactions and into the transcript of the
   // session it was resumed from; the lines in sight stay where they are.
@@ -593,7 +643,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   }
   function pick(name, remember = true) {
     if (pane && name) { $(PANES[pane]).classList.add("hidden"); pane = null; markPane(); }
-    if (remember && name) store(PICKED, name);
+    if (remember && name) { store(PICKED, name); setTab("agents"); }
     if (remember || !name) phoneChat(!!name);  // a session the person picks shows its chat (on a phone, #4885)
     if (name === agent) return;
     if (!agent && name) phoneChat(true);  // the first one at load
@@ -1049,12 +1099,38 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
+  // A tab, a row of the Artifacts or Browsers tab, or the ⚙ of the foot (#5883); true when it was one.
+  function listControl(t) {
+    const tb = t.closest("[data-sess-tab]");
+    if (tb) {
+      const k = tb.dataset.sessTab;
+      if (TAB_PANE[k]) { showPane(TAB_PANE[k]); return true; }
+      setTab("agents");
+      // Beside the list (not on a phone, which shows the list): the session chosen last, in place of the tab's view.
+      if ((pane === "arts" || pane === "browsers") && window.innerWidth >= 760) {
+        const want = store(PICKED);
+        const s = list.find(x => x.name === want) || list.find(x => x.role === "manager") || list[0];
+        if (s) pick(s.name);
+      }
+      return true;
+    }
+    const ar = t.closest("[data-art-session]");
+    if (ar) {
+      const sel = $("#artSession");
+      sel.value = ar.dataset.artSession; sel.dispatchEvent(new Event("change"));
+      showPane("arts"); drawArtRows();
+      return true;
+    }
+    const br = t.closest("[data-brw-row]");
+    if (br) { openBrowserRow(br.dataset.brwRow).then(() => setTab("browsers")).catch(() => {}); return true; }
+    if (t.closest("#sessSettings")) { openListSettings(); return true; }
+    return false;
+  }
   bar.addEventListener("click", async (e) => {
+    if (listControl(e.target)) return;
     if (e.target.closest("[data-you]")) return showPane("you");
     if (e.target.closest("[data-status]")) return showPane("status");
-    if (e.target.closest("[data-arts]")) return showPane("arts");
     if (e.target.closest("[data-cost]")) return showPane("cost");
-    if (e.target.closest("[data-brw]")) return showPane("browsers");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
@@ -1069,10 +1145,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts], [data-cost], [data-brw]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-art-session], [data-brw-row]")) {
+      e.preventDefault(); return listControl(e.target);
+    }
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-cost]")) {
       e.preventDefault();
-      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status"
-        : e.target.closest("[data-cost]") ? "cost" : e.target.closest("[data-brw]") ? "browsers" : "arts");
+      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status" : "cost");
     }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");

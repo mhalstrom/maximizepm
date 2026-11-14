@@ -48,6 +48,9 @@ async function tick() {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "MaximizePM does not answer");
     list = (await r.json()).browsers || [];
     draw($("#brwView"));
+    // The rows of the Browsers tab of the session list (#5883).
+    document.dispatchEvent(new CustomEvent("maxpm-browsers", { detail: { rows: list.map(b => ({ key: keyOf(b),
+      who: b.session ? nameOf(b.session) : "No session", site: site(b.url) || "New tab", project: b.project })) } }));
   } catch (e) {
     $("#brwView").innerHTML = empty(`Could not read the browsers (${esc(e.message)}); the page asks again.`);
     $("#brwView").dataset.sig = "";
@@ -129,15 +132,20 @@ async function picture(b) {
   if (pics.get(k) === p) place($("#brwView"), k);
 }
 
+// A tile, or a row of the Browsers tab of the list (#5883): its session with the Browser beside the chat; a project's
+// own browser (no session) opens the project in Plan.
+export async function openBrowserRow(key) {
+  const b = list.find(x => keyOf(x) === key);
+  if (!b) return;
+  if (!b.session) return nav.openProject(b.project);
+  await nav.openSession(b.session);
+  openBrowser(b.session, null, b.project).catch(() => {});
+}
+
 function wire(box) {
-  box.addEventListener("click", async (e) => {
+  box.addEventListener("click", (e) => {
     const t = e.target.closest("[data-brw-key]");
-    if (!t) return;
-    const b = list.find(x => keyOf(x) === t.dataset.brwKey);
-    if (!b) return;
-    if (!b.session) return nav.openProject(b.project);
-    await nav.openSession(b.session);
-    openBrowser(b.session, null, b.project).catch(() => {});
+    if (t) openBrowserRow(t.dataset.brwKey);
   });
   document.addEventListener("visibilitychange", () => { if (shown() && !timer && !reading) tick(); });
 }

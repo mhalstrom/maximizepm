@@ -305,7 +305,7 @@ try {
   }
   q('nav button[data-tab="sessions"]').click();
   q("#sessYouRow .srow-main").click(); await look("sessions/you");
-  q("#sessArtsRow .srow-main").click(); await look("sessions/artifacts");
+  q('#sessTabs [data-sess-tab="arts"]').click(); await look("sessions/artifacts");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
 
@@ -1406,10 +1406,10 @@ try {
   out.chat = !shown(q("#sessYou")) && !q("#sessYouRow .srow").classList.contains("on");
   history.back();
   await until(() => location.pathname === "/you" && shown(q("#sessYou")), "Back shows You again");
-  await until(() => q("#sessArtsRow .srow-main"), "the Artifacts row");
-  q("#sessArtsRow .srow-main").click();
-  await until(() => location.pathname === "/artifacts" && shown(q("#sessArts")) && !shown(q("#sessYou")), "the Artifacts row: /artifacts");
-  out.arts = q("#sessArtsRow .srow").classList.contains("on") && !q("#sessYouRow .srow").classList.contains("on")
+  await until(() => q('#sessTabs [data-sess-tab="arts"]'), "the Artifacts tab");
+  q('#sessTabs [data-sess-tab="arts"]').click();
+  await until(() => location.pathname === "/artifacts" && shown(q("#sessArts")) && !shown(q("#sessYou")), "the Artifacts tab: /artifacts");
+  out.arts = q('#sessTabs [data-sess-tab="arts"]').classList.contains("on") && !q("#sessYouRow .srow").classList.contains("on")
     && !q('nav button[data-tab="artifacts"]');
   history.back();
   await until(() => location.pathname === "/you" && shown(q("#sessYou")) && !shown(q("#sessArts")), "Back from Artifacts to You");

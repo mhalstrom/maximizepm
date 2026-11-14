@@ -4,39 +4,46 @@
     <aside class="panel sess-side" aria-label="Running sessions">
       <!-- The list folds to a thin strip beside the chat (#5626): the button, or Cmd+\ (Ctrl+\); the page keeps the
            choice. A phone shows the list or the chat, and has no button. -->
-      <h2><span class="sess-side-t" title="Read from each session's transcript">Running sessions</span>
+      <!-- #5883 (mark 2026-11-14): Capacity at the top, with the one Start an agent button (its dialog also starts a
+           plain session in a folder, #5851); You under it; then the tabs Agents, Artifacts, Browsers; Cost and the
+           settings of these lists at the foot. -->
+      <h2><span class="sess-side-t" title="Slots, idle sessions and advice">Capacity</span>
+        <span id="sessStart" class="sess-start"></span>
         <button class="iconbtn sess-fold" type="button" id="sessFold" aria-controls="sessLayout" aria-expanded="true" title="Hide list" aria-label="Hide the session list">‹</button></h2>
-      <!-- Start an agent and the open session slots (#5102 step 2): here, where the new session shows. -->
-      <div id="sessStart" class="sess-start"></div>
+      <!-- The numbers and advice of Plan's Overview Capacity (overview.js capacityHtml), in a narrow form. -->
+      <div id="sessCap" class="sess-cap"></div>
       <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. Under it, the session
            that goes through that list with you (#5110: your assistant, a session type of its own). -->
       <div class="slist-mgr slist-you" aria-label="You">
         <div id="sessYouRow"></div>
         <div id="sessAssist" class="slist-rows" aria-label="Your assistant"></div>
       </div>
-      <!-- The Status row (#5852): how many sessions need you, are done, work, or are idle; it opens the Status view. -->
-      <div id="sessStatusRow" class="slist-status" aria-label="Status"></div>
-      <!-- The Artifacts row (#5102 step 3): what all the sessions made; it opens the Artifacts view. -->
-      <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
-        <div class="srow-main" tabindex="0" role="button" title="What all sessions made or named" aria-label="Artifacts of all sessions">
-          <div class="srow-h"><b class="srow-t">Artifacts</b></div><div class="sub">What the sessions made</div></div></div></div>
-      <!-- The Cost row (#5857): what the sessions used, in tokens and dollars; it opens the Cost view. -->
-      <div id="sessCostRow" class="slist-cost" aria-label="Cost"><div class="srow srow-cost" data-cost="1">
-        <div class="srow-main" tabindex="0" role="button" title="What the sessions used" aria-label="Cost of all sessions">
-          <div class="srow-h"><b class="srow-t">Cost</b></div><div class="sub">What the sessions used</div></div></div></div>
-      <!-- The Browsers row (#5879): every browser that runs now; it opens the Browsers view. -->
-      <div id="sessBrwRow" class="slist-brw" aria-label="Browsers"><div class="srow srow-brw" data-brw="1">
-        <div class="srow-main" tabindex="0" role="button" title="Every browser that runs now" aria-label="Browsers of all sessions">
-          <div class="srow-h"><b class="srow-t">Browsers</b></div><div class="sub">None open</div></div></div></div>
-      <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
-      <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
-        <div class="slist-h">Experts</div>
-        <div id="sessExpertRows" class="slist-rows"></div>
+      <!-- The tabs (#5883): sessions.js draws the three buttons; this browser keeps the chosen one. -->
+      <div id="sessTabs" class="sess-tabs" role="tablist" aria-label="Lists"></div>
+      <div class="sess-tp" data-tp="agents" role="tabpanel" aria-label="Agents">
+        <!-- The Status row (#5852): how many sessions need you, are done, work, or are idle; it opens the Status view. -->
+        <div id="sessStatusRow" class="slist-status" aria-label="Status"></div>
+        <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
+        <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
+          <div class="slist-h">Experts</div>
+          <div id="sessExpertRows" class="slist-rows"></div>
+        </div>
+        <div id="sessions" class="slist"></div>
+        <!-- The foot of the list (#5102 step 2): the ended sessions (read only) and Close N finished (the tmux panes). -->
+        <div id="sessEnded" class="slist-ended hidden" aria-label="Ended sessions"></div>
+        <div id="sessFoot" class="sess-foot"></div>
       </div>
-      <div id="sessions" class="slist"></div>
-      <!-- The foot of the list (#5102 step 2): the ended sessions (read only) and Close N finished (the tmux panes). -->
-      <div id="sessEnded" class="slist-ended hidden" aria-label="Ended sessions"></div>
-      <div id="sessFoot" class="sess-foot"></div>
+      <!-- Artifacts (#5102 step 3): the sessions that made or named something; a row filters the Artifacts view. -->
+      <div class="sess-tp hidden" data-tp="arts" role="tabpanel" aria-label="Artifacts"><div id="sessArtRows" class="slist-tab"></div></div>
+      <!-- Browsers (#5879): every browser that runs now; a row opens its session with the Browser beside the chat. -->
+      <div class="sess-tp hidden" data-tp="browsers" role="tabpanel" aria-label="Browsers"><div id="sessBrwRows" class="slist-tab"></div></div>
+      <!-- The foot: Cost (#5857), what the sessions used; it opens the Cost view. The ⚙ opens the settings of these lists. -->
+      <div class="sess-bottom">
+        <div id="sessCostRow" class="slist-cost" aria-label="Cost"><div class="srow srow-cost" data-cost="1">
+          <div class="srow-main" tabindex="0" role="button" title="What the sessions used" aria-label="Cost of all sessions">
+            <div class="srow-h"><b class="srow-t">Cost</b><span class="sub">What the sessions used</span></div></div></div></div>
+        <button class="iconbtn" type="button" id="sessSettings" title="Settings" aria-label="Settings of these lists">⚙</button>
+      </div>
     </aside>
     <div class="panel sess-main hidden" id="sessMain">
       <!-- The head (#5115): one row at every width. Left: the name, the agent id, the state as a dot with its word, and
