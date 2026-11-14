@@ -111,6 +111,8 @@ def approve_signins(conn, a, who):
     if b is None or not (b.running() or b.proxy is not None):
         raise RiverError(f"the browser of {session or project} is not running now: open it in its Browser pane, "
                          "sign in, then Allow again")
+    if not b.running():  # serve started again: attach to the Chrome that the earlier serve left running
+        b.start()
     got = {}
     for site in pick:
         got[site] = signin.site_cookies(b, site)
