@@ -200,18 +200,53 @@ class Grants(Base):
         core.claim(self.c, iid, who)
         return iid
 
-    def test_no_grant_is_refused_and_names_the_set_and_the_manager(self):
-        iid = self.hold("deploy")
+    def manager(self):
         core.register(self.c, "manager-1")
         self.c.execute("UPDATE agents SET role='manager' WHERE name='manager-1'")
-        with mock.patch.object(core, "active_manager", lambda conn, but=None: "manager-1"):
-            msg = self.refused("dev")
+        p = mock.patch.object(core, "active_manager", lambda conn, but=None: "manager-1")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def alerts(self, to):
+        return [r["body"] for r in self.c.execute("SELECT body FROM messages WHERE kind='alert' AND to_agent=? "
+                                                  "ORDER BY id", (to,))]
+
+    def test_no_grant_is_refused_and_asks_the_person_for_an_unmarked_set(self):
+        iid = self.hold("deploy")
+        self.manager()
+        msg = self.refused("dev")
         self.assertIn("the set stripe-live", msg)
-        self.assertIn("maxpm ask manager-1", msg)
-        self.assertIn(f"maxpm secret grant stripe-live --item {iid}", msg)
+        self.assertIn(f"MaximizePM asked mark for the grant (maxpm secret grant stripe-live --item {iid})", msg)
         self.assertEqual(vault.log(self.c, "stripe-key")["log"][0]["action"], "refused")
+        self.assertEqual(len(self.alerts("mark")), 1)  # the set is not marked: the person, not the manager
+        self.assertEqual(self.alerts("manager-1"), [])
+        self.assertIn("asked mark for the grant already", self.refused("dev"))
+        self.assertEqual(len(self.alerts("mark")), 1)  # once an hour
         self.assertEqual(self.use(None), b"sk_live_1")  # a person needs no grant
         self.assertEqual(self.use("mark"), b"sk_live_1")
+
+    def test_the_manager_grants_only_the_sets_the_person_marked(self):
+        self.manager()
+        iid = self.hold("deploy")
+        with self.assertRaises(RiverError) as e:
+            vault.grant(self.c, "stripe-live", "item", str(iid), actor="manager-1")
+        self.assertIn("did not mark the set stripe-live", str(e.exception))
+        vault.set_change(self.c, "stripe-live", manager_may_grant=True, actor="mark")
+        with self.assertRaises(RiverError):
+            vault.set_change(self.c, "stripe-live", manager_may_grant=False, actor="manager-1")  # the mark is the person's
+        self.refused("dev")
+        self.assertIn("the manager may grant", self.alerts("manager-1")[0])
+        g = vault.grant(self.c, "stripe-live", "item", str(iid), actor="manager-1")
+        self.assertEqual(g["granted_by"], "manager-1")
+        self.assertEqual(self.use("dev"), b"sk_live_1")
+        lines = vault.grant_summary(self.c)
+        self.assertEqual(lines, [f"granted by manager-1: g{g['id']} set stripe-live to task #{iid}"])
+        note = self.c.execute("SELECT body FROM messages WHERE kind='note' AND to_agent='mark'").fetchone()
+        self.assertIn(f"g{g['id']} set stripe-live to task #{iid}", note["body"])
+        self.assertIsNone(vault.grant_summary(self.c))  # once a day
+        vault.revoke(self.c, g["grant"], actor="manager-1")
+        with self.assertRaises(RiverError):
+            vault.grant(self.c, "stripe-live", "item", str(iid), actor="dev")  # a worker never grants
 
     def test_project_grant_covers_a_session_on_its_task(self):
         g = vault.grant(self.c, "stripe-live", "project", "site", actor="mark")

@@ -259,6 +259,11 @@ Stop when the user tells you to, and tell the user what you did.
   one time when it ends. Workers keep their items, do the parts that do not
   need the limited thing, and wait in `maxpm inbox --wait` for your word.
   They do not ask you if it ended, so say it to each of them.
+- **A session was refused a secret** (an alert from maxpm names the set and the
+  grant command): when the person marked the set "the manager may grant", and
+  the task needs it, run the command it names. Grant the narrowest scope (the
+  task, `--item <id>`; it ends with the task). Any other set goes to the person;
+  they get the alert by themselves. The person gets a daily list of your grants.
 
 ## Your tools
 

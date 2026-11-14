@@ -724,17 +724,65 @@ def _require(conn, name, actor, what, detail=None):
     ok = allowed(conn, name, actor)
     if ok["ok"]:
         return ok
-    with core.tx(conn):
-        _log(conn, name, actor, "refused", f"{detail or what}: {ok['why']}")
-    held = core._held_item(conn, actor)
-    scope = f"--item {held['id']}" if held else f"--agent {actor}"
+    who = session_of(conn, actor)["name"] or actor  # allowed() confirmed it: the session's own name
+    held = core._held_item(conn, who)
+    scope = f"--item {held['id']}" if held else f"--agent {who}"
     if ok["sets"]:
-        ask = f"Grant the set {ok['sets'][0]} to me: maxpm secret grant {ok['sets'][0]} {scope}"
+        grant_line = f"maxpm secret grant {ok['sets'][0]} {scope}"
     else:
-        ask = f"Put the secret {name} in a set and grant it to me: maxpm secret set <set> --add {name}; " \
-              f"maxpm secret grant <set> {scope}"
-    raise RiverError(f"{ok['why']}: the {what} is refused. Ask the manager: "
-                     + _ask_line(conn, ask, held["id"] if held else None))
+        grant_line = f"maxpm secret set <set> --add {name}; maxpm secret grant <set> {scope}"
+    to, sent = _refusal_alert(conn, name, who, ok, grant_line, held)
+    with core.tx(conn):
+        _log(conn, name, who, "refused", f"{detail or what}: {ok['why']}")
+    raise RiverError(f"{ok['why']}: the {what} is refused. "
+                     + (f"MaximizePM asked {to} for the grant ({grant_line}); " if sent else
+                        f"MaximizePM asked {to} for the grant already; " if to else
+                        "No manager or person is registered to ask; ")
+                     + "take other work, or release the item until the grant comes")
+
+
+REFUSED_AGAIN = 3600  # seconds: a refused use alerts once per secret and session in this time
+
+
+def _refusal_alert(conn, name, who, ok, grant_line, held):
+    """#5828: a refused use asks for the grant by itself: the manager when one of the secret's sets is marked 'the
+    manager may grant' and a manager is active, else the person (a phone alert). Once per REFUSED_AGAIN. Returns
+    (to, sent)."""
+    marked = bool(ok["sets"]) and conn.execute(
+        "SELECT 1 FROM secret_sets WHERE manager_may_grant=1 AND name IN (%s)" % ",".join("?" * len(ok["sets"])),
+        ok["sets"]).fetchone()
+    manager = core.active_manager(conn) if marked else None
+    person = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC LIMIT 1").fetchone()
+    to = manager or (person["name"] if person else None)
+    if not to:
+        return None, False
+    since = core.iso(core.now() - __import__("datetime").timedelta(seconds=REFUSED_AGAIN))
+    if conn.execute("SELECT 1 FROM secret_log WHERE name=? AND actor=? AND action='refused' AND at>?",
+                    (name, who, since)).fetchone():
+        return to, False
+    body = (f"{who} was refused the secret {name}: {ok['why']}"
+            + (f" (task #{held['id']})" if held else "") + f". To grant it: {grant_line}"
+            + (" (the set is marked 'the manager may grant')" if manager else ""))
+    with core.tx(conn):
+        core._send(conn, "alert", "maxpm", body, to=to, item_id=held["id"] if held else None)
+    return to, True
+
+
+def _may_grant(conn, actor, s, what):
+    """A person grants and revokes any set; the active manager only the sets that the person marked 'the manager
+    may grant' (#5828). Returns who it is."""
+    who = session_of(conn, actor)
+    if who["person"]:
+        return who
+    if core._is_manager(conn, who["name"]) and s["manager_may_grant"]:
+        return who
+    if core._is_manager(conn, who["name"]):
+        person = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC LIMIT 1").fetchone()
+        raise RiverError(f"the person did not mark the set {s['name']} 'the manager may grant': only a person may "
+                         f"{what} it. Ask: maxpm ask {person['name'] if person else '<person>'} \"Please {what} the "
+                         f"set {s['name']}: <to what, why>\" --blocked")
+    raise RiverError(f"only a person or the manager may {what} a credential set. Ask the manager: "
+                     + _ask_line(conn, f"Please {what} the set {s['name']}: <to what, why>"))
 
 
 def _person_only(conn, actor, what):
@@ -853,9 +901,10 @@ def _set_name(conn, set_id):
 
 
 def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
-    """Grant a set to one scope, until a revoke or until (a time a person types: 7d, 2026-12-01). Only a person."""
-    _person_only(conn, actor, "grant a credential set")
+    """Grant a set to one scope, until a revoke or until (a time a person types: 7d, 2026-12-01). A person, or the
+    manager for a set marked 'the manager may grant' (#5828)."""
     s = _set(conn, set_name)
+    actor = _may_grant(conn, actor, s, "grant")["name"] or actor
     v = _scope_value(conn, scope, value)
     end = core.iso(core.parse_when(until, core.setting(conn, "timezone"))) if until else None
     with core.tx(conn):
@@ -875,8 +924,7 @@ def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
 
 def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=None):
     """End grants: one by its id (g12), or the set's grants to one scope, or all grants of the set. The next use is
-    refused. Only a person."""
-    _person_only(conn, actor, "revoke a credential set's grant")
+    refused. A person, or the manager for a set marked 'the manager may grant' (#5828)."""
     if grant_id is not None:
         gid = str(grant_id).lstrip("gG#")
         if not gid.isdigit():
@@ -891,6 +939,11 @@ def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=Non
             q += " AND scope=? AND value=?"
             args += [scope, _scope_value(conn, scope, value)]
         rows = conn.execute(q, args).fetchall()
+    for set_id in {g["set_id"] for g in rows}:
+        actor = _may_grant(conn, actor, conn.execute("SELECT * FROM secret_sets WHERE id=?", (set_id,)).fetchone(),
+                           "revoke")["name"] or actor
+    if not rows:  # a set with no grants (a grant id with none raised above): the same rule says who learns that
+        _may_grant(conn, actor, s, "revoke")
     at = core.iso(core.now())
     live = [g for g in rows if not _grant_end(conn, g, at)]
     with core.tx(conn):
@@ -898,6 +951,41 @@ def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=Non
             conn.execute("UPDATE secret_grants SET revoked_at=?, revoked_by=? WHERE id=?", (at, actor, g["id"]))
     return {"revoked": [_grant_info(conn, conn.execute("SELECT * FROM secret_grants WHERE id=?", (g["id"],)).fetchone())
                         for g in live]}
+
+
+SUMMARY_EVERY = 86400  # seconds: the person's summary of the manager's grants comes once a day
+
+
+def grant_summary(conn):
+    """A pass of maxpm serve (#5828): once a day, a note to the person with the grants and revokes that a session
+    (the manager) made since the last summary; nothing when it made none."""
+    import datetime
+    r = conn.execute("SELECT value FROM meta WHERE key='secret_grant_summary_at'").fetchone()
+    now = core.now()
+    if r and core.parse_iso(r["value"]) > now - datetime.timedelta(seconds=SUMMARY_EVERY):
+        return None
+    since = r["value"] if r else core.iso(now - datetime.timedelta(seconds=SUMMARY_EVERY))
+    people = {x["name"] for x in conn.execute("SELECT name FROM agents WHERE kind='human'")}
+    lines = []
+    for g in conn.execute("SELECT * FROM secret_grants WHERE granted_at>? OR revoked_at>? ORDER BY id", (since, since)):
+        if g["granted_at"] > since and g["granted_by"] and g["granted_by"] not in people:
+            lines.append(f"granted by {g['granted_by']}: " + _grant_line_text(conn, g))
+        if g["revoked_at"] and g["revoked_at"] > since and g["revoked_by"] and g["revoked_by"] not in people:
+            lines.append(f"revoked by {g['revoked_by']}: " + _grant_line_text(conn, g))
+    person = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC LIMIT 1").fetchone()
+    with core.tx(conn):
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('secret_grant_summary_at', ?)", (core.iso(now),))
+        if lines and person:
+            core._send(conn, "note", "maxpm", "The manager's credential grants of the last day:\n  " + "\n  ".join(lines)
+                       + "\nEnd one: maxpm secret revoke g<id>. Mark a set so the manager may no longer grant it: "
+                         "maxpm secret set <set> --manager-may-grant off", to=person["name"])
+    return lines
+
+
+def _grant_line_text(conn, g):
+    info = _grant_info(conn, g)
+    return f"g{g['id']} set {info['set']} to {info['covers']}" + (f" until {core.show_time(g['until'])}" if g["until"]
+                                                                   else "")
 
 
 def grants(conn, set_name=None, ended=False, for_agent=None):
