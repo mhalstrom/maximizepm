@@ -28,8 +28,8 @@ export function renderYou() {
                 msgs ? `${msgs} message${msgs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") || "Nothing waits on you";
   const on = row.dataset.on === "1";
   const html = `<div class="srow srow-you${n ? " needs" : ""}${on ? " on" : ""}" data-you="1">
-    <div class="srow-main" tabindex="0" role="button" title="What waits on you" aria-label="You: what waits on you">
-      <div class="srow-h"><b class="srow-t">You</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) need you now">! ${n}</span>` : ""}</div>
+    <div class="srow-main" tabindex="0" role="button" title="What waits on you" aria-label="Your action items: what waits on you">
+      <div class="srow-h"><b class="srow-t">Your action items</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) need you now">! ${n}</span>` : ""}</div>
       <div class="sub">${esc(line)}</div></div></div>`;
   if (row.dataset.sig !== html) { row.innerHTML = html; row.dataset.sig = html; }
   // The agent that goes through the list with the person (#5103): next to Copy prompt, in the head of the view.

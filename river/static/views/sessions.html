@@ -4,25 +4,26 @@
     <aside class="panel sess-side" aria-label="Running sessions">
       <!-- The list folds to a thin strip beside the chat (#5626): the button, or Cmd+\ (Ctrl+\); the page keeps the
            choice. A phone shows the list or the chat, and has no button. -->
-      <!-- #5883 (mark 2026-11-14): Capacity at the top, with the one Start an agent button (its dialog also starts a
-           plain session in a folder, #5851); You under it; then the tabs Agents, Artifacts, Browsers; Cost and the
-           settings of these lists at the foot. -->
-      <h2><span class="sess-side-t" title="Slots, idle sessions and advice">Capacity</span>
-        <span id="sessStart" class="sess-start"></span>
-        <button class="iconbtn sess-fold" type="button" id="sessFold" aria-controls="sessLayout" aria-expanded="true" title="Hide list" aria-label="Hide the session list">‹</button></h2>
-      <!-- The numbers and advice of Plan's Overview Capacity (overview.js capacityHtml), in a narrow form. -->
+      <!-- #5883, #5886 (mark 2026-11-14): the five Capacity numbers across the top (overview.js capacityHtml); Start an
+           agent right below them (its dialog also starts a plain session in a folder, #5851), with the fold button;
+           Your action items; Sessions with its status line; the tabs Agents, Artifacts, Browsers; Cost and the
+           settings of these lists at the foot. A folded list shows only the fold button. -->
       <div id="sessCap" class="sess-cap"></div>
-      <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. Under it, the session
-           that goes through that list with you (#5110: your assistant, a session type of its own). -->
-      <div class="slist-mgr slist-you" aria-label="You">
+      <div class="sess-top">
+        <span id="sessStart" class="sess-start"></span>
+        <button class="iconbtn sess-fold" type="button" id="sessFold" aria-controls="sessLayout" aria-expanded="true" title="Hide list" aria-label="Hide the session list">‹</button></div>
+      <!-- Your action items (#5102 step 1, the You row): what waits on you, with a ! badge; it opens the You view. Under
+           it, the session that goes through that list with you (#5110: your assistant, a session type of its own). -->
+      <div class="slist-mgr slist-you" aria-label="Your action items">
         <div id="sessYouRow"></div>
         <div id="sessAssist" class="slist-rows" aria-label="Your assistant"></div>
       </div>
+      <!-- Sessions (#5852 the Status row, #5886): how many sessions need you, are done, work, or are idle, and the
+           browsers that run; it opens the Status view. -->
+      <div id="sessStatusRow" class="slist-status" aria-label="Sessions"></div>
       <!-- The tabs (#5883): sessions.js draws the three buttons; this browser keeps the chosen one. -->
       <div id="sessTabs" class="sess-tabs" role="tablist" aria-label="Lists"></div>
       <div class="sess-tp" data-tp="agents" role="tabpanel" aria-label="Agents">
-        <!-- The Status row (#5852): how many sessions need you, are done, work, or are idle; it opens the Status view. -->
-        <div id="sessStatusRow" class="slist-status" aria-label="Status"></div>
         <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
         <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
           <div class="slist-h">Experts</div>

@@ -59,10 +59,13 @@ export function renderCapacity() {
   put($("#capacity"), capacityHtml(S));
 }
 
-// The numbers, Waiting for work and the advice; also at the top of the Sessions list (#5883), with the class cls.
-export function capacityHtml(S, cls = "") {
+// The numbers, Waiting for work and the advice. The top of the Sessions list (#5886) shows only the numbers: numbersOnly,
+// with the class cls.
+export function capacityHtml(S, cls = "", numbersOnly = false) {
   const c = S && S.capacity; if (!c) return "";
   const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");
+  const more = numbersOnly ? "" : `${idle.length ? `<div class="muted t-s ov-idle">Waiting for work: ${idle.map(a => `<span class="link" data-session-go="${esc(a.name)}">${esc((S.session_names || {})[a.name] || a.name)}</span>`).join(", ")}</div>` : ""}
+    <ul class="advice">${c.advice.map(a => `<li class="${a.kind}">${esc(a.text)}</li>`).join("")}</ul>`;
   return `<div class="stats ${cls}">
       <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions you can still start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
       <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + idle.map(a => a.name).join(", ") : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
@@ -70,8 +73,7 @@ export function capacityHtml(S, cls = "") {
       <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
       <div class="stat hum" title="Ready items that wait on a person"><div class="n">${c.ready_for_humans.length}</div><div class="l">for people</div></div>
     </div>
-    ${idle.length ? `<div class="muted t-s ov-idle">Waiting for work: ${idle.map(a => `<span class="link" data-session-go="${esc(a.name)}">${esc((S.session_names || {})[a.name] || a.name)}</span>`).join(", ")}</div>` : ""}
-    <ul class="advice">${c.advice.map(a => `<li class="${a.kind}">${esc(a.text)}</li>`).join("")}</ul>`;
+    ${more}`;
 }
 
 // The step bars above the graph: the open items by step, agents and people.

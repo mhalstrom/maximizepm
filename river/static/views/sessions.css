@@ -8,13 +8,13 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-layout > .sess-main { padding: var(--sp-5) calc(var(--sp-6) + var(--sp-1)) calc(var(--sp-5) + var(--sp-0)); }
 /* The list folds to a strip with only its button (#5626; sessions.js wireFold). From 760 px only: a phone shows the list
    or the chat. The strip keeps the button's width, and the chat and the side panel take the rest. */
-.sess-side h2 { flex-wrap: nowrap; }
+.sess-top { flex: none; display: flex; align-items: center; gap: var(--sp-2); margin: 0 0 var(--sp-4); }
 .sess-fold { margin-left: auto; flex: none; }
 @media (max-width: 759px) { .sess-fold { display: none; } }
 @media (min-width: 760px) {
   .sess-layout.side-folded, .sess-layout.side-folded.with-panel { grid-template-columns: calc(var(--w-tool) + 2 * var(--sp-1) + var(--hair)) minmax(0, 1fr); }
   .sess-layout.side-folded > .sess-side { padding: var(--sp-5) var(--sp-1); }
-  .sess-layout.side-folded > .sess-side > :not(h2), .sess-layout.side-folded .sess-side-t { display: none; }
+  .sess-layout.side-folded > .sess-side > :not(.sess-top) { display: none; }
   .sess-layout.side-folded .sess-fold { margin: 0 auto; }
 }
 /* From 1024 px the side panel is a third column; below it, a drawer over the chat (phone.css). */
@@ -583,19 +583,16 @@ button.srow-it { cursor: pointer; }
 #coldDlg .cold-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-5); }
 /* The work controls of the list (#5102 step 2): Start an agent at the top, the ended sessions and Close N finished
    at the foot; Give work in the head of a waiting session; the queue and + item in the Items list. */
-/* #5883: the heading is Capacity with Start an agent at its right; under it the five numbers in one narrow row, the
-   sessions that wait for work, and the advice in a small font. */
-.sess-start { display: flex; flex: none; margin-left: auto; }
-.sess-side h2 .sess-start + .sess-fold { margin-left: var(--sp-2); }
+/* #5886: the five Capacity numbers in one narrow row at the top; Start an agent under them, the width of the list less
+   the fold button. */
+.sess-start { display: flex; flex: 1 1 auto; min-width: 0; }
+.sess-start .agentStart, .sess-start .btn { flex: 1 1 auto; }
 .sess-layout.side-folded .sess-start { display: none; }
-.sess-cap { flex: none; margin-bottom: var(--sp-4); }
+.sess-cap { flex: none; margin-bottom: var(--sp-3); }
 .stats.stats-narrow { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-1); }
 .stats-narrow .stat { padding: var(--sp-1) var(--sp-2); min-width: 0; }
 .stats-narrow .stat .n { font-size: var(--fs-l); }
 .stats-narrow .stat .l { font-size: var(--fs-xs); overflow-wrap: anywhere; }
-.sess-cap .ov-idle { margin-top: var(--sp-2); }
-.sess-cap .advice { margin-top: var(--sp-1); font-size: var(--fs-s); }
-.sess-cap .advice li { padding: var(--sp-1) var(--sp-3); }
 /* The tabs Agents, Artifacts, Browsers (#5883): a line of three equal tabs; the chosen one is underlined. Each tab's list
    scrolls under them; Cost and the ⚙ stay at the foot. */
 .sess-tabs { flex: none; display: flex; border-bottom: var(--hair) solid var(--line); margin: 0 0 var(--sp-3); }

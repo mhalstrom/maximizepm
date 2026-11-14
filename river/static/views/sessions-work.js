@@ -11,7 +11,7 @@ import { S } from "../page.js";
 
 const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
 
-// The one Start an agent button (#5883) and the Capacity block of Plan's Overview under it. The dialog picks the work: the
+// The five Capacity numbers of Plan's Overview (#5886) and the one Start an agent button under them (#5883). The dialog picks the work: the
 // next ready item, a project, an item, or a plain session in a folder with no item (#5851). With nothing ready for an
 // agent (or the queue off everywhere) it opens on the plain session.
 export function renderStart() {
@@ -22,7 +22,7 @@ export function renderStart() {
   put($("#sessStart"), agentStart(S.launch_agents, { label: "Start an agent", cls: "primary",
     attrs: `data-launch="${q && ready ? 1 : "plain"}"`,
     title: q && ready ? "Start an agent" : "Start an agent in a folder" }));
-  put($("#sessCap"), capacityHtml(S, "stats-narrow"));
+  put($("#sessCap"), capacityHtml(S, "stats-narrow", true));
 }
 
 // The ended sessions (stopped or gone agents with no running session), newest first; a click shows the chat read only.

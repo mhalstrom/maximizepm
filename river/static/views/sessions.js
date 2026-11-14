@@ -463,10 +463,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     autoWait();
   }
 
-  // The Status row of the list and the Status view (#5852), from the same read as the rows. The view draws only while
-  // it shows; its HTML goes in only when it changed, so a row keeps its hover and focus.
+  // The Sessions row of the list (#5852, #5886: with the browsers that run) and the Status view, from the same read as
+  // the rows. The view draws only while it shows; its HTML goes in only when it changed, so a row keeps its hover and focus.
   function drawStatus() {
-    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status"));
+    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0));
     if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
     document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
   }

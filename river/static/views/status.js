@@ -34,13 +34,15 @@ export function countLine(list) {
     .join(" · ") || "No session runs";
 }
 
-// The Status row of the session list: the counts, and a ! badge while a session needs you.
-export function statusRowHtml(list, on) {
+// The Sessions row of the session list (#5886: the heading over the tabs): the counts and the browsers that run, and a
+// ! badge while a session needs you. It opens the Status view.
+export function statusRowHtml(list, on, browsers = 0) {
   const n = byStatus(list).needs_you.length;
+  const line = countLine(list) + (browsers ? ` · ${browsers} browser${browsers === 1 ? "" : "s"}` : "");
   return `<div class="srow srow-status${n ? " needs" : ""}${on ? " on" : ""}" data-status="1">
-    <div class="srow-main" tabindex="0" role="button" title="All sessions by state" aria-label="Status of all sessions">
-      <div class="srow-h"><b class="srow-t">Status</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} session(s) need you">! ${n}</span>` : ""}</div>
-      <div class="sub">${esc(countLine(list))}</div></div></div>`;
+    <div class="srow-main" tabindex="0" role="button" title="All sessions by state" aria-label="Sessions: all sessions by state">
+      <div class="srow-h"><b class="srow-t">Sessions</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} session(s) need you">! ${n}</span>` : ""}</div>
+      <div class="sub">${esc(line)}</div></div></div>`;
 }
 
 function row(s) {
