@@ -144,6 +144,8 @@ jobs:
           app=desktop/out/mac-arm64/MaximizePM.app/Contents/Resources/river-app
           cp -R "$app/bin" "$d/bin"
           rsync -a --exclude '__pycache__' --exclude '*.pyc' "$app/river" "$d/"
+          # The agent guides: install-standalone.sh links them as Claude Code skills on a host (#5873).
+          cp -R skills "$d/skills"
           [ -x "$d/river/bin/maxpm-dictate" ] || { echo "the dictation helper is missing"; exit 1; }
           tar -C "$RUNNER_TEMP/code" -czf "desktop/out/MaximizePM-$v-code.tar.gz" "maximizepm-$v"
           node desktop/scripts/manifest.js "$v" "desktop/out/MaximizePM-$v-code.tar.gz" > desktop/out/manifest.json

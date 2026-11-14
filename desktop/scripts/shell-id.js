@@ -10,7 +10,9 @@ const here = path.join(__dirname, "..");
 
 function shellId() {
   const h = crypto.createHash("sha256");
-  for (const f of ["main.js", "preload.js", "server.js", "scripts/fetch-python.js", "entitlements.mac.plist", "signed.config.js"]) {
+  // ../river/python-builds.txt: the pins of the app's Python (#5873).
+  for (const f of ["main.js", "preload.js", "server.js", "scripts/fetch-python.js", "../river/python-builds.txt",
+    "entitlements.mac.plist", "signed.config.js"]) {
     h.update(f + "\0" + fs.readFileSync(path.join(here, f)) + "\0");
   }
   const pkg = JSON.parse(fs.readFileSync(path.join(here, "package.json"), "utf8"));

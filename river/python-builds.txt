@@ -1,0 +1,9 @@
+# The Python that MaximizePM carries where a computer has none of its own (python-build-standalone, CPython 3.13).
+# One place for both users: the desktop app's build (desktop/scripts/fetch-python.js) and the install on a host
+# (install-standalone.sh). The sha256 of each file is from the release's SHA256SUMS.
+# Lines: release <tag>, then <os>-<arch> <file> <sha256>.
+release 20260924
+mac-arm64 cpython-3.13.15+20260924-aarch64-apple-darwin-install_only_stripped.tar.gz 064afb7c2fc0bbf511d886288adf98696af5105e36c138cdf2c199c0146fcf68
+mac-x64 cpython-3.13.15+20260924-x86_64-apple-darwin-install_only_stripped.tar.gz 327814efd865a0b6a99c149b12a261e9d0ad409183515c745d41bda2d07282e9
+linux-arm64 cpython-3.13.15+20260924-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz 5ad58156cbec94e5643c13caa792e92df72a23f33d3a6425d4cbff5c4b7a040c
+linux-x64 cpython-3.13.15+20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz d0b640eed27fbdd6f5f2bd33444aee53df2c8863f8b2a96f4094717411e3de9c

@@ -25,3 +25,20 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Tests (standard library only)
         run: python -m unittest discover -s tests -t . -v
+  # install-standalone.sh on a Linux host with no Python of its own (#5873): the Python of river/python-builds.txt,
+  # checked by sha256, and the code of this commit; then the maxpm command runs on a new queue, and a second run
+  # keeps the Python it has.
+  standalone:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install with install-standalone.sh, then run maxpm
+        run: |
+          sh install-standalone.sh --from . --dir "$RUNNER_TEMP/m" --bin-dir "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/maxpm" --version
+          MAXPM_DB="$RUNNER_TEMP/q.db" MAXPM_LOCAL=1 "$RUNNER_TEMP/bin/maxpm" --json status > /dev/null
+          sh install-standalone.sh --from . --dir "$RUNNER_TEMP/m" --bin-dir "$RUNNER_TEMP/bin" | grep -q 'is current'

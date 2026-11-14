@@ -2,18 +2,29 @@
 // starts on a Mac with no Python of its own. Pinned by release and sha256; run before electron-builder
 // (npm run dist does). Usage: node scripts/fetch-python.js [mac-arm64] [mac-x64] (default: both).
 // Result: build/python/<os>-<arch>/python (with bin/python3), which electron-builder copies to river-app/python.
+// The pins are in river/python-builds.txt, which install-standalone.sh reads too (#5873).
 const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const RELEASE = "20260924";
-const BUILDS = {
-  "mac-arm64": { file: "cpython-3.13.15+20260924-aarch64-apple-darwin-install_only_stripped.tar.gz",
-    sha256: "064afb7c2fc0bbf511d886288adf98696af5105e36c138cdf2c199c0146fcf68" },
-  "mac-x64": { file: "cpython-3.13.15+20260924-x86_64-apple-darwin-install_only_stripped.tar.gz",
-    sha256: "327814efd865a0b6a99c149b12a261e9d0ad409183515c745d41bda2d07282e9" },
-};
+const PINS = path.join(__dirname, "..", "..", "river", "python-builds.txt");
+
+// river/python-builds.txt: "release <tag>", then "<os>-<arch> <file> <sha256>" lines; # starts a comment.
+function readPins(text) {
+  let release = null;
+  const builds = {};
+  for (const raw of text.split("\n")) {
+    const words = raw.replace(/#.*/, "").trim().split(/\s+/).filter(Boolean);
+    if (words[0] === "release" && words.length === 2) release = words[1];
+    else if (words.length === 3 && /^[0-9a-f]{64}$/.test(words[2])) builds[words[0]] = { file: words[1], sha256: words[2] };
+    else if (words.length) throw new Error(`${PINS}: a line it does not know: ${raw}`);
+  }
+  if (!release) throw new Error(`${PINS} names no release`);
+  return { release, builds };
+}
+
+const { release: RELEASE, builds: BUILDS } = readPins(fs.readFileSync(PINS, "utf8"));
 // Parts of the standard library river never uses (tests, the Tk GUI and IDLE, pip bootstrap).
 const DROP = ["test", "idlelib", "tkinter", "turtledemo", "ensurepip", "lib2to3"];
 
@@ -51,6 +62,6 @@ function fetchOne(arch) {
 }
 
 try {
-  const arches = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(BUILDS);
+  const arches = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(BUILDS).filter((a) => a.startsWith("mac-"));
   for (const a of arches) fetchOne(a);
 } catch (e) { console.error(e.message); process.exit(1); }
