@@ -10,8 +10,9 @@
 .cv-plus { color: var(--ready); font-variant-numeric: tabular-nums; }
 .cv-minus { color: var(--warn); font-variant-numeric: tabular-nums; }
 .cv-note { padding: var(--sp-2) 0; }
-.cv-list { display: flex; flex-direction: column; border: var(--hair) solid var(--line); border-radius: var(--r-m); }
-.cv-li { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-2) var(--sp-3); color: var(--ink);
+.cv-list { display: flex; flex-direction: column; border: var(--hair) solid var(--line); border-radius: var(--r-m);
+  max-height: var(--h-pre); overflow-y: auto; font-size: var(--fs-m); }  /* a long list scrolls; the diff stays near */
+.cv-li { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-1) var(--sp-3); color: var(--ink);
   text-decoration: none; border-bottom: var(--hair) solid var(--line); min-width: 0; }
 .cv-li:last-child { border-bottom: 0; }
 .cv-li:hover { background: var(--bg); }
