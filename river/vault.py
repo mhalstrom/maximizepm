@@ -1201,6 +1201,14 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
         for to in {r["asked_by"], r["proposed_by"]} - {None}:
             core._send(conn, "notice", "maxpm", f"{actor or 'the person'} allowed {', '.join(pick)} for request "
                        f"r{r['id']} ({g['covers']}): run the command again", to=to, item_id=r["item_id"])
+        # #5840: the session released its task and blocked it on this request (policy p154: it does not wait at its
+        # prompt); the OK ends that block, so the task is ready and the next session gets the grant.
+        it = conn.execute("SELECT blocked_reason FROM items WHERE id=?", (r["item_id"],)).fetchone() \
+            if r["item_id"] else None
+        if it and it["blocked_reason"] and re.search(rf"\br{r['id']}\b", it["blocked_reason"]):
+            conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, "
+                         "blocked_set_by=NULL WHERE id=?", (r["item_id"],))
+            core._event(conn, r["item_id"], actor, f"outside blocker cleared: request r{r['id']} allowed")
     return {**request_info(conn, _request(conn, rid)), "grant": g["grant"]}
 
 

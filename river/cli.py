@@ -5648,6 +5648,10 @@ def render_secret(a, res):
     elif cmd in ("request", "propose", "approve", "refuse"):
         print(_request_line(res) + (f"; sent to {res['to']}" if res.get("to") else "")
               + (f"; grant {res['grant']}" if res.get("grant") else ""))
+        if cmd == "request" and res.get("sites") and res.get("item_id"):  # #5840: do not wait at the prompt (p154)
+            print(f"next: commit what is done, then maxpm blocked {res['item_id']} --reason \"waits for request "
+                  f"{res['request']}\" and maxpm release {res['item_id']}: the person's Allow ends the block, and the "
+                  f"next session of #{res['item_id']} opens the sites signed in")
     elif cmd == "requests":
         if not res["requests"]:
             print("no requests wait" + ("" if a.all else " (--all shows the answered ones)"))

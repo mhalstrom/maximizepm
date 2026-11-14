@@ -400,7 +400,17 @@ class SigninRequests(Base):
         self.assertIn("r1 asked: dev asks for the person's sign-ins of github.com from the browser of site/boss",
                       out.getvalue())
         self.assertNotIn("None", out.getvalue())
+        self.assertIn(f"maxpm blocked {self.item} --reason \"waits for request r1\"", out.getvalue())
         self.assertEqual(vault.requests(self.c)["requests"][0]["source"], "site/boss")
+
+    def test_allow_ends_the_block_that_names_the_request(self):
+        """#5840: the asking session released its task, blocked on the request; Allow makes the task ready."""
+        from river.routes import secrets as routes_secrets
+        r = self.ask()
+        core.block(self.c, self.item, "waits for request r1 (sign-ins)", actor="dev")
+        core.release(self.c, self.item, "dev")
+        routes_secrets.act(self.c, {"action": "approve", "request": r["id"]}, "mark")
+        self.assertIsNone(self.c.execute("SELECT blocked_reason FROM items WHERE id=?", (self.item,)).fetchone()[0])
 
 
 if __name__ == "__main__":
