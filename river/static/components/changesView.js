@@ -81,7 +81,8 @@ function fileHtml(f, fi, root, ctx, split) {
     <div class="chg-fhead"><span class="chg-path">${esc(f.path)}</span>${status ? chip("c-p", status) : ""}${f.untracked ? chip("c-p", "not in git") : ""}
       <span class="chg-plus">+${f.add}</span><span class="chg-minus">−${f.del}</span><span class="spacer"></span>${editor}</div>
     ${f.binary ? `<div class="muted t-m chg-note">A binary file.</div>` : ""}
-    ${f.hunks.length ? `<div class="chg-scroll"><table class="chg-t${split ? " chg-split" : ""}">${body.join("")}</table></div>` : ""}
+    ${f.hunks.length ? `<div class="chg-scroll"><table class="chg-t${split ? " chg-split" : ""}">${split
+      ? `<colgroup><col class="chg-cn"><col><col class="chg-cn"><col></colgroup>` : ""}${body.join("")}</table></div>` : ""}
     ${f.cut ? `<div class="muted t-m chg-note">The rest of this file is not shown: the diff is too long. ${editor}</div>` : ""}
   </section>`;
 }

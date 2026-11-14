@@ -31,7 +31,10 @@
 .chg-n { width: 1%; text-align: right; color: var(--muted); white-space: nowrap; user-select: none; cursor: pointer;
   font-variant-numeric: tabular-nums; }
 .chg-c { white-space: pre; cursor: pointer; }
-.chg-split .chg-c { width: 50%; }
+/* Side by side: two equal halves in the box's width; a long line wraps inside its half (one column scrolls instead). */
+.chg-split { table-layout: fixed; }
+.chg-split .chg-cn { width: calc(var(--sp-7) * 2); }
+.chg-split .chg-c { white-space: pre-wrap; overflow-wrap: anywhere; }
 .chg-sign { display: inline-block; width: 2ch; color: var(--muted); user-select: none; }
 .chg-add { background: var(--ready-bg); }
 .chg-del { background: var(--warn-bg); }
