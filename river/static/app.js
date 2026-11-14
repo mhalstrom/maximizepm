@@ -428,7 +428,8 @@ function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
   let p = pane || (tabName === "sessions" && !view.session ? "" : tabName);
   if (tabName === "sessions" && view.session && !pane) {
     p += "/" + encodeURIComponent(view.session);
-    if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
+    if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5)
+      : ["browser", "changes"].includes(view.art) ? "/" + view.art : "/artifacts/" + view.art;
   }
   const q = new URLSearchParams();
   if (tabName === "plan") { p += "/" + planView; if (scope.project) q.set("project", scope.project); if (scope.goal) q.set("goal", scope.goal); }
@@ -470,7 +471,9 @@ const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
 // Another tab of the side panel, or none: the same entry, with the artifact's id.
 onPanel((session, target) => {
   if (session !== view.session) return;
-  view.art = !target ? null : /^item:\d+$/.test(target) ? target : artId(target);
+  // The fixed tools have an address of their own (#5855): /sessions/<name>/browser and /sessions/<name>/changes.
+  const tool = (/^tool:(browser|changes):/.exec(target || "") || [])[1];
+  view.art = !target ? null : /^item:\d+$/.test(target) ? target : tool || artId(target);
   if (tab === "sessions") syncUrl(false);
 });
 wireItemPop();  // the pop-up of every item on the page (#4622)

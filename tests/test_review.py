@@ -93,6 +93,16 @@ class SessionDiff(Base):
         self.assertTrue(f["cut"] and d["cut"])
         self.assertEqual(sum(len(h["lines"]) for h in f["hunks"]), 10)
 
+    def test_many_new_files_show_as_one_line_by_folder(self):
+        os.makedirs(os.path.join(self.repo, "shots"))
+        for i in range(5):
+            self.write(f"shots/s{i}.yml", "x\n")
+        with unittest.mock.patch.object(review, "UNTRACKED_MAX", 2):
+            d = review.session_diff(self.c, "dev")
+        self.assertEqual(len(d["files"]), 2)
+        self.assertEqual(d["untracked_more"], {"count": 3, "folders": [("shots/", 3)]})
+        self.assertEqual(review.count_of(self.c, "dev"), 5)
+
     def test_a_session_in_the_same_folder_is_named(self):
         core.register(self.c, "dev2")
         it = core.item_add(self.c, "app", "other", actor="t")["id"]

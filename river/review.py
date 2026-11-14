@@ -144,12 +144,20 @@ def untracked(root, budget):
     """The files not yet known to git (not ignored), each as a new file with its text (text files only)."""
     out = git(root, "ls-files", "--others", "--exclude-standard", "-z")
     names = [x for x in (out or "").split("\0") if x]
+    if len(names) > UNTRACKED_MAX:  # the rest: one line, counted by top folder (a folder of screenshots, #5855)
+        rest = {}
+        for name in names[UNTRACKED_MAX:]:
+            top = name.split("/", 1)[0] + ("/" if "/" in name else "")
+            rest[top] = rest.get(top, 0) + 1
+        budget["more"] = {"count": len(names) - UNTRACKED_MAX,
+                          "folders": sorted(rest.items(), key=lambda kv: -kv[1])[:8]}
+        names = names[:UNTRACKED_MAX]
     files = []
-    for i, name in enumerate(names):
+    for name in names:
         f = {"path": name, "old": None, "status": "added", "add": 0, "del": 0, "binary": False, "hunks": [],
              "cut": False, "untracked": True}
         files.append(f)
-        if i >= UNTRACKED_MAX or budget["left"] <= 0:
+        if budget["left"] <= 0:
             f["cut"] = True
             continue
         try:
@@ -231,6 +239,7 @@ def session_diff(conn, agent, base="origin"):
     ahead = git(root, "rev-list", "--count", f"{main_ref(root)}..HEAD") if head and main_ref(root) else None
     return {"agent": agent, "folder": folder, "root": root, "git": True, "base": base, "against": against,
             "head": head, "files": files, "cut": budget["left"] <= 0, "review_at": review_at,
+            "untracked_more": budget.get("more"),
             "project": project[0] if project else None, "state": state_of(conn, target, head) if head else None,
             "reviewed": reviewed, "shared": sharing(conn, agent, root),
             "commits_ahead": int(ahead.strip()) if ahead and ahead.strip().isdigit() else None}

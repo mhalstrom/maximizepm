@@ -140,7 +140,9 @@ function draw(box, src, ctx) {
     <div class="cv-sum t-m">${files.length} file${files.length === 1 ? "" : "s"} <span class="cv-plus">+${add}</span> <span class="cv-minus">−${del}</span> ${state} ${gate ? `<span class="muted">${esc(gate)}</span>` : ""}</div>
     ${actions}
     ${files.length ? `<nav class="cv-list">${list}</nav>` : `<div class="muted cv-note">No changes ${src.session ? "against " + esc(d.against || "this base") : "named #" + d.item + " in a commit yet"}.</div>`}
-    ${d.cut ? `<div class="t-m muted cv-note">The diff is long: some lines are not shown. The file list is whole.</div>` : ""}
+    ${d.cut ? `<div class="t-m muted cv-note">The diff is long: some lines are not shown.</div>` : ""}
+    ${d.untracked_more ? `<div class="t-m muted cv-note">And ${d.untracked_more.count} more new files that git does not know: ${
+      d.untracked_more.folders.map(([f, k]) => `<span class="cv-path">${esc(f)}</span> ${k}`).join(", ")}. Add them to .gitignore if they are not work.</div>` : ""}
     ${fileBlocks}</div>`;
   box.scrollTop = keep;
   const ta = box.querySelector(".cv-text");
