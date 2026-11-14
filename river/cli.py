@@ -1199,6 +1199,27 @@ def build_parser(only=None):
                    help="change the site, account or 2-step only; ask for no password")
     x.add_argument("--project")
     x.add_argument("--note")
+    # Requests (#5834): a session asks; the manager grants a marked set or proposes a checklist; the person approves.
+    x = ses.add_parser("request", help="ask the manager for a set for your task: maxpm secret request <set> --reason")
+    x.add_argument("name", help="the set")
+    x.add_argument("--reason", required=True, help="why the task needs it")
+    x.add_argument("--item", help="the task (default: the one you hold)")
+    x = ses.add_parser("propose", help="the manager: put a request to the person as a checklist of credentials")
+    x.add_argument("request", help="r12")
+    x.add_argument("--offer", required=True, help="the credentials to choose from, by name, comma separated")
+    x.add_argument("--tick", default="", help="the ones you expect the person to allow, comma separated")
+    x.add_argument("--reason", help="why (default: the session's reason)")
+    x = ses.add_parser("approve", help="the person: allow the ticked credentials of a request (or --only your pick)")
+    x.add_argument("request", help="r12")
+    x.add_argument("--only", help="exactly these credentials, comma separated")
+    x.add_argument("--note")
+    x = ses.add_parser("refuse", help="no grant for a request")
+    x.add_argument("request", help="r12")
+    x.add_argument("--note", help="why")
+    x = ses.add_parser("requests", help="the requests that wait")
+    x.add_argument("--all", action="store_true", help="also the answered ones")
+    x = ses.add_parser("check", help="one session: the sets it holds, who granted each, its requests and each use")
+    x.add_argument("name", help="the session")
     x = ses.add_parser("cookies", help="save a session browser's sign-in of one site (its cookies) into a set (a "
                        "person only): the sessions that a grant of the set covers start signed in there")
     x.add_argument("name", help="for example github-cookies")
@@ -5512,6 +5533,20 @@ def _secret_cmd(conn, a, actor):
             raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} {where}")
         return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc, "where": where,
                 "masked": prot["level"] != "open"}
+    if cmd in ("request", "propose", "approve", "refuse", "requests", "check"):  # #5834
+        names = lambda s: [x.strip() for x in (s or "").split(",") if x.strip()]  # noqa: E731
+        args = {"action": cmd, "name": getattr(a, "name", None), "request": getattr(a, "request", None)}
+        if cmd == "request":
+            args.update(reason=a.reason, item=a.item)
+        elif cmd == "propose":
+            args.update(offer=names(a.offer), tick=names(a.tick), reason=a.reason)
+        elif cmd == "approve":
+            args.update(only=names(a.only) if a.only is not None else None, note=a.note)
+        elif cmd == "refuse":
+            args.update(note=a.note)
+        elif cmd == "requests":
+            args.update(all=a.all)
+        return _secret_op(conn, args, actor)
     if cmd == "cookies":  # the browsers run in maxpm serve: always through it
         return ask_server(conn, "secret", {"action": "cookies", "name": vault.check_name(a.name), "site": a.site,
                                            "session": a.session, "agent": a.session, "set": a.set_name,
@@ -5584,6 +5619,30 @@ def render_secret(a, res):
     elif cmd in ("pipe", "run"):
         print(f"gave secret {res['secret']} to {res['piped_to']} {res['where']} (exit 0"
               + ("; its value is masked as *** in the output)" if res["masked"] else ")"))
+    elif cmd in ("request", "propose", "approve", "refuse"):
+        print(_request_line(res) + (f"; sent to {res['to']}" if res.get("to") else "")
+              + (f"; grant {res['grant']}" if res.get("grant") else ""))
+    elif cmd == "requests":
+        if not res["requests"]:
+            print("no requests wait" + ("" if a.all else " (--all shows the answered ones)"))
+        for r in res["requests"]:
+            print("  " + _request_line(r))
+    elif cmd == "check":
+        print(f"{res['agent']}: the sets it may use now")
+        for g in res["grants"]:
+            print("  " + _grant_line(g))
+        if not res["grants"]:
+            print("  none")
+        if res["requests"]:
+            print("its requests:")
+            for r in res["requests"]:
+                print("  " + _request_line(r))
+        print("its uses and refusals, newest first:")
+        for r in res["uses"]:
+            print(f"  {core.show_time(r['at'])}  {r['name']:<24} {r['action']:<8}"
+                  + (f"  #{r['item_id']}" if r["item_id"] else "") + (f"  {r['detail']}" if r["detail"] else ""))
+        if not res["uses"]:
+            print("  none")
     elif cmd == "cookies":
         print(f"saved the sign-in of {res['site']} ({res['cookies']} cookies) as {res['secret']}"
               + (f" in the set {res['set']}: the sessions that a grant of it covers start signed in there"
@@ -5653,6 +5712,15 @@ def render_secret(a, res):
             print("no grants" + ("" if a.ended else " that give their set now (--ended shows the others)"))
         for g in res["grants"]:
             print("  " + _grant_line(g))
+
+
+def _request_line(r):
+    """One request (#5834): its id, state, who asked for what, and the checklist."""
+    marks = ", ".join(("[x] " if n in r["ticked"] else "[ ] ") + n for n in r["offered"])
+    return (f"{r['request']} {r['state']}: {r['asked_by']} asks for {r['set_name']} for {r['covers']}"
+            + (f" ({r['reason']})" if r.get("reason") else "") + (f"; checklist {marks}" if marks else "")
+            + (f"; allowed {', '.join(r['chosen'])}" if r["chosen"] else "")
+            + (f"; by {r['decided_by'] or 'a person'}" if r["state"] in ("granted", "refused") else ""))
 
 
 def _grant_line(g):

@@ -570,5 +570,86 @@ class Levels(Base):
         self.assertEqual(m.feed(b"x MIIEvQIBADANBgkqhkiG9w0BAQEFAASC y") + m.flush(), b"x *** y")
 
 
+class Requests(Base):
+    """#5834 (mark 2026-11-14): a session asks the manager; for a set the person did not mark, the manager proposes
+    a checklist; the person's OK grants exactly the ticked credentials."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "site")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "dev")
+        core.register(self.c, "manager-1")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='manager-1'")
+        for n in ("stripe-key", "stripe-webhook", "db-url"):
+            vault.put(self.c, n, b"v-" + n.encode(), None)
+        vault.set_change(self.c, "stripe-live", add=["stripe-key", "stripe-webhook"], actor="mark")
+        self.iid = core.item_add(self.c, "site", "refund flow", actor="t")["id"]
+        core.claim(self.c, self.iid, "dev")
+        p = mock.patch.object(core, "active_manager", lambda conn, but=None: "manager-1")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def last(self, to, kind="alert"):
+        r = self.c.execute("SELECT body FROM messages WHERE kind=? AND to_agent=? ORDER BY id DESC", (kind, to)).fetchone()
+        return r["body"] if r else None
+
+    def test_checklist_for_a_set_that_is_not_marked(self):
+        r = vault.request(self.c, "stripe-live", "refunds need the live key", "dev")
+        self.assertEqual((r["state"], r["to"], r["covers"]), ("open", "manager-1", f"task #{self.iid}"))
+        self.assertIn("not marked 'the manager may grant'", self.last("manager-1"))
+        p = vault.propose(self.c, r["request"], ["stripe-key", "stripe-webhook", "db-url"], ["stripe-key"],
+                          actor="manager-1")
+        self.assertEqual(p["state"], "asked")
+        body = self.last("mark")
+        self.assertIn("[x] stripe-key", body)
+        self.assertIn("[ ] stripe-webhook", body)
+        self.assertIn("/settings", body)
+        with self.assertRaises(RiverError):
+            vault.approve(self.c, r["request"], actor="manager-1")  # the OK is the person's
+        a = vault.approve(self.c, r["request"], ["stripe-key", "db-url"], actor="mark")  # mark unticks and adds
+        self.assertEqual((a["state"], a["chosen"]), ("granted", ["stripe-key", "db-url"]))
+        self.assertEqual(vault.get(self.c, "stripe-key", "dev"), b"v-stripe-key")
+        self.assertEqual(vault.get(self.c, "db-url", "dev"), b"v-db-url")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "stripe-webhook", "dev")  # exactly the selection
+        self.assertIn("allowed stripe-key, db-url", self.last("dev", "notice"))
+        core.done(self.c, self.iid, "ok", "dev")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "stripe-key", "dev")  # the grant ended with the task
+
+    def test_a_marked_set_is_the_managers_grant(self):
+        vault.set_change(self.c, "stripe-live", manager_may_grant=True, actor="mark")
+        r = vault.request(self.c, "stripe-live", "refunds", "dev")
+        self.assertIn(f"maxpm secret grant stripe-live --item {self.iid}", self.last("manager-1"))
+        vault.grant(self.c, "stripe-live", "item", str(self.iid), actor="manager-1")
+        self.assertEqual(vault.requests(self.c, every=True)["requests"][0]["state"], "granted")
+        self.assertEqual(vault.requests(self.c)["requests"], [])
+        self.assertIn(f"for your request {r['request']}", self.last("dev", "notice"))
+        res = vault.check(self.c, "dev")
+        self.assertEqual([g["set"] for g in res["grants"]], ["stripe-live"])
+        self.assertEqual(res["grants"][0]["granted_by"], "manager-1")
+        vault.get(self.c, "stripe-key", "dev")
+        self.assertEqual(vault.check(self.c, "dev")["uses"][0]["action"], "use")
+
+    def test_refuse_and_cli(self):
+        r = vault.request(self.c, "stripe-live", "refunds", "dev")
+        vault.refuse(self.c, r["request"], "use the test key", actor="manager-1")
+        self.assertIn("use the test key", self.last("dev", "notice"))
+        rc, out = self.run_cli(["secret", "request", "stripe-live", "--reason", "refunds again"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("r2 open: dev asks for stripe-live", out)
+        rc, out = self.run_cli(["--as", "manager-1", "secret", "propose", "r2", "--offer", "stripe-key,db-url",
+                                "--tick", "stripe-key"])
+        self.assertIn("checklist [x] stripe-key, [ ] db-url", out)
+        rc, out = self.run_cli(["--as", "mark", "secret", "approve", "r2"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("allowed stripe-key", out)
+        rc, out = self.run_cli(["--as", "mark", "secret", "check", "dev"])
+        self.assertIn("set req2 to task #", out)
+        rc, out = self.run_cli(["secret", "requests", "--all"])
+        self.assertIn("r1 refused", out)
+
+
 if __name__ == "__main__":
     unittest.main()

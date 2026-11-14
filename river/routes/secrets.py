@@ -23,6 +23,7 @@ def credentials(h, path):
     try:
         rows = [{k: r.get(k) for k in SHOWN} for r in vault.listing(conn)["secrets"]]
         out = {"credentials": rows, "sets": vault.sets(conn)["sets"], "grants": vault.grants(conn)["grants"],
+               "requests": vault.requests(conn)["requests"],  # #5834: the checklists that wait (#5833 draws them)
                "levels": list(vault.LEVELS), "scopes": list(vault.GRANT_SCOPES), "kinds": list(vault.GRANT_KINDS),
                "store": vault.backend().name}
     finally:
@@ -81,6 +82,19 @@ def act(conn, a, who):
     if action == "get":
         data = vault.get(conn, name, who, a.get("use"), a.get("how"), a.get("argv"))
         return {"secret": name, "value_b64": base64.b64encode(data).decode(), **vault.protection(conn, name)}
+    # Requests and their checklists (#5834)
+    if action == "request":
+        return vault.request(conn, name, a.get("reason"), who, a.get("item"))
+    if action == "propose":
+        return vault.propose(conn, a.get("request"), a.get("offer") or [], a.get("tick") or [], a.get("reason"), who)
+    if action == "approve":
+        return vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"))
+    if action == "refuse":
+        return vault.refuse(conn, a.get("request"), a.get("note"), who)
+    if action == "requests":
+        return vault.requests(conn, bool(a.get("all")))
+    if action == "check":
+        return vault.check(conn, a.get("agent") or name)
     if action == "cookies":  # #5827: a session browser's sign-in of one site into a set; serve holds the browsers
         from .. import signin
         from . import browser as routes_browser

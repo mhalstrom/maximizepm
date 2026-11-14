@@ -233,11 +233,15 @@ def listing(conn, project=None):
     return {"secrets": rows, "store": backend().name}
 
 
-def log(conn, name=None, limit=30):
-    q, args = "SELECT name, at, actor, action, detail, item_id FROM secret_log", []
+def log(conn, name=None, limit=30, actor=None):
+    q, args, where = "SELECT name, at, actor, action, detail, item_id FROM secret_log", [], []
     if name:
-        q += " WHERE name=?"
+        where.append("name=?")
         args.append(check_name(name))
+    if actor:  # #5834: one session's uses (maxpm secret check)
+        where.append("actor=?")
+        args.append(actor)
+    q += (" WHERE " + " AND ".join(where)) if where else ""
     rows = [dict(r) for r in conn.execute(q + " ORDER BY id DESC LIMIT ?", args + [int(limit)])]
     return {"log": rows}
 
@@ -919,7 +923,196 @@ def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
         cur = conn.execute("INSERT INTO secret_grants (set_id, scope, value, note, granted_by, granted_at, until) "
                            "VALUES (?,?,?,?,?,?,?)", (s["id"], scope, v, note, actor, at, end))
         g = conn.execute("SELECT * FROM secret_grants WHERE id=?", (cur.lastrowid,)).fetchone()
+        # #5834: the requests for this set and scope are answered by the grant
+        for r in conn.execute("SELECT * FROM secret_requests WHERE state IN ('open','asked') AND scope=? AND value=? "
+                              "AND set_name=?", (scope, v, set_name)).fetchall():
+            conn.execute("UPDATE secret_requests SET state='granted', decided_by=?, decided_at=?, grant_id=? WHERE id=?",
+                         (actor, at, g["id"], r["id"]))
+            if r["asked_by"]:
+                core._send(conn, "notice", "maxpm", f"{actor or 'a person'} granted the set {set_name} for your "
+                           f"request r{r['id']}: run the command again", to=r["asked_by"], item_id=r["item_id"])
     return {**_grant_info(conn, g, set_name), "already": False}
+
+
+# ---- requests (#5834, mark 2026-11-14): a session asks the manager; for a set the person did not mark, the manager
+# proposes a checklist to the person, and the person's OK grants exactly the ticked credentials.
+
+def _people(conn):
+    return [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC")]
+
+
+def _request(conn, rid):
+    t = str(rid).strip().lstrip("rR#")
+    r = conn.execute("SELECT * FROM secret_requests WHERE id=?", (int(t),)).fetchone() if t.isdigit() else None
+    if not r:
+        raise RiverError(f"no request {rid}: maxpm secret requests lists them")
+    return r
+
+
+def request_info(conn, r):
+    import json
+    d = dict(r)
+    d["request"] = f"r{r['id']}"
+    for k in ("offered", "ticked", "chosen"):
+        d[k] = json.loads(r[k]) if r[k] else []
+    d["covers"] = _scope_text(conn, r["scope"], r["value"])
+    it = conn.execute("SELECT title, short FROM items WHERE id=?", (r["item_id"],)).fetchone() if r["item_id"] else None
+    d["task"] = (it["short"] or it["title"]) if it else None
+    return d
+
+
+def _checklist(conn, rid, offered, ticked, reason, task, who):
+    from . import notify
+    lines = "\n".join(f"  [{'x' if n in ticked else ' '}] {n}" for n in offered)
+    return (f"{who} asks you to allow credentials for {task} (request r{rid}). Reason: {reason}\n{lines}\n"
+            f"Tick or untick them on the page and press OK: {notify.page_url(conn)}settings\n"
+            f"Or here: maxpm secret approve r{rid} (the ticked ones), --only <names> (your own pick), "
+            f"or maxpm secret refuse r{rid} --note \"<why>\"")
+
+
+def request(conn, set_name, reason, actor=None, item=None):
+    """A session asks for a set for its task. To the manager when one is active (it grants a marked set, or proposes
+    a checklist to the person for another); with no manager, a set that is not marked goes to the person as a
+    checklist of its credentials, all ticked."""
+    import json
+    who = session_of(conn, actor)
+    if who["person"]:
+        raise RiverError("a person grants it: maxpm secret grant <set> --item <id>")
+    if not (reason or "").strip():
+        raise RiverError("say why the task needs it: maxpm secret request <set> --reason \"<why>\"")
+    s = _set(conn, set_name)
+    name = who["name"]
+    held = core._item(conn, item) if item else core._held_item(conn, name)
+    scope, value = ("item", str(held["id"])) if held else ("agent", name)
+    at = core.iso(core.now())
+    manager = core.active_manager(conn, but=name)
+    members = [r["name"] for r in conn.execute("SELECT name FROM secret_set_members WHERE set_id=? ORDER BY name",
+                                               (s["id"],))]
+    people = _people(conn)
+    to_person = not manager and not s["manager_may_grant"]
+    with core.tx(conn):
+        cur = conn.execute("INSERT INTO secret_requests (item_id, scope, value, set_name, reason, asked_by, asked_at, "
+                           "offered, ticked, state) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (held["id"] if held else None, scope, value, s["name"], reason.strip(), name, at,
+                            json.dumps(members) if to_person else None, json.dumps(members) if to_person else None,
+                            "asked" if to_person else "open"))
+        rid = cur.lastrowid
+        task = f"#{held['id']}" if held else name
+        if manager:
+            how = (f"maxpm secret grant {s['name']} --{scope} {value}" if s["manager_may_grant"] else
+                   f"the set is not marked 'the manager may grant': put a checklist to the person: maxpm secret "
+                   f"propose r{rid} --offer {','.join(members) or '<names>'} --tick <the ones you expect>")
+            core._send(conn, "alert", "maxpm", f"{name} asks for the set {s['name']} for {task} (request r{rid}): "
+                       f"{reason.strip()}. {how}", to=manager, item_id=held["id"] if held else None)
+            to = manager
+        elif s["manager_may_grant"] or not people:
+            to = people[0] if people else None
+            if to:
+                core._send(conn, "alert", "maxpm", f"{name} asks for the set {s['name']} for {task} (request r{rid}): "
+                           f"{reason.strip()}. maxpm secret grant {s['name']} --{scope} {value}", to=to,
+                           item_id=held["id"] if held else None)
+        else:
+            to = people[0]
+            core._send(conn, "alert", "maxpm", _checklist(conn, rid, members, members, reason.strip(), task, name),
+                       to=to, item_id=held["id"] if held else None)
+    return {**request_info(conn, _request(conn, rid)), "to": to}
+
+
+def propose(conn, rid, offered, ticked=(), reason=None, actor=None):
+    """The manager puts a request to the person as a checklist: offered (credential names), ticked (those it
+    expects the person to allow). The person ticks or unticks, then OK (approve)."""
+    import json
+    who = session_of(conn, actor)
+    if not core._is_manager(conn, who["name"]):
+        raise RiverError("the manager proposes a checklist; a person approves with maxpm secret approve r<id>")
+    r = _request(conn, rid)
+    if r["state"] not in ("open", "asked"):
+        raise RiverError(f"request r{r['id']} is {r['state']}")
+    offered = [check_name(n) for n in dict.fromkeys(x.strip() for x in offered if x.strip())]
+    if not offered:
+        raise RiverError("--offer names the credentials the person chooses from")
+    missing = [n for n in offered if not conn.execute("SELECT 1 FROM secrets WHERE name=?", (n,)).fetchone()]
+    if missing:
+        raise RiverError(f"no credential {', '.join(missing)}: maxpm secret list shows the names")
+    ticked = [n for n in dict.fromkeys(x.strip() for x in ticked if x.strip())]
+    if any(n not in offered for n in ticked):
+        raise RiverError("--tick names only credentials of --offer")
+    people = _people(conn)
+    if not people:
+        raise RiverError("no person is registered to ask (maxpm register <name> --human)")
+    reason = (reason or r["reason"] or "").strip()
+    with core.tx(conn):
+        conn.execute("UPDATE secret_requests SET state='asked', proposed_by=?, proposed_at=?, offered=?, ticked=?, "
+                     "reason=? WHERE id=?", (who["name"], core.iso(core.now()), json.dumps(offered), json.dumps(ticked),
+                                            reason, r["id"]))
+        task = f"#{r['item_id']}" if r["item_id"] else r["asked_by"]
+        core._send(conn, "alert", "maxpm", _checklist(conn, r["id"], offered, ticked, reason, task, who["name"]),
+                   to=people[0], item_id=r["item_id"])
+    return {**request_info(conn, _request(conn, rid)), "to": people[0]}
+
+
+def approve(conn, rid, chosen=None, actor=None, note=None):
+    """The person's OK: a set of exactly the chosen credentials (default: the ticked ones), granted to the request's
+    scope. Only a person."""
+    import json
+    _person_only(conn, actor, "approve a credential request")
+    r = _request(conn, rid)
+    if r["state"] not in ("open", "asked"):
+        raise RiverError(f"request r{r['id']} is {r['state']}")
+    pick = json.loads(r["ticked"] or "[]") if chosen is None else [x.strip() for x in chosen if x.strip()]
+    if chosen is None and not r["offered"]:  # a request with no checklist: the set it named
+        pick = [x["name"] for x in conn.execute("SELECT m.name FROM secret_set_members m JOIN secret_sets s "
+                                                "ON s.id=m.set_id WHERE s.name=?", (r["set_name"],))]
+    if not pick:
+        raise RiverError("nothing is ticked: tick the credentials to allow, or refuse it: maxpm secret refuse "
+                         f"r{r['id']} --note \"<why>\"")
+    name = f"req{r['id']}"
+    set_change(conn, name, add=pick, note=f"request r{r['id']} of {r['asked_by']} for "
+               + (f"#{r['item_id']}" if r["item_id"] else r["value"]), actor=actor)
+    g = grant(conn, name, r["scope"], r["value"], note=note or f"request r{r['id']}", actor=actor)
+    at = core.iso(core.now())
+    with core.tx(conn):
+        conn.execute("UPDATE secret_requests SET state='granted', decided_by=?, decided_at=?, chosen=?, set_id="
+                     "(SELECT id FROM secret_sets WHERE name=?), grant_id=?, note=COALESCE(?, note) WHERE id=?",
+                     (actor, at, json.dumps(pick), name, g["id"], note, r["id"]))
+        for to in {r["asked_by"], r["proposed_by"]} - {None}:
+            core._send(conn, "notice", "maxpm", f"{actor or 'the person'} allowed {', '.join(pick)} for request "
+                       f"r{r['id']} ({g['covers']}): run the command again", to=to, item_id=r["item_id"])
+    return {**request_info(conn, _request(conn, rid)), "grant": g["grant"]}
+
+
+def refuse(conn, rid, note=None, actor=None):
+    """No grant: a person, or the manager for a request that is still at it."""
+    who = session_of(conn, actor)
+    r = _request(conn, rid)
+    if not (who["person"] or (core._is_manager(conn, who["name"]) and r["state"] == "open")):
+        raise RiverError("only a person refuses a request that is at the person, and the manager one at the manager")
+    if r["state"] not in ("open", "asked"):
+        raise RiverError(f"request r{r['id']} is {r['state']}")
+    with core.tx(conn):
+        conn.execute("UPDATE secret_requests SET state='refused', decided_by=?, decided_at=?, note=? WHERE id=?",
+                     (who["name"] or actor, core.iso(core.now()), note, r["id"]))
+        if r["asked_by"]:
+            core._send(conn, "notice", "maxpm", f"request r{r['id']} for the set {r['set_name']} was refused"
+                       + (f": {note}" if note else "") + ". Do the task without it, or release it",
+                       to=r["asked_by"], item_id=r["item_id"])
+    return request_info(conn, _request(conn, rid))
+
+
+def requests(conn, every=False):
+    q = "SELECT * FROM secret_requests" + ("" if every else " WHERE state IN ('open','asked')") + " ORDER BY id"
+    return {"requests": [request_info(conn, r) for r in conn.execute(q)]}
+
+
+def check(conn, agent, limit=30):
+    """For one session (#5834, mark: 'a way to verify that they are getting credentials they are actually allowed to
+    access'): the grants that cover it now and who gave each, its requests, and its uses and refusals."""
+    if not conn.execute("SELECT 1 FROM agents WHERE name=?", (agent,)).fetchone():
+        raise RiverError(f"no agent {agent}: maxpm who --all shows the names")
+    return {"agent": agent, "grants": grants(conn, for_agent=agent)["grants"],
+            "requests": [request_info(conn, r) for r in conn.execute(
+                "SELECT * FROM secret_requests WHERE asked_by=? ORDER BY id DESC LIMIT 10", (agent,))],
+            "uses": log(conn, limit=limit, actor=agent)["log"]}
 
 
 def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=None):

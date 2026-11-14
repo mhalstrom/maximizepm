@@ -1202,6 +1202,32 @@ CREATE TABLE IF NOT EXISTS secret_grants (
   revoked_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS secret_grants_set ON secret_grants(set_id);
+-- Requests for credentials (#5834, mark 2026-11-14): a session asks the manager for a set (maxpm secret request);
+-- for a set that the person did not mark, the manager proposes a checklist to the person: offered (the credentials,
+-- by name), ticked (the ones it expects the person to allow). The person's OK grants exactly chosen, as a set of its
+-- own (set_id) to the scope. state: open (at the manager), asked (at the person), granted, refused, withdrawn.
+-- Readers: maxpm secret requests|approve|refuse|check, GET /api/credentials (the page's checklist, #5833).
+CREATE TABLE IF NOT EXISTS secret_requests (
+  id          INTEGER PRIMARY KEY,
+  item_id     INTEGER,
+  scope       TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  set_name    TEXT,
+  reason      TEXT,
+  asked_by    TEXT,
+  asked_at    TEXT NOT NULL,
+  proposed_by TEXT,
+  proposed_at TEXT,
+  offered     TEXT,
+  ticked      TEXT,
+  state       TEXT NOT NULL DEFAULT 'open',
+  decided_by  TEXT,
+  decided_at  TEXT,
+  chosen      TEXT,
+  note        TEXT,
+  set_id      INTEGER,
+  grant_id    INTEGER
+);
 
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
 -- bring them back, newest first, on every device and through the relay. At most sessions.PROMPTS_KEEP a session.

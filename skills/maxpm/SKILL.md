@@ -513,7 +513,8 @@ command prints a value; never print one yourself.
   in on its site by itself, and your browser starts with the saved sign-ins (cookies) of your granted sets.
   Type no password; when it stops, it alerts the manager: do not sign in yourself.
 - A secret in a set needs a grant that covers you (your task, its goal, kind or project, or you):
-  `maxpm secret grants --for <you>`. A refusal names the set and the request to the manager; send it.
+  `maxpm secret grants --for <you>`. A refusal asks for the grant by itself; to say why the task needs it:
+  `maxpm secret request <set> --reason "<why>"`. Take other work until the notice of the grant comes.
   A secret in no set: only the session that saved it uses it. MaximizePM confirms your session from its
   processes, never from `--as`: run these commands in your own session, after its `maxpm go`.
 - Only the person has it: add a person item `Run in a terminal: maxpm secret put <name>` (it asks for the
