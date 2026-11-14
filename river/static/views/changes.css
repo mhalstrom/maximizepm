@@ -38,7 +38,9 @@
 .cv-none { background: var(--bg); }
 .cv-on { box-shadow: inset var(--hair-2) 0 0 var(--accent); background: var(--prog-bg); }
 .cv-hunk td { color: var(--muted); background: var(--bg); padding: var(--sp-1) var(--sp-2); white-space: pre; }
-.cv-crow td { padding: var(--sp-2) var(--sp-3); white-space: normal; font-family: inherit; font-size: var(--fs-m); }
+.cv-crow td { padding: var(--sp-2) var(--sp-3); white-space: normal; font-size: var(--fs-m);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }  /* the page's font, not the code's */
+.cv-crow .cv-comment > .t-s { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .cv-comment { border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-2) var(--sp-3);
   background: var(--panel); max-width: var(--w-form); overflow-wrap: anywhere; }
 .cv-form { display: flex; flex-direction: column; gap: var(--sp-2); max-width: var(--w-form); }
