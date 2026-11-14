@@ -107,6 +107,7 @@ def forget():
     """Read the status and the setting again at the next request (after maxpm phone, the setup step, or a test)."""
     _SELF.update(at=0.0, value=None)
     _LOGINS.update(at=0.0, value=set())
+    _PAGE.update(at=0.0, port=None, value=None)
 
 
 def serving(port):
@@ -115,6 +116,20 @@ def serving(port):
     if code != 0:
         return None
     return f"127.0.0.1:{port}" in out or f"localhost:{port}" in out
+
+
+_PAGE = {"at": 0.0, "port": None, "value": None}
+
+
+def page_url(port):
+    """https://<name> (no slash at the end) when tailscale serve forwards this computer's page on <port> now, else
+    None: the address of a phone notice's link (notify.remote_page, #5860). Read again at most every CACHE_S seconds."""
+    t = time.monotonic()
+    if _PAGE["port"] != port or t - _PAGE["at"] > CACHE_S:
+        me = self_info() if cli() or RUNNER else None
+        on = bool(me and me.get("running") and me.get("name")) and serving(port)
+        _PAGE.update(at=t, port=port, value=f"https://{me['name']}" if on else None)
+    return _PAGE["value"]
 
 
 def serve_command(port):

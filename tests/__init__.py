@@ -28,6 +28,10 @@ from river import review as _review  # noqa: E402
 _review.COUNT_AGAIN = float("inf")  # the page state starts no git count of the sessions' folders (#5855)
 core.LOGIN_PATH_RUNNER = lambda: None  # a test never starts the person's login shell (#5611); a test sets its own
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
+from river import tailnet as _tailnet  # noqa: E402
+# A test never asks the person's Tailscale (#5860): a phone notice's link went to this Mac's tailnet name when
+# tailscale serve forwarded the page here. Tests of Tailscale set their own fake (tests/test_tailnet.py).
+_tailnet.RUNNER = lambda args: (127, "")
 from river.agents import codex as codex_adapter  # noqa: E402
 codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
 server.ENTER_PAUSE = server.COMMAND_LOOK = server.INTERRUPT_PAUSE = 0  # no waits for a CLI's paste window or a command's screen (#5220)

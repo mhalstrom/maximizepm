@@ -727,6 +727,13 @@ function renderSetup(st) {
         <button class="btn" data-su="recheck">Check again</button>`
       : tn.running ? `<button class="btn primary" data-su="tailnet">Turn it on</button><button class="btn" data-su="recheck">Check again</button>`
       : `<button class="btn" data-su="recheck">Check again</button>`));
+  // The other way to the phone (#5860): the MaximizePM relay, below Tailscale and never first. A relay that is
+  // connected shows in the ⋯ menu, with its state and Disconnect.
+  const rl = S.relay;
+  if (rl && !rl.configured) more.push(extra(false, "Another way: the relay",
+    "The MaximizePM relay opens this page from any browser, after you sign in to it on this computer.",
+    rl.pending ? `<a class="btn" href="${esc(rl.pending.link)}" target="_blank" rel="noopener">Approve code ${esc(rl.pending.code)}</a>`
+      : `<button class="btn" data-su="relay">Connect relay</button>`));
   const missing = Object.entries(st.skills).filter(([, v]) => v !== "installed").map(([k]) => k);
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
     missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",
@@ -776,6 +783,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
       const r = await act("tailnet_serve", {});
       toast(r && r.enable ? "Tailscale asks for your approval: open the link in Your phone" : "Your phone can open this page now: scan the code");
     }
+    else if (k === "relay") await connectRelay();
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
     else if (k === "ntfy") {
@@ -899,22 +907,27 @@ window.riverOpenInPanel = async (session, target) => {
   openInPanel(target, session);
 };
 wireArtLinks();
-// Relay button: connects this MaximizePM to the relay (maxpm connect), so its page opens from any browser.
-// A click starts the sign-in: the relay page opens with a code to approve, and maxpm serve finishes it.
+// Relay button: shows the relay connection (maxpm connect), and disconnects it. Only a relay that is connected or
+// waits for its code shows here: Tailscale is the first way to the phone, and the setup guide offers the relay below
+// it (Your phone, #5860). Connect starts the sign-in: the relay page opens with a code to approve, and maxpm serve
+// finishes it.
 let relayArmed = 0;  // a click on a connected relay asks again before it disconnects
+async function connectRelay() {
+  try {
+    const got = await act("relay_connect", {});
+    window.open(got.link, "_blank", "noopener");
+    toast(`Approve code ${got.code} on the relay page`);
+  } catch (e) { /* toast shown */ }
+}
 function renderRelay() {
   const r = S.relay, b = $("#relayBtn");
-  if (!r) return b.classList.add("hidden");
+  if (!r || (!r.configured && !r.pending)) return b.classList.add("hidden");
   b.classList.remove("hidden");
   const armed = Date.now() - relayArmed < 4000;
   b.classList.toggle("primary", !!r.pending || armed);
   if (r.pending) {
     b.textContent = `Relay code ${r.pending.code}`;
     b.title = "Approve this code on the relay page";
-  } else if (!r.configured) {
-    b.textContent = "Connect relay";
-    b.title = "Open this page from any browser"
-      + (r.error ? `\nLast try: ${r.error}` : "");
   } else if (armed) {
     b.textContent = "Disconnect?";
     b.title = "Disconnect this computer from the relay";
@@ -933,14 +946,7 @@ function renderRelay() {
 $("#relayBtn").onclick = async () => {
   const r = S.relay || {};
   if (r.pending) return void window.open(r.pending.link, "_blank", "noopener");
-  if (!r.configured) {
-    try {
-      const got = await act("relay_connect", {});
-      window.open(got.link, "_blank", "noopener");
-      toast(`Approve code ${got.code} on the relay page`);
-    } catch (e) { /* toast shown */ }
-    return;
-  }
+  if (!r.configured) return connectRelay();
   if (Date.now() - relayArmed > 4000) { relayArmed = Date.now(); renderRelay(); setTimeout(renderRelay, 4100); return; }
   relayArmed = 0;
   try {

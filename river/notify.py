@@ -240,13 +240,17 @@ OPEN_TEXT = {"maxpm": "the MaximizePM page", "agent": "the agent's own app (clau
 
 
 def phone_note(conn):
-    """Where a phone tap on a link to the page goes, and why."""
-    from . import relay
+    """Where a phone tap on a link to the page goes, and why. Tailscale comes first; the relay is the other way (#5860)."""
+    from . import relay, tailnet
+    ts = tailnet.page_url(SERVE_PORT["port"] or core.serve_port_now(conn))
+    if ts:
+        return f"A phone with Tailscale opens the MaximizePM page at {ts}/."
     cfg = relay.load()
     if cfg:
         return f"A phone opens the MaximizePM page through the relay ({relay.site_url(cfg)}/)."
     return (f"A phone cannot open the MaximizePM page: it runs only on this computer (127.0.0.1). A tap there opens "
-            f"ntfy_click ({core.setting(conn, 'ntfy_click')}) instead; maxpm connect makes the page reachable from the phone.")
+            f"ntfy_click ({core.setting(conn, 'ntfy_click')}) instead. To open the page from the phone: maxpm phone "
+            "(over Tailscale), or maxpm connect (the MaximizePM relay).")
 
 
 def open_lines(conn, person=None):
@@ -260,14 +264,19 @@ def open_lines(conn, person=None):
 
 
 def remote_page(url):
-    """The address of a link to the page on this computer through the relay (maxpm connect), or None."""
+    """The address on the phone of a link to the page on this computer, or None: over Tailscale when tailscale serve
+    forwards the page (maxpm phone, #5863), else through the relay (maxpm connect). Tailscale comes first (#5860)."""
     import urllib.parse
-    from . import relay
-    cfg = relay.load()
-    if not cfg:
-        return None
+    from . import relay, tailnet
     u = urllib.parse.urlsplit(url or "")
-    return relay.site_url(cfg) + "/" + u.path.lstrip("/") + (f"?{u.query}" if u.query else "")
+    port = u.port or SERVE_PORT["port"]
+    base = tailnet.page_url(port) if port else None
+    if not base:
+        cfg = relay.load()
+        if not cfg:
+            return None
+        base = relay.site_url(cfg)
+    return base + "/" + u.path.lstrip("/") + (f"?{u.query}" if u.query else "")
 
 
 def _is_local(url):

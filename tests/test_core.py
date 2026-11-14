@@ -3623,6 +3623,19 @@ class NotifyOpen(Base):
         self.assertEqual(send("http://127.0.0.1:8765/"), "https://mark-ab3cd9.relay.example.org/")
         self.assertEqual(send("https://chatgpt.com/codex"), "https://chatgpt.com/codex")
         self.assertIn("https://mark-ab3cd9.relay.example.org/", notify.status(self.c)["phone"])
+        # #5860: Tailscale comes first. When tailscale serve forwards the page, the link goes there, not to the relay.
+        from river import tailnet
+        status = json.dumps({"Self": {"DNSName": "mac.tail1.ts.net.", "UserID": 1}, "BackendState": "Running"})
+        serve = json.dumps({"Web": {"mac.tail1.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8765"}}}}})
+        old = tailnet.RUNNER
+        tailnet.RUNNER = lambda args: (0, status if args[0] == "status" else serve)
+        self.addCleanup(lambda: (setattr(tailnet, "RUNNER", old), tailnet.forget()))
+        tailnet.forget()
+        self.assertEqual(send(local), "https://mac.tail1.ts.net/sessions/cx?as=mark")
+        with mock.patch.object(notify, "SERVE_PORT", {"port": 8765}):
+            self.assertEqual(send(None), "https://mac.tail1.ts.net/")  # a notice with no link: the page itself
+            self.assertIn("Tailscale opens the MaximizePM page at https://mac.tail1.ts.net/", notify.phone_note(self.c))
+        self.assertEqual(send("http://127.0.0.1:9999/"), "https://mark-ab3cd9.relay.example.org/")  # another port
 
     def test_setup_asks_and_status_shows_it(self):
         from river import cli, notify

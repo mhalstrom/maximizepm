@@ -2246,7 +2246,7 @@ def build_parser(only=None):
                    help="ask the maxpm serve that runs to start again with the code on disk, and wait until it answers")
     x.add_argument("--install-login", action="store_true",
                    help="start maxpm serve at login and again after a crash (macOS: a launchd agent; Linux: a systemd "
-                        "user unit), for a computer you reach through the relay")
+                        "user unit), for a computer you reach from your phone or another computer")
     x.add_argument("--remove-login", action="store_true", help="remove that login agent")
     x.add_argument("--kick", action="store_true", help="stop maxpm serve and start it again through its login agent, "
                    "or through the open desktop app, also when it hangs (the repair of the serve check)")
