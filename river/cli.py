@@ -2223,6 +2223,14 @@ def build_parser(only=None):
     x.add_argument("resume", nargs=argparse.REMAINDER, metavar="-- RESUME",
                    help="after --: the command that resumes this session")
     sub.add_parser("capacity", help="how many agent sessions the graph can use now")
+    ho = sub.add_parser("host", help="run MaximizePM on a remote host (a server, a Mac mini), set up from here over SSH")
+    hos = ho.add_subparsers(dest="hcmd", required=True)
+    x = hos.add_parser("setup", help="install MaximizePM on the host, serve at login there, the page over Tailscale")
+    x.add_argument("target", help="the SSH target of the host, as for ssh: mini, you@server")
+    x.add_argument("--move", action="store_true",
+                   help="also move this queue there (the host's queue must have no projects); this copy then refuses")
+    x.add_argument("--install", action="store_true", help="install this computer's code there even when it has maxpm")
+    hos.add_parser("forget", help="use this queue here again after a move to a host")
     ph = sub.add_parser("phone", help="reach this MaximizePM from your phone over Tailscale: its address and QR code")
     ph.add_argument("--on", action="store_true", help="turn it on: run tailscale serve --bg <serve_port>")
 
@@ -2605,6 +2613,21 @@ READS_NEEDS_YOU = ("cleanup", "health")
 
 
 def _run(args, conn):
+    if args.cmd == "host":  # a remote host over SSH (#5876); host forget also works on a queue that moved
+        from . import host
+        if args.hcmd == "forget":
+            res = host.forget(conn)
+            text = "This queue is in use here again." if res["forgot"] else "This queue was not marked moved."
+        else:
+            res = host.setup(conn, args.target, do_move=args.move, reinstall=args.install)
+            text = host.render(res)
+        print(json.dumps(res) if args.json else text)
+        return 0
+    if args.cmd != "serve" or not args.remove_login:
+        from . import host
+        why = host.moved_refusal(conn)  # the queue lives on a host now (#5876)
+        if why:
+            raise RiverError(why)
     if args.cmd == "serve" and args.restart:
         res = serve_restart(conn)
         if res.get("waits"):
