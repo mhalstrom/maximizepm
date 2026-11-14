@@ -61,6 +61,10 @@ def act(conn, a, who):
     if action == "get":
         data = vault.get(conn, name, who, a.get("use"), a.get("how"), a.get("argv"))
         return {"secret": name, "value_b64": base64.b64encode(data).decode(), **vault.protection(conn, name)}
+    if action == "signin":  # #5826
+        dec = lambda k: base64.b64decode(a[k]) if a.get(k) else None  # noqa: E731
+        return vault.signin_save(conn, name, a.get("site"), a.get("account"), dec("value_b64"), dec("totp_b64"),
+                                 a.get("two_step"), bool(a.get("reset")), who, a.get("project"), a.get("note"))
     if action == "level":  # #5825
         return vault.set_level(conn, name, a.get("level"), a.get("add_commands") or (), a.get("remove_commands") or (),
                                a.get("add_hosts") or (), a.get("remove_hosts") or (), a.get("env"), a.get("var"), who)

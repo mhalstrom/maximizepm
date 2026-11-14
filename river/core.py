@@ -1137,7 +1137,17 @@ CREATE TABLE IF NOT EXISTS secrets (
   allow_commands  TEXT,
   allow_hosts     TEXT,
   allow_env       INTEGER NOT NULL DEFAULT 0,
-  var             TEXT
+  var             TEXT,
+  -- A sign-in (#5826, river/signin.py): kind 'signin', the site and the account; the value is the password, an
+  -- authenticator key (if any) is in the store under '<name>#totp'. two_step: who passes a 2-step check, the person
+  -- (the default) or the agents (serve makes the code). fail_at, fail_why: the one try failed; serve fills no more
+  -- until a person resets it. Readers: signin.check (each page of a session's browser), maxpm secret list.
+  kind            TEXT NOT NULL DEFAULT 'token',
+  site            TEXT,
+  account         TEXT,
+  two_step        TEXT NOT NULL DEFAULT 'person',
+  fail_at         TEXT,
+  fail_why        TEXT
 );
 -- Each put, use and delete of a secret, by name, with who and the item they held (#5757). Reader: maxpm secret log.
 CREATE TABLE IF NOT EXISTS secret_log (
@@ -1887,6 +1897,14 @@ def _migrate(conn):
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_hosts TEXT")
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_env INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE secrets ADD COLUMN var TEXT")
+    # Sign-in credentials (#5826).
+    if "site" not in {r["name"] for r in conn.execute("PRAGMA table_info(secrets)")}:
+        conn.execute("ALTER TABLE secrets ADD COLUMN kind TEXT NOT NULL DEFAULT 'token'")
+        conn.execute("ALTER TABLE secrets ADD COLUMN site TEXT")
+        conn.execute("ALTER TABLE secrets ADD COLUMN account TEXT")
+        conn.execute("ALTER TABLE secrets ADD COLUMN two_step TEXT NOT NULL DEFAULT 'person'")
+        conn.execute("ALTER TABLE secrets ADD COLUMN fail_at TEXT")
+        conn.execute("ALTER TABLE secrets ADD COLUMN fail_why TEXT")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
     # Operations checks (#5430): a check of the form beat keeps its last beat; a run keeps each subject's status.

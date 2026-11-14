@@ -1185,6 +1185,20 @@ def build_parser(only=None):
     x.add_argument("name")
     x.add_argument("--var", help="the variable for this run")
     x.add_argument("command", nargs=argparse.REMAINDER, help="the command, after --")
+    x = ses.add_parser("signin", help="a sign-in that maxpm serve fills in a session's browser by itself: the site, "
+                       "the account, the password (it asks), and an authenticator key (--totp)")
+    x.add_argument("name", help="for example github-mark")
+    x.add_argument("--site", help="the site: github.com (its pages below it too: accounts.google.com for google.com)")
+    x.add_argument("--account", help="the account name or address that the site's form takes")
+    x.add_argument("--totp", action="store_true", help="also ask for the authenticator key (the text under 'can't "
+                   "scan the code'); piped in: the second line")
+    x.add_argument("--two-step", dest="two_step", choices=("person", "agents"),
+                   help="who passes a 2-step check: the person (the default) or the agents, from the key (a person only)")
+    x.add_argument("--reset", action="store_true", help="fill again after a failed try (a person only)")
+    x.add_argument("--keep-password", dest="keep_password", action="store_true",
+                   help="change the site, account or 2-step only; ask for no password")
+    x.add_argument("--project")
+    x.add_argument("--note")
     x = ses.add_parser("level", help="a secret's protection (a person only): locked (only the named commands), "
                        "hidden (any command; the default), open (the value shows in output)")
     x.add_argument("name")
@@ -5476,6 +5490,25 @@ def _secret_cmd(conn, a, actor):
             raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} {where}")
         return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc, "where": where,
                 "masked": prot["level"] != "open"}
+    if cmd == "signin":
+        args = {"action": "signin", "name": vault.check_name(a.name), "site": a.site, "account": a.account,
+                "two_step": a.two_step, "reset": a.reset, "project": a.project, "note": a.note}
+        password = key = b""
+        if not (a.keep_password or a.reset and not (a.site or a.account or a.totp)):
+            if sys.stdin.isatty():
+                import getpass
+                password = getpass.getpass(f"The password of {a.name} (it is not shown): ").encode()
+                if a.totp:
+                    key = getpass.getpass("The authenticator key (it is not shown): ").encode()
+            else:
+                lines = sys.stdin.buffer.read().splitlines()
+                password = lines[0] if lines else b""
+                key = lines[1] if a.totp and len(lines) > 1 else b""
+        if a.totp and not key:
+            raise RiverError("--totp: no authenticator key came (piped in: the second line)")
+        args.update(value_b64=base64.b64encode(password).decode() if password else None,
+                    totp_b64=base64.b64encode(key).decode() if key else None)
+        return _secret_op(conn, args, actor)
     if cmd == "level":
         from .routes import secrets
         return secrets.act(conn, {"action": "level", "name": a.name, "level": a.level, "add_commands": a.command,
@@ -5526,6 +5559,12 @@ def render_secret(a, res):
     elif cmd in ("pipe", "run"):
         print(f"gave secret {res['secret']} to {res['piped_to']} {res['where']} (exit 0"
               + ("; its value is masked as *** in the output)" if res["masked"] else ")"))
+    elif cmd == "signin":
+        print(f"{'saved' if res['made'] else 'changed'} sign-in {res['secret']}: {res['account']} on {res['site']}; "
+              + ("the agents pass a 2-step check from its key" if res["two_step"] == "agents" and res["totp"] else
+                 "a 2-step check goes to the person")
+              + (f"; it stopped: {res['failed']} (a person resets it: --reset)" if res["failed"] else "")
+              + f". A session with a grant of its set is signed in by maxpm serve; it types no password")
     elif cmd == "level":
         print(f"secret {res['secret']}: {res['level']}"
               + (f"; commands {', '.join(res['commands'])}" if res["commands"] else
@@ -5548,6 +5587,8 @@ def render_secret(a, res):
             print(f"  {r['name']:<28} {r['level']:<7} {r['project'] or '-':<14} saved {core.show_time(r['updated_at'])} by "
                   f"{r['updated_by'] or 'a person'}; {used}" + (f"; sets {', '.join(r['sets'])}" if r.get("sets")
                                                                  else "; in no set")
+                  + (f"; sign-in {r['account']} on {r['site']}" if r.get("kind") == "signin" else "")
+                  + (f" (stopped: {r['fail_why']})" if r.get("fail_why") else "")
                   + (f"  ({r['note']})" if r["note"] else ""))
     elif cmd == "log":
         for r in res["log"]:

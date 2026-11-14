@@ -1214,6 +1214,9 @@ class Browser:
         if fn:
             fn(method, p)
             return
+        if method in ("Page.loadEventFired", "Page.navigatedWithinDocument") and session == self.session and self.owner:
+            from . import signin  # #5826: a sign-in page of a site that a granted sign-in names fills by itself
+            signin.soon(self, (self.targets.get(self.target) or {}).get("url") or p.get("url"))
         if method == "Runtime.bindingCalled" and p.get("name") == PASSKEY_BINDING:  # #5814: the page asks for a passkey
             if session == self.session:
                 threading.Thread(target=self.passkey, args=(p.get("payload") or "",), daemon=True,

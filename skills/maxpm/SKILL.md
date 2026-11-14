@@ -509,6 +509,8 @@ command prints a value; never print one yourself.
   `maxpm secret env <name> <file> [--key VAR]` (a `.env` line). `maxpm secret list` shows the names and levels.
 - Each secret has a level: hidden (the default; the output shows `***` for it), locked (only the commands the
   person named), open. A locked command or a `.env` file that the level refuses: send the request it prints.
+- A sign-in that a grant gives you (`maxpm secret signin`, saved by the person): `maxpm serve` signs your browser
+  in on its site by itself. Type no password; when it stops, it alerts the manager: do not sign in yourself.
 - A secret in a set needs a grant that covers you (your task, its goal, kind or project, or you):
   `maxpm secret grants --for <you>`. A refusal names the set and the request to the manager; send it.
   A secret in no set: only the session that saved it uses it.

@@ -187,7 +187,16 @@ def act(conn, a, who):
     _record(b, mark, out=out)
     if browser.STEPS_ON and (a.get("action") or "status") in BAR_STEPS:
         _bar_step(conn, a, who, out)
+    if (a.get("action") or "status") in SCRUBBED:  # #5826: no reply holds a password that serve filled or a field holds
+        from .. import signin
+        try:
+            out = signin.scrub(_browser_of(conn, a, who), out)
+        except RiverError:
+            pass
     return out
+
+
+SCRUBBED = {"eval", "text", "html", "extract", "snapshot", "outline", "batch", "run"}
 
 
 # #5707: the person's actions of the pane's bar that a recording of their steps keeps
@@ -525,7 +534,10 @@ def _act(conn, a, who):
         if b.said:
             out["notes"] = b.said
         if not person and (action == "open" or out.get("navigated")):  # #5811: the accounts it may use here
-            line = browser.account_note(conn, project, out.get("url"), opened=action == "open")
+            from .. import signin  # #5826: a granted sign-in of this site, which serve fills itself
+            host = (urlsplit(out.get("url") or "").hostname or "").lower()
+            line = signin.note(conn, who, host) or browser.account_note(conn, project, out.get("url"),
+                                                                        opened=action == "open")
             if line:
                 out["notes"] = list(out.get("notes") or []) + [line]
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one

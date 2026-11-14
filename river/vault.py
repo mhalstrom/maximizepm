@@ -203,6 +203,7 @@ def delete(conn, name, actor=None):
         raise RiverError(f"no secret {name}: maxpm secret list shows the names")
     _require(conn, name, actor, "delete")
     backend().delete(conn, name)
+    backend().delete(conn, name + TOTP_SUFFIX)  # a sign-in's authenticator key; nothing for a token
     with core.tx(conn):
         conn.execute("DELETE FROM secrets WHERE name=?", (name,))
         _log(conn, name, actor, "delete")
@@ -211,7 +212,8 @@ def delete(conn, name, actor=None):
 
 def listing(conn, project=None):
     q = ("SELECT s.name, p.name AS project, s.note, s.created_by, s.created_at, s.updated_by, s.updated_at, s.used_at, s.used_by, "
-         "s.uses, s.level, s.allow_commands, s.allow_hosts, s.allow_env, s.var "
+         "s.uses, s.level, s.allow_commands, s.allow_hosts, s.allow_env, s.var, s.kind, s.site, s.account, "
+         "s.two_step, s.fail_why "
          "FROM secrets s LEFT JOIN projects p ON p.id=s.project_id")
     args = []
     if project:
@@ -394,6 +396,106 @@ class Masker:
     def flush(self):
         out, self.buf = self._mask(self.buf), b""
         return out
+
+
+# ---- sign-ins (#5826): a site, an account and a password that maxpm serve fills in a session's browser itself
+
+TOTP_SUFFIX = "#totp"  # the store name of a sign-in's authenticator key: '<name>#totp' (no secret name has a '#')
+TWO_STEP = ("person", "agents")
+
+
+def norm_site(site):
+    """A site as a sign-in keeps it: lower case, no scheme, path, port or www. (accounts.google.com stays)."""
+    s = re.sub(r"^[a-z]+://", "", (site or "").strip().lower()).split("/")[0].split(":")[0].removeprefix("www.")
+    if not re.match(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$", s) and s != "localhost":
+        raise RiverError(f"a site is a host name such as github.com, not {site!r}")
+    return s
+
+
+def totp_key(text):
+    """The authenticator key as base32 bytes check: the key that a site shows (spaces allowed) or its otpauth://
+    address. Raises when it is not one."""
+    t = text.decode(errors="replace").strip() if isinstance(text, bytes) else str(text).strip()
+    if t.startswith("otpauth://"):
+        from urllib.parse import parse_qs, urlsplit
+        t = (parse_qs(urlsplit(t).query).get("secret") or [""])[0]
+    t = re.sub(r"[\s-]", "", t).upper()
+    try:
+        if not t or not base64.b32decode(t + "=" * (-len(t) % 8)):
+            raise ValueError
+    except (ValueError, base64.binascii.Error):
+        raise RiverError("the authenticator key is the letters and digits a site shows under 'can't scan the code' "
+                         "(base32), or its otpauth:// address: nothing was saved")
+    return t.encode()
+
+
+def totp_code(key, at=None, digits=6, step=30):
+    """The 6-digit code of an authenticator key now (RFC 6238, SHA-1, 30 s): what an authenticator app shows."""
+    import hashlib
+    import hmac
+    import time
+    t = key.decode() if isinstance(key, bytes) else key
+    k = base64.b32decode(t + "=" * (-len(t) % 8))
+    h = hmac.new(k, int((time.time() if at is None else at) // step).to_bytes(8, "big"), hashlib.sha1).digest()
+    o = h[-1] & 15
+    return str((int.from_bytes(h[o:o + 4], "big") & 0x7FFFFFFF) % 10 ** digits).zfill(digits)
+
+
+def signin_save(conn, name, site=None, account=None, password=None, totp=None, two_step=None, reset=False,
+                actor=None, project=None, note=None):
+    """Save or change a sign-in: its site and account, its password (a new value replaces the old one), its
+    authenticator key, who passes a 2-step check, and reset (fill again after a failed try). two_step agents and
+    reset: a person only. Replies with names, never a value."""
+    check_name(name)
+    row = conn.execute("SELECT * FROM secrets WHERE name=?", (name,)).fetchone()
+    if row and row["kind"] != "signin":
+        raise RiverError(f"the secret {name} is a token, not a sign-in: give the sign-in another name")
+    if not row and not (site and account and password):
+        raise RiverError("a new sign-in needs --site, --account and the password: maxpm secret signin <name> "
+                         "--site <site> --account <account> (it asks for the password)")
+    if (two_step == "agents" or reset) and not session_of(conn, actor)["person"]:
+        raise RiverError("only a person lets agents pass a 2-step check or resets a failed sign-in. Ask the manager: "
+                         + _ask_line(conn, f"Please check the sign-in {name}: <what>"))
+    if two_step is not None and two_step not in TWO_STEP:
+        raise RiverError(f"--two-step is person or agents, not {two_step!r}")
+    site = norm_site(site) if site else None
+    if account is not None and (not account.strip() or re.search(r"\s", account)):
+        raise RiverError("an account is a name or an address with no spaces")
+    key = totp_key(totp) if totp else None
+    if row:
+        _require(conn, name, actor, "replace")
+    if password:
+        put(conn, name, password, actor, project, note, "signin")
+    if key:
+        backend().put(conn, name + TOTP_SUFFIX, key)
+    with core.tx(conn):
+        conn.execute("UPDATE secrets SET kind='signin', site=COALESCE(?, site), account=COALESCE(?, account), "
+                     "two_step=COALESCE(?, two_step), note=COALESCE(?, note) WHERE name=?",
+                     (site, account, two_step, note, name))
+        if reset or password:
+            conn.execute("UPDATE secrets SET fail_at=NULL, fail_why=NULL WHERE name=?", (name,))
+        if key:
+            _log(conn, name, actor, "put", "authenticator key")
+        if reset:
+            _log(conn, name, actor, "reset", "a person reset the failed sign-in")
+        r = conn.execute("SELECT * FROM secrets WHERE name=?", (name,)).fetchone()
+    return {"secret": name, "site": r["site"], "account": r["account"], "two_step": r["two_step"],
+            "totp": backend().get(conn, name + TOTP_SUFFIX) is not None, "made": not row,
+            "failed": r["fail_why"], "level": r["level"]}
+
+
+def signins_for(conn, host):
+    """The sign-ins whose site is host or a site above it (google.com for accounts.google.com), longest site first."""
+    host = (host or "").lower().removeprefix("www.")
+    rows = conn.execute("SELECT * FROM secrets WHERE kind='signin' AND site IS NOT NULL").fetchall()
+    return sorted([r for r in rows if host == r["site"] or host.endswith("." + r["site"])],
+                  key=lambda r: (-len(r["site"]), r["name"]))
+
+
+def signin_failed(conn, name, why):
+    with core.tx(conn):
+        conn.execute("UPDATE secrets SET fail_at=?, fail_why=? WHERE name=?", (core.iso(core.now()), why, name))
+        _log(conn, name, "maxpm", "signin-failed", why)
 
 
 # ---- sets and grants (#5822)
