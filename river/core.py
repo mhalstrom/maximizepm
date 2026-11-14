@@ -13583,7 +13583,7 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
         if _is_ai(conn, actor):
             owned -= hooked_targets(conn)  # maxpm serve runs the release of a target with a deploy hook
         pool = [a for a in pool if (a["kind"] != "deploy" or a["target"] in owned)
-                and a["reserved_for"] in (None, actor) and a["id"] not in fresh]
+                and a["reserved_for"] in (None, actor) and (a["id"] not in fresh or a["reserved_for"] == actor)]
         # An item whose lease ran out while its agent's session still works on it: no second agent takes it.
         still = still_worked(conn)
         for a in [a for a in pool if still.get(a["id"], actor) != actor]:
@@ -20528,6 +20528,30 @@ def focus_role(focus):
 WAIT_SHARE = timedelta(seconds=20)
 
 
+def _just_closed(conn, item_id, project):
+    """The session that closed or released an item in the last WAIT_SHARE, holds nothing now, and runs go next:
+    when its next_item would give it item_id, the item is its own next task (auto_continue), and no waiting session
+    wakes for it first. realquicksite-4187 released #5787 and claimed #5788 3 seconds later; in between, the wait
+    of realquicksite-fa99 said WORK for #5788, and its go said IDLE (#5796)."""
+    t = now()
+    for a in conn.execute("SELECT name FROM agents WHERE kind='ai' AND stop_at IS NULL AND last_seen>=? AND "
+                          "COALESCE(role, '') NOT IN ('waiting', 'manager', 'planner', 'expert', 'assistant', "
+                          "'context') AND NOT EXISTS (SELECT 1 FROM items WHERE assignee=agents.name AND "
+                          "status='in_progress') ORDER BY last_seen DESC, name", (iso(t - WAIT_SHARE),)).fetchall():
+        recent = conn.execute("SELECT at, change FROM events WHERE actor=? ORDER BY id DESC LIMIT 10",
+                              (a["name"],)).fetchall()  # done writes 'what changed' after 'done'
+        if not any(e["change"].startswith(("done", "released")) and parse_iso(e["at"]) >= t - WAIT_SHARE
+                   for e in recent):
+            continue
+        try:
+            got = next_item(conn, project, None, False, a["name"], 50, only=tree_mode(conn, a["name"]))
+        except RiverError:
+            continue
+        if any(x["id"] == item_id for x in got):
+            return a["name"]
+    return None
+
+
 def _first_waiter(conn, item_id):
     """The waiting session that a newly ready item wakes first: of the agents in maxpm wait for project work
     (waiting_in names the item's project) whose next_item would give them the item (their tree, model and agent
@@ -20538,6 +20562,9 @@ def _first_waiter(conn, item_id):
                       (item_id,)).fetchone()
     if not it:
         return None
+    closer = _just_closed(conn, item_id, it["name"])
+    if closer:
+        return closer
     for w in conn.execute("SELECT name, waiting_in FROM agents WHERE kind='ai' AND role='waiting' AND wait_token IS "
                           "NOT NULL AND waiting_since IS NOT NULL AND waiting_in IS NOT NULL "
                           "ORDER BY waiting_since, name"):
@@ -20804,7 +20831,10 @@ def _want_fresh(conn, item_id, note):
 
 def fresh_items(conn):
     """The items maxpm serve starts a fresh session for now; it clears the mark of an item that is not ready
-    for a new session any more (claimed, closed, reserved, waits again)."""
+    for a new session any more (claimed, closed, reserved, waits again). The mark of an item it returns stays until
+    maxpm serve has reserved it for the new session (fresh_started): while the mark is on, no other session takes
+    the item, and no maxpm wait says WORK for it (#5796: in the seconds between the two, a waiting session woke
+    for the item, and its go said IDLE)."""
     rows = conn.execute("SELECT id FROM items WHERE fresh_start IS NOT NULL ORDER BY fresh_start, id").fetchall()
     if not rows:
         return []
@@ -20814,8 +20844,15 @@ def fresh_items(conn):
             a = ann.get(r["id"])
             if a and a["status"] == "open" and a["ready"] and not a["reserved_for"]:
                 out.append(r["id"])
-            conn.execute("UPDATE items SET fresh_start=NULL WHERE id=?", (r["id"],))
+            else:
+                conn.execute("UPDATE items SET fresh_start=NULL WHERE id=?", (r["id"],))
     return out
+
+
+def fresh_started(conn, item_id):
+    """maxpm serve started the fresh session for item_id (it is reserved for it now), or could not: the mark goes."""
+    with tx(conn):
+        conn.execute("UPDATE items SET fresh_start=NULL WHERE id=?", (item_id,))
 
 
 def idle_news(conn, agent, since):

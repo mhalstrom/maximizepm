@@ -2722,6 +2722,8 @@ def fresh_sessions(conn, runner=None):
                 out["failed"][i] = str(e)
                 with core.tx(conn):
                     core._event(conn, i, "maxpm", f"no fresh session: {e}; the item waits in the queue")
+            finally:
+                core.fresh_started(conn, i)  # after the reservation: no moment where the item is free (#5796)
     if fresh:
         start(core.fresh_items(conn), "an answer came for it")
     if not after.total_seconds():

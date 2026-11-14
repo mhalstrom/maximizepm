@@ -4929,6 +4929,58 @@ class Wait(Base):
         self.assertEqual(res["why"], f"#{i} is ready: not in w's tree")  # w's go would not give it to w
         self.assertIsNone(core._first_waiter(self.c, own))
 
+    def test_the_session_that_just_closed_an_item_takes_its_next_task_first(self):
+        # #5796: realquicksite-4187 released #5787 and claimed #5788 3 seconds later; in between the wait of
+        # realquicksite-fa99 said WORK for #5788, and its go said IDLE.
+        from unittest import mock
+        clock = [core.now()]
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        core.register(self.c, "v")
+        first = self.add("a", "first")
+        second = self.add("a", "second", after=[first])
+        core.claim(self.c, first, "v")
+        self.assertEqual(self.wait()["result"], "again")
+        core.done(self.c, first, "o", "v")  # second is ready, and it is v's next task (its tree)
+        self.assertEqual(core._first_waiter(self.c, second), "v")
+        self.assertEqual(self.wait()["result"], "again")  # w does not wake for it
+        clock[0] += core.timedelta(seconds=3)
+        core.claim(self.c, second, "v")
+        self.assertEqual(self.wait()["result"], "again")
+        # v does not take it: w's wait takes it after WAIT_SHARE.
+        core.release(self.c, second, "v")
+        self.assertEqual(self.wait()["result"], "again")
+        clock[0] += core.WAIT_SHARE
+        self.assertEqual(self.wait()["why"], f"#{second} is ready: second")
+
+    def test_an_item_an_answer_came_for_wakes_no_wait_before_its_fresh_session_has_it(self):
+        # #5796: fresh_items cleared the mark, and serve reserved the item for the new session seconds later; in
+        # between a waiting session's wait said WORK, and its go said IDLE.
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "v")
+        core.config_set(self.c, "fresh_sessions", "on")
+        core.config_set(self.c, "question_hold", "0s")
+        i = self.add("a", "needs an answer")
+        core.claim(self.c, i, "v")
+        q = core.send(self.c, "question", "Which one?", to="mark", item=i, actor="v")["id"]
+        core.release(self.c, i, "v")
+        core.unregister(self.c, "v")
+        self.assertEqual(self.wait()["result"], "again")  # it waits on the answer
+        core.answer(self.c, q, "the first", "mark")
+        self.assertEqual(self.wait()["result"], "again")  # a fresh session takes it
+        self.assertEqual(core.fresh_items(self.c), [i])
+        self.assertEqual(self.wait()["result"], "again")  # serve starts it now: the mark stays
+        core.register(self.c, "fresh1")
+        core.push(self.c, i, "fresh1", None, "maxpm")  # what start_fresh does
+        core.fresh_started(self.c, i)
+        self.assertEqual(self.wait()["result"], "again")
+        self.assertEqual([a["id"] for a in core.next_item(self.c, "a", None, False, "fresh1", 5)], [i])
+        # The session reserved for it takes it also while the mark is on.
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET fresh_start=? WHERE id=?", (core.iso(core.now()), i))
+        self.assertEqual([a["id"] for a in core.next_item(self.c, "a", None, False, "fresh1", 5)], [i])
+
     def test_capacity_still_warns_about_idle_sessions_that_do_not_wait(self):
         core.register(self.c, "idle1")
         self.wait()
