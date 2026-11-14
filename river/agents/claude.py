@@ -525,7 +525,10 @@ def read_transcript(path):
                     continue
             msg = d.get("message") if isinstance(d.get("message"), dict) else {}
             if d.get("type") == "assistant" and isinstance(msg.get("usage"), dict):
-                reqs.setdefault(msg.get("id") or d["timestamp"], (t, _usage(msg["usage"])))
+                u = _usage(msg["usage"])
+                if isinstance(msg.get("model"), str):
+                    u["model"] = msg["model"]  # each call's own model: a subagent may run another (cost view, #5857)
+                reqs.setdefault(msg.get("id") or d["timestamp"], (t, u))
                 leading = False
     return reqs, fork
 

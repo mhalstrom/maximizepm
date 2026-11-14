@@ -154,6 +154,10 @@ DEFAULT_SETTINGS = {
     # merge waits until a person approves its HEAD in the Changes view), or release (a cut release waits until a
     # person approves the release's changes). Set it per project: maxpm config set review_at push --project <p>.
     "review_at": "off",
+    # A cost limit (#5857, mark 2026-11-14: no default limits): an amount per day, week or month, in dollars ($40/day)
+    # or input-token equivalents (20M/week), globally or for one project. The person gets one alert at 80% and one
+    # at 100% in each period; nothing stops by itself. The Cost view shows the use. Empty: no limit.
+    "cost_limit": "",
     # Canvases (#4648): the largest version in bytes (a page carries its images and scripts inline), and how
     # many versions of a canvas maxpm keeps (a new version then removes the oldest, but never version 1).
     "canvas_max": "5000000",
@@ -436,11 +440,11 @@ DEFAULT_SETTINGS = {
     # expert_fresh_min tokens or more, the page offers a fresh expert that reads only the old one's handoff.
     # cache_ttl: how long a cache entry lives when the transcript does not say (Claude Code's says: 1h, or 5m in usage
     # overage; a Codex log does not). model_prices: dollars per million tokens of each model family, as
-    # input/cache read/5-minute cache write/1-hour cache write (Anthropic's prices of 2026-11; a model of no family
-    # here shows tokens only).
+    # input/cache read/5-minute cache write/1-hour cache write/output (Anthropic's prices of 2026-11, output at five
+    # times the input for each family, #5857; a model of no family here shows tokens only).
     "expert_fresh_min": "150k",
     "cache_ttl": "5m",
-    "model_prices": "fable=8/0.2/10/16, opus=4/0.2/5/8, sonnet=2/0.1/2.5/4, haiku=0.1/0.01/0.125/0.2",
+    "model_prices": "fable=8/0.2/10/16/40, opus=4/0.2/5/8/20, sonnet=2/0.1/2.5/4/10, haiku=0.1/0.01/0.125/0.2/0.5",
     # The Sessions tab opens 'Waits for you' by itself for a question of the open session (and when a person picks
     # its row) only while the question is younger than question_popup_max (#5001); an older open question stays in
     # the card's count, its 'Answer it' link, and maxpm needs-you, but does not pop up. 0s: every question pops up.
@@ -2541,6 +2545,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
                          "setup (a worktree, then the command in workspace_setup)")
     elif key == "review_at" and value not in ("off", "push", "release"):
         raise RiverError("review_at is off, push or release")
+    elif key == "cost_limit":
+        from . import cost
+        cost.parse_limit(value)
     elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
@@ -15033,38 +15040,41 @@ _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 
 def parse_prices(text):
-    """model_prices: {family: (input, cache read, 5-minute write, 1-hour write)} in dollars per million tokens, from
-    'opus=4/0.2/5/8, sonnet=2/0.1/2.5/4'. With fewer prices: a read at 0.1 of the input price, and writes at the
-    input price (gpt=1.25), or at the one write price given."""
+    """model_prices: {family: (input, cache read, 5-minute write, 1-hour write, output or None)} in dollars per million
+    tokens, from 'opus=4/0.2/5/8/20, sonnet=2/0.1/2.5/4/10'. With fewer prices: a read at 0.1 of the input price, and
+    writes at the input price (gpt=1.25), or at the one write price given; no output price (the cost view #5855 then
+    leaves output out of the dollars and says so)."""
     out = {}
     for part in re.split(r"[,\s]+", (text or "").strip()):
         if not part:
             continue
-        m = re.match(r"^([\w.-]+)=([0-9.]+(?:/[0-9.]+){0,3})$", part)
+        m = re.match(r"^([\w.-]+)=([0-9.]+(?:/[0-9.]+){0,4})$", part)
         if not m:
-            raise RiverError(f"model_prices: {part!r} is not <family>=<input>/<cache read>/<5m write>/<1h write> "
-                             f"(dollars per million tokens), for example opus=4/0.2/5/8")
+            raise RiverError(f"model_prices: {part!r} is not <family>=<input>/<cache read>/<5m write>/<1h write>"
+                             f"/<output> (dollars per million tokens), for example opus=4/0.2/5/8/20")
         nums = [float(x) for x in m.group(2).split("/")]
+        output = nums.pop() if len(nums) == 5 else None
         if len(nums) == 1:  # no cache prices given: a read at 0.1 of the input price, a write at the input price
             nums += [nums[0] * 0.1, nums[0], nums[0]]
         elif len(nums) == 2:
             nums += [nums[0], nums[0]]
         elif len(nums) == 3:  # one write price for both lifetimes
             nums += [nums[2]]
-        out[m.group(1).lower()] = tuple(nums)
+        out[m.group(1).lower()] = tuple(nums) + (output,)
     return out
 
 
-def model_price(conn, model):
+def model_price(conn, model, output=False):
     """(input, cache read, 5m write, 1h write) in dollars per million tokens for a model name or id (claude-opus-5-5,
-    opus): the model_prices family whose name is in it, the longest first; None for a model of no family there."""
+    opus): the model_prices family whose name is in it, the longest first; None for a model of no family there.
+    output: also the output price, as a fifth number (None when the setting gives none)."""
     if not model:
         return None
     prices = parse_prices(setting(conn, "model_prices"))
     m = model.lower()
     for fam in sorted(prices, key=len, reverse=True):
         if fam in m:
-            return prices[fam]
+            return prices[fam] if output else prices[fam][:4]
     return None
 
 

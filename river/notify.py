@@ -517,7 +517,7 @@ def loop(stop, interval_s=None):
             # Inside the try: a queue that is busy or cannot open fails this pass, not the thread (#1663).
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
-            from . import server, space, vault
+            from . import cost, server, space, vault
             from .routes import canvas as canvas_routes, sessions as session_routes
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
@@ -550,6 +550,7 @@ def loop(stop, interval_s=None):
                 canvas_routes.rqs_responses,  # comments and votes of realquicksite pages, to the canvas's session (#5790)
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
                 vault.grant_summary,  # once a day: the manager's credential grants, to the person (#5828)
+                cost.watch,  # cost_limit set: one alert at 80% and at 100% of each limit in its period (#5857)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
