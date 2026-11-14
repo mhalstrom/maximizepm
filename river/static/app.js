@@ -589,6 +589,34 @@ async function openSetup() {
 const setupDialog = makeDialog($("#setup"));
 let setupSig = "";
 function closeSetup() { setupDialog.close(); }
+// A remote host (#5882): the last result of Set up and of an agent sign-in there, so a new draw of the guide keeps them.
+let hostTarget = "", hostRes = null, hostSign = null;
+function hostHtml() {
+  const intro = "Run MaximizePM and its agents on a server or a Mac mini, so they keep working while this computer is closed. "
+    + "It needs SSH to that computer with no password prompt (Tailscale SSH, or your key there).";
+  if (!hostRes) return intro;
+  const r = hostRes, p = r.phone || {};
+  const lines = (r.steps || []).map(s => `<li>${esc(s)}</li>`).join("");
+  const moved = r.moved ? `<div>This computer's queue is marked moved: its maxpm now names the host. Quit the maxpm serve here.</div>`
+    + (r.moved.projects.length ? `<div>Project folders do not move. On ${esc(r.target)}, clone each one and run
+        ${r.moved.projects.map(x => `<code>maxpm project path ${esc(x.name)} &lt;folder&gt;</code>`).join(" ")}</div>` : "") : "";
+  const page = p.url ? `<div>The page there: <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a></div>
+      <div class="su-qr">${r.qr || ""}</div>`
+    : r.phone_error ? `<div>The page over Tailscale is not on yet: ${esc(r.phone_error)}</div>`
+    : p.enable && p.enable.url ? `<div>Tailscale on ${esc(r.target)} waits for one approval:
+        <a href="${esc(p.enable.url)}" target="_blank" rel="noopener">${esc(p.enable.url)}</a>. Then press Set up again.</div>`
+    : `<div>Tailscale does not run on ${esc(r.target)}: install it there, sign in, and press Set up again.</div>`;
+  const sg = hostSign;
+  const sign = !sg ? "" : sg.signed_in ? `<div>${sg.agent === "claude" ? "Claude Code" : "Codex"} is signed in on ${esc(r.target)}.</div>`
+    : `<div>Open <a href="${esc(sg.url)}" target="_blank" rel="noopener">the sign-in page</a> and sign in.
+        ${sg.code ? `Type this code there: <b>${esc(sg.code)}</b>. Codex finishes by itself.` : ""}</div>`
+      + (sg.paste ? `<div class="su-track"><input id="suHostCode" placeholder="the code that the page shows">
+          <button class="btn primary" data-su="hostcode">Send code</button></div>` : "");
+  return `<ul class="su-steps">${lines}</ul>${moved}${page}
+    <div>Sign the agents in there, once each:
+      <button class="btn" data-su="hostsignin" data-agent="claude">Claude Code</button>
+      <button class="btn" data-su="hostsignin" data-agent="codex">Codex</button></div>${sign}`;
+}
 function renderSetup(st) {
   // The first run is a short path in order (you, river for agents, a folder, an agent, a first task, Start);
   // each step checks itself. The first step not done yet is marked as the next one. Extras come after, folded.
@@ -729,6 +757,12 @@ function renderSetup(st) {
         <button class="btn" data-su="recheck">Check again</button>`
       : tn.running ? `<button class="btn primary" data-su="tailnet">Turn it on</button><button class="btn" data-su="recheck">Check again</button>`
       : `<button class="btn" data-su="recheck">Check again</button>`));
+  // A remote host (#5882; mark 2026-11-14 in #5880: the whole queue on one host, other devices are screens): maxpm
+  // host setup over SSH, then the agents' sign-ins there.
+  more.push(extra(!!(hostRes && hostRes.phone && hostRes.phone.url), "A remote host", hostHtml(),
+    `<span class="su-track"><input id="suHost" placeholder="mini or you@server" value="${esc(hostTarget)}">
+      <label class="su-opt"><input type="checkbox" id="suHostMove">Move this queue there</label>
+      <button class="btn primary" data-su="host">Set up</button></span>`));
   // The other way to the phone (#5860): the MaximizePM relay, below Tailscale and never first. A relay that is
   // connected shows in the ⋯ menu, with its state and Disconnect.
   const rl = S.relay;
@@ -784,6 +818,18 @@ $("#setupSteps").addEventListener("click", async (e) => {
     else if (k === "tailnet") {
       const r = await act("tailnet_serve", {});
       toast(r && r.enable ? "Tailscale asks for your approval: open the link in Your phone" : "Your phone can open this page now: scan the code");
+    }
+    else if (k === "host") {
+      const target = $("#suHost").value.trim(); if (!target) return toast("Type the SSH name of the host first", true);
+      toast(`Setting up ${target}: the install there takes a few minutes`);
+      hostTarget = target;
+      hostRes = await act("host_setup", { target, move: $("#suHostMove").checked });
+      hostSign = null;
+    }
+    else if (k === "hostsignin") hostSign = await act("host_signin", { target: hostTarget, agent: b.dataset.agent });
+    else if (k === "hostcode") {
+      const code = $("#suHostCode").value.trim(); if (!code) return toast("Paste the code from the sign-in page first", true);
+      hostSign = await act("host_signin", { target: hostTarget, agent: "claude", code });
     }
     else if (k === "relay") await connectRelay();
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }

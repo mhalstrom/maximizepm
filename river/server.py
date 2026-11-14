@@ -4519,6 +4519,30 @@ def tailnet_serve(conn, actor=None):
     return tailnet.serve_on(conn, actor)
 
 
+def _host_person(conn, who):
+    """A remote host is the person's step (#5882): a move changes where the whole queue lives."""
+    if who and not core._is_person(conn, who):
+        raise RiverError("only a person sets up a remote host: the setup guide, or maxpm host setup in a terminal")
+
+
+def host_setup_op(conn, args, who=None):
+    """The setup guide's A remote host (#5882): maxpm host setup <target> [--move] (river/host.py), with the QR code
+    of the host's page."""
+    from . import host, tailnet
+    _host_person(conn, who)
+    res = host.setup(conn, str(args.get("target") or "").strip(), do_move=bool(args.get("move")))
+    url = (res.get("phone") or {}).get("url")
+    res["qr"] = tailnet.qr_svg(url) if url else None
+    return res
+
+
+def host_signin_op(conn, args, who=None):
+    """An agent CLI's sign-in on the host, from the setup guide (#5882, river/agentlogin.py through host.signin)."""
+    from . import host
+    _host_person(conn, who)
+    return host.signin(str(args.get("target") or "").strip(), str(args.get("agent") or ""), args.get("code") or None)
+
+
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
@@ -4795,6 +4819,9 @@ OPS = {
     "canvas_open": canvas_open,
     # The setup guide's Your phone (#5863): the person's click runs tailscale serve --bg <serve_port>.
     "tailnet_serve": lambda c, a, who: tailnet_serve(c, who),
+    # The setup guide's A remote host (#5882): maxpm host setup and the agents' sign-ins there, a person's clicks.
+    "host_setup": lambda c, a, who: host_setup_op(c, a, who),
+    "host_signin": lambda c, a, who: host_signin_op(c, a, who),
     # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
     # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
     "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),

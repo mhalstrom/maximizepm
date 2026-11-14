@@ -146,6 +146,21 @@ class HostSetup(unittest.TestCase):
             host.setup(self.conn, "-oProxyCommand=x")
         self.assertEqual(self.host.ran, [])
 
+    def test_the_setup_guide_runs_it_for_a_person_only(self):
+        """#5882: the ops of the setup guide's A remote host; an agent's request is refused."""
+        from river import server
+        core.register(self.conn, "mark", human=True)
+        core.register(self.conn, "ag1")
+        res = server.OPS["host_setup"](self.conn, {"target": "mini", "move": False}, "mark")
+        self.assertEqual(res["phone"]["url"], URL)
+        self.assertIn("<svg", res["qr"])
+        self.assertIn("https://auth.openai.com/codex/device",
+                      server.OPS["host_signin"](self.conn, {"target": "mini", "agent": "codex"}, "mark")["url"])
+        for op in ("host_setup", "host_signin"):
+            with self.assertRaisesRegex(core.RiverError, "only a person sets up a remote host"):
+                server.OPS[op](self.conn, {"target": "mini", "agent": "codex", "move": True}, "ag1")
+        self.assertIsNone(host.moved(self.conn))
+
 
 if __name__ == "__main__":
     unittest.main()
