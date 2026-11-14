@@ -200,6 +200,15 @@ def move(conn, target):
     return {"files": sent, "projects": paths}
 
 
+def signin(target, agent, code=None):
+    """maxpm agent-login on the host (#5877): its link (and code) here, so the person signs in in a browser here."""
+    _check_target(target)
+    res, err = _json(target, "agent-login", agent, *(["--code", code] if code else []), timeout=90)
+    if not isinstance(res, dict):
+        raise RiverError(f"the sign-in of {agent} on {target} failed: {err[-600:]}")
+    return res
+
+
 def setup(conn, target, do_move=False, reinstall=False):
     """The steps of maxpm host setup (module docstring). Returns what each step did and the page address."""
     _check_target(target)
@@ -259,4 +268,6 @@ def render(res):
     if p.get("url"):
         lines += ["", f"The page: {p['url']}   (on your laptop and phone, with Tailscale on, the same account)",
                   tailnet.qr_text(p["url"])]
+    lines += ["", f"Sign the agent CLIs in there (once each): maxpm host signin {res['target']} claude, "
+              f"maxpm host signin {res['target']} codex"]
     return "\n".join(lines)

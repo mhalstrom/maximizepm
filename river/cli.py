@@ -2231,6 +2231,13 @@ def build_parser(only=None):
                    help="also move this queue there (the host's queue must have no projects); this copy then refuses")
     x.add_argument("--install", action="store_true", help="install this computer's code there even when it has maxpm")
     hos.add_parser("forget", help="use this queue here again after a move to a host")
+    x = hos.add_parser("signin", help="sign an agent CLI in on the host: its link here, you sign in in your browser")
+    x.add_argument("target", help="the SSH target of the host")
+    x.add_argument("agent", choices=["claude", "codex"])
+    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    x = sub.add_parser("agent-login", help="sign an agent CLI in on a computer with no browser (a host)")
+    x.add_argument("agent", choices=["claude", "codex"])
+    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
     ph = sub.add_parser("phone", help="reach this MaximizePM from your phone over Tailscale: its address and QR code")
     ph.add_argument("--on", action="store_true", help="turn it on: run tailscale serve --bg <serve_port>")
 
@@ -2510,6 +2517,11 @@ def run(argv=None):
         from . import mcp
         mcp.serve()
         return 0
+    if args.cmd == "agent-login":  # an agent CLI's sign-in with no browser (#5877): no queue needed
+        from . import agentlogin
+        res = agentlogin.paste(args.agent, args.code) if args.code else agentlogin.start(args.agent)
+        print(json.dumps(res) if args.json else agentlogin.render(res))
+        return 0
     if args.cmd == "connect":
         return connect_command(args)
     if args.cmd == "ops" and args.ocmd == "logs":  # a plugin: its own lines only, no briefing, no footer
@@ -2618,6 +2630,10 @@ def _run(args, conn):
         if args.hcmd == "forget":
             res = host.forget(conn)
             text = "This queue is in use here again." if res["forgot"] else "This queue was not marked moved."
+        elif args.hcmd == "signin":
+            from . import agentlogin
+            res = host.signin(args.target, args.agent, args.code)
+            text = agentlogin.render(res).replace("maxpm agent-login", f"maxpm host signin {args.target}")
         else:
             res = host.setup(conn, args.target, do_move=args.move, reinstall=args.install)
             text = host.render(res)

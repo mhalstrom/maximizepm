@@ -57,6 +57,11 @@ class FakeHost:
             return 0, "It also runs with nobody logged in, from boot on (systemd linger is now on).", ""
         if cmd.endswith("--json phone --on"):
             return (1, "", self.phone_err) if self.phone_err else (0, json.dumps(self.phone), "")
+        if cmd.endswith("--json agent-login codex"):  # #5877
+            return 0, json.dumps({"agent": "codex", "signed_in": False, "url": "https://auth.openai.com/codex/device",
+                                  "code": "ABCD-12345", "paste": False,
+                                  "next": "open the link, sign in, and type the code ABCD-12345; Codex finishes by "
+                                          "itself (maxpm agent-login codex says when)"}), ""
         raise AssertionError(f"unexpected command on the host: {cmd}")
 
 
@@ -107,9 +112,9 @@ class HostSetup(unittest.TestCase):
         text = self.run_cli("host", "setup", "mini", "--move")
         sent = Path(tempfile.mkdtemp()) / "sent.db"
         sent.write_bytes(self.host.files["maxpm.db"])
-        names = [r[0] for r in sqlite3.connect(sent).execute("SELECT name FROM projects")]
-        self.assertIn("web", names)
-        self.assertNotIn(host.MOVED_KEY, [r[0] for r in sqlite3.connect(sent).execute("SELECT key FROM meta")])
+        with contextlib.closing(sqlite3.connect(sent)) as db:
+            self.assertIn("web", [r[0] for r in db.execute("SELECT name FROM projects")])
+            self.assertNotIn(host.MOVED_KEY, [r[0] for r in db.execute("SELECT key FROM meta")])
         self.assertIn("maxpm project path web <folder>", text)
         self.assertEqual(host.moved(self.conn)["url"], URL)
         with self.assertRaisesRegex(core.RiverError, f"this queue moved to mini .*open {URL}.*maxpm host forget"):
@@ -128,6 +133,13 @@ class HostSetup(unittest.TestCase):
         self.host.phone_err = "maxpm: tailscale serve failed: Access denied: serve config denied"
         text = self.run_cli("host", "setup", "mini")
         self.assertIn("sudo tailscale set --operator=$USER", text)
+
+    def test_signin_on_the_host_shows_its_link_here(self):
+        """#5877: maxpm host signin runs maxpm agent-login on the host and names the command of this computer."""
+        text = self.run_cli("host", "signin", "mini", "codex")
+        self.assertIn("https://auth.openai.com/codex/device", text)
+        self.assertIn("type the code ABCD-12345", text)
+        self.assertIn("(maxpm host signin mini codex says when)", text)
 
     def test_a_bad_target_is_refused_before_ssh(self):
         with self.assertRaisesRegex(core.RiverError, "not an SSH target"):
