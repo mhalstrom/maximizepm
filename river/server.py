@@ -5554,6 +5554,13 @@ def serve(port: int, open_browser=False, dev=False):
           flush=True)
     if dev:
         threading.Thread(target=_restart_on_change, args=(httpd,), daemon=True).start()
+    try:  # a Chrome of the last start that still runs gets its proxy again at once (#5816)
+        from . import browser
+        for project, owner, what in browser.reattach():
+            print(f"browser {project}/{owner or '-'}: " + ("its proxy runs again" if what == "proxy" else
+                                                           "stopped: its proxy port is taken"), flush=True)
+    except Exception as e:  # never stop serve's start for it
+        print(f"browser reattach: {type(e).__name__}: {e}", flush=True)
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()

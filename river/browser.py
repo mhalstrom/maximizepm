@@ -1983,6 +1983,34 @@ def sweep(conn, at=None):
     return out
 
 
+def reattach():
+    """When maxpm serve starts (#5816): each Chrome that an earlier serve started and that still runs gets its proxy
+    again, on the port it was started with. Before, the proxy came back only at the next command or pane poll, and a
+    window (which no pane polls) showed ERR_PROXY_CONNECTION_FAILED until then. A Chrome whose port another program
+    took is stopped: it starts again at its next use. Returns [(project, owner, 'proxy'|'stopped')]."""
+    out = []
+    root = core.db_path().parent / "browsers"
+    for f in sorted(root.glob("*/state.json")) + sorted(root.glob("*/sessions/*/state.json")):
+        try:
+            st = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        project, owner, pid, port = st.get("project"), st.get("owner") or None, st.get("pid"), st.get("proxy_port")
+        if not (project and pid and port) or not core.pid_alive(pid):
+            continue
+        b = get(project, owner)
+        with b.lock:
+            if b.proxy is not None or b.attached:
+                continue
+            try:
+                b.proxy = Proxy(project, port)
+                out.append((project, owner, "proxy"))
+            except OSError:
+                b._kill(pid)
+                out.append((project, owner, "stopped"))
+    return out
+
+
 def project_of(conn, project=None, agent=None, cwd=None):
     """The project whose browser a command means: named; else the project of the item the agent holds, or of its
     last item; else the project of the folder."""

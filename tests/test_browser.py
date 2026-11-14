@@ -996,6 +996,44 @@ class SaveSignins(Base):
         self.assertIn("signed_in", names)
 
 
+class Reattach(Base):
+    """#5816: when serve starts, a Chrome of the last start that still runs gets its proxy again on its own port."""
+
+    def state(self, owner, port, pid=None):
+        d = browser.session_dir("web", owner)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(json.dumps({"project": "web", "owner": owner, "pid": pid or os.getpid(),
+                                                  "proxy_port": port, "window": True}), encoding="utf-8")
+
+    def free_port(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_a_live_chrome_gets_its_proxy_and_one_whose_port_is_taken_stops(self):
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        port = self.free_port()
+        self.state("ag1", port)
+        taken = socket.socket()
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        self.addCleanup(taken.close)
+        self.state("ag2", taken.getsockname()[1])
+        self.state("ag3", self.free_port(), pid=2 ** 22 + 7)  # its Chrome ended: nothing to do
+        killed = []
+        self.addCleanup(lambda: [b.proxy.server_close() for b in browser.BROWSERS.values() if b.proxy])
+        with mock.patch.object(browser.Browser, "_kill", lambda b, pid: killed.append(pid)):  # the pid is this test's
+            got = browser.reattach()
+            self.assertEqual(got, [("web", "ag1", "proxy"), ("web", "ag2", "stopped")])
+            self.assertEqual(killed, [os.getpid()])
+            self.assertEqual(browser.BROWSERS[("web", "ag1")].proxy.port, port)
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()  # the window's proxy answers again
+            self.assertEqual(browser.reattach(), [("web", "ag2", "stopped")])  # ag1 has its proxy already
+
+
 class TabStrip(Base):
     """#5632: the pane's tab strip shows each tab with its icon (Chrome's Favicons of the profile) and the session whose
     pointer is on it."""
