@@ -6979,6 +6979,23 @@ def _ops_outside_repairs(conn, c, at, pid):
                         (c["id"], iso(at - win))).fetchone()["n"]
 
 
+def _ops_run_broken(conn, run_id):
+    """Why a failed run of a cmd, plugin or log check says nothing about the service, or None: its command was not
+    found (exit 127: the watchdog's PATH lacked the maxpm folder, #5544), was not executable (126), or did not
+    start. Such a run is a broken check, and a repair (restart serve) would only hide it. A url check keeps no exit
+    code when the site does not answer, so the caller asks only for command checks."""
+    r = conn.execute("SELECT exit_code, timed_out FROM ops_runs WHERE id=?", (run_id,)).fetchone() if run_id else None
+    if r is None or r["timed_out"]:
+        return None
+    if r["exit_code"] == 127:
+        return "exit 127: command not found"
+    if r["exit_code"] == 126:
+        return "exit 126: the command is not executable"
+    if r["exit_code"] is None:
+        return "the command did not start"
+    return None
+
+
 def _ops_outside_one(conn, c, notice, at=None):
     """Run one outside check, then repair or send a notice as the rules say. Returns what it did."""
     run = ops_start(conn, c, at)
@@ -6991,10 +7008,13 @@ def _ops_outside_one(conn, c, notice, at=None):
         return rec
     c = _ops_row(row)
     failed = rec["status"] in OPS_FAILED
+    broken = failed and c["form"] in ("cmd", "plugin", "log") and _ops_run_broken(conn, rec.get("run"))
+    if broken:
+        rec["broken"] = broken
     pid = _ops_scope_project_id(conn, c)
     most = int(setting(conn, "ops_outside_repair_max", project_id=pid) or 0)
     window = setting(conn, "ops_outside_repair_window", project_id=pid)
-    if c["state"] == "fault" and failed and c["repair"]:
+    if c["state"] == "fault" and failed and c["repair"] and not broken:
         n = _ops_outside_repairs(conn, c, t, pid)
         if n < most:
             items = _ops_fault_items(conn, c)
@@ -7013,11 +7033,14 @@ def _ops_outside_one(conn, c, notice, at=None):
         return rec
     last = _ops_page_last(conn, c)
     if c["state"] == "fault" and failed and last in (None, "fault"):
-        what = (f"the watchdog ran its repair {rec['repair_limit']} times in {window} (ops_outside_repair_max {most}) "
+        what = (f"the check itself cannot run ({broken}), so the watchdog starts no repair: a person fixes the check"
+                if broken else
+                f"the watchdog ran its repair {rec['repair_limit']} times in {window} (ops_outside_repair_max {most}) "
                 f"and stopped: a person looks now"
                 if "repair_limit" in rec else "it has no repair command: a person looks now")
         items = _ops_fault_items(conn, c)
-        title = f"MaximizePM: {c['scope']}/{c['name']} is down"
+        title = (f"MaximizePM: the check {c['scope']}/{c['name']} cannot run" if broken else
+                 f"MaximizePM: {c['scope']}/{c['name']} is down")
         body = (f"{c['key']}: {_ops_last_summary(conn, c)}. {what}."
                 + (f" Item #{items[0]['id']}." if items else "") + f" Runs: maxpm ops history {c['scope']} {c['name']}")
         rec["notice"] = _ops_notice(conn, c, "paged", title, body, notice, t)

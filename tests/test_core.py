@@ -12406,6 +12406,24 @@ class OpsOutside(Base):
         core.ops_outside(self.c, self.notice, t + timedelta(minutes=4))
         self.assertEqual(len(self.sent), 3)
 
+    def test_a_check_whose_command_is_not_found_is_broken_and_starts_no_repair(self):
+        # #5544: the watchdog's PATH lacked the maxpm folder, so 'maxpm ops probe serve' ended with exit 127; that
+        # is a broken check, and a restart of serve would only hide it.
+        self.add()
+        self.check_code = 127
+        t = core.now()
+        for i in range(3):
+            r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))[0]
+        self.assertNotIn("restart serve", self.calls)
+        self.assertEqual(r["broken"], "exit 127: command not found")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], "MaximizePM: the check maxpm/serve cannot run")
+        self.assertIn("so the watchdog starts no repair", self.sent[0][1])
+        # The command is found again and the service is down: the repair runs as before.
+        self.check_code = 2
+        r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=3))[0]
+        self.assertEqual(r["repair"]["n"], 1)
+
     def test_a_check_of_severity_note_sends_no_notice(self):
         self.add(repair="", severity="note")
         t = core.now()
