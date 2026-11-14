@@ -4998,9 +4998,19 @@ def render_expert(res):
         print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in a tmux pane "
               f"({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
+        print_trust(t)
         if t.get("handover"):
             print(f"the talk so far is in #{t.get('task')}'s context; the expert reads it first. Tell the person in one "
                   f"line, then leave the topic to {t['session_name']}.")
+
+
+def print_trust(res):
+    """The line of a start in a folder that Claude Code has not trusted yet (#5892): it asks first, and its 'No, exit'
+    ends the session. MaximizePM answers nothing by itself."""
+    if res.get("trust"):
+        print(f"  Claude Code asks first whether it may trust {res['trust']}: answer 'Yes, I trust this folder' in the "
+              f"question card on the Sessions tab (or in its pane). 'No, exit' ends the session, and its item goes "
+              f"back to the queue.")
 
 
 def _fault_lines(f, r):
@@ -7137,6 +7147,7 @@ def render(a, res):
         print(f"started {res['agent']} as {res['session_name']} in {res['folder']}, a session with no item"
               + (f"; tmux pane {res['tmux_pane']}: maxpm view shows it" if res.get("tmux_pane") else "")
               + ". Talk with it on the Sessions tab, or in its pane.")
+        print_trust(res)
         return
     if c == "launch":
         it = f"#{res['item']['id']} {res['item']['title']}"
@@ -7158,6 +7169,7 @@ def render(a, res):
                   + (f"; tmux pane {res['tmux_pane']}: maxpm view shows it" if res.get("tmux_pane") else ""))
             if res.get("via_serve"):
                 print("  maxpm serve opened it: this session runs in a sandbox")
+            print_trust(res)
         return
     if c == "view" and "orphans" in res:
         for o in res["orphans"]:

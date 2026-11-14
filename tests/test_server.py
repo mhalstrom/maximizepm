@@ -1554,7 +1554,8 @@ class FakeTmux:
             return self._pane(name=opt("-n"))
         if cmd == "split-window":
             return None if self.full else self._pane(window=opt("-t"))
-        opts = {"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db"}
+        opts = {"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db",
+                "@maxpm_exit": "exit"}
         if cmd == "set-option" and "-p" in a and "-u" in a:  # unset: the pane has the option no more
             pane[opts[a[-1]]] = ""
         elif cmd == "set-option" and "-p" in a:
@@ -1564,9 +1565,13 @@ class FakeTmux:
         elif cmd == "send-keys":
             # keys: what the pane's shell runs. A long launch line comes as '. <file>' (#5884): the shell reads the
             # command line from the file. typed: the text as it came.
+            # A launch line ends with the command that marks the pane when the agent has ended (#5892): the shell
+            # runs it after the agent, so keys holds the line before it, and "exit_mark" says it came.
             pane.setdefault("typed", []).append(a[-1])
-            path = shlex.split(a[-1])[1] if a[-1].startswith(". ") and "/launch/launch-" in a[-1] else None
-            pane["keys"].append(Path(path).read_text(encoding="utf-8").split("\n", 1)[1].rstrip("\n") if path else a[-1])
+            line, mark, _ = a[-1].partition(server._exit_mark()) if "-l" in a else (a[-1], "", "")
+            pane["exit_mark"] = pane.get("exit_mark") or bool(mark)
+            path = shlex.split(line)[1] if line.startswith(". ") and "/launch/launch-" in line else None
+            pane["keys"].append(Path(path).read_text(encoding="utf-8").split("\n", 1)[1].rstrip("\n") if path else line)
         elif cmd == "rename-window":
             self.windows[opt("-t")]["name"] = a[-1]
         elif cmd == "join-pane":
@@ -1584,7 +1589,7 @@ class FakeTmux:
                                        str(sum(q["window"] == p["window"] for q in self.panes)), p["running"],
                                        "/dev/ttys00" + p["id"][1:], p["agent"], p.get("started", ""),
                                        # A pane made with no "db" is this test's queue's own; "" is a pane with no tag (#5054).
-                                       p.get("db", str(core.db_path().resolve())), p["name"]])
+                                       p.get("db", str(core.db_path().resolve())), p.get("exit", ""), p["name"]])
                              for p in self.panes)
         elif cmd == "show-options":
             return "C-b"
@@ -1641,7 +1646,7 @@ class LaunchInTmux(unittest.TestCase):
         server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#2 short",
                                "command": "sleep 60"}, {})
         pane = self.tmux.panes[-1]
-        self.assertEqual(pane["typed"], pane["keys"][:1] + ["Enter"])
+        self.assertEqual(pane["typed"], [pane["keys"][0] + server._exit_mark(), "Enter"])
         self.assertTrue(pane["keys"][0].startswith(f"cd {shlex.quote(self.dir.name)} && "), pane["keys"][0])
 
     def test_claim_next_and_a_drawer_open_name_the_session_before_it_starts(self):
@@ -2568,6 +2573,13 @@ class LaunchInTmux(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "only a person types into an agent's terminal"):
             server.terminal_keys(self.c, name, [{"key": "Enter"}], "other-agent")
         self.assertEqual(pane["keys"], ["1", "Enter", "-l; rm"])
+        # While the pane shows a question, the text bar types nothing (#5892): its Enter would answer the question
+        # (Claude Code's folder trust question took mark's 'continue' and the session exited).
+        for text in ("continue", "two\nlines"):
+            with self.assertRaisesRegex(RiverError, r"waits on a question in its terminal \(Do you trust this folder\?\)"):
+                server.OPS["session_send"](self.c, {"agent": name, "text": text}, "mark")
+        self.assertEqual(pane["keys"], ["1", "Enter", "-l; rm"])
+        pane["screen"] = "Welcome back\n> "  # the question is answered
         # The text bar of the Sessions tab (#4596): the person's text as one line, then Enter; empty text is Enter.
         r = server.OPS["session_send"](self.c, {"agent": name, "text": "yes, please go on "}, "mark")
         self.assertEqual((r["text"], pane["keys"][3:]), ("yes, please go on", ["yes, please go on", "Enter"]))
@@ -3524,11 +3536,11 @@ class LaunchInTmux(unittest.TestCase):
                     return got
                 time.sleep(0.1)
             self.fail(f"the panes did not get there: {got}")
-        # A pane river just opened shows a shell: for START_GRACE it starts, and no tidy closes it (#1011).
-        got = panes(lambda p: p["starting"] if p["name"] == "needs you" else p["running"] == "sleep")
+        # A pane river just opened shows a shell: for START_GRACE it starts (#1011), unless its command has ended
+        # already: the line's exit mark says so at once (#5892; 'true' ends at once).
+        got = panes(lambda p: p["exited"] if p["name"] == "needs you" else p["running"] == "sleep")
         self.assertEqual(list(Path(core.river_dir(), "launch").iterdir()), [])  # #1's file removed itself
-        self.assertEqual(([p["ended"] for p in got.values()], server.tmux_view(None, tidy=True)["closed"]),
-                         ([False, False, False], []))
+        self.assertEqual([(p["ended"], p["exited"]) for p in got.values()], [(False, False), (False, False), (True, True)])
         self.addCleanup(setattr, server, "START_GRACE", server.START_GRACE)
         server.START_GRACE = 0
         got = panes(lambda p: p["ended"] if p["name"] == "needs you" else p["running"] == "sleep")
@@ -5552,7 +5564,7 @@ class KillPane(unittest.TestCase):
         def tmux(a):
             if a[0] != "list-panes":
                 return ""
-            return "\n".join(f"%7|@1||1|{run}|/dev/ttys042|{agent}||{server._queue_db()}|{agent}"
+            return "\n".join(f"%7|@1||1|{run}|/dev/ttys042|{agent}||{server._queue_db()}||{agent}"
                              for agent, run in (("aider-1", "Python"), ("other-2", "zsh")))
         server.TMUX_RUNNER = tmux
         server.FG_PS_RUNNER = lambda tty: self.ps.get(tty, "")
@@ -5871,3 +5883,121 @@ class HermesWake(unittest.TestCase):
         with mock.patch.object(server, "agent_terminals", lambda conn: {}):
             server.wake_pass(self.c, {})
         self.assertTrue(core.send(self.c, "note", "x", to="h1", actor="mark")["native_status"].startswith("failed:"))
+
+
+class StartThatStops(unittest.TestCase):
+    """#5892: maxpm expert start in a new folder showed Claude Code's folder trust question; the session exited
+    ('No, exit'), the page went on showing it as starting and typed the person's 'continue' and 'hi' into the shell,
+    and maxpm expert list showed the expert as active."""
+
+    TRUST = ("Accessing workspace:\n\n /work/new\n\n Quick safety check: Is this a project you created or one you trust?"
+             "\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel\n")
+
+    def setUp(self):
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        self.tmux = server.TMUX_RUNNER = FakeTmux()
+        self.in_tmux = os.environ.pop("TMUX", None)
+
+    def tearDown(self):
+        if self.in_tmux is not None:
+            os.environ["TMUX"] = self.in_tmux
+        core.PLATFORM, server.TMUX_RUNNER = self.platform, None
+        self.c.close()
+        self.dir.cleanup()
+        os.environ.pop("MAXPM_DB", None)
+
+    def _exit(self, pane, screen):
+        """The agent command ended in the pane: its shell runs the exit mark the launch line ends with."""
+        pane["running"], pane["screen"], pane["exit"] = "zsh", screen, "1"
+
+    def test_a_pane_whose_agent_ended_is_ended_at_once_and_takes_no_text(self):
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane = self.tmux.panes[0]
+        self.assertTrue(pane["exit_mark"])  # the launch line ends with the command that marks the pane
+        pane["running"] = "zsh"  # a shell inside START_GRACE, with no mark: the agent may still start
+        self.assertEqual([(p["starting"], p["ended"]) for p in server._tmux_panes()], [(True, False)])
+        self._exit(pane, self.TRUST + "% ")
+        self.assertEqual([(p["starting"], p["ended"]) for p in server._tmux_panes()], [(False, True)])
+        with self.assertRaisesRegex(RiverError, "shows only a shell"):
+            server.session_send(self.c, name, "continue", "mark")
+        self.assertEqual(pane["keys"][1:], ["Enter"])  # the launch line and its Enter only
+
+    def test_a_worker_that_never_connected_ends_and_its_item_goes_back(self):
+        x = core.item_add(self.c, "shop", "work")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        self.assertEqual(core.item_show(self.c, x)["reserved_for"], name)
+        self.assertEqual(server.failed_starts(self.c), {})  # it starts: nothing to do
+        self._exit(self.tmux.panes[0], self.TRUST + "% ")
+        self.assertEqual(server.failed_starts(self.c), {name: "%0"})
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone())
+        it = core.item_show(self.c, x)
+        self.assertEqual((it["status"], it["reserved_for"]), ("open", None))
+        self.assertTrue(any("did not start" in r["change"] and "No, exit" in r["change"] for r in self.c.execute(
+            "SELECT change FROM events WHERE item_id=?", (x,))))
+        note = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' AND kind='notice'").fetchone()["body"]
+        self.assertIn(f"{name} did not start", note)
+        self.assertIn(f"maxpm launch --item {x}", note)
+        self.assertIn("Yes, I trust this folder", note)
+        self.assertEqual(server.failed_starts(self.c), {})  # once
+        self.assertEqual(len(self.tmux.panes), 1)  # the pane stays for the person to read; tidy closes it
+
+    def test_an_expert_that_never_connected_ends_and_its_task_goes_back(self):
+        r = server.start_expert(self.c, "llc", topic="The move", project="shop", model="opus")
+        self.assertEqual(core.item_show(self.c, r["task"])["assignee"], "llc")
+        self._exit(self.tmux.panes[0], "bash: claude: command not found\n$ ")
+        self.assertEqual(server.failed_starts(self.c), {"llc": "%0"})
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='llc'").fetchone())
+        task = core.item_show(self.c, r["task"])
+        self.assertEqual((task["status"], task["assignee"]), ("open", None))
+        note = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' AND kind='notice'").fetchone()["body"]
+        self.assertIn("command not found", note)
+        self.assertIn(f"maxpm expert start llc --item {r['task']}", note)
+        self.assertNotIn("trust", note)
+
+    def test_a_session_that_connected_or_started_again_is_left_alone(self):
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        self.c.execute("UPDATE agents SET pid=?, host=? WHERE name=?", (os.getpid(), core.this_host(), name))
+        self.c.commit()
+        self._exit(self.tmux.panes[0], "% ")
+        self.assertEqual(server.failed_starts(self.c), {})  # it ran: its end is revive_sessions' business
+        # The same name started again: its old pane, opened before the name registered again, is not its start.
+        self.c.execute("UPDATE agents SET pid=NULL, registered_at=? WHERE name=?",
+                       (core.iso(core.now() + core.timedelta(minutes=1)), name))
+        self.c.commit()
+        self.assertEqual(server.failed_starts(self.c), {})
+        self.assertIsNotNone(self.c.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone())
+
+    def test_a_start_in_a_folder_claude_code_does_not_trust_says_so(self):
+        cfg = Path(self.dir.name, "claude.json")
+        self.addCleanup(setattr, server, "CLAUDE_JSON", server.CLAUDE_JSON)
+        server.CLAUDE_JSON = str(cfg)
+        work = Path(self.dir.name, "work", "new")
+        work.mkdir(parents=True)
+        cfg.write_text(json.dumps({"projects": {str(work.parent): {"hasTrustDialogAccepted": False},
+                                                "/elsewhere": {"hasTrustDialogAccepted": True}}}))
+        self.assertTrue(server.claude_untrusted(work))
+        cfg.write_text(json.dumps({"projects": {str(work.parent): {"hasTrustDialogAccepted": True}}}))
+        self.assertFalse(server.claude_untrusted(work))  # a trusted folder above it counts, as in Claude Code
+        server.CLAUDE_JSON = str(Path(self.dir.name, "none.json"))
+        self.assertIsNone(server.claude_untrusted(work))  # no file: MaximizePM does not know
+        server.CLAUDE_JSON = str(cfg)
+        cfg.write_text(json.dumps({"projects": {}}))
+        t = {"project": "shop", "path": str(work), "session_title": "x", "command": "claude go"}
+        server._open_terminal(t, {})
+        self.assertEqual(t["trust"], str(work))
+        t = {"project": "shop", "path": str(work), "session_title": "y", "command": "codex go"}
+        server._open_terminal(t, {})
+        self.assertNotIn("trust", t)  # only Claude Code asks this
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.print_trust({"trust": str(work)})
+        self.assertIn(f"Claude Code asks first whether it may trust {work}: answer 'Yes, I trust this folder'",
+                      out.getvalue())

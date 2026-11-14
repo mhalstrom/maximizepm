@@ -533,6 +533,7 @@ def loop(stop, interval_s=None):
             steps = (
                 sweep,  # expired leases, holds and reservations, and needs-you, as every command does (#5597)
                 server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
+                server.failed_starts,  # a session whose agent exited in its pane before it connected ends (#5892)
                 session_routes.status_push,  # notify_status: a session entered a state the person wants a push for (#5852)
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)
                 server.paste_answers,  # an answer for an asker that waits at its prompt: type it there (#5303)

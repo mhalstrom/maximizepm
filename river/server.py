@@ -762,12 +762,40 @@ def _open_terminal(t, env, runner=None):
         line = f"cd {shlex.quote(t['path'])} && export {assign} && {t['command']}"
     else:
         line = f"cd {shlex.quote(t['path'])} && " + (f"{assign} " if assign else "") + t["command"]
+    if (t.get("platform") or core._exe_platform(t.get("command") or "")) == "claude-code" \
+            and claude_untrusted(t["path"], env):
+        t["trust"] = str(t["path"])  # the reply says that Claude Code asks first (#5892); MaximizePM answers nothing
     if runner:
         runner(line)
         return
     t["tmux_pane"] = _tmux_open(t, env, line)
     if t.get("first_prompt") and t.get("platform") and t["tmux_pane"]:
         hold_first_prompt(t["tmux_pane"], t["platform"], t["first_prompt"])
+
+
+CLAUDE_JSON = None  # tests: the path of Claude Code's own settings file, in place of the user's
+
+
+def claude_untrusted(folder, env=None):
+    """Whether Claude Code asks first if it may trust this folder (#5892): no folder from it up to / has
+    hasTrustDialogAccepted in Claude Code's settings file (~/.claude.json, or .claude.json in CLAUDE_CONFIG_DIR).
+    None when that file is missing or cannot be read: MaximizePM does not know. It only reads the file."""
+    import json
+    base = (env or {}).get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    path = Path(CLAUDE_JSON) if CLAUDE_JSON else Path(base).expanduser() / ".claude.json" if base \
+        else Path.home() / ".claude.json"
+    try:
+        projects = json.loads(path.read_text(encoding="utf-8")).get("projects") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(projects, dict):
+        return None
+    here = Path(str(folder)).expanduser()
+    for p in (here, *here.parents):
+        got = projects.get(str(p))
+        if isinstance(got, dict) and got.get("hasTrustDialogAccepted"):
+            return False
+    return True
 
 
 def hold_first_prompt(pane, kind, prompt):
@@ -865,13 +893,18 @@ TMUX_RUNNER = None
 TMUX_SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu"}
 # One line per pane: the free text (the session's name) comes last.
 _TMUX_PANE = ("#{pane_id}|#{window_id}|#{@maxpm_tile}|#{window_panes}|#{pane_current_command}|#{pane_tty}|#{@maxpm_agent}|"
-              "#{@maxpm_started}|#{@maxpm_db}|#{@maxpm_name}")
+              "#{@maxpm_started}|#{@maxpm_db}|#{@maxpm_exit}|#{@maxpm_name}")
 # A new pane shows a shell first: tmux starts the login shell, the shell reads its files, and only then it runs
 # the command line river typed. For START_GRACE seconds after river opened a pane, a shell there is a session
 # that starts, not one that ended. Without it, a tidy pass a few seconds after a start closed the pane before
 # the agent CLI ran: auto_tidy comes right after auto_release and fresh_sessions in the same pass of the loop,
 # so every tidy_every a session serve had just started never connected (#1011).
+# The line river types ends with a command that sets the pane's @maxpm_exit when the agent command has ended
+# (#5892): a shell in a pane with that mark is a session that ended, also inside START_GRACE. Claude Code in a
+# folder it did not trust yet exited 20 seconds after its start ('No, exit'), and for the rest of the minute the
+# page showed it as starting and typed the person's 'continue' and 'hi' into the shell.
 START_GRACE = 60
+EXIT_MARK = "@maxpm_exit"
 
 
 def _tmux_cmd():
@@ -963,13 +996,13 @@ def _tmux_panes_now(everywhere=False):
                 check=False)
     rows, t = [], core.now().timestamp()
     for line in (out or "").splitlines():
-        f = line.split("|", 9)
-        if len(f) == 10:
+        f = line.split("|", 10)
+        if len(f) == 11:
             shell = f[4].lstrip("-") in TMUX_SHELLS
-            starting = shell and f[7].isdigit() and t - int(f[7]) < START_GRACE
+            starting = shell and not f[9] and f[7].isdigit() and t - int(f[7]) < START_GRACE
             rows.append({"pane": f[0], "window": f[1], "tile": f[2] == "1", "window_panes": int(f[3] or 1),
                          "running": f[4].lstrip("-"), "ended": shell and not starting, "starting": starting,
-                         "tty": f[5], "agent": f[6] or None, "db": f[8] or None, "name": f[9]})
+                         "exited": bool(f[9]), "opened": int(f[7]) if f[7].isdigit() else None, "tty": f[5], "agent": f[6] or None, "db": f[8] or None, "name": f[10]})
     return rows
 
 
@@ -1032,9 +1065,17 @@ def _tmux_open(t, env, line):
     _tmux("set-option", "-p", "-t", pane, "@maxpm_db", _queue_db())  # only this queue tidies the pane (#5054)
     if env.get("MAXPM_AGENT"):
         _tmux("set-option", "-p", "-t", pane, "@maxpm_agent", env["MAXPM_AGENT"])
-    _tmux("send-keys", "-t", pane, "-l", _typed_line(line))
+    _tmux("send-keys", "-t", pane, "-l", _typed_line(line) + _exit_mark())
     _tmux("send-keys", "-t", pane, "Enter")
     return pane
+
+
+def _exit_mark():
+    """The end of the line typed into a new pane: when the agent command has ended, the pane's shell sets
+    EXIT_MARK on its own pane ($TMUX_PANE), so _tmux_panes sees an end at once (#5892)."""
+    import shlex
+    exe = (_tmux_cmd() or ["tmux"])[0]
+    return f' ; {shlex.quote(exe)} set-option -p -t "$TMUX_PANE" {EXIT_MARK} 1'
 
 
 TYPED_MAX = 500  # bytes: a longer command line goes into a file, and the pane gets a short line that reads it
@@ -1314,6 +1355,65 @@ def auto_tidy(conn):
     if not busy:
         TIDY["at"] = t
     return closed
+
+
+def failed_starts(conn):
+    """One pass of the loop of maxpm serve (#5892): a session that MaximizePM opened, whose agent command ended in its
+    pane (EXIT_MARK) before MaximizePM ever learned its process (no maxpm command, no hook), did not start: Claude
+    Code in a folder it did not trust yet, answered 'No, exit'; a command that failed. It ends now, not after
+    connect_within: its item or expert task goes back to the queue, the history of that item keeps the pane's last
+    lines, and the active manager (else each person) gets a notice. Only the newest pane of the name counts: a session
+    started again under the same name owns its new pane. The pane stays, so a person can read it; tidy closes it.
+    Returns {agent: pane}."""
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        return {}
+    try:
+        panes = [p for p in _tmux_panes() if _own_pane(p) and p["agent"]]
+    except RiverError:
+        return {}
+    newest = {}
+    for p in panes:
+        if p["agent"] not in newest or (p["opened"] or 0) > (newest[p["agent"]]["opened"] or 0):
+            newest[p["agent"]] = p
+    gone = [p for p in newest.values() if p["exited"] and p["ended"]]
+    out = {}
+    for p in gone:
+        a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai' AND pid IS NULL", (p["agent"],)).fetchone()
+        if a is None or (p["opened"] or 0) < core.parse_iso(a["registered_at"]).timestamp() - 5:
+            continue  # it connected, or the pane is older than the session of this name
+        name = a["name"]
+        text = _pane_texts([p["pane"]]).get(p["pane"], "")
+        lines = [x.strip() for x in _plain(text).splitlines() if x.strip()][-6:]
+        last = " | ".join(lines)[-600:] or "(empty)"
+        why = f"its agent command ended in tmux pane {p['pane']} before it connected"
+        held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress',"
+                                              "'held') ORDER BY id", (name,))]
+        m = re.search(r"#(\d+)", a["note"] or "")  # STARTED_NOTE names the item it was started for
+        items = held if held else [int(m.group(1))] if m else []
+        if a["role"] == "expert":
+            core._expert_let_go(conn, name, why)
+            again = f"maxpm expert start {name}" + (f" --item {held[0]}" if held else "")
+        else:
+            for i in held:
+                core.release(conn, i, f"{name} {why}", name)
+            again = f"maxpm launch --item {items[0]}" if items else "start it again"
+        for t in conn.execute("SELECT name FROM targets WHERE owner=?", (name,)).fetchall():
+            core.target_release(conn, t["name"], name)
+        if core.end_idle(conn, name, why, force=True) is None:
+            continue
+        body = (f"{name} did not start: {why}. Its last lines: {last}. When the cause is fixed: {again}"
+                + (". Claude Code asked whether it may trust the folder: answer 'Yes, I trust this folder' in the "
+                   "question card on the Sessions tab (or in the pane)" if "trust" in last.lower() else ""))
+        manager = core.active_manager(conn)
+        people = [manager] if manager else [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human'")]
+        with core.tx(conn):
+            for i in items:
+                if conn.execute("SELECT 1 FROM items WHERE id=?", (i,)).fetchone():
+                    core._event(conn, i, "maxpm", f"{name} did not start: {why}; the last lines of the pane: {last}")
+            for who in people:
+                core._send(conn, "notice", "maxpm", body, to=who, item_id=items[0] if items else None)
+        out[name] = p["pane"]
+    return out
 
 
 # The tests start tmux servers of their own (TMUX_CMD: tmux -S <tmp>/tmux.sock -f <tmp>/tmux.conf). A test that
@@ -3464,7 +3564,7 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
         deliver_soon(agent)  # the turn may have ended since the page's last look
         return {"agent": agent, "waiting": row}
     if attachments:
-        pane = _typing_pane(conn, agent, who, manager=manager)
+        pane = _no_question(conn, agent, _typing_pane(conn, agent, who, manager=manager))
         return _type_files(conn, agent, pane, text, _save_attachments(agent, attachments), who)
     if not text:
         raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
@@ -3477,7 +3577,7 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
             # mark 2026-11-11: the Settings dialog does this command; its picker would wait in the terminal for keys.
             raise RiverError(f"/{cmd['name']} with no argument opens a picker in the terminal: change the "
                              f"{cmd['setting']} in the session's Settings, or type /{cmd['name']} <value>")
-        pane = _typing_pane(conn, agent, who, manager=manager)
+        pane = _no_question(conn, agent, _typing_pane(conn, agent, who, manager=manager))
         send_keys(pane, [{"text": text}])
         time.sleep(ENTER_PAUSE)
         send_keys(pane, [{"key": "Enter"}])
@@ -3492,13 +3592,32 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
         return out
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.
-    pane = _typing_pane(conn, agent, who, manager=manager)
+    pane = _no_question(conn, agent, _typing_pane(conn, agent, who, manager=manager))
     _tmux("set-buffer", "-b", "maxpm-send", "--", text)
     _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
     time.sleep(ENTER_PAUSE)
     _tmux("send-keys", "-t", pane, "Enter")
     _keep_prompt(conn, agent, text, who)
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
+
+
+def _no_question(conn, agent, pane):
+    """The pane, when a message may go into it now; RiverError while it shows a question (a trust or permission
+    menu) and not the agent's idle prompt (#5892): the text and its Enter would answer the menu, and the person sees
+    a question card for it. The card answers it."""
+    try:
+        screen = _pane_screen(agent, pane)
+    except RiverError:
+        return pane  # the pane is gone: the send says so itself
+    rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
+    tail = _prompt_tail(_plain(screen["text"]))
+    parts = rx and _prompt_found(tail, rx, layout)
+    if parts and not (ad and ad.detect and _screen_state(tail, ad.detect) == "idle"):
+        q = " ".join((parts.get("question") or "").split())[:160]
+        raise RiverError(f"{agent} waits on a question in its terminal" + (f" ({q})" if q else "")
+                         + ": answer it first in the question card on the Sessions tab (or in its pane); the message "
+                           "was not typed, as its Enter would answer the question")
+    return pane
 
 
 def _save_attachments(agent, attachments):

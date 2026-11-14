@@ -15,6 +15,9 @@ export async function act(op, args) {
     body: JSON.stringify({ op, args, actor: actor() }) });
   const j = await r.json();
   if (!r.ok) { toast(j.error || "failed", true); throw new Error(j.error); }
+  // A start in a folder Claude Code has not trusted yet (#5892): after the caller's own "Started ..." toast.
+  const trust = j.result && j.result.trust;
+  if (trust) setTimeout(() => toast(`Claude Code asks first whether it may trust ${trust}: answer it in the session's question card`), 0);
   await hooks.refresh();
   return j.result;
 }
