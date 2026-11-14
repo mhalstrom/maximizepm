@@ -4,6 +4,7 @@ and keys come through op "browser_input", which needs the page's token (server.T
 reaches the browser through its own CDP address, GET /cdp/<agent> (#5405)."""
 
 import hmac
+import re
 import shlex
 import sqlite3
 import sys
@@ -809,6 +810,56 @@ def person_input(conn, a, who):
     return {"ok": True, "error": b.inputs.refusal()}
 
 
+SAVE_STRIP = ("accounts", "login", "signin", "auth", "id", "sso", "secure")  # the sign-in host of a site
+
+
+def _session_browser(project, session):
+    """The browser of a session; with no project (a needs-you card knows the session only), the one it runs."""
+    if project:
+        return browser.find(project, session)
+    found = [b for (p, owner), b in list(browser.BROWSERS.items()) if owner and owner == session]
+    return next((b for b in found if b.running()), found[0] if found else None)
+
+
+def secret_fill(conn, a, who):
+    """#5866, op browser_secret (a typing op: the page's token): Fill of the masked field in the pane or a needs-you
+    card. A person only, from the page (vault.session_of reads the processes, never the typed name): the value goes
+    into the field that the session's browser waits at (browser.fill_secret), then Enter. It is in no event, message,
+    log or reply; base64 in the request, as in Change password. save: 'Save as credential' of a password: when the
+    sign-in works (the form goes away on that site), the password goes into the store (the Keychain): the sign-in of
+    that site and account, or a new one."""
+    import base64
+    from .. import signin, vault
+    if not _person(conn, who) or not vault.session_of(conn, who)["person"]:
+        raise RiverError("only a person fills a secret into a browser, from the MaximizePM page; a session types with "
+                         "maxpm browser type")
+    session = (a.get("session") or "").strip()
+    b = _session_browser(a.get("project") or "", session)
+    if b is None or not b.running():
+        raise RiverError(f"the browser of {session or a.get('project') or 'that session'} is not running: open it first")
+    try:
+        text = base64.b64decode(a.get("value_b64") or "", validate=True).decode("utf-8")
+    except ValueError:
+        raise RiverError("the value did not arrive whole: type it again")
+    out = browser.fill_secret(b, text.rstrip("\r\n"), submit=a.get("submit", True) is not False)
+    out.update(project=b.project, session=b.owner)
+    if a.get("save") and out["filled"] == "password":
+        account = (a.get("account") or out["account"] or "").strip()
+        site = vault.norm_site(out["site"])
+        parts = site.split(".")
+        if len(parts) > 2 and parts[0] in SAVE_STRIP:
+            site = ".".join(parts[1:])
+        rows = vault.signins_for(conn, out["site"])
+        row = next((r for r in rows if not account or r["account"] == account), None)
+        if row is None and not account:
+            raise RiverError("the page names no account: type the account to save the password for")
+        name = row["name"] if row else re.sub(r"[^a-z0-9._-]+", "-", f"{site}-{account}".lower()).strip("-._")[:100]
+        signin.watch_new_password(b, name, row["site"] if row else site, account=None if row else account,
+                                  who=who, value=text.rstrip("\r\n"))
+        out["save"] = {"name": name, "new": row is None, "account": row["account"] if row else account}
+    return out
+
+
 HAND_TEXT = "The browser is at {title} ({url}). Take it from here."
 
 
@@ -892,4 +943,5 @@ OPS = {
     "browser_hand": hand,
     "browser_annotate": annotate_send,
     "browser_steps": steps_op,
+    "browser_secret": secret_fill,  # #5866: Fill of the masked field (a typing op)
 }

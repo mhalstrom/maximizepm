@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -67,7 +68,7 @@ class Base(unittest.TestCase):
         self.addCleanup(setattr, vault, "BACKEND", old)
         self.watched = []  # #5849: the watch for a new password, as a record (no thread in a test)
         for k, v in (("POLL", 0), ("SUBMIT_WAIT", 0.01),
-                     ("WATCHER", lambda b, name, site: self.watched.append((name, site)))):
+                     ("WATCHER", lambda b, name, site, **given: self.watched.append((name, site)))):
             p = mock.patch.object(signin, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -517,6 +518,126 @@ class ExpiredSignIns(Base):
         with contextlib.redirect_stdout(out):
             cli.run(["guide", "manager"])
         self.assertIn("**A sign-in that expired or stopped**", out.getvalue())
+
+
+class FillBrowser(CookieBrowser):
+    """A session's browser whose shown page waits at a password or code field (#5866)."""
+
+    def __init__(self, field, url="https://github.com/session", owner="dev"):
+        super().__init__(GH, [page(url, pw=bool(field and field["kind"] == "password"))], owner)
+        self.field, self.target, self.dialog, self.looks = field, "t1", None, 0
+        self.targets = {"t1": {"url": url, "title": "Sign in"}}
+        self.cond = threading.Condition()
+        self.seq, self.person_at = 0, 0.0
+
+    def _windowed(self):
+        return False
+
+    def evaluate(self, expr, timeout=None):
+        from river import browser
+        if expr in (browser.SECRET_FIELD_JS % "true", browser.SECRET_FIELD_JS % "false"):
+            self.looks += 1
+            return dict(self.field) if self.field else None
+        return super().evaluate(expr, timeout)
+
+
+class SecretFill(Base):
+    """#5866 (mark 2026-11-14, on the iPhone): the person pastes a password or code into a masked field of the page
+    (the Browser pane, a needs-you card), and Fill types it into the field that the session's browser waits at. The
+    value goes into no message, event, log or reply; Save as credential keeps it in the store once the sign-in works."""
+
+    VALUE = "Pa55-w0rd-from-the-phone"
+
+    def setUp(self):
+        super().setUp()
+        from river import browser
+        self.browser = browser
+        self.b = FillBrowser({"kind": "password", "label": "Password", "account": "mark-gh"})
+        old = dict(browser.BROWSERS)
+        browser.BROWSERS[("site", "dev")] = self.b
+        self.addCleanup(lambda: (browser.BROWSERS.clear(), browser.BROWSERS.update(old)))
+
+    def fill(self, who="mark", **kw):
+        from river.routes import browser as routes_browser
+        args = {"session": "dev", "value_b64": base64.b64encode(self.VALUE.encode()).decode(), **kw}
+        return routes_browser.secret_fill(self.c, args, who)
+
+    def nowhere(self):
+        """The value is in no row of the queue: messages, events, the secret log, notes."""
+        for (table,) in self.c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            for row in self.c.execute(f"SELECT * FROM \"{table}\""):
+                self.assertNotIn(self.VALUE, json.dumps([str(x) for x in row]), table)
+
+    def test_fill_types_the_value_into_the_page_field_and_presses_enter(self):
+        out = self.fill()
+        self.assertEqual(self.b.typed, [self.VALUE])
+        self.assertEqual(self.b.i, 1)  # Enter: the page went on
+        self.assertEqual((out["filled"], out["submitted"], out["site"], out["session"]),
+                         ("password", True, "github.com", "dev"))
+        self.assertIn(self.VALUE, self.b.signin_values)  # scrub() keeps it out of every reply to a session
+        self.assertEqual(signin.scrub(self.b, {"text": "x " + self.VALUE}), {"text": "x ***"})
+        self.assertNotIn(self.VALUE, json.dumps(out))
+        self.assertEqual(self.watched, [])  # no Save as credential: nothing is kept
+        self.nowhere()
+
+    def test_a_code_field_and_no_enter(self):
+        self.b.field = {"kind": "code", "label": "Code", "account": ""}
+        out = self.fill(submit=False, save=True)
+        self.assertEqual((out["filled"], out["submitted"], self.b.i), ("code", False, 0))
+        self.assertNotIn("save", out)  # a one-time code is never saved
+
+    def test_only_a_person_fills_and_only_at_a_secret_field(self):
+        with self.assertRaisesRegex(RiverError, "only a person fills a secret"):
+            self.fill(who="dev")
+        self.b.field = None
+        with self.assertRaisesRegex(RiverError, "no password or code field"):
+            self.fill()
+        self.assertEqual(self.b.typed, [])
+        with self.assertRaisesRegex(RiverError, "not running"):
+            self.fill(session="nobody")
+
+    def test_save_as_credential_updates_the_sign_in_of_that_account(self):
+        out = self.fill(save=True)
+        self.assertEqual(out["save"], {"name": "gh", "new": False, "account": "mark-gh"})
+        self.assertEqual(self.watched, [("gh", "github.com")])
+
+    def test_save_as_credential_makes_a_new_sign_in_when_the_sign_in_works(self):
+        self.b = FillBrowser({"kind": "password", "label": "", "account": "mark@example.com"},
+                             url="https://accounts.example.com/signin/pw")
+        self.browser.BROWSERS[("site", "dev")] = self.b
+        got = []
+        with mock.patch.object(signin, "WATCHER", lambda b, name, site, **kw: got.append((name, site, kw))):
+            out = self.fill(save=True)
+        self.assertEqual(out["save"], {"name": "example.com-mark-example.com", "new": True,
+                                       "account": "mark@example.com"})
+        name, site, kw = got[0]
+        self.assertEqual((site, kw["account"], kw["who"], kw["value"]),
+                         ("example.com", "mark@example.com", "mark", self.VALUE))
+        # The watch: the form still shows; then the page goes on, and the sign-in is made with the value that worked.
+        self.assertFalse(signin.watch_step(self.b, name, site, self.VALUE, "mark@example.com", "mark")["saved"])
+        self.b.pages, self.b.i = [page("https://accounts.example.com/home")], 0
+        self.assertEqual(signin.watch_step(self.b, name, site, self.VALUE, "mark@example.com", "mark"),
+                         {"value": None, "saved": True, "made": True})
+        row = self.c.execute("SELECT kind, site, account FROM secrets WHERE name=?", (name,)).fetchone()
+        self.assertEqual(tuple(row), ("signin", "example.com", "mark@example.com"))
+        self.assertEqual(vault.Files().get(self.c, name), self.VALUE.encode())
+        self.nowhere()
+
+    def test_a_page_with_no_account_needs_one_typed(self):
+        self.b = FillBrowser({"kind": "password", "label": "", "account": ""}, url="https://example.net/login")
+        self.browser.BROWSERS[("site", "dev")] = self.b
+        with self.assertRaisesRegex(RiverError, "type the account"):
+            self.fill(save=True)
+        self.assertEqual(self.fill(save=True, account="ann")["save"]["name"], "example.net-ann")
+
+    def test_the_frame_status_looks_at_most_once_a_second(self):
+        f = self.browser.secret_field(self.b)
+        self.assertEqual((f["kind"], f["site"]), ("password", "github.com"))
+        self.browser.secret_field(self.b)
+        self.assertEqual(self.b.looks, 1)
+        self.b.dialog = {"type": "alert"}  # a box of the page holds every script call: no look
+        self.assertIsNone(self.browser.secret_field(self.b))
+        self.assertEqual(self.b.looks, 1)
 
 
 if __name__ == "__main__":

@@ -335,30 +335,38 @@ def _fail(conn, b, cred, why, person=False):
 
 WATCH_FOR = 1800.0  # seconds that a stopped sign-in waits for the person's new password in its browser
 WATCH_EVERY = 1.0
-WATCHER = None      # tests: fn(b, name, site) instead of a thread
+WATCHER = None      # tests: fn(b, name, site, **given) instead of a thread
 
 
-def watch_new_password(b, name, site):
+def watch_new_password(b, name, site, account=None, who=None, value=None):
     """#5849: after a stopped fill, the person types the new password in the browser (the alert's link). While the
     site's password form shows, the value of its password field is kept in serve's memory; when the form is gone on
     that site (the sign-in worked), the value becomes the sign-in's new password (Change password), the new sign-in is
-    saved back, and the session hears that it may go on. Nothing is kept when the form never goes away."""
+    saved back, and the session hears that it may go on. Nothing is kept when the form never goes away.
+    #5866: Fill of the pane gives the value itself (value: the page may leave its form before a look reads the
+    field), and 'Save as credential' on a site with no sign-in makes a new one of that account (by the person who)."""
+    given = {k: v for k, v in (("account", account), ("who", who), ("value", value)) if v is not None}
     if WATCHER:
-        return WATCHER(b, name, site)
+        return WATCHER(b, name, site, **given)
+    if value is not None:
+        b.signin_given = (name, value)
     if b.__dict__.get("signin_watching") == name:
         return None
     b.signin_watching = name
-    threading.Thread(target=_watch, args=(b, name, site, time.time() + WATCH_FOR), daemon=True,
+    threading.Thread(target=_watch, args=(b, name, site, time.time() + WATCH_FOR, account, who), daemon=True,
                      name=f"browser-signin-watch-{b.project}").start()
     return None
 
 
-def _watch(b, name, site, until):
+def _watch(b, name, site, until, account=None, who=None):
     try:
         last = None
         while time.time() < until and b.running():
             time.sleep(WATCH_EVERY)
-            if done := watch_step(b, name, site, last):
+            given = b.__dict__.pop("signin_given", None)
+            if given and given[0] == name:
+                last = given[1]
+            if done := watch_step(b, name, site, last, account, who):
                 if done["saved"]:
                     return
                 last = done["value"]
@@ -366,8 +374,9 @@ def _watch(b, name, site, until):
         b.signin_watching = None
 
 
-def watch_step(b, name, site, last):
-    """One look of the watch: {'value': the last password typed, 'saved': True when it was saved}, or None."""
+def watch_step(b, name, site, last, account=None, who=None):
+    """One look of the watch: {'value': the last password typed, 'saved': True when it was saved}, or None. A name
+    with no sign-in yet (#5866) becomes a new one: the site, the account, and the password that worked."""
     f = _fields(b)
     host = _host(f.get("url")) if f else None
     if not host or not _on(host, site):
@@ -379,8 +388,12 @@ def watch_step(b, name, site, last):
         return {"value": None, "saved": False}
     conn = core.connect()
     try:
-        vault.signin_save(conn, name, password=last.encode(), actor=None)
         b.__dict__.setdefault("signin_values", set()).add(last)  # scrub() keeps it out of every reply
+        if not conn.execute("SELECT 1 FROM secrets WHERE name=?", (name,)).fetchone():
+            vault.signin_save(conn, name, site=site, account=account, password=last.encode(), actor=who,
+                              note=f"saved from the browser of {b.owner} (Save as credential)")
+            return {"value": None, "saved": True, "made": True}
+        vault.signin_save(conn, name, password=last.encode(), actor=None)
         save_back(conn, b, host)
         with core.tx(conn):
             vault._log(conn, name, "a person", "replace", f"new password typed in the browser of {b.owner}")

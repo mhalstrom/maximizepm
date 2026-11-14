@@ -13,7 +13,10 @@
 // memory: Chrome's History and the pages its tabs showed), and a last row that searches Google for the words.
 // #5674: a box of the page (alert, confirm, prompt) shows over the frame with OK and Cancel; the person answers it
 // at any time, also while a session controls the browser.
+// #5866: when the page waits at a password or code field, a masked field of the device shows above the page, with
+// Fill (secretFill.js): an iPhone pastes into it, which it cannot do into the frames.
 import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
+import { secretFillHtml, wireSecretFill } from "./secretFill.js";
 import { button } from "./button.js";
 import { makeSuggest } from "./suggestList.js";
 import { openTool, panelSession } from "./sidePanel.js";
@@ -83,6 +86,7 @@ function render(box, project, session) {
       ${button("Save sign-ins for the project", { cls: "br-save hidden", title: "Save sign-ins", data: { br: "save_signins" } })}
       ${button("Close", { kind: "warn", title: "Close it; the sign-ins stay", data: { br: "close" } })}
     </div>
+    <div class="br-secret hidden"></div>
     <div class="br-stage" tabindex="-1">
       <img class="br-img" alt="The page of the browser" draggable="false">
       <div class="br-over" aria-hidden="true">
@@ -184,6 +188,7 @@ function render(box, project, session) {
     wby.classList.toggle("hidden", !wby.textContent);
     stage.classList.toggle("br-locked", !v.mine);
     dialog(j.running && j.dialog);
+    secretBar(j.running && !j.window && !j.dialog ? j.secret_field : null);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
     strip(j.tabs || []);
     msg.classList.toggle("hidden", j.running && !!v.w);
@@ -211,6 +216,21 @@ function render(box, project, session) {
     $$(".br-boxno").classList.toggle("hidden", d.type === "alert");  // no focus: the person may type in the chat
   }
   dbox.addEventListener("submit", (e) => { e.preventDefault(); dbox.querySelector("[data-br=dialog_yes]").click(); });
+
+  // #5866: the masked field for the page's password or code field. Drawn again when the field changes, never while
+  // the person types in it (the account the page shows may change as the page draws).
+  const sbox = $$(".br-secret");
+  let skey = "";
+  function secretBar(f) {
+    const key = f ? JSON.stringify([f.kind, f.site, f.account]) : "";
+    if (key === skey) return;
+    const cur = sbox.querySelector(".sf");
+    if (f && cur && (cur.contains(document.activeElement) || cur.querySelector(".sf-in").value)) return;
+    skey = key;
+    sbox.classList.toggle("hidden", !f);
+    sbox.innerHTML = f ? secretFillHtml(f) : "";
+    if (f) wireSecretFill(sbox.querySelector(".sf"), () => ({ project, session }));
+  }
 
   // A frame (#5637): the JPEG bytes of the binary answer, shown from a blob address. A poll that was slower than
   // another brings an older frame: it is dropped. The addresses that no longer show are freed once the new one loads.

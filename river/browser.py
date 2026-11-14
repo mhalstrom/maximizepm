@@ -2666,6 +2666,7 @@ def frame(b, after, timeout=8, pane=None, many=False, place=None):
     if f and (not mark or f["seq"] > mark):
         out["frame"] = {"data": f["data"], "w": f["w"], "h": f["h"], "sharp": bool(f.get("sharp")), "seq": f["seq"]}
     out.update(drawn(b))
+    out["secret_field"] = secret_field(b)  # #5866: the pane offers a masked field of the device for it
     return out
 
 
@@ -2882,6 +2883,91 @@ def secret(b):
         return b.evaluate(SECRET_JS, 5) is not False
     except RiverError:
         return True
+
+
+# #5866 (mark 2026-11-14, on the iPhone: 'i can't manage to paste on my iphone'): the secret field that the shown page
+# waits at: a visible password field, else a visible field of a one-time code, in the page or a same-origin frame.
+# The pane and the needs-you card then show a masked field of the person's own device (an iPhone pastes into a native
+# field, not into the frames), and Fill types the value into this field. %s: true focuses and selects the field, so
+# the text that Fill inserts replaces what the field held. account: the account that the page shows (a user field,
+# or Google's address above its password field), for 'Save as credential'.
+SECRET_FIELD_JS = r"""(() => { const focus = %s;
+  const vis = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.disabled && !e.readOnly; };
+  const words = e => [e.name, e.id, e.getAttribute('autocomplete'), e.getAttribute('aria-label'), e.placeholder]
+    .filter(Boolean).join(' ').toLowerCase();
+  const type = e => (e.getAttribute('type') || 'text').toLowerCase();
+  const docs = [document];
+  document.querySelectorAll('iframe').forEach(f => { try { if (f.contentDocument) docs.push(f.contentDocument); } catch (x) {} });
+  for (const d of docs) {
+    const all = [...d.querySelectorAll('input')].filter(vis);
+    const pw = all.find(e => type(e) === 'password');
+    const f = pw || all.find(e => /one-time-code/.test(words(e)) || (['text', 'tel', 'number'].includes(type(e))
+      && /(^|[^a-z])(otp|totp|2fa|mfa|pin|verification|code)([^a-z]|$)/.test(words(e))));
+    if (!f) continue;
+    if (focus) { f.focus(); if (f.select) f.select(); }
+    const user = all.find(e => e !== f && ['email', 'text'].includes(type(e)) && /user|email|login|account|identifier/.test(words(e)));
+    const shown = d.querySelector('[data-email]'), mail = /[\w.+-]+@[\w-]+(\.[\w-]+)+/.exec((d.body && d.body.innerText || '').slice(0, 4000));
+    const account = (user && user.value) || (shown && shown.getAttribute('data-email')) || (mail && mail[0]) || '';
+    const label = (f.labels && f.labels[0] && f.labels[0].innerText) || f.getAttribute('aria-label') || f.placeholder || '';
+    return {kind: pw ? 'password' : 'code', label: label.trim().slice(0, 60), account: account.trim().slice(0, 120)};
+  }
+  return null; })()"""
+SECRET_LOOK = 1.0     # seconds that a look at the page's secret field holds for the frame polls
+SECRET_BACKOFF = 5.0  # seconds with no look after a page that did not answer it
+
+
+def secret_field(b):
+    """#5866: {'kind': 'password' | 'code', 'label', 'account', 'site'} of the field that the shown page waits at, or
+    None. Looked at most once a SECRET_LOOK for all the polls of the panels; never while a box of the page waits, the
+    browser shows as a window (the person types in it), or Chrome does not run."""
+    if not b.running() or b._windowed() or b.dialog:
+        return None
+    now, got = time.time(), b.__dict__.get("secret_look")
+    if got and got[2] == b.target and now < got[0]:
+        return got[1]
+    lock = b.__dict__.setdefault("secret_lock", threading.Lock())
+    if not lock.acquire(blocking=False):
+        return got[1] if got else None  # another poll looks now
+    try:
+        try:
+            v, wait = b.evaluate(SECRET_FIELD_JS % "false", 2), SECRET_LOOK
+        except Exception:  # noqa: BLE001 - a page that loads or hangs: what was seen before, no look for a while;
+            # the frame answer goes on in any case
+            v, wait = (got[1] if got else None), SECRET_BACKOFF
+        v = v if isinstance(v, dict) and v.get("kind") in ("password", "code") else None
+        if v:
+            cur = b.targets.get(b.target) or {}
+            v["site"] = (urlsplit(cur.get("url", "")).hostname or "").lower()
+        b.secret_look = (now + wait, v, b.target)
+        return v
+    finally:
+        lock.release()
+
+
+def fill_secret(b, text, submit=True):
+    """#5866: the person's secret into the field that the shown page waits at (secret_field), as one inserted text,
+    then Enter when submit. The value is kept nowhere: no recorded step, no typed line over the frame, no log; only
+    the set of filled values in memory (signin.scrub), so no reply to a session (eval, text, snapshot, its CDP reads)
+    holds it."""
+    if not text:
+        raise RiverError("type or paste the password or code first")
+    if not b.running():
+        raise RiverError("the browser is not running: open its page first")
+    v = b.evaluate(SECRET_FIELD_JS % "true", 5)
+    if not isinstance(v, dict) or v.get("kind") not in ("password", "code"):
+        raise RiverError("the page shows no password or code field now: open the browser and go to that step")
+    b.__dict__.setdefault("signin_values", set()).add(text)
+    b.page("Input.insertText", {"text": text})
+    if submit:
+        for p in key_events("Enter"):
+            b.page("Input.dispatchKeyEvent", p)
+    b.secret_look = None
+    b.person_at = time.time()
+    cur = b.targets.get(b.target) or {}
+    _notify(b)
+    return {"filled": v["kind"], "submitted": bool(submit), "account": v.get("account") or "",
+            "site": (urlsplit(cur.get("url", "")).hostname or "").lower()}
 
 
 def note_pointer(b, who, x, y, press=False, target=None):

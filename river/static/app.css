@@ -500,3 +500,13 @@ button.tc-unfold { display: none; }
 .mic-float.hidden, .mic-note.hidden { display: none; }
 .mic-note { position: fixed; z-index: 40; max-width: min(280px, calc(100vw - 2 * var(--sp-6))); padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-s); background: var(--panel); color: var(--muted); font-size: var(--fs-s); box-shadow: var(--shadow-pop); }
+
+/* The masked field for a secret that a session's browser waits at (components/secretFill.js, #5866) */
+.sf { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.sf-h { color: var(--muted); }
+.sf-row { display: flex; gap: var(--sp-2); align-items: center; }
+.sf-in { flex: 1 1 auto; min-width: 0; }
+.sf-row .btn { flex: none; min-height: var(--tap); }
+.sf-save, .sf-acct { display: flex; gap: var(--sp-2); align-items: center; color: var(--muted); }
+.sf-save input { margin: 0; }
+.sf-acct input { flex: 1 1 auto; min-width: 0; max-width: var(--w-l); }

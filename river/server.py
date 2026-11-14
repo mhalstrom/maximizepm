@@ -4272,7 +4272,8 @@ TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_sen
               "browser_input",  # the person's mouse and keys in a project's browser (#4631)
               "browser_hand",  # Hand to <session>: it types a line into that session's chat (#5616)
               "browser_steps",  # Record and Stop of the pane: Stop types the steps into the session's chat (#5707)
-              "browser_annotate")  # Send of Annotate: the marked-up page goes into the session's chat (#5655)
+              "browser_annotate",  # Send of Annotate: the marked-up page goes into the session's chat (#5655)
+              "browser_secret")  # Fill: the person's password or code into the page's field (#5866)
 # Ops that come many times a second (#5651: the Browser pane's moves, up to one each screen frame) and change no row
 # of the queue: they renew the person (core.activity) at most once in LIGHT_GAP seconds, and leave the page's state
 # as it is (state_changed): each move would have made the next GET /api/state build the whole state again.

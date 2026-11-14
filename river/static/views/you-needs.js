@@ -8,6 +8,11 @@ import { S, nav } from "../page.js";
 import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
+import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
+
+// #5866: an alert that links a session's Browser at a sign-in step (signin.py: a stopped fill, an expired sign-in, a
+// 2-step code) gets the masked field: the person fills the password or code from here, on a phone too.
+const browserOf = (body) => { const m = /\/sessions\/([^/\s?#]+)\/browser\b/.exec(body || ""); return m ? decodeURIComponent(m[1]) : ""; };
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
 export let NY = [], nySig = "";
@@ -60,12 +65,15 @@ export function renderNeedsYou() {
     const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent === "maxpm" ? "MaximizePM" : e.from_agent}: ${e.body || ""}`;
     const open = nyOpen.has(e.id);
     const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";
+    const br = !isItem && e.message_kind === "alert" ? browserOf(e.body) : "";
+    const fill = br ? `<div class="ny-sf" data-session="${esc(br)}">${secretFillHtml(null)}</div>` : "";
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
         <span class="chips">${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
-      ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
+      ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}${fill}<div class="actions">${buttons}</div></div>` : ""}`;
   }).join("") + (total > NY.length ? `<div class="muted t-s ny-more">The ${NY.length} most important of ${total}. The rest come here as you finish these; <code>maxpm needs-you</code> lists them all.</div>` : "");
   // Files and local pages in the details open in the side panel of the session that sent them (#4689).
   document.querySelectorAll("#needsYou .nyx .ny-c").forEach(x => linkArtifacts(x, x.closest(".nyx").dataset.agent || null));
+  document.querySelectorAll("#needsYou .ny-sf").forEach(x => wireSecretFill(x.querySelector(".sf"), () => ({ session: x.dataset.session })));
 }
 
 // One browser notification per event, once: seen ids live in localStorage. The first
