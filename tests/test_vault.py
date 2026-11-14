@@ -51,6 +51,67 @@ class Base(unittest.TestCase):
         return rc, out.getvalue() + err.getvalue()
 
 
+class FakeSecurity:
+    """/usr/bin/security as the Keychain backend calls it: -i reads one command per line and cuts each line at 4096
+    bytes (as macOS 26 does, measured in #5840); find-generic-password -w prints the stored password."""
+    LINE = 4096
+
+    def __init__(self):
+        self.items = {}
+
+    def __call__(self, args, stdin=None):
+        import re
+        import subprocess
+        if args == ["-i"]:
+            for line in stdin.decode().splitlines():
+                line = line[:self.LINE]
+                m = re.match(r'add-generic-password -U -s "([^"]*)" -a "([^"]*)" .* -X ([0-9a-fA-F]*)$', line)
+                if m:
+                    hx = m.group(3)[:len(m.group(3)) // 2 * 2]
+                    self.items[(m.group(1), m.group(2))] = bytes.fromhex(hx).decode()
+                m = re.match(r'delete-generic-password -s "([^"]*)" -a "([^"]*)"$', line)
+                if m:
+                    self.items.pop((m.group(1), m.group(2)), None)
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        if args[0] == "find-generic-password":
+            v = self.items.get((args[2], args[4]))
+            return subprocess.CompletedProcess(args, 0 if v is not None else 44, (v + "\n").encode() if v else b"", b"")
+        raise AssertionError(args)
+
+
+class KeychainParts(Base):
+    """#5840: mark's Allow failed with 'Invalid base64-encoded string: number of data characters (1997)': security -i
+    cut the line of a 2 KB browser sign-in. A long value is stored in parts now."""
+
+    def setUp(self):
+        super().setUp()
+        self.sec = FakeSecurity()
+        self.k = vault.Keychain()
+        p = mock.patch.object(vault.Keychain, "_run", lambda _self, args, stdin=None: self.sec(args, stdin))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_long_values_of_every_padding_come_back_whole(self):
+        for n in (10, 899, 900, 901, 1499, 1500, 1501, 4000, 4001, 4002, 60000):  # base64 ends in ==, = and none
+            data = os.urandom(n)
+            self.k.put(self.c, "gmail", data)
+            self.assertEqual(self.k.get(self.c, "gmail"), data, n)
+        self.k.put(self.c, "gmail", b"short")  # a shorter value removes the old parts
+        self.assertEqual(self.k.get(self.c, "gmail"), b"short")
+        self.assertEqual([a for _s, a in self.sec.items], ["gmail"])
+        self.k.put(self.c, "gmail", os.urandom(5000))
+        self.k.delete(self.c, "gmail")
+        self.assertEqual(self.sec.items, {})
+
+    def test_a_value_cut_before_is_a_refusal_that_names_its_length_only(self):
+        svc = self.k.service(self.c)
+        self.sec.items[(svc, "old")] = "b64:" + "QUJD" * 499 + "Q"  # 1997 characters, as mark's
+        with self.assertRaises(RiverError) as e:
+            self.k.get(self.c, "old")
+        self.assertIn("a cut value of the secret old (1997 base64 characters): save it again", str(e.exception))
+        self.assertNotIn("QUJD", str(e.exception))
+
+
 class Vault(Base):
     def test_put_list_pipe_never_print_the_value(self):
         rc, out = self.run_cli(["secret", "put", "cf-token", "--note", "Cloudflare, Workers edit"], TOKEN + b"\n")

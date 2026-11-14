@@ -65,28 +65,66 @@ class Keychain:
         except (OSError, subprocess.TimeoutExpired) as e:
             raise RiverError(f"the macOS Keychain did not answer ({e.__class__.__name__})")
 
+    # #5840: security -i cuts each line it reads at 4096 bytes (measured on macOS 26: a value of 3000 base64
+    # characters came back as 2011), and the value goes on that line as hex. A browser sign-in (about 2 KB of base64)
+    # was cut, and its read-back failed. A longer value is stored in parts of PART base64 characters: the item
+    # <name> holds 'parts:<n>', and <name>#1 .. <name>#n hold the parts ('#' is in no secret's name).
+    PART = 1200
+
     def put(self, conn, name, data):
-        word = ("b64:" + base64.b64encode(data).decode()).encode().hex()
+        b = base64.b64encode(data).decode()
         svc = self.service(conn)
-        line = f'add-generic-password -U -s "{svc}" -a "{name}" -l "{svc}: {name}" -X {word}\n'
-        r = self._run(["-i"], line.encode())  # security -i says 0 also on a failure: read it back
-        if self.get(conn, name) != data:
+        old = self._count(conn, name)
+        chunks = [b[i:i + self.PART] for i in range(0, len(b), self.PART)]
+        items = ([(name, "b64:" + b)] if len(b) <= self.PART else
+                 [(name, f"parts:{len(chunks)}")] + [(f"{name}#{i}", "b64:" + c) for i, c in enumerate(chunks, 1)])
+        lines = "".join(f'add-generic-password -U -s "{svc}" -a "{acct}" -l "{svc}: {name}" -X {word.encode().hex()}\n'
+                        for acct, word in items)
+        r = self._run(["-i"], lines.encode())  # security -i says 0 also on a failure: read it back
+        keep = len(items) - 1
+        if old > keep:  # a shorter value than before: its old parts go
+            self._run(["-i"], "".join(f'delete-generic-password -s "{svc}" -a "{name}#{i}"\n'
+                                      for i in range(keep + 1, old + 1)).encode())
+        try:
+            back = self.get(conn, name)
+        except RiverError:
+            back = None
+        if back != data:
             # Its words only: a line that repeats the command would hold the value as hex.
             said = re.sub(r"[0-9a-fA-F]{16,}", "...", r.stderr.decode(errors="replace")).strip()[:200]
             raise RiverError("the macOS Keychain refused the secret: nothing was saved. The login keychain may be "
                              "locked (unlock it in Keychain Access)" + (f"; security said: {said}" if said else ""))
 
+    def _raw(self, conn, account):
+        r = self._run(["find-generic-password", "-s", self.service(conn), "-a", account, "-w"])
+        return None if r.returncode else r.stdout.decode().rstrip("\n")
+
+    def _count(self, conn, name):
+        out = self._raw(conn, name)
+        return int(out[6:]) if out and out.startswith("parts:") and out[6:].isdigit() else 0
+
     def get(self, conn, name):
-        r = self._run(["find-generic-password", "-s", self.service(conn), "-a", name, "-w"])
-        if r.returncode:
+        out = self._raw(conn, name)
+        if out is None:
             return None
-        out = r.stdout.decode().rstrip("\n")
+        if out.startswith("parts:"):
+            n = int(out[6:]) if out[6:].isdigit() else 0
+            parts = [self._raw(conn, f"{name}#{i}") for i in range(1, n + 1)]
+            if not n or any(p is None or not p.startswith("b64:") for p in parts):
+                raise RiverError(f"the Keychain holds only part of the secret {name}: save it again")
+            out = "b64:" + "".join(p[4:] for p in parts)
         if out.startswith("b64:"):
-            return base64.b64decode(out[4:])
+            try:
+                return base64.b64decode(out[4:], validate=True)
+            except ValueError:  # binascii.Error: a value cut before #5840; its length only, never its text
+                raise RiverError(f"the Keychain holds a cut value of the secret {name} ({len(out) - 4} base64 "
+                                 f"characters): save it again")
         return out.encode()  # put there by hand (Keychain Access): its text as it is
 
     def delete(self, conn, name):
-        self._run(["-i"], f'delete-generic-password -s "{self.service(conn)}" -a "{name}"\n'.encode())
+        svc = self.service(conn)
+        self._run(["-i"], "".join(f'delete-generic-password -s "{svc}" -a "{acct}"\n' for acct in
+                                  [f"{name}#{i}" for i in range(1, self._count(conn, name) + 1)] + [name]).encode())
 
 
 class Files:
