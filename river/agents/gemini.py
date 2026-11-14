@@ -316,9 +316,29 @@ def _detail(tc):
     return (tc.get("description") or "").strip() or (json.dumps(args, ensure_ascii=False) if args else "")
 
 
-def _result_text(tc):
-    shown = tc.get("resultDisplay")
+def _shown_text(shown):
+    """The text of a tool call's resultDisplay as Gemini 0.68 writes it: a string; for a shell command the terminal's
+    lines, each a list of styled spans ({"text", "bold", "inverse", ...}); for a file edit an object with the diff
+    (fileDiff). None for another form."""
     if isinstance(shown, str):
+        return shown
+    if isinstance(shown, dict):
+        return shown["fileDiff"] if isinstance(shown.get("fileDiff"), str) else None
+    if isinstance(shown, list) and all(isinstance(line, list) for line in shown):
+        lines = ["".join(s.get("text", "") for s in line if isinstance(s, dict)).rstrip() for line in shown]
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
+    return None
+
+
+def _result_text(tc):
+    """What a tool call gave back: what Gemini showed the person (resultDisplay), else the response to the model.
+    A refused or failed edit keeps the diff it proposed in resultDisplay: its error is the response's
+    ("[Operation Cancelled] Reason: User denied execution.")."""
+    display = tc.get("resultDisplay")
+    shown = _shown_text(display)
+    if shown is not None and (isinstance(display, str) or tc.get("status") in (None, "success")):
         return shown
     out = []
     for p in tc.get("result") or ():
@@ -381,7 +401,10 @@ def parse_chat(lines):
     The turn: working after a prompt, after a model line with no text (it asked for tools) and after tool results;
     idle after the model's text, or after a cancelled tool call; None when the file has no message yet. Gemini 0.68
     records the tool calls of a reply only when they are done, so while they run the reply's line has no calls yet:
-    a reply with text then reads as idle (the screen, DETECT, is the state source)."""
+    a reply with text then reads as idle (the screen, DETECT, is the state source). A turn that the person cancels
+    (Esc) ends in an info line "Request cancelled.", then a $patch that removes it from the history: the cancelled
+    prompt and the info line, or the reply with the refused tool call and the info line (seen in a real 0.68 log,
+    session-2026-11-14T00-15-006c1604.jsonl). The text that streamed before the cancel is not in the log."""
     entries, turn = [], None
     for m in _records(lines)[1]:
         got, st = _message(m)
@@ -466,7 +489,7 @@ DETECT = {
     # LoadingIndicator: "<phrase> (esc to cancel, 12s)" while a turn streams.
     "working": r"\(esc to cancel, \d",
     "blocked": [
-        r"Allow execution of",                       # a shell command ("Allow execution of [rm]?"), an MCP tool
+        r"Allow execution of",                       # a shell command ("Allow execution of [Shell]?"), an MCP tool
         r"Apply this change\?",                      # a file edit
         r"Do you trust the files in this folder\?",  # folder trust, at the start
         r"How would you like to authenticate for this project\?",  # sign-in, at the start

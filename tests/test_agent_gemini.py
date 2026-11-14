@@ -16,6 +16,7 @@ FIX = Path(__file__).parent / "fixtures" / "gemini"
 DONE = FIX / "session-2026-11-11T07-50-a64cec76.jsonl"
 WORKING = FIX / "session-2026-11-11T07-55-5d0c1b2a.jsonl"
 CANCELLED = FIX / "session-cancelled.jsonl"
+REAL = FIX / "session-2026-11-14T00-15-006c1604.jsonl"
 
 
 def lines(path):
@@ -231,6 +232,82 @@ class Chat(unittest.TestCase):
         self.assertEqual(gemini.CHAT["file_tools"], ["write_file", "replace"])
 
 
+class RealLog(unittest.TestCase):
+    """The log of a real Gemini CLI 0.68.0 session (#5216): a reply, a turn cancelled with Esc, a read-only shell
+    command that ran without a question, an edit the person refused, a shell command the person allowed, then the
+    same session resumed with --resume <id> and one more prompt. The model was a scripted local stand-in (the
+    README of the fixtures)."""
+
+    SID = "006c1604-f0af-40ae-b1b5-1f960f71cf3d"
+
+    def setUp(self):
+        self.lines = lines(REAL)
+
+    def test_the_whole_file_reads_as_gemini_keeps_it(self):
+        # Gemini's own $patch lines remove both cancelled turns: the prompt that streamed, and the refused edit.
+        entries, turn = gemini.parse_chat(self.lines)
+        self.assertEqual([(e["role"], e["text"]) for e in entries], [
+            ("user", "say hello"), ("assistant", "Hello. This folder has a small Python file and a README."),
+            ("user", "list files here"), ("tool", "Shell"), ("result", "calc.py         README.md"),
+            ("assistant", "Done: run_shell_command finished."),
+            ("user", "edit the function name"),
+            ("user", "make a file please"), ("tool", "Shell"), ("result", ""),
+            ("assistant", "Done: run_shell_command finished."),
+            ("user", "say hello again"), ("assistant", "Hello. This folder has a small Python file and a README."),
+        ])
+        self.assertEqual(turn, "idle")
+        self.assertEqual([e["detail"] for e in entries if e["role"] == "tool"], ["ls", "touch notes.txt"])
+
+    def test_line_by_line_each_reply_and_each_tool_call_shows_once(self):
+        got, turn = [], None
+        for line in self.lines:
+            e, st = gemini.parse_chat_line(json.loads(line))
+            got += [(x["role"], x["text"], x.get("error")) for x in e]
+            turn = st or turn
+        self.assertEqual(got, [
+            ("user", "say hello", None),
+            ("assistant", "Hello. This folder has a small Python file and a README.", None),
+            ("user", "be slow please", None), ("event", "Request cancelled.", None),
+            ("user", "list files here", None), ("tool", "Shell", None), ("result", "calc.py         README.md", False),
+            ("assistant", "Done: run_shell_command finished.", None),
+            ("user", "edit the function name", None), ("tool", "Edit", None),
+            ("result", "[Operation Cancelled] Reason: User denied execution.", True),
+            ("event", "Request cancelled.", None),
+            ("user", "make a file please", None), ("tool", "Shell", None), ("result", "", False),
+            ("assistant", "Done: run_shell_command finished.", None),
+            ("user", "say hello again", None),
+            ("assistant", "Hello. This folder has a small Python file and a README.", None),
+        ])
+        self.assertEqual(turn, "idle")
+
+    def test_a_reply_that_asks_for_a_tool_is_working_until_its_calls_are_written(self):
+        # Gemini writes the reply with no calls first; while a confirmation waits, that is the last line.
+        first = next(json.loads(x) for x in self.lines if '"f448c1b4-' in x and "toolCalls" not in x)
+        self.assertEqual(gemini.parse_chat_line(first), ([], "working"))
+
+    def test_an_accepted_edit_shows_its_diff(self):
+        tc = {"status": "success", "resultDisplay": {"fileDiff": "--- a\n+++ b\n", "fileName": "calc.py"},
+              "result": [{"functionResponse": {"response": {"output": "Successfully modified file"}}}]}
+        self.assertEqual(gemini._result_text(tc), "--- a\n+++ b\n")
+        self.assertEqual(gemini._result_text({"status": "success", "resultDisplay": [[{"text": "a  "}], [{"text": " "}]]}), "a")
+
+    def test_the_session_is_found_by_its_id_and_resume_writes_the_same_file(self):
+        self.assertEqual(json.loads(self.lines[0])["sessionId"], self.SID)
+        self.assertEqual(sum('"sessionId"' in x for x in self.lines), 2)  # the first line, and the resume's $set
+        with tempfile.TemporaryDirectory() as tmp:
+            chats = Path(tmp) / "gemdemo" / "chats"
+            chats.mkdir(parents=True)
+            shutil.copy(REAL, chats / REAL.name)
+            self.assertEqual(gemini.chat_path(self.SID, None, tmp), chats / REAL.name)
+        self.assertEqual(gemini.resume_command(self.SID, None, None, {})[:3], ["gemini", "--resume", self.SID])
+
+    def test_title_folder_and_tokens(self):
+        self.assertEqual(gemini.chat_title(self.lines), "say hello")
+        self.assertEqual(gemini.chat_cwd(self.lines), "/Users/demo/projects/gemdemo")
+        # Six model lines stay (the refused edit's reply is removed); each said 1200 in and 20 out.
+        self.assertEqual(gemini.chat_usage(self.lines), {"input": 7200, "output": 120, "cache_read": 0, "cache_write": 0})
+
+
 class Screen(unittest.TestCase):
     def read(self, name):
         return screen((FIX / name).read_text(encoding="utf-8"))
@@ -240,19 +317,28 @@ class Screen(unittest.TestCase):
         self.assertEqual(gemini.DETECT["process"], "gemini")
 
     def test_each_screen_reads_as_its_state(self):
+        # Screens of a real Gemini CLI 0.68.0 in a tmux pane (#5216); pane_cancelled is the screen after Esc.
         for name, want in (("pane_idle.txt", "idle"), ("pane_idle_draft.txt", "idle"), ("pane_working.txt", "working"),
+                           ("pane_cancelled.txt", "idle"),
                            ("pane_blocked_shell.txt", "blocked"), ("pane_blocked_edit.txt", "blocked"),
                            ("pane_blocked_trust.txt", "blocked"), ("pane_blocked_auth.txt", "blocked")):
             self.assertEqual(self.read(name)[0], want, name)
 
     def test_a_blocked_screen_gives_its_question_and_options(self):
         _, p = self.read("pane_blocked_shell.txt")
-        self.assertEqual(p["question"], "Allow execution of [rm]?")
+        self.assertEqual(p["question"], "Allow execution of [Shell]?")
         self.assertEqual(p["options"], [("1. Allow once", True), ("2. Allow for this session", False),
                                         ("3. No, suggest changes (esc)", False)])
-        self.assertEqual(self.read("pane_blocked_edit.txt")[1]["question"], "Apply this change?")
-        self.assertEqual(self.read("pane_blocked_trust.txt")[1]["question"], "Do you trust the files in this folder?")
-        self.assertEqual(self.read("pane_blocked_auth.txt")[1]["options"][0], ("1. Sign in with Google", True))
+        _, p = self.read("pane_blocked_edit.txt")
+        self.assertEqual(p["question"], "Apply this change?")
+        self.assertEqual([o for o, _ in p["options"]], ["1. Allow once", "2. Allow for this session",
+                                                        "3. Modify with external editor", "4. No, suggest changes (esc)"])
+        _, p = self.read("pane_blocked_trust.txt")
+        self.assertEqual(p["question"], "Do you trust the files in this folder?")
+        self.assertEqual(p["options"], [("1. Trust folder (gemdemo)", True), ("2. Trust parent folder (projects)", False),
+                                        ("3. Don't trust", False)])
+        self.assertEqual(self.read("pane_blocked_auth.txt")[1]["options"], [
+            ("1. Sign in with Google", True), ("2. Use Gemini API Key", False), ("3. Vertex AI", False)])
 
     def test_the_tell_instead_option_is_on_each_tool_menu(self):
         for name in ("pane_blocked_shell.txt", "pane_blocked_edit.txt"):
@@ -261,7 +347,8 @@ class Screen(unittest.TestCase):
 
     def test_a_reply_that_ends_in_a_question_is_no_prompt(self):
         text = (FIX / "pane_working.txt").read_text(encoding="utf-8").replace(
-            " ⠼ Running the test suite", " ✦ Allow execution of the tests now?\n ⠼ Running the test suite")
+            " ⠧ Thinking...", " ✦ Allow execution of the tests now?\n ⠧ Thinking...")
+        self.assertIn("Allow execution of the tests now?", text)
         self.assertEqual(screen(text)[0], "working")
 
     def test_the_state_comes_from_the_screen_and_the_id_from_the_log(self):
