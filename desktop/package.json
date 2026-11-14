@@ -39,6 +39,10 @@
         "to": "river-app/bin"
       },
       {
+        "from": "../skills",
+        "to": "river-app/skills"
+      },
+      {
         "from": "../river",
         "to": "river-app/river",
         "filter": [
