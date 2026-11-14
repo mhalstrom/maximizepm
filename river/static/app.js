@@ -409,7 +409,8 @@ function readUrl() {
   const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
-  const pane = parts[0] === "you" ? "you" : parts[0] === "status" ? "status" : parts[0] === "artifacts" ? "arts" : null;
+  const pane = parts[0] === "you" ? "you" : parts[0] === "status" ? "status" : parts[0] === "artifacts" ? "arts"
+    : parts[0] === "cost" ? "cost" : null;  // /cost: the Cost view (#5857)
   const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length,
               pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
@@ -424,7 +425,7 @@ function readUrl() {
 }
 function urlItem() { return readUrl().item; }
 function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
-  const pane = tabName === "sessions" ? { you: "you", status: "status", arts: "artifacts" }[view.pane] : null;
+  const pane = tabName === "sessions" ? { you: "you", status: "status", arts: "artifacts", cost: "cost" }[view.pane] : null;
   let p = pane || (tabName === "sessions" && !view.session ? "" : tabName);
   if (tabName === "sessions" && view.session && !pane) {
     p += "/" + encodeURIComponent(view.session);
@@ -850,6 +851,7 @@ async function openFromUrl() {
     if (r.pane === "you") sessionsTab.showYou(false);
     if (r.pane === "status") sessionsTab.showStatus(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
+    if (r.pane === "cost") sessionsTab.showCost(false);
     // The first page (#5102 step 5, design #4657): the You view when something waits on the person. On a phone (#5853):
     // the Status view, every session by its state, where the person answers, sends Esc or a reply. A phone is under
     // 600 px (the page's breakpoint; phones are 360-430 px): a narrow desktop window keeps its first page.
@@ -1056,7 +1058,8 @@ setInterval(() => {
   {
     try { if (r.plan) setPlan(r.plan.view, r.plan); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
       if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "status") sessionsTab.showStatus(false);
-      if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
+      if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); if (r.pane === "cost") sessionsTab.showCost(false);
+    } catch (e) { /* the state draws it */ }
   }
 }
 refresh().finally(() => { booting = false; }).then(openFromUrl).then(maybeSetup).catch((e) => {

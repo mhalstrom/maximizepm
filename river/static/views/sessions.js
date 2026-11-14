@@ -263,9 +263,9 @@ function renderList(el, list, picked, empty) {
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
   let list = [], busy = false, again = false, proposals = [], listRead = false;
   // A pane in place of a session's chat (#5102): "you" (what waits on the person), "status" (every session by its
-  // state, #5852) or "arts" (the artifacts of all sessions); null while a session shows.
+  // state, #5852), "arts" (the artifacts of all sessions) or "cost" (what they used, #5857); null while a session shows.
   let pane = null;
-  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts" };
+  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts", cost: "#sessCost" };
   let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
   const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
   // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
@@ -386,7 +386,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  for (const b of ["#youBack", "#statusBack", "#artsBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  for (const b of ["#youBack", "#statusBack", "#artsBack", "#costBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head (#4903; at every width since #5115): a card under it at the right with Open session,
   // Give work, Settings, the links to Plan and End (on a phone also the item). A choice, Esc, or a click outside closes it.
   const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
@@ -547,6 +547,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function markPane() {
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
+    $("#sessCostRow .srow").classList.toggle("on", pane === "cost");
     if (pane !== "status") closeReply();
     drawStatus();
   }
@@ -582,6 +583,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     }
     markPane();
     phoneChat(true);
+    if (kind === "cost") import("./cost.js").then(m => m.showCost());  // read on each opening, not every 3 s (#5857)
     onPane(kind, byPerson);
   }
   function pick(name, remember = true) {
@@ -1046,6 +1048,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (e.target.closest("[data-you]")) return showPane("you");
     if (e.target.closest("[data-status]")) return showPane("status");
     if (e.target.closest("[data-arts]")) return showPane("arts");
+    if (e.target.closest("[data-cost]")) return showPane("cost");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
@@ -1060,9 +1063,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts], [data-cost]")) {
       e.preventDefault();
-      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status" : "arts");
+      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status"
+        : e.target.closest("[data-cost]") ? "cost" : "arts");
     }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
@@ -1124,5 +1128,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
            showStatus: (byPerson = true) => showPane("status", byPerson),
-           showArts: (byPerson = true) => showPane("arts", byPerson), pane: () => pane };
+           showArts: (byPerson = true) => showPane("arts", byPerson),
+           showCost: (byPerson = true) => showPane("cost", byPerson), pane: () => pane };
 }

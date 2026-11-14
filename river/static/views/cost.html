@@ -1,0 +1,11 @@
+<!-- The Cost view of the Sessions tab (#5857): what each session, item and project used in a period, in tokens and
+     dollars; the plan windows that an agent writes to its log (Codex); the cost limits that the person set (none by
+     default). The Cost row of the session list opens it; so does /cost. views/cost.js draws it from GET /api/cost.
+     maxpm serve puts it into sessions.html, at view: cost. -->
+<div class="panel sess-main sess-cost hidden" id="sessCost">
+  <div class="sess-head">
+    <button class="btn" type="button" id="costBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
+    <h2 class="sess-h2" title="What the sessions used">Cost</h2>
+  </div>
+  <div class="cost-body"><div id="costView"></div></div>
+</div>

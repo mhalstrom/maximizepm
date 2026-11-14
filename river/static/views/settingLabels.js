@@ -45,7 +45,8 @@ export const LABELS = {
   question_popup_max: "Open 'Waits for you' by itself at most", question_wait_end: "End a session that waits for an answer after",
   web_terminal: "Terminal tab", web_terminal_relay: "Terminal tab through the relay",
   // Work
-  review: "Review before release", review_at: "A person approves changes before (off, push, release)", review_cmd: "Review command", review_prompt: "Review prompt", review_timeout: "Stop a review command after",
+  review: "Review before release", review_at: "A person approves changes before (off, push, release)",
+  cost_limit: "Cost limit: an alert at 80% and 100% ($40/day, 20M/week)", review_cmd: "Review command", review_prompt: "Review prompt", review_timeout: "Stop a review command after",
   auto_review: "Start reviews by itself", release_approval: "Release gate", release_commits: "Command that lists a release's commits",
   deploy_timeout: "Stop a deploy after", hook_timeout: "Stop a hook after", result_look: "A finished result is looked at",
   tracker: "Outside tracker", push_guard: "Commands held while an alert is unread", due_warn_before: "Warn before a due date",

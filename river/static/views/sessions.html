@@ -20,6 +20,10 @@
       <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
         <div class="srow-main" tabindex="0" role="button" title="What all sessions made or named" aria-label="Artifacts of all sessions">
           <div class="srow-h"><b class="srow-t">Artifacts</b></div><div class="sub">What the sessions made</div></div></div></div>
+      <!-- The Cost row (#5857): what the sessions used, in tokens and dollars; it opens the Cost view. -->
+      <div id="sessCostRow" class="slist-cost" aria-label="Cost"><div class="srow srow-cost" data-cost="1">
+        <div class="srow-main" tabindex="0" role="button" title="What the sessions used" aria-label="Cost of all sessions">
+          <div class="srow-h"><b class="srow-t">Cost</b></div><div class="sub">What the sessions used</div></div></div></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
       <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
         <div class="slist-h">Experts</div>
@@ -68,6 +72,7 @@
     <!-- view: you -->
     <!-- view: status -->
     <!-- view: artifacts -->
+    <!-- view: cost -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
       <!-- The tabs and the panel's ✕ share one line: the ✕ never stands alone under the address bar (#5323). -->

@@ -1,0 +1,35 @@
+/* The Cost view of Sessions (#5857, views/cost.js): in place of a session's chat, what the sessions used; the body
+   scrolls. Its row in the session list sits under Artifacts. A phone: the table's own columns scroll inside it. */
+.sess-cost.hidden { display: none; }
+.slist-cost { flex: none; }
+.slist-cost .srow-t { font-weight: 700; }
+.sess-cost .cost-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-3) var(--sp-4); }
+.sess-cost .cost-body > * { max-width: 60rem; margin-left: auto; margin-right: auto; }
+#costView { display: flex; flex-direction: column; gap: var(--sp-4); }
+.cost-bar { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
+.cost-tab.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
+.cost-sum { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2) var(--sp-4); }
+.cost-big { font-size: var(--fs-2xl); font-weight: 700; font-variant-numeric: tabular-nums; }
+.cost-sec { display: flex; flex-direction: column; gap: var(--sp-3); }
+.cost-h { margin: 0; font-size: var(--fs-base); }
+.cost-meter { display: flex; flex-direction: column; gap: var(--sp-1); max-width: var(--w-form); }
+.cost-mh { display: flex; gap: var(--sp-3); align-items: baseline; font-size: var(--fs-m); }
+.cost-over { color: var(--warn); }
+.cost-th { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); }
+.cost-note { padding: var(--sp-1) 0; }
+.cost-scroll { overflow-x: auto; }
+.cost-t { width: 100%; border-collapse: collapse; font-size: var(--fs-m); }
+.cost-t th { text-align: left; font-weight: 600; color: var(--muted); font-size: var(--fs-s); padding: var(--sp-1) var(--sp-3);
+  border-bottom: var(--hair) solid var(--line); white-space: nowrap; }
+.cost-t td { padding: var(--sp-2) var(--sp-3); border-bottom: var(--hair) solid var(--line); vertical-align: baseline; }
+.cost-t .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cost-name { overflow-wrap: anywhere; min-width: var(--w-m); }
+.cost-model { white-space: nowrap; }
+.cost-share { width: var(--w-xs); }
+.cost-share .bar { margin: 0; }
+@media (max-width: 759px) {  /* a phone: the period and table switches at the size of a tap; no model or share column */
+  .cost-tab { min-height: var(--tap); }
+  .cost-t .cost-model, .cost-t .cost-share { display: none; }
+  .cost-name { min-width: 0; }
+  .sess-cost .cost-body { padding: var(--sp-3) var(--sp-2); }
+}
