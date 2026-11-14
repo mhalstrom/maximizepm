@@ -1062,6 +1062,10 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn(f"MAXPM_AGENT={r['session_name']} claude --name notes --remote-control notes", sent[-1])
         for n in (name, r["session_name"]):
             self.assertEqual(core._agent(self.c, n)["role"], "plain")
+        # It runs no maxpm command: its hooks record its chat, so the Sessions tab finds the transcript (#5861).
+        core.hook_report(self.c, "claude", {"hook_event_name": "UserPromptSubmit", "session_id": "sid-5861",
+                                            "prompt": "hello"}, env={"MAXPM_AGENT": name})
+        self.assertEqual(core.last_claude_session(self.c, name), "sid-5861")
         # No worker slot, no queue work: the Start button still has its slot, and go gives no item.
         self.assertEqual(core.live_sessions(self.c), 0)
         b = core.go(self.c, os.path.join(web, "src"), name)
@@ -1072,7 +1076,8 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn("Role: SESSION", out.getvalue())
         self.assertIn("do not run maxpm wait", out.getvalue())
         # Idle at its prompt for hours: the worker rules (idle_end) leave it alone.
-        self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z', talked_at='2026-01-01T00:00:00Z'")
+        self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z', talked_at='2026-01-01T00:00:00Z', "
+                       "activity_at='2026-01-01T00:00:00Z'")
         self.c.commit()
         self.assertEqual(server.fresh_sessions(self.c, runner=sent.append)["ended"], {})
         self.assertEqual(core.end_quiet_experts(self.c), {})

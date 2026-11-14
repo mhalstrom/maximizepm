@@ -15133,6 +15133,9 @@ def hook_report(conn, agent_id, payload, env=None):
         return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
                 "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
     record_session_url(conn, agent, session_url_from_env(env))
+    # The hook's session is the agent's chat: a session that runs no maxpm command (a session with no item, #5851)
+    # records it only here, and the Sessions tab finds its transcript by it (#5861). One read when it is known.
+    record_session(conn, agent, rep["session_id"])
     state, typed = rep["state"], rep["prompt"]
     t, alert, answered, remind = iso(now()), None, [], None
     with tx(conn):
