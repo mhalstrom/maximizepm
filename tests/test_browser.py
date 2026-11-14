@@ -1064,6 +1064,26 @@ class Passkey(Base):
         b.passkey("get")  # a page that asks again at its load: no window again
         self.assertEqual(log, [])
 
+    def test_the_panel_never_goes_back_to_a_blank_page(self):
+        b, st, log = self.fake()
+        asked = st["url"]
+        b.person_at = time.time()
+        b.passkey("get")
+        log.clear()
+        st["url"] = "about:blank"  # seen 2026-11-13 17:26: the window showed no page when the step ended
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 0.3), mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+            b.passkey("done")
+        self.assertEqual(log[-1], ("open", asked))  # back to the page that asked
+        b.person_at = time.time() + 61
+        st["url"] = "https://accounts.google.com/challenge/pk?2"
+        b.passkey("get")
+        log.clear()
+        seen = iter(["https://accounts.google.com/challenge/pk?2", "about:blank", "https://myaccount.google.com/"])
+        b.info = lambda: {"url": next(seen, "https://myaccount.google.com/")}
+        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+            b.passkey("done")
+        self.assertEqual(log[-1], ("open", "https://myaccount.google.com/"))  # the next real page, not the blank one
+
     def test_a_session_s_request_opens_no_window_and_a_window_closes_by_itself(self):
         b, st, log = self.fake()
         b.passkey("get")  # nobody used the panel: a session meets the passkey page

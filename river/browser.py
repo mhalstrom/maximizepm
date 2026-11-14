@@ -121,6 +121,11 @@ def _app_script(script):
         return ""
 
 
+def _host(url):
+    """The host of an address, for a log line: a sign-in address carries tokens that the log must not keep."""
+    return urlsplit(url or "").hostname or "no page"
+
+
 def hide_app(pid):
     """Hide the app with this pid (all its windows) at once. True when macOS took it."""
     return bool(pid) and _app_script(HIDE_JS % int(pid)) == "true"
@@ -763,6 +768,7 @@ class Browser:
         self.agent_at = 0.0  # a session's last action that may change the page (#5814)
         self.passkey_at = None    # #5814: when the window of a passkey step opened (None: no such window)
         self.passkey_asked = False  # the page in that window asked for the passkey
+        self.passkey_url = ""       # the page that asked for it
         self.passkey_skip = None  # (url, time) of a passkey step that ended with no passkey: no window again there
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
@@ -1513,22 +1519,32 @@ class Browser:
                 self.said = getattr(self, "said", []) + [
                     "the page asks for a passkey: only the person signs in; ask them in the panel"]
                 return
-            self.passkey_at, self.passkey_asked = now, False
+            self.passkey_at, self.passkey_asked, self.passkey_url = now, False, url
             self.state["window_by"] = {"who": "A passkey step", "person": True, "passkey": True, "at": core.iso(core.now())}
+            self._say_passkey(f"the page asked for a passkey: a window opens over the panel ({_host(url)})")
             self._switch_keep(True, url)
             threading.Thread(target=self._passkey_limit, args=(now,), daemon=True,
                              name=f"browser-passkey-limit-{self.project}").start()
         elif kind in ("done", "ended") and self.passkey_at and self._windowed():
-            url = self.info()["url"]
+            url = self._page_url()
             hide_app(self.state.get("pid"))  # the step ended: out of sight now
+            self._say_passkey(f"the passkey step {'gave the passkey' if kind == 'done' else 'ended with no passkey'}; "
+                              f"the window is hidden after {time.time() - self.passkey_at:.0f}s")
+            nxt = None
             if kind == "done":  # the page sends the signed answer and goes on, hidden: give it that time, then close
                 end = time.time() + PASSKEY_DONE_WAIT
-                while time.time() < end and self.running() and self.info()["url"] == url:
+                while time.time() < end and self.running():
+                    u = self._page_url()
+                    if u.startswith(("http://", "https://")) and u != url:  # its next page, never a blank one
+                        nxt = u
+                        break
                     time.sleep(0.2)
                 time.sleep(PASSKEY_SETTLE)
+                u = self._page_url()
+                nxt = u if u.startswith(("http://", "https://")) and u != url else nxt
             else:
                 self.passkey_skip = (url, now)
-            self.passkey_back(hidden=True)
+            self.passkey_back(hidden=True, url=nxt)
 
     def _passkey_limit(self, at):
         """The window never stays: it closes when its page asks for no passkey within PASSKEY_START, and in any case
@@ -1543,21 +1559,34 @@ class Browser:
             self.passkey_skip = (self.info()["url"] if self.running() else "", time.time())
             self.passkey_back()
 
-    def passkey_back(self, hidden=False):
-        """Close the window of a passkey step: the panel goes on, headless, at the window's page, with its cookies.
+    def passkey_back(self, hidden=False, url=None):
+        """Close the window of a passkey step: the panel goes on, headless, with its cookies, at url (the page after
+        the passkey), else the window's page, else the page that asked: never a blank page (seen 2026-11-13 17:26).
         hidden: the window is hidden already."""
         if not self.passkey_at:
             return
         if not self._windowed():  # the person pressed Back to the panel already
             self.passkey_at = None
             return
-        url = self.info()["url"] if self.running() else ""
-        self.passkey_at = None
-        self.state.pop("window_by", None)
         if not hidden:
             hide_app(self.state.get("pid"))  # out of sight at once; the start below takes a second or two
+        if not url:
+            u = self._page_url()
+            url = u if u.startswith(("http://", "https://")) else self.passkey_url
+        self._say_passkey(f"the window closed; the panel goes on at {_host(url)}")
+        self.passkey_at = None
+        self.state.pop("window_by", None)
         self._switch_keep(False, url)
         _notify(self)
+
+    def _page_url(self):
+        try:
+            return (self.info().get("url") or "") if self.running() else ""
+        except (RiverError, OSError):
+            return ""
+
+    def _say_passkey(self, what):
+        print(f"browser {self.project}/{self.owner or '-'}: {what}", flush=True)
 
     def _switch_keep(self, window, url):
         """Start Chrome again with or without a window; its cookies, those of this run too, and the page go along."""
