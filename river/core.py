@@ -12788,7 +12788,7 @@ def _process_list():
 CLI_SERVERS_GRACE = timedelta(seconds=60)  # what an agent CLI starts this soon after its own start: its servers
 
 
-def busy_now(conn, names=None, skip=()):
+def busy_now(conn, names=None, skip=(), at_prompt=True):
     """The agents (among names; else every AI agent) in whose session a command runs now: the agent CLI process
     runs on this computer, and a process below it started after the agent's last river command (a test run, a
     build, a merge). The servers the CLI started with are older, and so is a maxpm wait, which renews last_seen
@@ -12798,12 +12798,17 @@ def busy_now(conn, names=None, skip=()):
     hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (a sandbox that blocks it).
     Two kinds of process are no work (#5861): the wake listener (maxpm report --wake, a Claude Code hook that waits
     for a message from each turn end on, #5686), and what the CLI started in its first CLI_SERVERS_GRACE (its MCP
-    servers). A session with no item runs no river command, so both are newer than its last one."""
+    servers). A session with no item runs no river command, so both are newer than its last one.
+    An agent whose hooks said last that its turn ended (report:idle) with no background work of its own, after its
+    last river command, is at its prompt: not busy, whatever runs below it (an MCP server that started late).
+    at_prompt=False leaves that rule out: the Stop hook asks what runs below the session to record that report."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
-    rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
-                                    (host,)).fetchall()
-            if (names is None or r["name"] in names) and t - parse_iso(r["last_seen"]) < limit]
+    rows = [r for r in conn.execute("SELECT name, pid, last_seen, activity_at, activity_event, activity_waits FROM agents "
+                                    "WHERE kind='ai' AND pid IS NOT NULL AND host=?", (host,)).fetchall()
+            if (names is None or r["name"] in names) and t - parse_iso(r["last_seen"]) < limit
+            and not (at_prompt and r["activity_event"] == "report:idle" and not r["activity_waits"] and r["activity_at"]
+                     and parse_iso(r["activity_at"]) >= parse_iso(r["last_seen"]))]
     if not rows:
         return set()
     text = _PROCS.get()  # taken before the write lock of the transaction that runs now (tx)
@@ -15191,7 +15196,8 @@ def hook_report(conn, agent_id, payload, env=None):
         if state == "idle":
             found = rep["waits"]
             if found is None:  # the input does not say: a process below the session, not this hook (busy_now)
-                found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()}) else []
+                found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()},
+                                                           at_prompt=False) else []
             waits = json.dumps(found) if found else None
         conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=? WHERE name=?",
                      (t, f"report:{state}" if state else a["activity_event"], prompt, waits, agent))
