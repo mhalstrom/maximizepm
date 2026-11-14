@@ -1135,10 +1135,47 @@ CREATE TABLE IF NOT EXISTS secret_log (
   name     TEXT NOT NULL,
   at       TEXT NOT NULL,
   actor    TEXT NOT NULL,
-  action   TEXT NOT NULL,                     -- put | replace | use | delete
-  detail   TEXT,                              -- how it came (stdin, browser) or where it went (the command, the file)
+  action   TEXT NOT NULL,                     -- put | replace | use | refused | delete | set-add | set-remove
+  detail   TEXT,                              -- how it came (stdin, browser), where it went (the command, the file),
+                                              -- the grant that allowed a use, or why a use was refused
   item_id  INTEGER
 );
+-- Credential sets (#5822, river/vault.py): a person groups secrets into named sets and grants a set to a project, a
+-- goal, a kind of task, one task or one agent. A session may use a secret only when a grant of one of its sets
+-- covers the session (vault.allowed). Readers: maxpm secret sets|grants, and every get. manager_may_grant: the
+-- person's mark that the manager may grant this set (read by the manager's grants, #5828).
+CREATE TABLE IF NOT EXISTS secret_sets (
+  id                 INTEGER PRIMARY KEY,
+  name               TEXT NOT NULL UNIQUE,
+  note               TEXT,
+  manager_may_grant  INTEGER NOT NULL DEFAULT 0,
+  created_by         TEXT,
+  created_at         TEXT NOT NULL
+);
+-- The secrets of each set; one secret can be in several sets. Readers: vault.allowed, maxpm secret sets|list.
+CREATE TABLE IF NOT EXISTS secret_set_members (
+  set_id    INTEGER NOT NULL REFERENCES secret_sets(id) ON DELETE CASCADE,
+  name      TEXT NOT NULL REFERENCES secrets(name) ON DELETE CASCADE,
+  added_by  TEXT,
+  added_at  TEXT NOT NULL,
+  PRIMARY KEY (set_id, name)
+);
+-- A grant of a set to one scope. value: the id of the project, goal or item; the kind's or the agent's name. It ends
+-- at until, at a revoke, or when its goal is complete or its item is closed (computed by vault.allowed, not stored).
+-- Readers: vault.allowed, maxpm secret grants.
+CREATE TABLE IF NOT EXISTS secret_grants (
+  id          INTEGER PRIMARY KEY,
+  set_id      INTEGER NOT NULL REFERENCES secret_sets(id) ON DELETE CASCADE,
+  scope       TEXT NOT NULL CHECK (scope IN ('project','goal','kind','item','agent')),
+  value       TEXT NOT NULL,
+  note        TEXT,
+  granted_by  TEXT,
+  granted_at  TEXT NOT NULL,
+  until       TEXT,
+  revoked_by  TEXT,
+  revoked_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS secret_grants_set ON secret_grants(set_id);
 
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
 -- bring them back, newest first, on every device and through the relay. At most sessions.PROMPTS_KEEP a session.

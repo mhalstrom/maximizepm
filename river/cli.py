@@ -1190,6 +1190,38 @@ def build_parser(only=None):
     x.add_argument("-n", type=int, default=30)
     x = ses.add_parser("delete", help="delete the value and its name")
     x.add_argument("name")
+    # Sets and grants (#5822): under secret, not a command of their own, so that one word holds every credential step.
+    x = ses.add_parser("set", help="make or change a credential set (a person only): maxpm secret set stripe-live "
+                       "--add stripe-key")
+    x.add_argument("name", help="the set's name: for example stripe-live")
+    x.add_argument("--add", action="append", default=[], metavar="SECRET", help="add a secret (repeat it)")
+    x.add_argument("--remove", action="append", default=[], metavar="SECRET", help="take a secret out (repeat it)")
+    x.add_argument("--note", help="what the set is for")
+    x.add_argument("--manager-may-grant", dest="manager_may_grant", choices=("on", "off"),
+                   help="on: the manager may grant this set")
+    x.add_argument("--delete", action="store_true", help="delete the set and its grants (its secrets stay)")
+    ses.add_parser("sets", help="the sets, their secrets, and how many grants each has")
+
+    def scope_args(x):
+        g = x.add_mutually_exclusive_group()
+        g.add_argument("--project")
+        g.add_argument("--goal", help="the goal's owner and every session on a task of the goal")
+        g.add_argument("--kind", help="work, operational, review, fixes, deploy or monitor")
+        g.add_argument("--item", help="one task")
+        g.add_argument("--agent", help="one session")
+    x = ses.add_parser("grant", help="grant a set to a project, a goal, a kind of task, one task or one agent "
+                       "(a person only)")
+    x.add_argument("name", help="the set")
+    scope_args(x)
+    x.add_argument("--until", help="when it ends: 7d, 2026-12-01, 'fri 18:00' (default: until a revoke)")
+    x.add_argument("--note", help="why")
+    x = ses.add_parser("revoke", help="end a grant (g12), or a set's grants to one scope, or all its grants")
+    x.add_argument("name", help="a grant id (g12) or a set")
+    scope_args(x)
+    x = ses.add_parser("grants", help="the grants that give a set now")
+    x.add_argument("name", nargs="?", help="only this set's")
+    x.add_argument("--for", dest="for_agent", metavar="AGENT", help="only those that cover this agent now")
+    x.add_argument("--ended", action="store_true", help="also the ended ones")
 
     gl = sub.add_parser("goal", help="goals: outcomes in a project that one agent owns and works toward")
     gls = gl.add_subparsers(dest="gcmd", required=True)
@@ -5373,6 +5405,27 @@ def _secret_cmd(conn, a, actor):
         return _secret_op(conn, {"action": "log", "name": a.name, "limit": a.n}, actor)
     if cmd == "delete":
         return _secret_op(conn, {"action": "delete", "name": a.name}, actor)
+    if cmd in ("set", "sets", "grant", "revoke", "grants"):
+        # Names and scopes only, in the queue's database: no Keychain, so no trip through maxpm serve.
+        from .routes import secrets
+        args = {"action": cmd, "name": getattr(a, "name", None)}
+        if cmd == "set":
+            args.update(add=a.add, remove=a.remove, note=a.note, delete=a.delete,
+                        manager_may_grant=None if a.manager_may_grant is None else a.manager_may_grant == "on")
+        elif cmd in ("grant", "revoke"):
+            scope = next((s for s in vault.GRANT_SCOPES if getattr(a, s, None)), None)
+            args.update(scope=scope, value=getattr(a, scope) if scope else None)
+            if cmd == "grant":
+                if not scope:
+                    raise RiverError("name what the set goes to: --project, --goal, --kind, --item or --agent")
+                args.update(until=a.until, note=a.note)
+            elif re.match(r"^[gG]\d+$", a.name):
+                if scope:
+                    raise RiverError("a grant id names one grant: leave out --project, --goal, --kind, --item, --agent")
+                args.update(grant=a.name, name=None)
+        elif cmd == "grants":
+            args.update(ended=a.ended, for_agent=a.for_agent)
+        return secrets.act(conn, args, actor)
     raise RiverError(f"secret: no command {cmd}")
 
 
@@ -5396,13 +5449,50 @@ def render_secret(a, res):
             used = f"used {r['uses']}x, last {core.show_time(r['used_at'])} by {r['used_by'] or 'a person'}" \
                 if r["uses"] else "never used"
             print(f"  {r['name']:<28} {r['project'] or '-':<14} saved {core.show_time(r['updated_at'])} by "
-                  f"{r['updated_by'] or 'a person'}; {used}" + (f"  ({r['note']})" if r["note"] else ""))
+                  f"{r['updated_by'] or 'a person'}; {used}" + (f"; sets {', '.join(r['sets'])}" if r.get("sets")
+                                                                 else "; in no set")
+                  + (f"  ({r['note']})" if r["note"] else ""))
     elif cmd == "log":
         for r in res["log"]:
             print(f"  {core.show_time(r['at'])}  {r['name']:<24} {r['action']:<8} {r['actor']}"
                   + (f"  #{r['item_id']}" if r["item_id"] else "") + (f"  {r['detail']}" if r["detail"] else ""))
         if not res["log"]:
             print("no puts or uses yet")
+    elif cmd == "set":
+        if res.get("deleted"):
+            print(f"deleted set {res['set']} and its grants (its secrets stay)")
+            return
+        print(f"{'made' if res['made'] else 'changed'} set {res['set']}: "
+              + (", ".join(res["secrets"]) or "no secrets yet (--add <secret>)")
+              + ("; the manager may grant it" if res["manager_may_grant"] else "")
+              + (f"; {res['grants']} grant(s)" if res["grants"] else
+                 f". Grant it: maxpm secret grant {res['set']} --project <name>"))
+    elif cmd == "sets":
+        if not res["sets"]:
+            print("no sets. Make one: maxpm secret set <set> --add <secret>")
+        for s in res["sets"]:
+            print(f"  {s['name']:<24} {', '.join(s['secrets']) or '(empty)'}; {s['grants']} grant(s)"
+                  + ("; the manager may grant it" if s["manager_may_grant"] else "")
+                  + (f"  ({s['note']})" if s["note"] else ""))
+    elif cmd == "grant":
+        print(("already granted: " if res["already"] else "granted: ") + _grant_line(res))
+    elif cmd == "revoke":
+        if not res["revoked"]:
+            print("no grant that gives its set now matches: nothing was revoked (maxpm secret grants)")
+        for g in res["revoked"]:
+            print("revoked: " + _grant_line(g))
+    elif cmd == "grants":
+        if not res["grants"]:
+            print("no grants" + ("" if a.ended else " that give their set now (--ended shows the others)"))
+        for g in res["grants"]:
+            print("  " + _grant_line(g))
+
+
+def _grant_line(g):
+    return (f"{g['grant']}  set {g['set']} to {g['covers']}"
+            + (f" until {core.show_time(g['until'])}" if g["until"] and g["active"] else "")
+            + f", by {g['granted_by'] or 'a person'} {core.show_time(g['granted_at'])}"
+            + (f"; {g['ended']}" if g["ended"] else "") + (f"  ({g['note']})" if g["note"] else ""))
 
 
 def _canvas_dispatch(conn, a, actor):

@@ -506,6 +506,9 @@ command prints a value; never print one yourself.
   or pipe it in: `<command> | maxpm secret put <name>`. Add `--note "<what it is>"`.
 - Use: `maxpm secret pipe <name> -- wrangler secret put <VAR>` (the value on the command's stdin), or
   `maxpm secret env <name> <file> [--key VAR]` (a `.env` line). `maxpm secret list` shows the names.
+- A secret in a set needs a grant that covers you (your task, its goal, kind or project, or you):
+  `maxpm secret grants --for <you>`. A refusal names the set and the request to the manager; send it.
+  A secret in no set: only the session that saved it uses it.
 - Only the person has it: add a person item `Run in a terminal: maxpm secret put <name>` (it asks for the
   value, unseen) that blocks your item.
 

@@ -1,6 +1,6 @@
 """Op "secret" (#5757, river/vault.py): maxpm secret from inside an agent's sandbox, which refuses the macOS
 Keychain, and maxpm secret put --from-browser, which reads the value from the project's browser here, so it never
-leaves maxpm serve. The CLI is the only caller; the page shows no value.
+leaves maxpm serve. Also the sets and grants (#5822). The CLI is the only caller for now; the page shows no value.
 
 GET: none. OPS: page actions, merged into server.OPS."""
 
@@ -66,6 +66,18 @@ def act(conn, a, who):
         return vault.listing(conn, a.get("project"))
     if action == "log":
         return vault.log(conn, name, a.get("limit") or 30)
+    # Sets and grants (#5822): names and scopes only, never a value.
+    if action == "set":
+        return vault.set_change(conn, name, a.get("add") or (), a.get("remove") or (), a.get("note"),
+                                a.get("manager_may_grant"), bool(a.get("delete")), who)
+    if action == "sets":
+        return vault.sets(conn)
+    if action == "grant":
+        return vault.grant(conn, name, a.get("scope"), a.get("value"), a.get("until"), a.get("note"), who)
+    if action == "revoke":
+        return vault.revoke(conn, a.get("grant"), name, a.get("scope"), a.get("value"), who)
+    if action == "grants":
+        return vault.grants(conn, name, bool(a.get("ended")), a.get("for_agent"))
     raise RiverError(f"secret: no action {action!r}")
 
 
