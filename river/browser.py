@@ -253,6 +253,58 @@ def track_child(proc):
             _REAPER["thread"].start()
 
 
+# A host with no display (#5878: a Linux server that maxpm host setup made). A headless Chrome needs none. A Chrome
+# with a window (Open as a window: Google's sign-in refuses a headless one) runs there on a virtual display, Xvfb,
+# when it is installed; the panel shows it as it shows a headless one (the screencast), and the person's input goes
+# in through the panel too. A passkey step needs a person at a real screen: on such a host it opens no window.
+SCREEN_KIND = None  # tests: "screen", "xvfb" or "none" in place of what this computer has
+_XVFB = {"proc": None, "display": None}
+_XVFB_LOCK = threading.Lock()
+XVFB_SIZE = "1920x1080x24"
+
+
+def screen_kind():
+    """screen: a display that a person sees (macOS, or DISPLAY / WAYLAND_DISPLAY set); xvfb: none, but Xvfb is
+    installed; none: neither."""
+    if SCREEN_KIND:
+        return SCREEN_KIND
+    if sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return "screen"
+    return "xvfb" if shutil.which("Xvfb") else "none"
+
+
+NO_SCREEN = ("this computer has no display and no Xvfb, so its browser runs only in the panel (headless). To open it "
+             "as a window here (a site that refuses a headless browser), install Xvfb on this computer, for example: "
+             "sudo apt install xvfb")
+
+
+def xvfb_display():
+    """The DISPLAY of the Xvfb that this serve started (once; started again when it ended)."""
+    with _XVFB_LOCK:
+        p = _XVFB["proc"]
+        if p is not None and p.poll() is None:
+            return _XVFB["display"]
+        n = next((n for n in range(90, 200) if not os.path.exists(f"/tmp/.X11-unix/X{n}")
+                  and not os.path.exists(f"/tmp/.X{n}-lock")), None)
+        if n is None:
+            raise RiverError("no free X display number for Xvfb (90 to 199 are in use)")
+        try:
+            # -terminate: it ends with its last client (the Chrome), so none stays after serve stops.
+            p = subprocess.Popen(["Xvfb", f":{n}", "-screen", "0", XVFB_SIZE, "-nolisten", "tcp", "-terminate"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        except OSError as e:
+            raise RiverError(f"Xvfb did not start: {e}")
+        track_child(p)
+        end = time.time() + 5
+        while time.time() < end and p.poll() is None and not os.path.exists(f"/tmp/.X11-unix/X{n}"):
+            time.sleep(0.05)
+        if p.poll() is not None:
+            raise RiverError(f"Xvfb :{n} ended at once (exit {p.returncode})")
+        _XVFB.update(proc=p, display=f":{n}")
+        return _XVFB["display"]
+
+
 def reap():
     """Wait for each Chrome child that ended (poll), so none stays a zombie. Returns how many still run."""
     with _CHILDREN_LOCK:
@@ -837,6 +889,8 @@ class Browser:
                 self._stop_chrome()
             if self.ws is not None and window in (None, bool(self.state.get("window"))):
                 return
+            if window and screen_kind() == "none":  # #5878: no display and no Xvfb; the panel stays as it is
+                raise RiverError(NO_SCREEN)
             if window is not None and window != bool(self.state.get("window")):
                 self._stop_chrome()
                 self.state["window"] = window
@@ -945,13 +999,20 @@ class Browser:
         place = self.passkey_place() if self.state.get("window") and self.passkey_at else None
         if place:  # #5814: the window of a passkey step lies over the panel where the person works
             args[-2:-1] = [f"--window-size={place[2]},{place[3]}", f"--window-position={place[0]},{place[1]}"]
+        env = None
+        if self.state.get("window"):
+            screen = screen_kind()
+            if screen == "xvfb":  # #5878: a window on the virtual display; the panel shows it
+                env = {**os.environ, "DISPLAY": xvfb_display()}
+            elif screen == "none":  # a window from before (a serve on another computer) has no display here
+                self.state["window"] = False
         if not self.state.get("window"):
             args[1:1] = ["--headless=new", "--hide-scrollbars", "--mute-audio"]
             ua = user_agent(chrome)
             if ua:
                 args.insert(1, f"--user-agent={ua}")
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=True)
+                                     start_new_session=True, env=env)
         track_child(self.proc)
         end = time.time() + START_WAIT
         while time.time() < end:
@@ -1533,6 +1594,11 @@ class Browser:
                 return
             url = self.info()["url"]
             if self.passkey_skip and self.passkey_skip[0] == url and now - self.passkey_skip[1] < PASSKEY_SKIP:
+                return
+            if screen_kind() != "screen":  # #5878: a host with no display: no person sits at a window there
+                self.said = getattr(self, "said", []) + [
+                    "the page asks for a passkey, and this computer has no screen for its window: sign in to this "
+                    "site with a passkey on a computer with a screen, or use another sign-in way of the site"]
                 return
             if now - self.person_at > PASSKEY_PERSON or self.agent_at >= self.person_at:
                 self.said = getattr(self, "said", []) + [

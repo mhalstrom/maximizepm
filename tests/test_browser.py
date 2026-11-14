@@ -4199,3 +4199,66 @@ class BrowsersView(Base):
         self.assertEqual([fn for p in ("/api/browsers", "/api/browser/thumb") for m, fn in routes.GET if m(p)],
                          [routes.browsers, routes.thumb])
         self.assertIn("browsers", server.PAGE_VIEWS)  # /browsers gets the page, which opens the Browsers view
+
+
+class NoScreen(Base):
+    """#5878: the project browser on a host with no display: a window runs on Xvfb, or is refused with the reason; a
+    passkey step opens no window."""
+
+    def kind(self, kind):
+        old = browser.SCREEN_KIND
+        browser.SCREEN_KIND = kind
+        self.addCleanup(setattr, browser, "SCREEN_KIND", old)
+
+    def test_the_kind_of_screen(self):
+        self.kind(None)
+        linux = mock.patch.object(browser, "sys", mock.Mock(platform="linux"))
+        with linux, mock.patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+            with mock.patch.object(browser.shutil, "which", lambda n: "/usr/bin/Xvfb" if n == "Xvfb" else None):
+                self.assertEqual(browser.screen_kind(), "xvfb")
+            with mock.patch.object(browser.shutil, "which", lambda n: None):
+                self.assertEqual(browser.screen_kind(), "none")
+            os.environ["DISPLAY"] = ":0"
+            self.assertEqual(browser.screen_kind(), "screen")
+
+    def test_a_window_with_no_display_and_no_xvfb_is_refused_and_the_panel_stays(self):
+        self.kind("none")
+        b = browser.get("web", "ag1")
+        b.ws, b.state["window"] = object(), False
+        stopped = []
+        b._stop_chrome = lambda: stopped.append(1)
+        with self.assertRaisesRegex(RiverError, "no display and no Xvfb.*sudo apt install xvfb"):
+            b.start(window=True)
+        self.assertEqual((stopped, b.state["window"]), ([], False))
+
+    def test_xvfb_starts_once_on_a_free_display(self):
+        made, ran = set(), []
+
+        class Proc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        def popen(argv, **k):
+            ran.append(argv)
+            made.add(f"/tmp/.X11-unix/X{argv[1][1:]}")
+            return Proc()
+        taken = {"/tmp/.X11-unix/X90"}
+        old = dict(browser._XVFB)
+        self.addCleanup(browser._XVFB.update, old)
+        browser._XVFB.update(proc=None, display=None)
+        with mock.patch.object(browser.subprocess, "Popen", popen), \
+                mock.patch.object(browser.os.path, "exists", lambda p: p in taken or p in made), \
+                mock.patch.object(browser, "track_child", lambda p: None):
+            self.assertEqual(browser.xvfb_display(), ":91")
+            self.assertEqual(browser.xvfb_display(), ":91")
+        self.assertEqual(ran, [["Xvfb", ":91", "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-terminate"]])
+
+    def test_a_passkey_on_a_host_opens_no_window(self):
+        self.kind("xvfb")
+        b, st, log = Passkey.fake(self)
+        b.person_at = time.time()
+        b.passkey("get")
+        self.assertEqual(log, [])
+        self.assertIn("no screen for its window", b.said[-1])
