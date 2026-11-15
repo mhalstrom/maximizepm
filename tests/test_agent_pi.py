@@ -39,14 +39,15 @@ class Env(unittest.TestCase):
 
 
 class Describe(Env):
-    def test_it_is_a_built_in_adapter_with_every_part_but_detect(self):
+    def test_it_is_a_built_in_adapter_with_every_part(self):
         self.assertEqual(agents.check(pi, "pi"), [])
         self.assertEqual((self.a.source, self.a.missing()), ("builtin", []))
         self.assertIs(agents.get("pi-coding-agent"), self.a)
         for part in ("describe", "settings", "effort", "launch", "identity", "chat", "state", "input", "resume",
-                     "commands", "setup"):
+                     "commands", "setup", "detect"):
             self.assertTrue(self.a.supports(part), part)
-        self.assertFalse(self.a.supports("detect"))  # the extension is the one source of the state
+        # The extension is the one source of the state; the screen rules read only the trust question (#5905).
+        self.assertEqual(self.a.state["state"], "hook")
         self.assertEqual(self.a.describe["family"], "multi")
         self.assertEqual(self.a.config_key("tools"), "pi_tools")
 
@@ -376,6 +377,69 @@ class State(Env):
         self.assertEqual(json.loads(out.strip().splitlines()[-1]),
                          [["[maxpm alert from mark] the build is red", {"deliverAs": "steer"}]], err)
         self.assertFalse(alive.exists())  # the session ended its listener: a sender gets a failure now
+
+
+class TrustQuestion(Env):
+    """#5905 (mark's test 2026-11-15): Pi's project trust question comes before its extension loads, so no hook
+    reports it; the screen rules read it, and the Sessions tab shows a card with its five options and no Other."""
+
+    def read(self, name):
+        from river import server
+        tail = server._prompt_tail(server._plain((FIX / name).read_text(encoding="utf-8")))
+        return server._prompt_found(tail, server._AnyOf(self.a.detect["blocked"]), server._layout(self.a.detect))
+
+    OPTIONS = ["Trust", "Trust parent folder", "Trust (this session only)", "Do not trust",
+               "Do not trust (this session only)"]
+
+    def test_the_question_and_its_five_options_are_read(self):
+        parts = self.read("pane_trust.txt")
+        self.assertEqual(parts["question"], "Trust project folder?")
+        names = [o for o, _ in parts["options"]]
+        # The long option wraps at the cursor's column: its second part is no option of its own.
+        self.assertEqual(names[1], "Trust parent folder (/Users/x/projects/a-folder-with-a-long-name-for-the-test/"
+                                   "one-more-folder-level/and-another-level-of-folders)")
+        self.assertEqual([names[0], *names[2:]], [self.OPTIONS[0], *self.OPTIONS[2:]])
+        self.assertEqual([s for _, s in parts["options"]], [True, False, False, False, False])
+        narrow = self.read("pane_trust_narrow.txt")  # the cursor under the wrapped option, which takes two lines
+        self.assertEqual(narrow["question"], "Trust project folder?")
+        self.assertEqual([o for o, _ in narrow["options"]][2:], self.OPTIONS[2:])
+        self.assertEqual(narrow["options"][1][0], "Trust parent folder (/Users/x/projects/a-folder-with-a-long-name-"
+                                                  "for-the-test/one-more-folder-level)")  # broke inside the path
+        self.assertEqual([s for _, s in narrow["options"]], [False, False, False, True, False])
+
+    def test_the_card_has_no_other_and_moves_the_cursor(self):
+        from river import server
+        from tests.test_server import FakeTmux
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "pi-1")
+        tmux = FakeTmux()
+        tmux.session = True
+        tmux._pane(name="pi-1")
+        pane = tmux.panes[0]
+        # tmux names the process node; its title on the terminal is pi (DETECT['process']).
+        pane.update(agent="pi-1", running="pi", screen=(FIX / "pane_trust.txt").read_text(encoding="utf-8"))
+        old = server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE
+        server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE = tmux, "linux", 0
+        self.addCleanup(lambda: (setattr(server, "TMUX_RUNNER", old[0]), setattr(core, "PLATFORM", old[1]),
+                                 setattr(server, "PROMPT_PAUSE", old[2])))
+        card = server.pane_prompts(conn, {"pi-1": pane["id"]})["pi-1"]
+        self.assertEqual((card["question"], len(card["options"]), card["tell"], card["fixed"]),
+                         ("Trust project folder?", 5, None, True))
+        with mock.patch.object(server, "agent_terminals", lambda c: {"pi-1": pane["id"]}):
+            with self.assertRaisesRegex(core.RiverError, "takes only one of its options"):
+                server.prompt_answer(conn, "pi-1", card["sig"], other="do nothing", who="mark")
+            got = server.prompt_answer(conn, "pi-1", card["sig"], pick=3, who="mark")
+        self.assertEqual((got["picked"], pane["keys"]), ("Do not trust", ["Down", "Down", "Down", "Enter"]))
+
+    def test_the_idle_screen_waits_for_nobody(self):
+        from river import server
+        idle = ("\n ▀▀█  v1.5.2\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash\n\n"
+                + "─" * 80 + "\n\n" + "─" * 80 + "\n/work/demo\n$0.000 (sub) 0.0%/500k (auto)   (mistral) small • high\n")
+        tail = server._prompt_tail(server._plain(idle))
+        self.assertIsNone(server._prompt_found(tail, server._AnyOf(self.a.detect["blocked"]),
+                                               server._layout(self.a.detect)))
+        self.assertIsNone(server._screen_state(tail, self.a.detect))  # the extension reports the state
 
 
 if __name__ == "__main__":

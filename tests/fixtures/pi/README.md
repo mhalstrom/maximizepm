@@ -1,5 +1,10 @@
 Pi session files for tests/test_agent_pi.py (#5170, #5204).
 
+pane_trust.txt and pane_trust_narrow.txt are Pi 1.5.2's project trust question in a tmux pane 120 and 70 columns
+wide, read with tmux capture-pane on 2026-11-15 for #5905 (a folder with .pi/settings.json). The folder paths are
+neutral ones of a like length, so Pi's wrap of the long 'Trust parent folder (<path>)' option stays (its second part
+starts at the column of the cursor). In the narrow screen the cursor is on 'Do not trust'.
+
 session.jsonl and fork.jsonl are files that a real Pi 1.5.2 session wrote (npm package @earendil-works/pi-coding-agent),
 recorded on 2026-11-11 for #5204. A script drove `pi --mode rpc --provider mistral --model mistral-small-latest
 --thinking high` with the state extension of river/agents/pi.py (extension_text, loaded with -e) and one more

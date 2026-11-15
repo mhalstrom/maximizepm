@@ -2518,14 +2518,37 @@ def _prompt_parts(tail, layout=None):
 
         def option(x):
             return marked(x) is not None or (len(x) - len(x.lstrip()) == col and not lay["hint"].search(x))
+
+        def wrap_over(n, step):
+            """The next option's line after the lines from n on (step: 1 down, -1 up) that are the rest of an option
+            which the CLI wrapped at the cursor's column (#5905: Pi's 'Trust parent folder (<path>)'), at most two;
+            None when n starts no such lines or no option follows them."""
+            k = n
+            while 0 <= k < len(lines) and abs(k - n) < 2 and mcol < col and lines[k].strip() \
+                    and len(lines[k]) - len(lines[k].lstrip()) == mcol and not mark.match(lines[k]) \
+                    and not lay["hint"].search(lines[k]):
+                k += step
+            return k if k != n and 0 <= k < len(lines) and option(lines[k]) else None
         top = at
-        while top > 0 and option(lines[top - 1]) and not (numbered and not _NUMBERED.match(lines[top - 1].strip())):
-            top -= 1
+        while top > 0:
+            k = top - 1 if option(lines[top - 1]) else wrap_over(top - 1, -1)
+            if k is None or (numbered and not _NUMBERED.match(lines[k].strip())):
+                break
+            top = k
         end = at + 1
-        while end < len(lines) and option(lines[end]):
-            end += 1
-        options = [(m.group(3).strip() if n == at else marked(lines[n]) or lines[n].strip(), n == at)
-                   for n in range(top, end)]
+        while end < len(lines):
+            k = end + 1 if option(lines[end]) else wrap_over(end, 1)
+            if k is None:
+                break
+            end = k
+        options = []
+        for n in range(top, end):
+            if n != at and not option(lines[n]):  # the wrapped rest of the option above
+                # A wrapped part with no space in it (a path) broke inside its word: the next part goes on it.
+                inword = not option(lines[n - 1]) and " " not in lines[n - 1].strip()
+                options[-1] = (options[-1][0] + ("" if inword else " ") + lines[n].strip(), options[-1][1])
+            else:
+                options.append((m.group(3).strip() if n == at else marked(lines[n]) or lines[n].strip(), n == at))
         framed = re.compile(f"^\\s*[{lay['box']}]")
         frame_end = end
         if framed.match(tail[at]):

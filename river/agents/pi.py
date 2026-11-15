@@ -100,6 +100,23 @@ CHAT = {"compressed": False, "file_tools": ["write", "edit"], "ref": "session", 
 
 STATE = {"state": "hook", "session_id": "hook"}
 
+# Screen rules (#5905): the state comes from the extension, but the project trust question comes before an extension
+# loads, so the pane watcher reads it from the screen: 'Trust project folder?', then a list with the cursor '→' and the
+# key line '↑↓ navigate  enter select  escape/ctrl+c cancel' (Pi 1.5.2, tests/fixtures/pi/pane_trust.txt). The card
+# moves the cursor with Up and Down and presses Enter. No screen rule reads idle or working: those match nothing, so
+# MaximizePM reads Pi's state only from the extension, as before. 'pi' is the process title on its terminal (tmux
+# names the pane's process node).
+DETECT = {
+    "process": "pi",
+    "idle": r"(?!)",
+    "working": r"(?!)",
+    "blocked": [r"^\s*Trust project folder\?"],
+    "tell_instead": None,
+    "image_paste": None,
+    "menu": "→",
+    "hint": r"↑↓ navigate\s+enter select",
+}
+
 # Stop on the Sessions tab (#5547): Esc aborts the running turn.
 # Messages reach it through the state extension's listener (core.native_message 'wake', #5691).
 INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["Escape"]}

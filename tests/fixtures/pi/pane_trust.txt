@@ -1,0 +1,18 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Trust project folder?
+ /Users/x/projects/a-folder-with-a-long-name-for-the-test/one-more-folder-level/and-another-level-of-folders/pitr
+ ust
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ → Trust
+   Trust parent folder
+ (/Users/x/projects/a-folder-with-a-long-name-for-the-test/one-more-folder-level/and-another-level-of-folders)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
