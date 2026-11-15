@@ -2494,6 +2494,10 @@ def run(argv=None):
         return activity_command(agent_id=words[2])
     if words[:2] == ["report", "--wake"] and len(words) == 3:
         return wake_command()
+    if words[:2] == ["report", "--call"] and len(words) == 3:
+        # The call record of #5911 was reverted (#5809), but sessions that started while it ran keep the hook in
+        # their settings: answer it with exit 0 and no output, so that their tool calls are not refused.
+        return 0
     args = parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)

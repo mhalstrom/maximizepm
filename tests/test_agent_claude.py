@@ -72,3 +72,16 @@ class Interrupted(unittest.TestCase):
     def test_a_prompt_in_brackets_is_still_the_persons_turn(self):
         out, turn = claude.parse_chat_line(self.line("[draft] look at the header"))
         self.assertEqual(([e["role"] for e in out], turn), (["user"], "working"))
+
+
+class OldCallHook(unittest.TestCase):
+    """The call record of #5911 was reverted (#5809); a session that started while it ran still has the hook."""
+
+    def test_the_old_call_hook_exits_0_with_no_output_so_the_tool_call_runs(self):
+        import contextlib
+        import io
+        from river import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.run(["report", "--call", "claude"])
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "", ""))
