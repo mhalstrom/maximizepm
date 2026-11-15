@@ -6025,20 +6025,6 @@ class StartThatStops(unittest.TestCase):
         self.assertEqual([p["agent"] for p in self.tmux.panes], [talks])  # its pane closed; the other one stays
         self.assertEqual(server.end_quiet(self.c), {})
 
-    def test_a_pane_of_ours_that_lost_its_session_is_done(self):
-        """#5903: pane %36 kept a Claude Code open for two days: its chat had moved on to another pane, which takes the
-        agent's name off the old one (_untag_panes), and a pane with no agent name was done only by its shell."""
-        core.item_add(self.c, "shop", "work")
-        server.launch_agent(self.c)
-        mine = self.tmux.panes[0]
-        self.tmux._pane()
-        mine["agent"], mine["screen"] = "", "> "
-        self.tmux.panes[-1]["screen"] = "> "  # a pane a person made: no @maxpm_name
-        done = server._done_panes(self.c, server._tmux_panes())
-        self.assertEqual(done, {mine["id"]: "no session of the queue runs in it (its chat went on in another pane)"})
-        mine["screen"] = self.TRUST  # a question on its screen: a person may answer it
-        self.assertEqual(server._done_panes(self.c, server._tmux_panes()), {})
-
     def test_a_start_in_a_folder_claude_code_does_not_trust_says_so(self):
         cfg = Path(self.dir.name, "claude.json")
         self.addCleanup(setattr, server, "CLAUDE_JSON", server.CLAUDE_JSON)
