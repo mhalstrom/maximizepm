@@ -425,8 +425,11 @@ DEFAULT_SETTINGS = {
     # A session with no item (role plain, #5851): a person starts an agent in a folder from the page (New session, or
     # maxpm launch --session) and talks with it. It takes no queue work, holds no lease or worker slot, and MaximizePM
     # never ends it by the worker rules (idle_end, wait_max, hand-over). It ends when a person ends it, when its
-    # process ends, or after session_idle_end with no prompt typed or sent to it (0s: never).
-    "session_idle_end": "0s",
+    # process ends, or after session_idle_end with no prompt typed or sent to it and no work (0s: never). 1h, not
+    # never (#5903, mark 2026-11-14: 'why is it taking so long for the sessions to be cleared up?'): ten sessions of
+    # a demo sat at their prompt for two hours on the Sessions tab, with no work in progress. Longer than idle_end, as
+    # the person talks with it.
+    "session_idle_end": "1h",
     # queue off (a project, or global): the project uses sessions only (#5851). Its maxpm go gives no item, goal or
     # wait: the session becomes a session with no item, and the page shows New session, not the queue's Start.
     "queue": "on",
@@ -21741,12 +21744,13 @@ def end_quiet_experts(conn):
         _expert_let_go(conn, a["name"], why)
         if end_idle(conn, a["name"], why):
             out[a["name"]] = why
-    # A session with no item (#5851) ends only when session_idle_end is set: no prompt typed or sent to it, and no
-    # work reported by its hooks, for that long.
+    # A session with no item (#5851) ends after session_idle_end (1h; 0s: never): no prompt typed or sent to it, and
+    # no work reported by its hooks, for that long, and no command that runs in it now (#5903: one long command
+    # reports nothing to the hooks while it runs).
     for a in conn.execute("SELECT * FROM agents WHERE role='plain' AND kind='ai'").fetchall():
         limit = parse_duration(setting(conn, "session_idle_end", agent=a["name"]))
         last = max(parse_iso(x) for x in (a["talked_at"], a["activity_at"], a["last_seen"]) if x)
-        if not limit.total_seconds() or t - last < limit:
+        if not limit.total_seconds() or t - last < limit or busy_now(conn, {a["name"]}):
             continue
         why = f"a session with no talk and no work for {setting(conn, 'session_idle_end', agent=a['name'])} " \
               f"(session_idle_end)"

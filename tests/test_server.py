@@ -1080,9 +1080,11 @@ class LaunchAgent(unittest.TestCase):
                        "activity_at='2026-01-01T00:00:00Z'")
         self.c.commit()
         self.assertEqual(server.fresh_sessions(self.c, runner=sent.append)["ended"], {})
+        core.config_set(self.c, "session_idle_end", "0s")  # never
         self.assertEqual(core.end_quiet_experts(self.c), {})
-        # session_idle_end set: a session with no talk and no work for that long ends.
-        core.config_set(self.c, "session_idle_end", "1h")
+        # session_idle_end (1h by default, #5903): a session with no talk and no work for that long ends.
+        core.config_unset(self.c, "session_idle_end")
+        self.assertEqual(core.setting(self.c, "session_idle_end"), "1h")
         self.assertEqual(set(core.end_quiet_experts(self.c)), {name, r["session_name"]})
         with self.assertRaisesRegex(RiverError, "no folder"):
             server.start_session(self.c, os.path.join(self.dir.name, "missing"), runner=sent.append)
@@ -6007,6 +6009,35 @@ class StartThatStops(unittest.TestCase):
         self.c.commit()
         self.assertEqual(server.failed_starts(self.c), {})
         self.assertIsNotNone(self.c.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone())
+
+    def test_a_session_with_no_item_ends_after_an_hour_with_no_talk_and_its_pane_closes(self):
+        """#5903: ten sessions of a demo, started from the page with no item, sat at their prompt for two hours on the
+        Sessions tab: session_idle_end was 0s (never). Now 1h, and the pane closes with the end."""
+        quiet = server.start_session(self.c, self.dir.name)["session_name"]
+        talks = server.start_session(self.c, self.dir.name)["session_name"]
+        old = core.iso(core.now() - core.timedelta(minutes=61))
+        self.c.execute("UPDATE agents SET last_seen=?, talked_at=?, activity_at=? WHERE name=?", (old, old, old, quiet))
+        self.c.execute("UPDATE agents SET last_seen=?, talked_at=? WHERE name=?",
+                       (old, core.iso(core.now() - core.timedelta(minutes=5)), talks))
+        self.c.commit()
+        self.assertEqual(list(server.end_quiet(self.c)), [quiet])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name=?", (quiet,)).fetchone())
+        self.assertEqual([p["agent"] for p in self.tmux.panes], [talks])  # its pane closed; the other one stays
+        self.assertEqual(server.end_quiet(self.c), {})
+
+    def test_a_pane_of_ours_that_lost_its_session_is_done(self):
+        """#5903: pane %36 kept a Claude Code open for two days: its chat had moved on to another pane, which takes the
+        agent's name off the old one (_untag_panes), and a pane with no agent name was done only by its shell."""
+        core.item_add(self.c, "shop", "work")
+        server.launch_agent(self.c)
+        mine = self.tmux.panes[0]
+        self.tmux._pane()
+        mine["agent"], mine["screen"] = "", "> "
+        self.tmux.panes[-1]["screen"] = "> "  # a pane a person made: no @maxpm_name
+        done = server._done_panes(self.c, server._tmux_panes())
+        self.assertEqual(done, {mine["id"]: "no session of the queue runs in it (its chat went on in another pane)"})
+        mine["screen"] = self.TRUST  # a question on its screen: a person may answer it
+        self.assertEqual(server._done_panes(self.c, server._tmux_panes()), {})
 
     def test_a_start_in_a_folder_claude_code_does_not_trust_says_so(self):
         cfg = Path(self.dir.name, "claude.json")

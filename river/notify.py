@@ -546,7 +546,7 @@ def loop(stop, interval_s=None):
                 server.adopt_sessions,  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
                 server.revive_sessions,  # a session whose process ended with no stop resumes in a pane (#5061)
                 server.fresh_sessions,  # work for an agent idle at its prompt goes to a fresh session
-                core.end_quiet_experts,  # an expert nobody talked with for expert_idle_end ends (#4955)
+                server.end_quiet,  # an expert after expert_idle_end, a session with no item after session_idle_end (#5903)
                 server.auto_release,  # a ready review gets a reviewer, a ready deploy its deployer
                 server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
                 server.auto_context,  # goal_context on: a goal with ready work gets a context session (a base)

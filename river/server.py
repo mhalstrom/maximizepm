@@ -1147,8 +1147,11 @@ def _done_panes(conn, panes, terminals=None):
     A registered agent whose process runs in the pane decides in place of the named one (a session that began
     again under another name). A pane that shows a prompt (prompt_pattern) is never done by the queue's word:
     a person may want to answer it; but the pane of an agent with a stop request is done with its prompt too,
-    since an answer would only let it read the stop and end. A pane with no agent name (a session for a person's
-    item) is done only by its shell. terminals: agent_terminals(conn), when the caller has it."""
+    since an answer would only let it read the stop and end. A pane that river opened (@maxpm_name) with no agent
+    name, where no agent of the queue runs, is done too (#5903): every start names its agent now, and the name goes
+    only when the session's chat moved on to a new pane (_untag_panes); an agent CLI that still runs in such a pane
+    belongs to no session (pane %36 kept a Claude Code of an ended session open for two days). terminals:
+    agent_terminals(conn), when the caller has it."""
     import re
     panes = [p for p in panes if _own_pane(p)]  # another queue's pane is never done here (#5054)
     done = {p["pane"]: "its agent ended" for p in panes if p["ended"]}
@@ -1161,9 +1164,11 @@ def _done_panes(conn, panes, terminals=None):
     registered = {r["name"] for r in conn.execute("SELECT name FROM agents")}
     for p in panes:
         # The named agent is registered and its process runs in another terminal: nothing here says it is done.
-        if p["ended"] or not p["agent"] or (p["agent"] in registered and not here.get(p["pane"])):
+        if p["ended"] or (not p["agent"] and not p.get("name")) or (
+                p["agent"] in registered and not here.get(p["pane"])):
             continue
-        why = f"{p['agent']} is not in the queue any more"
+        why = (f"{p['agent']} is not in the queue any more" if p["agent"]
+               else "no session of the queue runs in it (its chat went on in another pane)")
         for name in here.get(p["pane"], ()):
             a = core.agent_status(conn, name)
             # A stop is a request: the agent may still commit. It ended when its last go ran (role stopped); one
@@ -1353,6 +1358,30 @@ def auto_tidy(conn):
     if not busy:
         TIDY["at"] = t
     return closed
+
+
+def end_quiet(conn):
+    """One pass of the loop of maxpm serve: core.end_quiet_experts (an expert after expert_idle_end, a session with no
+    item after session_idle_end), then the tmux pane of each session it ended closes at once (#5903), as for a worker
+    that fresh_sessions ends: before, the pane waited for tidy_every, and the Sessions tab kept the agent CLI open.
+    Returns {agent: why}."""
+    try:
+        terminals = agent_terminals(conn) if TMUX_RUNNER is not None or _tmux_cmd() else {}
+    except RiverError:
+        terminals = {}
+    out = core.end_quiet_experts(conn)
+    if terminals and out:
+        try:
+            panes = {p["pane"]: p["agent"] for p in _tmux_panes(everywhere=True)}
+        except RiverError:
+            panes = {}
+        for agent in out:
+            pane = terminals.get(agent)
+            if pane and panes.get(pane) == agent:
+                _tmux("kill-pane", "-t", pane, check=False)
+                with core.tx(conn):
+                    core._event(conn, None, "maxpm", f"closed the tmux pane {pane} of {agent}: {out[agent]}")
+    return out
 
 
 def failed_starts(conn):
