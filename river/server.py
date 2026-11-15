@@ -1119,8 +1119,9 @@ def _pane_texts(panes):
 
 class _Tail(list):
     """The last lines of a pane (_prompt_tail), with the lines just above them (above): a dialog taller than the
-    tail has its title there (#5226)."""
+    tail has its title there (#5226); gaps: the numbers of its lines that a blank line came before (#5906)."""
     above = ()
+    gaps = None  # not known (a tail made from lines with no blank ones)
 
 
 PROMPT_ABOVE = 30  # lines above the tail where the title of a tall dialog may be
@@ -1131,9 +1132,15 @@ def _prompt_tail(text):
     of the tool call that waits on a permission prompt, so it is a space on every other look. A space in its
     place gives the same lines on each look, and a prompt that stays on the screen stays the same (#4280)."""
     import re
-    lines = [x.rstrip() for x in text.splitlines() if x.strip()]
+    lines, gap, blank = [], [], False
+    for x in text.splitlines():
+        if x.strip():
+            lines.append(x.rstrip())
+            gap.append(blank)
+        blank = not x.strip()
     tail = _Tail(re.sub(r"^(\s*)⏺", r"\1 ", x) for x in lines[-PROMPT_LINES:])
     tail.above = lines[-PROMPT_LINES - PROMPT_ABOVE:-PROMPT_LINES] if len(lines) > PROMPT_LINES else []
+    tail.gaps = {n for n, g in enumerate(gap[-PROMPT_LINES:]) if g}
     return tail
 
 
@@ -2555,7 +2562,13 @@ def _prompt_parts(tail, layout=None):
             while frame_end < len(tail) and framed.match(tail[frame_end]):
                 frame_end += 1
     question, qat = None, None
-    near = [n for n in range(top - 1, max(top - 4, -1), -1) if "?" in lines[n]]
+    # A '?' close over the menu, or in the text block right over it (no blank line inside it on the screen): a
+    # question, not a title. #5906: Codex wraps its trust text in a narrow pane ('Trust this folder? Codex can ...
+    # Your trust decision will be saved.'), and the card's question was its last line, 'saved.'.
+    gaps, para = getattr(tail, "gaps", None), top - 1
+    while gaps is not None and para > 0 and para not in gaps:
+        para -= 1
+    near = [n for n in range(top - 1, max(min(para - 1, top - 4), -1), -1) if "?" in lines[n]]
     title = _menu_title(lines, top, col) if options and row is None and numbered and not near else None
     if row is not None:  # its box says what it asks; a '?' above it is the chat's (OpenCode, #5281)
         question, qat = _row_question(tail, lines, row, framed)

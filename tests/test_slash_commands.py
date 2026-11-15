@@ -244,6 +244,26 @@ class MenuScreens(unittest.TestCase):
         # it waited at a permission prompt).
         self.assertIsNone(self.found("codex", "pane_slash_popup.txt"))
 
+    def test_codexs_trust_question_reads_the_same_in_a_narrow_pane(self):
+        """#5906 (mark's test 2026-11-15): in a 66-column pane the card's question was 'saved.', the last line of
+        Codex's wrapped trust text, as for a menu title. The screen: the text of Codex 0.159.1 (its binary's strings),
+        wrapped at the pane's width over its menu; no capture, as a test Codex asked first about its shared
+        background server."""
+        import textwrap
+        text = ("Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. "
+                "Folder settings can run code automatically, even without a model request. Continue only if you "
+                "trust these files. Your trust decision will be saved.")
+        ad = agents.find("codex")
+        for width, gap in ((60, []), (66, [""]), (120, [])):  # with and with no blank line over the menu
+            body = textwrap.wrap(text, width - 4)
+            lines = ["  You are in ~/Projects/trust-test", "", *("  " + x for x in body), *gap,
+                     "› 1. Trust and continue", "  2. Quit", "", "  Press enter to continue"]
+            p = server._prompt_found(server._prompt_tail("\n".join(lines) + "\n"), server._AnyOf(ad.detect["blocked"]),
+                                     server._layout(ad.detect))
+            self.assertEqual((p["question"], [o for o, _ in p["options"]]),
+                             ("Trust this folder?", ["1. Trust and continue", "2. Quit"]), width)
+            self.assertEqual(len(body) > 3, width < 100)  # the narrow ones put the '?' more than 3 lines up
+
 
 class SentFromThePage(TmuxBase):
     """#5220: a slash command from the message box: its text, a pause (Codex reads a fast Enter as part of a paste),
