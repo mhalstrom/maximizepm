@@ -116,10 +116,10 @@ def code_stamp(root=None):
     return best
 
 
-def _post(port, body, token, timeout, path="/api/run"):
-    """(status, answer) of POST path (/api/run) on this computer: directly, else through the sandbox's HTTP proxy
+def _post(port, body, token, timeout):
+    """(status, answer) of POST /api/run on this computer: directly, else through the sandbox's HTTP proxy
     (an agent sandbox permits no direct connection; its proxy passes a host that the sandbox allows)."""
-    req = (f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+    req = (f"POST /api/run HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
            f"X-Maxpm-Token: {token}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n")
     s = None
     try:
@@ -139,7 +139,7 @@ def _post(port, body, token, timeout, path="/api/run"):
             s = socket.create_connection((p.hostname, p.port or 80), timeout=2)
         except OSError:
             return None, None
-        head = req.replace(f"POST {path}", f"POST http://127.0.0.1:{port}{path}", 1)
+        head = req.replace("POST /api/run", f"POST http://127.0.0.1:{port}/api/run", 1)
         if p.username:
             import binascii
             cred = binascii.b2a_base64(f"{unquote(p.username)}:{unquote(p.password or '')}".encode(), newline=False)
@@ -226,30 +226,6 @@ def run_remote(words, env=None, cwd=None):
     return int(res.get("code") or 0)
 
 
-CALL_AGENT = ("claude", "codex", "grok")  # the agents whose hooks send their tool calls (#5911)
-
-
-def call_hook(agent_id, stdin=None, env=None, post=None):
-    """maxpm report --call <agent>: an agent's hook before or after a tool call (#5911). It hands the hook's own
-    input (stdin, JSON) to maxpm serve (POST /api/call, with the token of the serve file), which answers at once and
-    records the call after its answer, and it returns 0 with no output. With no serve, or any error, it does the
-    same and the call is not recorded: the hook never stops or slows the call (p147). The input goes on as it came,
-    inside the request's JSON, so this process neither reads nor writes JSON of its own."""
-    env = os.environ if env is None else env
-    try:
-        data = (stdin if stdin is not None else sys.stdin.buffer).read()
-        if agent_id not in CALL_AGENT or not data.strip().startswith(b"{"):
-            return 0
-        with open(serve_file(env), encoding="utf-8") as f:
-            info = _loads(f.read())
-        head = _dumps({"agent_type": agent_id, "agent": env.get("MAXPM_AGENT") or ""}).encode()
-        body = head[:-1] + b', "payload": ' + data.strip() + b"}"
-        (post or _post)(int(info["port"]), body, str(info["token"]), 1, "/api/call")
-    except Exception:  # noqa: BLE001 - a hook must never fail the call
-        pass
-    return 0
-
-
 # mark 2026-11-12: MaximizePM runs on Windows only inside WSL 2 (a Linux system); native Windows is not supported.
 WSL_ONLY = ("MaximizePM runs on Windows only inside WSL 2. Install WSL 2, then install and run maxpm in its Linux "
             "terminal: https://github.com/mhalstrom/maximizepm#windows")
@@ -266,8 +242,6 @@ def main():
     """The installed maxpm command (the pyproject entry point, and bin/maxpm): serve runs it when it can, else
     maxpm here."""
     refuse_native_windows()
-    if sys.argv[1:3] == ["report", "--call"] and len(sys.argv) == 4:
-        sys.exit(call_hook(sys.argv[3]))  # first: it runs before and after every tool call
     code = run_remote(sys.argv[1:])
     if code is not None:
         sys.exit(code)

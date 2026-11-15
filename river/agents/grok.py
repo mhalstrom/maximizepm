@@ -267,42 +267,16 @@ AGENT_BODY = ("This is a MaximizePM session: its hooks report its state to Maxim
               "instructions (CLAUDE.md, AGENTS.md) and the maxpm briefing.")
 
 
-def agent_definition(python, script, call=None):
-    """The text of the agent file: each event of HOOK_EVENTS runs `python script <event>`, and each of CALL_EVENTS
-    also runs call (the command `maxpm report --call grok`, #5911) when it is given. The front matter is YAML; each
-    command is a JSON string, which YAML reads as the same double-quoted string."""
+def agent_definition(python, script):
+    """The text of the agent file: each event of HOOK_EVENTS runs `python script <event>`. The front matter is YAML;
+    each command is a JSON string, which YAML reads as the same double-quoted string."""
     lines = ["---", "name: maxpm", "description: A MaximizePM session (its hooks report its state)",
              "prompt_mode: extend", "agents_md: true", "hooks:"]
     for ev in HOOK_EVENTS:
         cmd = f"{shlex.quote(python)} {shlex.quote(script)} {ev}"
         lines += [f"  {ev}:", "    - hooks:", "        - type: command", f"          command: {json.dumps(cmd)}",
                   f"          timeout: {HOOK_TIMEOUT}"]
-        if call and ev in CALL_EVENTS:
-            lines += ["        - type: command", f"          command: {json.dumps(call)}",
-                      f"          timeout: {CALL_TIMEOUT}"]
     return "\n".join(lines + ["---", "", AGENT_BODY, ""])
-
-
-# The call record (#5911): before and after every tool call, `maxpm report --call grok` hands the hook's input to
-# maxpm serve and returns (river/client.py call_hook). Its own timeout: Grok's default for a tool hook is 600 s.
-CALL_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
-CALL_TIMEOUT = 5
-
-
-def read_call(payload):
-    """A Grok tool call hook's input as a call report (river/agents CALL_REPORT_KEYS), or None for another event.
-    hook_event_name holds Claude's name of the event, hookEventName Grok's own (docs/user-guide/10-hooks.md)."""
-    from . import call_report
-    ev = payload.get("hook_event_name") or _EVENT_NAMES.get(str(payload.get("hookEventName") or ""))
-    if ev not in CALL_EVENTS:
-        return None
-    args = ("pre" if ev == "PreToolUse" else "post", payload.get("sessionId"), payload.get("toolUseId"),
-            payload.get("toolName"), payload.get("toolInput"))
-    if ev == "PreToolUse":
-        return call_report(*args)
-    if ev == "PostToolUse":
-        return call_report(*args, payload.get("toolResult", payload.get("tool_response")))
-    return call_report(*args, payload.get("error"), ok=False)
 
 
 def _write(path, text):
@@ -331,8 +305,7 @@ def install_hooks(folder, report, python=None, where=None):
     root = str(Path(__file__).resolve().parents[2])
     _write(script, HOOK_SCRIPT.format(root=root, report=list(report), state=str(where / STATE_DIR)))
     agent = where / AGENT_FILE
-    call = " ".join(shlex.quote(w) for w in [*report, "--call", "grok"])
-    _write(agent, agent_definition(python or sys.executable, str(script), call))
+    _write(agent, agent_definition(python or sys.executable, str(script)))
     return ["--agent", str(agent)]
 
 

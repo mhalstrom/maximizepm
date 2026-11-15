@@ -133,59 +133,6 @@ INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{te
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# The call record (#5911). Codex 0.159 runs hooks before and after each tool call (PreToolUse, PostToolUse), from
-# config.toml or from -c on its command line (the session flags layer), so MaximizePM puts nothing in ~/.codex.
-# Codex runs a hook only after the person trusts it: it keeps the hash of each trusted hook in hooks.state, and it
-# reads hooks.state from the session flags layer too (codex-rs/hooks/src/config_rules.rs). So each start passes the
-# hooks and their trust: the hash is the one Codex computes (discovery.rs hook_hash): the sha256 of the JSON of
-# {event_name, hooks: [the normalized handler]}, keys sorted, no spaces. A hook whose hash differs only asks the
-# person (its trust prompt): the call is then not recorded, and nothing else changes.
-# ---------------------------------------------------------------------------------------------------------------
-
-CALL_EVENTS = {"PreToolUse": "pre_tool_use", "PostToolUse": "post_tool_use"}
-CALL_TIMEOUT = 5
-CALL_KEY_SOURCE = "/<session-flags>/config.toml"  # the key of a hook from -c (discovery.rs synthetic_layer_path)
-
-
-def call_hook_hash(event_label, command, timeout=CALL_TIMEOUT):
-    """The trust hash that Codex computes for one command hook with no matcher (discovery.rs hook_hash and
-    codex-rs/config/src/fingerprint.rs version_for_toml)."""
-    import hashlib
-    import json
-    identity = {"event_name": event_label,
-                "hooks": [{"type": "command", "command": command, "timeout": timeout, "async": False}]}
-    text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
-
-
-def call_hooks(report):
-    """The -c words that add a hook before and after every tool call, running `maxpm report --call codex`, with the
-    trust of each, for one start (river/agents call_hooks)."""
-    import json
-    import shlex
-    command = " ".join(shlex.quote(w) for w in [*report, "--call", "codex"])
-    words, state = [], []
-    for ev, label in CALL_EVENTS.items():
-        words += ["-c", f'hooks.{ev}=[{{hooks=[{{type="command",command={json.dumps(command)},'
-                        f'timeout={CALL_TIMEOUT}}}]}}]']
-        key = f"{CALL_KEY_SOURCE}:{label}:0:0"
-        state.append(f'{json.dumps(key)}={{trusted_hash={json.dumps(call_hook_hash(label, command))}}}')
-    return words + ["-c", "hooks.state={" + ",".join(state) + "}"]
-
-
-def read_call(payload):
-    """A Codex tool call hook's JSON input as a call report (river/agents CALL_REPORT_KEYS), or None for another
-    event (codex-rs/hooks/src/schema.rs: PreToolUseCommandInput, PostToolUseCommandInput)."""
-    from . import call_report
-    ev = payload.get("hook_event_name")
-    if ev not in CALL_EVENTS:
-        return None
-    args = ("pre" if ev == "PreToolUse" else "post", payload.get("session_id"), payload.get("tool_use_id"),
-            payload.get("tool_name"), payload.get("tool_input"))
-    return call_report(*args) if ev == "PreToolUse" else call_report(*args, payload.get("tool_response"))
-
-
-# ---------------------------------------------------------------------------------------------------------------
 # Chat log (#5182). Codex writes ~/.codex/sessions/<y>/<m>/<d>/rollout-<time>-<thread id>.jsonl (or $CODEX_HOME),
 # which it compresses to .jsonl.zst; the thread id is the agent's native_address.
 # ---------------------------------------------------------------------------------------------------------------

@@ -19,7 +19,6 @@ Each part is optional unless it is marked required; the page shows only what an 
  9. Resume: resume_command().
 10. Commands: COMMANDS, and optionally read_commands(folder).
 11. Setup: SETUP, and optionally write_mcp_config().
-12. Calls: read_call(), and optionally call_hooks() (the call record of maxpm serve, #5911).
 
 The loader refuses a module without a valid DESCRIBE. A module without build_command loads (the built-in claude and
 codex modules have only their describe part until #5181), but no start path can start it: Adapter.build_command
@@ -308,33 +307,7 @@ STATE_KEYS = {"state": str, "session_id": str}
 HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str, type(None)),
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
-
-# 12. Calls (#5911): the agent's hooks before and after each tool call run `maxpm report --call <id>` with the hook's
-# own input on stdin, and maxpm serve records the call (core.record_call). The hooks go in with the agent's state
-# hooks (install_hooks: Claude Code's hook file, Grok's agent file), or, for an agent whose state comes from the
-# screen, with call_hooks(report) -> [argv words] (Codex: -c hooks...), which core.hook_words adds to each start.
-# read_call(payload) -> a call report (CALL_REPORT_KEYS) | None (the input is no tool call):
-# A call report = {
-#      "phase":      "pre" (before the call runs) or "post" (after it),
-#      "session_id": the agent's id of the session, or None,
-#      "ref":        the agent's id of the call (tool_use_id), which pairs the two hooks of one call, or None,
-#      "tool":       the tool's name ("Bash", "Edit", "mcp__server__tool"),
-#      "input":      the tool's input as the hook gives it (a dict, usually),
-#      "output":     post: the tool's output or its error, or None,
-#      "ok":         post: False when the tool failed, else True,
-#    }
-CALL_REPORT_KEYS = {"phase": str, "session_id": (str, type(None)), "ref": (str, type(None)), "tool": str,
-                    "input": object, "output": object, "ok": bool}
-
-
-def call_report(phase, session_id, ref, tool, inp, output=None, ok=True):
-    """A call report (CALL_REPORT_KEYS) from the fields of a hook's input, each checked for its type."""
-    return {"phase": phase, "session_id": session_id if isinstance(session_id, str) and session_id else None,
-            "ref": ref if isinstance(ref, str) and ref else None, "tool": tool if isinstance(tool, str) else "",
-            "input": inp, "output": output, "ok": bool(ok)}
-
-
-DETECT_KEYS ={"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
+DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
                "behind": str, "header": str, "fixed": str}
@@ -424,7 +397,6 @@ PARTS = {
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
-    "calls": {"data": None, "functions": ("read_call", "call_hooks")},
 }
 
 BUILTIN = ("claude", "codex", "pi", "copilot", "hermes", "gemini", "grok", "opencode", "goose", "aider", "amp", "cursor")
@@ -863,18 +835,6 @@ class Adapter:
         return {"state": None, "event": "", "session_id": None, "message": None, "call": None, "shows": False,
                 "waits": None, "prompt": None, "again": False, "run": None, **got}
 
-    def read_call(self, payload):
-        """What a tool call hook's own input says (a call report, CALL_REPORT_KEYS), or None when the agent has no
-        read_call or the input is no tool call."""
-        f = self._fn("read_call")
-        got = f(payload if isinstance(payload, dict) else {}) if f else None
-        return got if isinstance(got, dict) and got.get("phase") in ("pre", "post") and got.get("tool") else None
-
-    def call_hooks(self, report):
-        """The argv words that put the call hooks in a start of an agent whose state hooks do not hold them."""
-        f = self._fn("call_hooks")
-        return list(f(list(report)) or ()) if f else []
-
     def layout(self):
         """Its DETECT with the layout keys it leaves out (DETECT_LAYOUT): what the pane watcher reads a screen with."""
         return {**DETECT_LAYOUT, **(self.detect or {})}
@@ -1113,7 +1073,7 @@ def page_list():
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "import_files", "shared_readers",
-           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "CALL_REPORT_KEYS", "call_report"]
+           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
 
 
 # Last, after every name above: core imports the built-in adapters while it loads (their setting defaults), and they import

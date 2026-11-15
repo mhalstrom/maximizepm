@@ -542,34 +542,6 @@ def _usage_line(u):
             f"peak context {_k(u['peak_context'])}")
 
 
-def render_calls(rows, full=False):
-    """maxpm calls: one line a call (newest first), or with full one call with its params and result (#5911)."""
-    if not rows:
-        print("No tool calls recorded. The hooks of sessions that MaximizePM starts (Claude Code, Codex, Grok) record "
-              "them while maxpm serve runs; maxpm config get call_record_days says how long they stay.")
-        return
-    for r in rows:
-        status = r["status"] or "running"
-        took = f" {r['duration_ms']} ms" if r["duration_ms"] is not None else ""
-        task = f" #{r['item_id']}" if r["item_id"] else ""
-        at = core.show_time(r["started_at"][:19] + "Z") if r["started_at"] else "?"
-        print(f"c{r['id']}  {at}  {r['agent'] or r['agent_type']}{task}  "
-              f"s{r['session']}.{r['seq']}  {r['tool']}  {status}{took}")
-        if not full:
-            text = " ".join((r["params"] or "").split())
-            print(f"    {text[:150]}" if text else "    (params removed: older than call_record_days)")
-            continue
-        print(f"  session: {r['agent_type']} {r['session_id'] or '?'}; source: {r['source']}"
-              + (f"; repeats c{r['supersedes']}" if r["supersedes"] else ""))
-        print(f"  params: {r['params'] if r['params'] is not None else '(removed)'}")
-        if r["error"]:
-            print(f"  error: {r['error']}")
-        if r["result_file"]:
-            print(f"  result: in {r['result_file']}")
-        elif r["result"] is not None:
-            print(f"  result: {r['result']}")
-
-
 def render_usage(res, limit=20):
     if not res["items"]:
         print(f"(no measured items in {res['since']}: MaximizePM measures an item when it is done, from the "
@@ -1835,12 +1807,6 @@ def build_parser(only=None):
     x.add_argument("--human", help="only this person's (and those for anyone)"); x.add_argument("--all", action="store_true", help="closed ones too")
     x = sub.add_parser("status", help="overview: every project's counts, recent completions, who is working, open slots")
     x.add_argument("--recent", type=int, default=10, help="how many recent completions (default 10)")
-    x = sub.add_parser("calls", help="the tool calls that sessions made (their hooks record each one in maxpm "
-                       "serve), newest first: of a task, an agent or a session")
-    x.add_argument("id", nargs="?", type=int, help="one call, with its params and result")
-    x.add_argument("--item", type=int); x.add_argument("--agent"); x.add_argument("--session", type=int,
-                                                                                  help="a tool session's number")
-    x.add_argument("--limit", "-n", type=int, default=30, help="how many calls (default 30)")
     x = sub.add_parser("usage", help="token cost of each done item, from its Claude Code sessions' transcripts, "
                        "and the medians for fresh and forked sessions")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
@@ -2528,9 +2494,6 @@ def run(argv=None):
         return activity_command(agent_id=words[2])
     if words[:2] == ["report", "--wake"] and len(words) == 3:
         return wake_command()
-    if words[:2] == ["report", "--call"] and len(words) == 3:
-        from .client import call_hook  # a hook before and after every tool call (#5911)
-        return call_hook(words[2])
     args = parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)
@@ -4227,11 +4190,6 @@ def dispatch(conn, a, actor):
         return space.with_archive(conn, lambda: dispatch(conn, a, actor))
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
-    if c == "calls":
-        got = core.calls_list(conn, a.item, a.agent, a.session, a.limit, a.id)
-        if a.id and not got:
-            raise RiverError(f"no call {a.id}: maxpm calls lists them")
-        return got
     if c == "health":
         return core.health(conn, a.since, a.until, a.project, a.by)
     if c == "change":
@@ -6966,8 +6924,6 @@ def render(a, res):
         return render_wait(res)
     if c == "usage":
         return render_usage(res, a.limit)
-    if c == "calls":
-        return render_calls(res, full=bool(a.id))
     if c == "health":
         return render_health(res)
     if c == "change":

@@ -146,43 +146,18 @@ INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["Escape"]}
 WAKE_EVENTS = ("UserPromptSubmit", "Stop")
 WAKE_TIMEOUT = 86400
 
-# The call record (#5911): before and after every tool call, `report --call claude` hands the hook's JSON to maxpm
-# serve and returns (river/client.py call_hook). PostToolUseFailure is the hook after a call that failed.
-CALL_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
-
 
 def hook_settings(report):
     """The Claude Code settings (claude --settings) with MaximizePM's hooks: each event runs `report --hook claude`,
-    which reads the hook's JSON on stdin, and WAKE_EVENTS also start the listener `report --wake claude`. Each of
-    CALL_EVENTS also runs `report --call claude` for every tool, in a group of its own (Claude Code runs the groups
-    of one event side by side). report: the maxpm report command (argv words)."""
+    which reads the hook's JSON on stdin, and WAKE_EVENTS also start the listener `report --wake claude`. report: the
+    maxpm report command (argv words)."""
     import shlex
     run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
             "timeout": 10}]
     wake = {"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--wake", "claude"]),
             "asyncRewake": True, "timeout": WAKE_TIMEOUT}
-    call = {"matcher": "", "hooks": [{"type": "command", "timeout": 5,
-                                      "command": " ".join(shlex.quote(w) for w in [*report, "--call", "claude"])}]}
-    hooks = {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
-             else [{"hooks": run + [wake] if ev in WAKE_EVENTS else run}] for ev in HOOK_EVENTS}
-    for ev in CALL_EVENTS:
-        hooks.setdefault(ev, []).append(call)
-    return {"hooks": hooks}
-
-
-def read_call(payload):
-    """A tool call hook's JSON input as a call report (river/agents CALL_REPORT_KEYS), or None for another event."""
-    from . import call_report
-    ev = payload.get("hook_event_name")
-    if ev not in CALL_EVENTS:
-        return None
-    args = ("pre" if ev == "PreToolUse" else "post", payload.get("session_id"), payload.get("tool_use_id"),
-            payload.get("tool_name"), payload.get("tool_input"))
-    if ev == "PreToolUse":
-        return call_report(*args)
-    if ev == "PostToolUse":
-        return call_report(*args, payload.get("tool_response"))
-    return call_report(*args, payload.get("error"), ok=False)
+    return {"hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
+                      else [{"hooks": run + [wake] if ev in WAKE_EVENTS else run}] for ev in HOOK_EVENTS}}
 
 
 def install_hooks(folder, report):

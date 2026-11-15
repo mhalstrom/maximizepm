@@ -541,7 +541,6 @@ def loop(stop, interval_s=None):
                 core.activity_watch,  # an agent whose hooks reported nothing for activity_silence: tell the manager
                 server.watch_busy,  # an agent that is busy with no river command keeps its leases
                 core.sample_sessions,  # once a minute: what each live session does, for maxpm health (#5352)
-                core.prune_calls,  # the call record: old params and results go, ended sessions get their end (#5911)
                 core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person
                 core.tell_unanswered,  # a blocked message the manager did not answer in manage_unanswered: tell its sender
                 server.adopt_sessions,  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
