@@ -799,6 +799,9 @@ class Browser:
         self.screen = None   # (w, h) of the panel's screen, CSS px
         self.sharp = threading.Event()  # a sharp frame is due: _sharpen takes a screenshot of the page
         self.sharp_due = 0.0  # when: SHARP_QUIET after the last new frame
+        # A size change and the sharp screenshot never run at once (#5713): Chrome puts back, when a screenshot ends,
+        # the size that held when it began, so a size set during one was lost (13 of 18 loaded Linux runs).
+        self.emu_lock = threading.RLock()
         self.sent = {}       # pane id -> the seq that its last answered poll had (#5637: several polls at once)
         self.sharp_thread = None
         self.seen = []       # the bytes (a hash) of the last screencast frames, for the sharp frames
@@ -1116,8 +1119,9 @@ class Browser:
             sw, sh = self.screen or (0, 0)
             if sw < VIEW[0] or sh < VIEW[1]:
                 sw, sh = SCREEN
-        self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": dsf,
-                  "mobile": mobile, "screenWidth": sw, "screenHeight": sh}, session=self.session)
+        with self.emu_lock:  # after a sharp screenshot that runs now, which would put the old size back (#5713)
+            self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": dsf,
+                      "mobile": mobile, "screenWidth": sw, "screenHeight": sh}, session=self.session)
         if mobile != self.touch:  # a phone has touch: pages that ask (pointer: coarse) see it
             self.touch = mobile
             try:
@@ -1173,7 +1177,9 @@ class Browser:
             if not s or not size or self._windowed():
                 continue
             try:
-                data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 70}, session=s, timeout=10)["data"]
+                with self.emu_lock:  # no size change while it runs (#5713)
+                    data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 70}, session=s,
+                                     timeout=10)["data"]
             except (RiverError, KeyError):
                 continue
             if s != self.session or size != self._page_size() or self.sharp_due != due:
@@ -5343,9 +5349,9 @@ def set_size(b, spec, who=None, dpr=None):
         b.start()
         if b.size:
             b._fit()
-            _size_held(b, b.size[0])
         elif b.session:
-            b.call("Emulation.clearDeviceMetricsOverride", session=b.session)
+            with b.emu_lock:  # after a sharp screenshot that runs now (#5713)
+                b.call("Emulation.clearDeviceMetricsOverride", session=b.session)
             if b.touch:
                 b.touch = False
                 b.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=b.session)
@@ -5353,21 +5359,7 @@ def set_size(b, spec, who=None, dpr=None):
     b.forced = size_spec(spec, dpr, who)
     b.start()
     b._fit()
-    if not b.forced["mobile"]:  # a mobile page's width follows its viewport tag (980 with none), not the size
-        _size_held(b, b.forced["w"])
     return {**b.info(), "view": b.evaluate("[innerWidth, innerHeight]", 5)}
-
-
-SIZE_WAIT = 2.0  # seconds that a size command waits for the page to take its new width
-
-
-def _size_held(b, w):
-    """Wait until the page has the width that a size command gave it, at most SIZE_WAIT (#5902): Chrome applies the
-    emulated size after its call returns, and a GitHub run on Linux read the earlier width (390 after fit to 1000)
-    right after the command. A page that never shows that width (a page with its own minimum) costs the wait once."""
-    end = time.monotonic() + SIZE_WAIT
-    while b.evaluate("innerWidth", 5) != w and time.monotonic() < end:
-        time.sleep(0.05)
 
 
 def switch_tab(b, target):
