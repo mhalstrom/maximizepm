@@ -520,6 +520,33 @@ class PaneState(Env):
         self.assertEqual(sessions.state(self.c, dict(self.c.execute("SELECT * FROM agents WHERE name=?", (name,))
                                                      .fetchone()), None)[0], "prompt")
 
+    def test_a_session_that_runs_no_maxpm_command_leaves_starting(self):
+        # #5907 (mark's test 2026-11-15): a Codex session with no item, started with a prompt, ran no maxpm command, so
+        # it recorded no process, and the Sessions tab showed it 'starting' while its pane was idle.
+        name, pane = self.start("codex")
+        pane["running"] = "codex"
+        pane["screen"] = "• Hello! The current folder is empty.\n\n› Ask Codex to do anything\n\n  ? for shortcuts"
+        looked, pid = [], os.getpid()  # a live process, as the Sessions tab lists only those
+
+        def find(agent, process):
+            looked.append((agent, process))
+            return (pid, "codex --model gpt") if agent == name else (None, None)
+        old = self.server.PANE_PROCESS_FIND
+        self.server.PANE_PROCESS_FIND = find
+        self.addCleanup(setattr, self.server, "PANE_PROCESS_FIND", old)
+        self.addCleanup(self.server.PANE_PROCESS.clear)
+        row = lambda: dict(self.c.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone())
+        self.assertIsNone(row()["pid"])
+        got = self.server.watch_prompts(self.c)
+        self.assertEqual((got["processes"], got["reported"]), ({name: pid}, {name: "idle"}))
+        self.assertEqual((row()["pid"], row()["pid_cmd"], looked), (pid, "codex --model gpt", [(name, "codex")]))
+        terms = self.server.agent_terminals(self.c)
+        views = sessions.views(self.c, terms, self.tmp.name, self.tmp.name,
+                               prompts=self.server.pane_prompts(self.c, terms))
+        self.assertEqual(next(v["state"] for v in views if v["name"] == name), "idle")
+        self.server.watch_prompts(self.c)
+        self.assertEqual(len(looked), 1)  # recorded: no more ps for it
+
     def test_a_message_from_the_page_marks_a_detect_agent_working_at_once(self):
         # #5277: a short turn (Aider streams its reply after its spinner went) can start and end between two passes of
         # the watcher; the message that starts it records working, and the watcher reports idle when the prompt is back.

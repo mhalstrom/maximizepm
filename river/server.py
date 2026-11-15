@@ -2810,10 +2810,11 @@ def watch_prompts(conn):
     alerts once. Each pane is read with its agent's adapter (_pane_rule). The same look is the state source of an
     agent whose adapter's STATE['state'] is 'detect' (Codex): blocked, working or idle (_screen_state) goes to
     core.report as maxpm report does, when it changed (#5183). Returns {"waiting": {agent: question}, "told":
-    [agents], "closed": [message ids]}, "reported": {agent: state} when it recorded a state, and "session_ids":
-    {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty)."""
+    [agents], "closed": [message ids]}, "reported": {agent: state} when it recorded a state, "session_ids":
+    {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
+    "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids = {}, {}, {}
+    waiting, states, ids, procs = {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     for agent, pane in sorted(agent_terminals(conn).items()):
         if agent in stopped:
@@ -2828,6 +2829,9 @@ def watch_prompts(conn):
         sid = _pane_session_id(conn, agent, pane, ad)
         if sid:
             ids[agent] = sid
+        pid = _pane_process(conn, agent, ad)
+        if pid:
+            procs[agent] = pid
         if pattern:
             tail = _prompt_tail(_plain(screen["text"]))
             parts = _prompt_found(tail, rx, layout)
@@ -2843,6 +2847,8 @@ def watch_prompts(conn):
     reported = {"reported": got} if (got := _pane_reports(conn, states)) else {}
     if ids:
         reported["session_ids"] = ids
+    if procs:
+        reported["processes"] = procs
     t, wait = core.now(), core.parse_duration(core.setting(conn, "prompt_wait"))
     for agent in [a for a in PROMPTS if a not in waiting]:
         del PROMPTS[agent]
@@ -2900,6 +2906,35 @@ def _pane_session_id(conn, agent, pane, ad):
         return None
     core.record_session(conn, agent, found[-1])
     return found[-1]
+
+
+PANE_PROCESS = {}  # agent -> when the pane watcher last looked for its process (time.monotonic)
+PANE_PROCESS_RETRY = 30  # seconds: one ps for each agent at most this often
+PANE_PROCESS_FIND = None  # a test hook: (agent, process name) -> (pid, command line); else core.live_agent_process
+
+
+def _pane_process(conn, agent, ad):
+    """Record the agent CLI process of a session in a tmux pane that has none recorded, and return its pid (#5907).
+    A session records its process with its first maxpm command; a session that runs none (a Codex session with no
+    item, started with a prompt) stayed 'starting' on the Sessions tab, also while its pane showed it idle. The process
+    is the one of the adapter's CLI (DETECT['process']) whose environment names the agent (MAXPM_AGENT, which the
+    launch line sets). One ps at most every PANE_PROCESS_RETRY for each agent."""
+    proc = (ad.detect or {}).get("process") if ad is not None else None
+    if not proc:
+        return None
+    row = conn.execute("SELECT pid FROM agents WHERE name=? AND kind='ai'", (agent,)).fetchone()
+    if not row or row["pid"]:
+        return None
+    t = time.monotonic()
+    if t - PANE_PROCESS.get(agent, -PANE_PROCESS_RETRY) < PANE_PROCESS_RETRY:
+        return None
+    PANE_PROCESS[agent] = t
+    live, cmd = (PANE_PROCESS_FIND or core.live_agent_process)(agent, proc)
+    if not live or not core.set_process(conn, agent, live, cmd, env={"MAXPM_AGENT": agent}):
+        return None
+    with core.tx(conn):
+        core._event(conn, None, "maxpm", f"{agent}: its {ad.label} process {live} runs in its tmux pane; recorded it")
+    return live
 
 
 def _pane_reports(conn, states):
