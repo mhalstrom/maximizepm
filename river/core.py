@@ -3249,6 +3249,26 @@ def project_path(conn, name, path, actor=None, move=False):
     return dict(_project(conn, name))
 
 
+def start_folder(conn, p, folder=None, actor=None):
+    """The project p, with the folder a new session opens in (#5894). A project with no folder gets the folder the
+    person picked at the start (Start's Folder field, --folder of launch and expert start): MaximizePM makes it, when
+    it does not exist, and links the project to it. With no folder picked, the error says how to pick one. Before,
+    every start refused and sent the caller to maxpm project path first."""
+    full = str(Path(folder).expanduser().resolve()) if folder else None
+    if p["path"]:
+        if full and full != p["path"]:
+            raise RiverError(f"project {p['name']} works in {p['path']}; a start's folder is only for a project with "
+                             f"none. To move the project: maxpm project path {p['name']} {full} --move")
+        return p
+    if not full:
+        raise RiverError(f"project {p['name']} has no folder yet. Pick the folder its sessions work in: --folder "
+                         f"<folder>, or the Folder field of Start on the page. It becomes the project's folder")
+    if Path(full).exists() and not Path(full).is_dir():
+        raise RiverError(f"{full} is a file; pick a folder")
+    Path(full).mkdir(parents=True, exist_ok=True)
+    return project_path(conn, p["name"], full, actor)
+
+
 def project_target(conn, name, target, actor=None):
     """Put a project in the deploy target it ships to; no target clears it."""
     with tx(conn):
@@ -19392,7 +19412,7 @@ def project_sessions(conn, ann=None):
 
 
 def launch_target(conn, project=None, agent=None, item=None, model=None, effort=None, spread=False,
-                  options=None, actor=None, prompt=None):
+                  options=None, actor=None, prompt=None, folder=None, preview=False):
     """Where and how a new agent session should start: the folder of the project that holds the most
     important ready item an agent can take (or of the project named, or of the one item named), and the
     command of the chosen launch_agents entry (the first when none is named). Refuses when nothing is ready there.
@@ -19401,7 +19421,9 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     the one whose top item is most important; when every such project has an agent, the top item.
 
     The one item named can be reserved for the actor (given to a manager, who takes no work): the new
-    session gets it. prompt: maxpm launch --prompt, after the profile's first prompt."""
+    session gets it. prompt: maxpm launch --prompt, after the profile's first prompt. folder: the folder the person
+    picked for a project with none (start_folder). preview (the page's Next line): the item and project only, also
+    for a project with no folder yet."""
     ann = annotate(conn, closed=False)
     project = _project(conn, project)["name"] if project else None
     own = conn.execute("SELECT 1 FROM items WHERE id=? AND reserved_for=? AND status='open'",
@@ -19445,14 +19467,15 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not p["path"] and top["kind"] == "review":
         # A deploy project has no folder: the reviewer starts in a folder of the release.
         p = _review_folder(conn, top) or p
-    if not p["path"]:
-        raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session there: "
-                         f"maxpm project path {p['name']} <folder>")
     if agent is None and top["agent"]:
         agent = agent_for_type(conn, top["agent"], p["id"])
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
                              f"maxpm config set launch_agents \"...; {platform_spec(top['agent'])['label']}=@{top['agent']}\"")
+    if preview and not p["path"] and not folder:  # Start names this work; its dialog asks for the folder (#5894)
+        return {"project": p["name"], "path": None, "item": {"id": top["id"], "title": top["title"],
+                                                             "agent": top["agent"]}, "ready": len(pool), "why": why}
+    p = start_folder(conn, p, folder, actor)
     plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
     if model:
         # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
@@ -19551,7 +19574,7 @@ def role_agent(conn, role, project_id=None, item_id=None):
 def _start_next(conn):
     """What Start (work: top item) opens now, and why; None when nothing is ready."""
     try:
-        t = launch_target(conn, spread=True)
+        t = launch_target(conn, spread=True, preview=True)
     except RiverError:
         return None
     return {**t["item"], "project": t["project"], "why": t["why"]}

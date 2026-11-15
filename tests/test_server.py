@@ -1674,6 +1674,40 @@ class LaunchInTmux(unittest.TestCase):
                 server.open_agent_on(self.c, x, person="mark")
         self.assertEqual({r["name"] for r in self.c.execute("SELECT name FROM agents")}, before)
 
+    def test_a_start_in_a_project_with_no_folder_takes_the_folder_the_person_picks(self):
+        """#5894: launch, Open an agent and expert start in a project with no folder refused and sent the caller to
+        maxpm project path first. Now the refusal says how to pick one there, and the folder picked becomes the
+        project's folder (made when missing), and the session starts in it."""
+        core.project_add(self.c, "web")
+        first = core.item_add(self.c, "web", "first")["id"]
+        waits = core.item_add(self.c, "web", "after it", after=[first])["id"]
+        tasks = len(core.item_list(self.c, project="web"))
+        for start in (lambda: server.launch_agent(self.c, "web"),
+                      lambda: server.dispatch_item(self.c, first),
+                      lambda: server.open_agent_on(self.c, waits),
+                      lambda: server.start_expert(self.c, "fab", "the research", "web", model="opus")):
+            with self.assertRaisesRegex(RiverError, "web has no folder yet.*--folder <folder>.*Folder field of Start"):
+                start()
+        self.assertEqual((self.tmux.panes, len(core.item_list(self.c, project="web"))), ([], tasks))  # no expert task
+        # The page's Start still names the next work there; its dialog asks for the folder.
+        self.assertEqual((core._start_next(self.c)["id"], core._start_next(self.c)["project"]), (first, "web"))
+        folder = Path(self.dir.name, "sites", "web")  # it does not exist yet
+        t = server.launch_agent(self.c, "web", folder=str(folder))
+        self.assertTrue(folder.is_dir())
+        self.assertEqual(core._project(self.c, "web")["path"], str(folder.resolve()))
+        self.assertTrue(self.tmux.panes[-1]["keys"][0].startswith(f"cd {shlex.quote(str(folder.resolve()))} && "))
+        self.assertEqual(t["item"]["id"], first)
+        # The project has a folder now: the same folder again is no change; another one is a move, the person's call.
+        server.open_agent_on(self.c, waits, folder=str(folder))
+        with self.assertRaisesRegex(RiverError, "web works in .*maxpm project path web .* --move"):
+            server.open_agent_on(self.c, waits, folder=os.path.join(self.dir.name, "elsewhere"))
+        # An expert in a project with no folder, with the folder named.
+        core.project_add(self.c, "docs")
+        e = server.start_expert(self.c, "fab", "the research", "docs", model="opus",
+                                folder=os.path.join(self.dir.name, "docs"))
+        self.assertEqual(core._project(self.c, "docs")["path"], str(Path(self.dir.name, "docs").resolve()))
+        self.assertEqual(core._item(self.c, e["task"])["title"], "the research")
+
     def test_an_expert_starts_in_a_pane_and_is_never_ended_as_an_idle_worker(self):
         """#4955: an expert idle at its prompt for hours, with nothing in hand and a note to read, stays; serve gives
         it no work; expert_idle_end ends it; --resume starts its last chat again with its topic from the history."""

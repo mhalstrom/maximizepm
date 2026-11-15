@@ -34,6 +34,15 @@ class PlaceholderNote(unittest.TestCase):
         self.assertIn("has no {model} placeholder, so the agent starts with its own model", got)
         self.assertNotIn("@codex", got)  # a profile is @ and the agent's name, for every registered agent
 
+    def test_the_folder_picked_for_a_project_with_none_goes_to_the_server(self):
+        # #5894: the dialog's Folder for <project> field; with none typed, nothing goes (the project has a folder).
+        js = ("const m = await import('./components/launchDialog.js');"
+              "console.log(JSON.stringify([m.launchArgs({agent: 'A', newFolder: '~/Projects/web'}),"
+              " m.launchArgs({agent: 'A', newFolder: ''})]));")
+        out = subprocess.run(["node", "--input-type=module", "-e", js], cwd=STATIC, capture_output=True, text=True,
+                             timeout=30, check=True)
+        self.assertEqual(json.loads(out.stdout), [{"agent": "A", "folder": "~/Projects/web"}, {"agent": "A"}])
+
     def test_the_drawer_names_any_agent_as_an_agent_type(self):
         text = (STATIC / "components" / "drawer.js").read_text(encoding="utf-8")
         self.assertNotIn("codex or claude-code;", text)

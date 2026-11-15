@@ -1889,7 +1889,8 @@ def build_parser(only=None):
     g.add_argument("--session", action="store_true",
                    help="a session with no item (the page's New session): the agent opens in --folder with --prompt "
                         "as its first prompt, or none; no maxpm go, no queue work")
-    x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder)")
+    x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder); else the folder "
+                                    "for a project that has none: it becomes the project's folder (made when missing)")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
     x = sub.add_parser("workspace", help="the git worktree of each session (setting workspace): list them, or remove one")
     xs = x.add_subparsers(dest="wcmd")
@@ -1914,6 +1915,8 @@ def build_parser(only=None):
                    "own name; its transcript is named in the task (repeatable)")
     y.add_argument("--project", help="the project whose folder it works in (default: its last one, else the first "
                                      "project with a folder)")
+    y.add_argument("--folder", help="the folder for a project that has none: it becomes the project's folder (made "
+                                    "when missing)")
     y.add_argument("--resume", action="store_true", help="resume its last Claude Code chat, with its context")
     y.add_argument("--agent", help="a launch_agents label (default: the first)")
     y.add_argument("--model", help="its model (your choice: fable too)")
@@ -3549,14 +3552,15 @@ def _expert_cmd(conn, a, actor):
         summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text(encoding="utf-8")
     args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
             "model": a.model, "effort": a.effort, "item": a.item, "summary": summary,
-            "sources": a.source, "canvases": a.canvas, "sessions": a.session}
+            "sources": a.source, "canvases": a.canvas, "sessions": a.session,
+            "folder": str(Path(a.folder).expanduser().resolve()) if a.folder else None}  # serve runs in another folder
     if in_sandbox():
         return {"expert_started": {**ask_server(conn, "start_expert", args, actor, timeout=40), "via_serve": True}}
     from . import server
     return {"expert_started": server.start_expert(conn, a.name, a.topic, a.project, a.resume, agent=a.agent, actor=actor,
                                                   model=a.model, effort=a.effort, item=a.item,
                                                   summary=summary, sources=a.source, canvases=a.canvas,
-                                                  sessions=a.session)}
+                                                  sessions=a.session, folder=args["folder"])}
 
 
 _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window", "period", "every", "fail_after",
@@ -4020,8 +4024,12 @@ def dispatch(conn, a, actor):
             if not sep:
                 raise RiverError(f"--option {o!r} needs the form name=value, for example remote_control=off")
             opts[k.strip()] = v.strip()
-        if a.folder and not a.session:
-            raise RiverError("--folder goes with --session: maxpm launch --session --folder <folder>")
+        # Without --session, --folder is the folder picked for a project with none (#5894). Resolved here: maxpm serve
+        # runs in another folder.
+        folder = str(Path(a.folder).expanduser().resolve()) if a.folder and not a.session else None
+        if folder and a.dry_run:
+            raise RiverError("--dry-run changes nothing, and --folder makes a folder the project's folder: leave out "
+                             "one of them")
         if a.session:
             # A session with no item (#5851), as the page's New session.
             if a.dry_run:
@@ -4048,15 +4056,16 @@ def dispatch(conn, a, actor):
             # session, as for the page's Start and Dispatch.
             if a.prompt is not None:
                 core.custom_prompt(a.prompt)  # refuse here, before the request
-            choice = {"agent": a.agent, "model": a.model, "effort": a.effort, "options": opts, "prompt": a.prompt}
+            choice = {"agent": a.agent, "model": a.model, "effort": a.effort, "options": opts, "prompt": a.prompt,
+                      "folder": folder}
             res = (ask_server(conn, "dispatch_item", {"id": a.item, **choice}, actor, timeout=40) if a.item is not None
                    else ask_server(conn, "launch_agent", {"project": a.project, **choice}, actor, timeout=40))
             return {**res, "via_serve": True}
         if a.item is not None:
             return server.dispatch_item(conn, a.item, agent=a.agent, actor=actor, model=a.model, effort=a.effort,
-                                        options=opts or None, prompt=a.prompt)
+                                        options=opts or None, prompt=a.prompt, folder=folder)
         return server.launch_agent(conn, a.project, agent=a.agent, actor=actor, model=a.model, effort=a.effort,
-                                   options=opts or None, prompt=a.prompt)
+                                   options=opts or None, prompt=a.prompt, folder=folder)
     if c == "view":
         from . import server
         if a.orphans:

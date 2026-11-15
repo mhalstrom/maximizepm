@@ -170,7 +170,8 @@ async function drawerAction(what) {
     if (what === "replanned") await act("replanned", { id });
     if (what === "msg") { const body = $("#dMsgBody").value.trim(); if (!body) return; if (!actor()) return toast("Choose your name in 'You are' first", true); await act("send", { kind: $("#dMsgKind").value, body, item: id }); toast("Sent"); }
     if (what === "agent") {
-      const ch = await chooseLaunch(S, { title: "Open an agent", go: "Open agent", what: `#${id} ${it.title}`, item: it.ready ? it : null });
+      const ch = await chooseLaunch(S, { title: "Open an agent", go: "Open agent", what: `#${id} ${it.title}`, item: it.ready ? it : null,
+        project: it.project });
       if (!ch) return;
       const r = await act("open_agent_on", { id, person: actor() || undefined, ...launchArgs(ch) });
       toast(r.pushed_to ? `Gave #${id} to ${r.pushed_to}, which was waiting for work`

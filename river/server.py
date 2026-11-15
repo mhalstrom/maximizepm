@@ -148,17 +148,17 @@ def _can_open_terminal(runner, hint):
 
 
 def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
-                 prompt=None):
+                 prompt=None, folder=None):
     """Open a tmux pane in the project folder of the most important ready agent item and run
     the command of the chosen launch_agents entry there (default: the Claude Code profile), so one click starts one
     agent session. prompt (maxpm launch --prompt): the new session's first instruction,
-    after the profile's prompt."""
+    after the profile's prompt. folder: the folder picked for a project with none (core.start_folder)."""
     # With no project named, Start spreads sessions: first a project with ready work and no agent yet.
     # A session that waits for work in that project (maxpm wait) gets the item: no new session needed.
     # Else the new session gets a name and the item is pushed to it, so the next Start sees the project covered.
     # A custom prompt always opens a new session: a waiting one would get it only second-hand, as a message.
     t = core.launch_target(conn, project, agent, None, model, effort, spread=project is None, options=options,
-                           prompt=prompt)
+                           prompt=prompt, actor=actor, folder=folder)
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the Start button: you were waiting for work", actor)
@@ -168,13 +168,13 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
 
 
 def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
-                  prompt=None):
+                  prompt=None, folder=None):
     """Start work on one ready item: a session that waits for work in its project gets it (push);
     else river names a new session, reserves the item for it (push), and opens the chosen agent in the
     project folder with MAXPM_AGENT set to that name and MAXPM_FOCUS=item:<id>, so its first maxpm go takes it.
     With a custom prompt (maxpm launch --prompt) it always opens a new session."""
     t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
-                           prompt=prompt)
+                           prompt=prompt, folder=folder)
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
@@ -231,10 +231,11 @@ def _undo_start(conn, name, error, item_id=None, target=None, actor=None):
 
 
 def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=None, model=None, effort=None,
-                  options=None):
+                  options=None, folder=None):
     """Open an agent session for one item from its drawer. A ready item: Dispatch. A person's item: a
     session that does it together with the person. An item that waits: a session that first takes what
-    blocks it. The session learns which from MAXPM_FOCUS, which its maxpm go reads."""
+    blocks it. The session learns which from MAXPM_FOCUS, which its maxpm go reads. folder: the folder picked for
+    a project with none (core.start_folder)."""
     it = core.item_show(conn, item_id)
     if it["status"] not in core.OPEN_STATES:
         raise RiverError(f"#{item_id} is {it['status']}; there is nothing to open an agent on")
@@ -246,13 +247,10 @@ def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=Non
     if it["doer"] == "human" or mine:
         focus = f"help:{it['id']}" + (f"@{person}" if person else "")
     elif it["ready"]:
-        return dispatch_item(conn, it["id"], runner, agent, actor, model, effort, options)
+        return dispatch_item(conn, it["id"], runner, agent, actor, model, effort, options, folder=folder)
     else:
         focus = f"unblock:{it['id']}"
-    p = core._project(conn, it["project"])
-    if not p["path"]:
-        raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session there: "
-                         f"maxpm project path {p['name']} <folder>")
+    p = core.start_folder(conn, core._project(conn, it["project"]), folder, actor)
     return {**_open_focused(conn, p, focus, runner, agent, model, effort, options),
             "item": {"id": it["id"], "title": it["title"]}}
 
@@ -569,8 +567,9 @@ EXPERT_PROMPT = ("You are {name}, an expert session of MaximizePM on: {topic}. A
 
 def start_expert(conn, name, topic=None, project=None, resume=False, runner=None, agent=None, actor=None, model=None,
                  effort=None, options=None, item=None, summary=None, sources=(), canvases=(),
-                 sessions=()):
-    """maxpm expert start (#4955, #4959): open an agent session for an expert-tier task, in the folder of its project.
+                 sessions=(), folder=None):
+    """maxpm expert start (#4955, #4959): open an agent session for an expert-tier task, in the folder of its project
+    (folder: the folder picked for a project with none, core.start_folder).
     The task: item (made expert-tier), else on resume the open expert-tier task it had before, else a new
     expert-tier task with the topic as its title. The session claims it before it opens, so every expert has a task.
     resume: claude --resume of the last Claude Code session the expert ran in, so the talk goes on with its context;
@@ -614,14 +613,13 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
         project = project or (core._project_name(conn, core._item(conn, linked)["project_id"]) if linked else None) \
             or was_project or next((x["name"] for x in core.project_list(conn) if x.get("path")), None)
         if not project:
-            raise RiverError("an expert starts in the folder of a project: maxpm project path <name> <folder>")
+            raise RiverError("an expert starts in the folder of a project, and no project has a folder yet: name the "
+                             "project and pick its folder, --project <name> --folder <folder>")
+        core.start_folder(conn, core._project(conn, project), folder, actor)  # before the task: a refusal adds none
         task = core._item(conn, core.item_add(conn, project, topic, actor=actor, tier="expert", found_during=linked)["id"])
     elif task["tier"] != "expert":
         core.item_edit(conn, task["id"], actor=actor, tier="expert")
-    p = core._project(conn, core._project_name(conn, task["project_id"]))
-    if not p["path"]:
-        raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session: "
-                         f"maxpm project path {p['name']} <folder>")
+    p = core.start_folder(conn, core._project(conn, core._project_name(conn, task["project_id"])), folder, actor)
     _can_open_terminal(runner, f"cd {p['path']} && claude go")
     topic = task["title"]
     if model:
@@ -5016,13 +5014,16 @@ OPS = {
     "setup_skills": lambda c, a, who: setup_skills(),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
     "setup_ntfy": lambda c, a, who: setup_ntfy(c, who, a.get("open")),
-    # prompt: maxpm launch --prompt, which a command in a sandbox hands to maxpm serve.
+    # prompt: maxpm launch --prompt, which a command in a sandbox hands to maxpm serve. folder: the folder picked for
+    # a project with none (#5894).
     "launch_agent": lambda c, a, who: launch_agent(c, a.get("project"), agent=a.get("agent"), actor=who,
-                                                   prompt=a.get("prompt"), **_launch_args(a)),
+                                                   prompt=a.get("prompt"), folder=a.get("folder") or None,
+                                                   **_launch_args(a)),
     "dispatch_item": lambda c, a, who: dispatch_item(c, int(a["id"]), agent=a.get("agent"), actor=who,
-                                                     prompt=a.get("prompt"), **_launch_args(a)),
-    "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
+                                                     prompt=a.get("prompt"), folder=a.get("folder") or None,
                                                      **_launch_args(a)),
+    "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
+                                                     folder=a.get("folder") or None, **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
     # maxpm workspace drop (#5856): git writes the repository's worktree list, which an agent's sandbox may block.
     "workspace_drop": lambda c, a, who: workspace_drop(c, a["agent"], bool(a.get("force")), who),
@@ -5051,6 +5052,7 @@ OPS = {
                                                    agent=a.get("agent"), actor=who, item=a.get("item"),
                                                    summary=a.get("summary"), sources=a.get("sources") or (),
                                                    canvases=a.get("canvases") or (), sessions=a.get("sessions") or (),
+                                                   folder=a.get("folder") or None,
                                                    **_launch_args(a)),
     # Dictation (#5107): the page's audio goes to the helper on this Mac; each reply has the text so far. They touch
     # no queue (DICTATE_OPS).

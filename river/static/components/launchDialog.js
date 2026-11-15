@@ -102,6 +102,7 @@ function el() {
       const fam = famOf(v.agent);
       store("river.launch.model." + fam, v.model);
       store("river.launch.effort." + fam, v.effort);
+      if ($("#lNewFolder") && !v.newFolder) return $("#lNewFolder").focus();  // a project with no folder (#5894)
       if (ctx.pickFolder || v.work === PLAIN) {
         if (!v.folder) { const o = $("#lFolderOther"); if (o) o.focus(); return; }  // Other folder… with none typed
         store("river.launch.folder", v.folderPick);
@@ -139,6 +140,7 @@ function values() {
            work: q("#lWork") ? q("#lWork").value : "",
            folder: !q("#lFolder") ? "" : q("#lFolder").value === OTHER ? q("#lFolderOther").value.trim() : q("#lFolder").value,
            folderPick: q("#lFolder") ? q("#lFolder").value : "",
+           newFolder: q("#lNewFolder") ? q("#lNewFolder").value.trim() : "",
            prompt: q("#lPrompt") ? q("#lPrompt").value : "",
            options: Object.fromEntries([...d.querySelectorAll("[data-lopt][data-changed]")].map(x =>
              [x.dataset.lopt, x.type === "checkbox" ? (x.checked ? "on" : "off") : x.value])) };
@@ -200,6 +202,7 @@ function draw(prev) {
     </div>
     <div class="form ld-form">
       ${work}
+      ${ctx.pickFolder || workSel === PLAIN ? "" : newFolderField((it && it.project) || ctx.project, prev)}
       ${field("Agent", select({ id: "lAgent" }, opts.map(o => o.label), agent))}
       ${opt.efforts.length ? two(field("Model", modelSel), field("Effort", select({ id: "lEffort" }, [["", "the agent's default"], ...opt.efforts.map(e => [e, e])], effort))) : field("Model", modelSel)}
       ${note ? `<div class="muted t-s">${esc(note)}</div>` : ""}
@@ -242,9 +245,20 @@ function folderFields(prev) {
       prev ? prev.prompt : ""));
 }
 
+// A project with no folder yet (#5894): the person picks the folder its sessions work in, here in the dialog. The
+// server makes it the project's folder (and makes the folder when it does not exist), then starts the session.
+function newFolderField(project, prev) {
+  const p = project && (S.projects || []).find(x => x.name === project);
+  if (!p || p.path) return "";
+  return field(`Folder for ${esc(project)}`, `<input id="lNewFolder" value="${esc(prev ? prev.newFolder : "")}"
+      autocomplete="off" spellcheck="false" placeholder="~/Projects/${esc(project)}">`)
+    + `<div class="muted t-s">${esc(project)} has no folder yet. Its sessions work in the folder you name here; MaximizePM makes it when it does not exist.</div>`;
+}
+
 // Open the dialog. c: {title, go (button label), what (the work, as text), item (limits and recommendation),
-// pickWork (Start: choose the work), pickFolder (New session: a folder and a first prompt, no item)}. Resolves to
-// {agent, model, effort, work, folder, prompt, options} or null (cancel).
+// project (the work's project, when no item is given), pickWork (Start: choose the work), pickFolder (New session: a
+// folder and a first prompt, no item)}. Resolves to {agent, model, effort, work, folder, newFolder, prompt, options}
+// or null (cancel).
 export function chooseLaunch(state, c) {
   S = state; ctx = c || {};
   el();
@@ -260,5 +274,6 @@ export function launchArgs(v) {
   const out = { agent: v.agent };
   for (const k of ["model", "effort"]) if (v[k]) out[k] = v[k];
   if (v.options && Object.keys(v.options).length) out.options = v.options;
+  if (v.newFolder) out.folder = v.newFolder;  // the folder for a project with none (#5894)
   return out;
 }
