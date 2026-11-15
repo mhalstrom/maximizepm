@@ -6204,6 +6204,8 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
         _ops_note(conn, old["id"], f"ops fault again at {show_time(iso(at))}: {summary}", at, force=True)
         with tx(conn):
             _event(conn, old["id"], "maxpm", f"ops kind: {kind['kind']} (rule {kind['rule']}: {kind['why']})")
+            if kind["kind"] != "unknown":  # no rule matched: the kind that a session gave it before stays
+                _ops_put_kind_text(conn, old["id"], kind, c)
         _ops_tell_manager(conn, "alert", f"fault again: {key} ({summary}); #{old['id']} is open again", old["id"])
         return {"key": key, "item": old["id"], "action": "reopened"}
     # Storm: more than ops_storm_count keys of the scope went to fault within ops_storm_window: one item holds them.
@@ -6764,8 +6766,25 @@ def _ops_kind_text(k, c, item_id=None):
             f"\"<what shows it>\" --message \"<the text in the output that shows it>\" (the message becomes a known "
             f"message of the project, so the next fault of this kind needs no session). The kinds: maxpm ops kinds. "
             f"Then stop: the kind decides who takes the item next.") if k["kind"] == "unknown" else ""
-    return (f"Kind: {d['name']} (rule {k['rule']}: {k['why']}).\nWhat happens: {d['action']}.\nNever: {d['never']}."
-            + sort + "\n")
+    why = " ".join(str(k["why"]).split())  # one line, so _ops_put_kind_text finds the block again
+    if k.get("rule"):
+        why = f"rule {k['rule']}: {why}"
+    return (f"Kind: {d['name']} ({why}).\nWhat happens: {d['action']}.\nNever: {d['never']}." + sort + "\n")
+
+
+_OPS_KIND_BLOCK = re.compile(r"^Kind: [^\n]*\nWhat happens: [^\n]*\nNever: [^\n]*\n(?:Sort it: [^\n]*\n)?", re.M)
+
+
+def _ops_put_kind_text(conn, item_id, k, c):
+    """Inside a tx: put the kind's part (_ops_kind_text) in the fault item's context in place of the one there, so
+    the next session reads the kind in force. A context that still said 'Kind: unknown ... Sort it' after a session
+    gave the kind made each new session sort the fault again: one fault started three sessions, and two of them gave
+    a second kind and a person's item (#5919)."""
+    ctx = conn.execute("SELECT context FROM items WHERE id=?", (item_id,)).fetchone()["context"] or ""
+    text = _ops_kind_text(k, c, item_id)
+    m = _OPS_KIND_BLOCK.search(ctx)
+    ctx = ctx[:m.start()] + text + ctx[m.end():] if m else text + ctx
+    conn.execute("UPDATE items SET context=? WHERE id=?", (ctx, item_id))
 
 
 def _ops_kind_doer(kind, c):
@@ -6829,6 +6848,7 @@ def ops_kind_set(conn, item_id, kind, why, message=None, actor=None):
     held = it["assignee"] == actor and it["status"] in ("in_progress", "held")
     with tx(conn):
         _event(conn, item_id, actor or "person", f"ops kind: {k} (given by {actor or 'a person'}: {why[:300]})")
+        _ops_put_kind_text(conn, item_id, {"kind": k, "why": f"given by {actor or 'a person'}: {why[:300]}"}, c)
     item_edit(conn, item_id, models={"model": "", "effort": ""}, actor=actor or "person")
     person = _ops_person_step(conn, item_id, k, c, it["title"].split(" ", 1)[-1], actor or "person") \
         if doer == "human" else None

@@ -12209,6 +12209,33 @@ class OpsKinds(Base):
         self.check("job2")
         self.assertEqual(self.fault("job2", out="JOB CRITICAL - KeyError: 'plan'")[0]["kind"], "code-defect")
 
+    def test_a_given_kind_replaces_the_sorting_text_so_the_next_session_does_not_sort_it_again(self):
+        # #5919: the context still said 'Kind: unknown ... Sort it' after a session gave the kind, so each new session
+        # that serve started for the fault sorted it again, and two of them added a person's item.
+        self.check("job")
+        [x] = self.fault("job", out="JOB CRITICAL - KeyError: 'plan'")
+        evidence = self.item(x["item"])["context"].split("Then stop: the kind decides who takes the item next.\n", 1)[1]
+        core.claim(self.c, x["item"], "dev")
+        core.ops_kind_set(self.c, x["item"], "code defect", "a KeyError\nwith a stack trace", actor="dev")
+        ctx = self.item(x["item"])["context"]
+        self.assertTrue(ctx.startswith("Kind: code defect (given by dev: a KeyError with a stack trace).\n"), ctx[:200])
+        self.assertNotIn("Sort it", ctx)
+        self.assertNotIn("Kind: unknown", ctx)
+        self.assertTrue(ctx.endswith(evidence))
+        r = core.ops_kind_set(self.c, x["item"], "capacity", "load 900", actor="boss")  # the manager corrects it
+        ctx = self.item(x["item"])["context"]
+        self.assertTrue(ctx.startswith("Kind: capacity (given by boss: load 900).\n"), ctx[:200])
+        self.assertEqual(ctx.count("\nWhat happens: "), 1)
+        self.assertTrue(ctx.endswith(evidence))
+        self.assertIsNotNone(r["person"])
+        # Opened again with no rule that matches: the kind that was given stays.
+        core.done(self.c, r["person"], actor="mark")
+        core.done(self.c, x["item"], output="the load", actor="boss")
+        self.fault("job", out="JOB CRITICAL - KeyError: 'plan'", at=core.now() + core.timedelta(minutes=5))
+        it = self.item(x["item"])
+        self.assertEqual(it["status"], "open")
+        self.assertTrue(it["context"].startswith("Kind: capacity (given by boss"), it["context"][:200])
+
     def test_the_cli_lists_the_kinds_and_a_check_takes_a_layer(self):
         from river import cli
         out = io.StringIO()
