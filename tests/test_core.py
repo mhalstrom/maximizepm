@@ -9579,8 +9579,9 @@ class Activity(Base):
         from unittest import mock
         from river import agents, cli
         settings = core.activity_hook_settings()
-        self.assertEqual(sorted(settings["hooks"]), sorted(agents.get("claude").module.HOOK_EVENTS))
-        self.assertTrue(all(h["hooks"][0]["command"].endswith(" report --hook claude")
+        mod = agents.get("claude").module
+        self.assertEqual(sorted(settings["hooks"]), sorted(set(mod.HOOK_EVENTS) | set(mod.CALL_EVENTS)))
+        self.assertTrue(all(h["hooks"][0]["command"].endswith((" report --hook claude", " report --call claude"))
                             for hs in settings["hooks"].values() for h in hs))
         # The listener (#5686) starts at each prompt and each end of a turn, in the background, and wakes the session.
         wake = {ev: h["hooks"][1:] for ev, hs in settings["hooks"].items() for h in hs if len(h["hooks"]) > 1}

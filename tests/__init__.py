@@ -35,6 +35,7 @@ from river import tailnet as _tailnet  # noqa: E402
 _tailnet.RUNNER = lambda args: (127, "")
 from river.agents import codex as codex_adapter  # noqa: E402
 codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
+core.CALL_HOOKS = False  # Codex start commands without the call hooks' -c words; tests/test_calls.py sets True (#5911)
 server.ENTER_PAUSE = server.COMMAND_LOOK = server.INTERRUPT_PAUSE = 0  # no waits for a CLI's paste window or a command's screen (#5220)
 server.DELIVER_RUNNER = lambda agent: None  # no thread types a held message (#5587); a test sets its own
 server.PANE_PROCESS_FIND = lambda agent, process: (None, None)  # the pane watcher reads no real ps (#5907)

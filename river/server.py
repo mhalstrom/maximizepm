@@ -5763,6 +5763,11 @@ class Handler(BaseHTTPRequestHandler):
                     res = core.item_show(conn, iid)
                     res["tree"] = core.blockers(conn, iid)
                     res["messages"] = core.item_messages(conn, iid)
+                    # The tool calls of the task (#5911), newest first, short: maxpm calls <id> has the whole call.
+                    res["calls"] = [{k: c[k] for k in ("id", "agent", "agent_type", "tool", "source", "status",
+                                                       "started_at", "duration_ms")}
+                                    | {"params": (c["params"] or "")[:200]}
+                                    for c in core.calls_list(conn, item=iid, limit=200)]
                     return res
                 from . import space
                 if space.is_archived(conn, iid):  # the drawer of an archived item (#5712)
@@ -5829,6 +5834,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/mcp":
             return self._mcp("POST")
         if self._refuse():
+            return
+        if self.path == "/api/call":  # a tool call from an agent's hook (river/client.py call_hook, #5911)
+            if self.headers.get("Origin") or not hmac.compare_digest(self.headers.get("X-Maxpm-Token") or "", RUN_TOKEN):
+                return self._send(403, {"error": "a tool call with the token of the serve file only"})
+            try:
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            except ValueError:
+                return self._send(400, {"error": "a bad request"})
+            self._send(204, b"")  # the hook goes on at once; the call is recorded after the answer
+            take_call(req)
             return
         if self.path == "/api/run":  # a maxpm command (river/client.py, #5501)
             if self.headers.get("Origin") or not hmac.compare_digest(self.headers.get("X-Maxpm-Token") or "", RUN_TOKEN):
@@ -6067,6 +6082,56 @@ def stop_loop_process(wait=2.0):
             p.wait(timeout=5)
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---------------------------------------------------------------- the call record (#5911)
+# An agent's hook before and after each tool call posts its input to /api/call; the handler answers at once and puts
+# it in CALLS, and one thread of its own (with one connection) records them in order: the hook never waits on the
+# queue, and the hook before a call is stored before the hook after it.
+CALLS_MAX = 5000  # calls that wait to be stored; more (a queue that cannot be written) are dropped, not held
+CALLS = None
+_calls_lock = threading.Lock()
+
+
+def take_call(req):
+    """Queue one hook's request ({agent_type, agent, payload}) for the call writer; start the writer at the first."""
+    global CALLS
+    import queue
+    from datetime import datetime, timezone
+    with _calls_lock:
+        if CALLS is None:
+            CALLS = queue.Queue(CALLS_MAX)
+            threading.Thread(target=_call_writer, args=(CALLS,), name="maxpm-calls", daemon=True).start()
+    try:
+        CALLS.put_nowait((req, datetime.now(timezone.utc)))  # the time of the hook, not of the write
+    except queue.Full:
+        pass
+
+
+def store_call(conn, req, at=None):
+    """Record one hook's request: its adapter reads the call (read_call), core.record_call stores it."""
+    from . import agents
+    if not isinstance(req, dict) or not isinstance(req.get("payload"), dict):
+        return None
+    ad = agents.find(str(req.get("agent_type") or ""))
+    call = ad and ad.read_call(req["payload"])
+    return core.record_call(conn, ad.id, call, agent=str(req.get("agent") or ""), at=at) if call else None
+
+
+def _call_writer(q):
+    conn = None
+    while True:
+        req, at = q.get()
+        try:
+            conn = conn or core.connect()
+            store_call(conn, req, at)
+        except Exception as e:  # noqa: BLE001 - one bad call never stops the record
+            print(f"maxpm serve: a tool call was not recorded: {type(e).__name__}: {e}", flush=True)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            conn = None
 
 
 # ---------------------------------------------------------------- runners (#5501)

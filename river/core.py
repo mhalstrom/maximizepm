@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import contextvars
 import functools
+import hashlib
 import importlib
 import json
 import math
@@ -509,6 +510,11 @@ DEFAULT_SETTINGS = {
     # (#5352, decision 5 of the canvas does-maxpm-work). 0s: no samples. sample_keep: rows older than this go.
     "sample_every": "1m",
     "sample_keep": "90d",
+    # The call record (#5911): the hooks of Claude Code, Codex and Grok send every tool call of a session that
+    # MaximizePM started to maxpm serve, before and after it runs, and serve keeps it (tool_sessions, tool_calls)
+    # with its session, task, tool, params and result, each saved secret's value masked. After this many days the
+    # params and results go and the rows stay; 0: record no calls.
+    "call_record_days": "30",
     # Size limits (#5711, river/space.py): over a limit, maxpm serve removes the oldest removable data first until
     # the size is at 90% of it (maxpm cleanup --dry-run shows what would go). db_max_size: the data in the
     # database; folder_max_size: the whole folder beside the queue (browser caches, uploads, backups, the database).
@@ -1592,6 +1598,45 @@ CREATE TABLE IF NOT EXISTS browser_fallbacks (
 );
 CREATE INDEX IF NOT EXISTS browser_fallbacks_at ON browser_fallbacks(at);
 
+-- The call record (#5911; its form: mark 2026-11-14 through credentials-2, 'stored as sessions'): the hooks of a
+-- session's agent send every tool call to maxpm serve before and after it runs, and record_call (the one writer)
+-- stores it. A tool session holds its calls. Readers: maxpm calls, the task view of the page (the calls of an
+-- item, /api/item/<id>), and the workflow builder that comes later (it links an output to a later input by an
+-- exact match of values). After call_record_days, prune_calls deletes the params and results; the rows stay.
+CREATE TABLE IF NOT EXISTS tool_sessions (
+  id          INTEGER PRIMARY KEY,
+  session_id  TEXT,                          -- the agent's id of the session (Claude Code, Codex, Grok)
+  agent       TEXT,                          -- the MaximizePM agent of the session, when it is known
+  item_id     INTEGER,                       -- the task the agent held at the session's first call
+  project_id  INTEGER,
+  agent_type  TEXT NOT NULL,                 -- claude, codex, grok
+  started_at  TEXT NOT NULL,
+  ended_at    TEXT,                          -- set by end_tool_sessions when the agent is gone
+  next_seq    INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS tool_sessions_sid ON tool_sessions(agent_type, session_id);
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id           INTEGER PRIMARY KEY,
+  session      INTEGER NOT NULL REFERENCES tool_sessions(id),
+  seq          INTEGER NOT NULL,             -- the order of the call in its session
+  ref          TEXT,                         -- the agent's id of the call (tool_use_id): pairs the hook after it
+  tool         TEXT NOT NULL,
+  source       TEXT NOT NULL,                -- builtin (the agent's own tool), command (a shell command), mcp:<server>
+  params       TEXT,                         -- JSON, masked; a param over CALL_PARAM_MAX bytes is {sha256, size, type}
+  result       TEXT,                         -- JSON or text, masked; NULL until the call ends
+  result_file  TEXT,                         -- a result over CALL_RESULT_MAX bytes: its file beside the queue
+  status       TEXT,                         -- ok, error, refused; NULL while it runs (or no hook after it came)
+  error        TEXT,
+  started_at   TEXT,
+  duration_ms  INTEGER,
+  item_id      INTEGER,                      -- the task the agent held when the call started
+  supersedes   INTEGER,                      -- an earlier call of the session that this one repeats (same tool, params)
+  credential   TEXT                          -- the secret or set the gateway used; empty for the agent's own tools
+);
+CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls(session, ref);
+CREATE INDEX IF NOT EXISTS tool_calls_item ON tool_calls(item_id);
+CREATE INDEX IF NOT EXISTS tool_calls_started ON tool_calls(started_at);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
@@ -2493,7 +2538,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "conflict_max_lines", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes", "call_record_days"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -15375,6 +15420,249 @@ def hook_report(conn, agent_id, payload, env=None):
             "answered": answered, "remind": remind}
 
 
+# ---------------------------------------------------------------- the call record (#5911)
+
+# The hooks of a session's agent send every tool call to maxpm serve before and after it runs (river/client.py
+# call_hook, POST /api/call); serve passes each one here in one thread of its own (server.CALLS). record_call is the
+# one place that stores a call, so the form of the record can change behind it.
+CALL_PARAM_MAX = 512  # bytes: a larger param is kept as {sha256, size, type}, which still matches the same value
+CALL_RESULT_MAX = 256 * 1024  # bytes: a larger result goes to a file beside the queue (call_results/)
+CALL_RESULTS_DIR = "call_results"
+CALL_HOOKS = True  # tests: False keeps the -c words of Codex's call hooks out of the start commands they compare
+_CALL_MASK = {"key": None, "forms": []}
+
+
+def call_mask_forms(conn):
+    """The forms of every saved secret's value (vault.mask_forms), longest first: what a call record masks. Read
+    from the vault again only when the secrets changed (their names and times), not on each call."""
+    from . import vault
+    rows = conn.execute("SELECT name, COALESCE(updated_at, created_at) AS at FROM secrets ORDER BY name").fetchall()
+    key = (tuple((r["name"], r["at"]) for r in rows), id(vault.backend()))
+    if _CALL_MASK["key"] != key:
+        forms = set()
+        for r in rows:
+            for name in (r["name"], r["name"] + vault.TOTP_SUFFIX):
+                try:
+                    data = vault.backend().get(conn, name)
+                except Exception:  # noqa: BLE001 - a value that cannot be read now is masked once it can
+                    continue
+                forms.update(vault.mask_forms(data or b""))
+        _CALL_MASK.update(key=key, forms=sorted(forms, key=len, reverse=True))
+    return _CALL_MASK["forms"]
+
+
+def _masked(text, forms):
+    """text with each form of a saved secret's value replaced by the mask."""
+    if not forms or not text:
+        return text
+    from . import vault
+    data = text.encode("utf-8", "surrogatepass")
+    for f in forms:
+        data = data.replace(f, vault.MASK)
+    return data.decode("utf-8", "replace")
+
+
+def _json_text(value):
+    return value if isinstance(value, str) else json.dumps(_bytes_as_text(value), ensure_ascii=False, default=str)
+
+
+def _bytes_as_text(value):
+    """value with each list of byte numbers that is UTF-8 text made that text: Grok's shell result has its output
+    as one ([100, 117, ...]), and the mask finds a secret's value only in text."""
+    if isinstance(value, dict):
+        return {k: _bytes_as_text(v) for k, v in value.items()}
+    if isinstance(value, list):
+        if len(value) >= 4 and all(type(b) is int and 0 <= b < 256 for b in value):
+            try:
+                return bytes(value).decode("utf-8")
+            except UnicodeDecodeError:
+                return value
+        return [_bytes_as_text(v) for v in value]
+    return value
+
+
+def _call_params(value, forms):
+    """A call's params as stored: JSON, masked; each param (each key of a dict, else the whole value) larger than
+    CALL_PARAM_MAX bytes as {sha256, size, type} of its masked JSON, so the workflow builder can still match it."""
+    if value is None:
+        return None
+
+    def small(v):
+        text = _masked(_json_text(v) if not isinstance(v, str) else json.dumps(v, ensure_ascii=False), forms)
+        data = text.encode("utf-8", "surrogatepass")
+        if len(data) > CALL_PARAM_MAX:
+            return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "type": type(v).__name__}
+        try:
+            return json.loads(text)
+        except ValueError:  # a mask inside an escape: the masked JSON as a string
+            return text
+
+    out = {k: small(v) for k, v in value.items()} if isinstance(value, dict) else small(value)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _call_result(conn, value, forms, call_id):
+    """(result, result_file) of a call: its JSON or text, masked; a result over CALL_RESULT_MAX bytes goes to a file
+    beside the queue (call_results/<call id>.txt), and the row keeps its path."""
+    if value is None:
+        return None, None
+    text = _masked(_json_text(value), forms)
+    data = text.encode("utf-8", "surrogatepass")
+    if len(data) <= CALL_RESULT_MAX:
+        return text, None
+    folder = Path(river_dir()) / CALL_RESULTS_DIR
+    folder.mkdir(mode=0o700, exist_ok=True)
+    f = folder / f"{call_id}.txt"
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    return None, str(f)
+
+
+def _call_source(tool):
+    """Where a tool comes from: mcp:<server> (Claude Code and Codex: mcp__<server>__<tool>; Grok: <server>__<tool>),
+    command (a shell command), or builtin (the agent's own tool)."""
+    m = re.match(r"^(?:mcp__)?([A-Za-z0-9_.-]+?)__[A-Za-z0-9_.-]+$", tool or "")
+    if m:
+        return f"mcp:{m.group(1)}"
+    return "command" if tool in ("Bash", "shell", "exec_command", "local_shell", "run_terminal_command") else "builtin"
+
+
+def _tool_session(conn, platform, sid, who, t):
+    """The tool session row of an agent's session, inside a tx; made at its first call, with the task the agent
+    holds then. A session that a gone agent ended starts again when it calls again (a resumed session)."""
+    row = conn.execute("SELECT * FROM tool_sessions WHERE agent_type=? AND session_id IS ? ORDER BY id DESC LIMIT 1",
+                       (platform, sid)).fetchone()
+    if row and not row["ended_at"]:
+        if who and not row["agent"]:
+            conn.execute("UPDATE tool_sessions SET agent=? WHERE id=?", (who, row["id"]))
+        return row
+    held = _call_task(conn, who)
+    cur = conn.execute("INSERT INTO tool_sessions (session_id, agent, item_id, project_id, agent_type, started_at) "
+                       "VALUES (?,?,?,?,?,?)", (sid, who or None, held and held["id"],
+                                                 held and held["project_id"], platform, t))
+    return conn.execute("SELECT * FROM tool_sessions WHERE id=?", (cur.lastrowid,)).fetchone()
+
+
+def _iso_ms(t):
+    """A call's time: iso with milliseconds, so a call's duration is in milliseconds ('...T07:35:01.123Z')."""
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def _parse_ms(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ" if "." in s else "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc)
+
+
+def _call_task(conn, who):
+    """The task an agent works on now: an item in progress before a held one, the newest claim first."""
+    return who and conn.execute("SELECT id, project_id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                                "ORDER BY status='held', claimed_at DESC LIMIT 1", (who,)).fetchone()
+
+
+def record_call(conn, platform, call, agent=None, at=None):
+    """Store one tool call hook (a call report of the adapter's read_call): the one writer of tool_sessions and
+    tool_calls. The hook before the call adds the call's row, with its order in the session and the task that the
+    agent holds now; the hook after it adds the result, status and duration to that row (found by the session and
+    the call's ref, else the newest open call of the session and tool). Either may come first. agent: MAXPM_AGENT of
+    the hook's environment. Returns the call's row id, or None when call_record_days is 0."""
+    if not int(setting(conn, "call_record_days") or 0):
+        return None
+    tm = at or datetime.now(timezone.utc)  # not now(): a call's time keeps its milliseconds
+    t = _iso_ms(tm)
+    forms = call_mask_forms(conn)
+    sid, ref, post, tool = call.get("session_id"), call.get("ref"), call.get("phase") == "post", call["tool"]
+    who = activity_agent(conn, sid, {"MAXPM_AGENT": agent or ""})
+    with tx(conn):
+        ses = _tool_session(conn, platform, sid, who, t)
+        if ref:
+            row = conn.execute("SELECT * FROM tool_calls WHERE session=? AND ref=?", (ses["id"], ref)).fetchone()
+        elif post:
+            row = conn.execute("SELECT * FROM tool_calls WHERE session=? AND ref IS NULL AND tool=? AND status IS NULL "
+                               "ORDER BY id DESC LIMIT 1", (ses["id"], tool)).fetchone()
+        else:
+            row = None
+        params = _call_params(call.get("input"), forms)
+        fresh = row is None
+        if fresh:
+            held = _call_task(conn, who)
+            same = conn.execute("SELECT id FROM tool_calls WHERE session=? AND tool=? AND params=? ORDER BY id DESC "
+                                "LIMIT 1", (ses["id"], tool, params)).fetchone() if params is not None else None
+            cur = conn.execute(
+                "INSERT INTO tool_calls (session, seq, ref, tool, source, params, started_at, item_id, supersedes, "
+                "credential) VALUES (?,?,?,?,?,?,?,?,?,'')",
+                (ses["id"], ses["next_seq"], ref, tool, _call_source(tool), params, t,
+                 held and held["id"], same and same["id"]))
+            conn.execute("UPDATE tool_sessions SET next_seq=next_seq+1 WHERE id=?", (ses["id"],))
+            row = conn.execute("SELECT * FROM tool_calls WHERE id=?", (cur.lastrowid,)).fetchone()
+        elif not post:  # the hook after the call came first
+            conn.execute("UPDATE tool_calls SET params=?, started_at=? WHERE id=?", (params, t, row["id"]))
+        if post:
+            ok = call.get("ok", True)
+            result, rfile = _call_result(conn, call.get("output") if ok else None, forms, row["id"])
+            ms = None if fresh else max(0, round((tm - _parse_ms(row["started_at"])).total_seconds() * 1000))
+            conn.execute("UPDATE tool_calls SET params=COALESCE(params, ?), result=?, result_file=?, status=?, "
+                         "error=?, duration_ms=? WHERE id=?",
+                         (params, result, rfile, "ok" if ok else "error",
+                          None if ok else _masked(_json_text(call.get("output") or ""), forms)[:CALL_RESULT_MAX],
+                          ms, row["id"]))
+        return row["id"]
+
+
+def prune_calls(conn, at=None):
+    """A pass of maxpm serve: end_tool_sessions; then, at most once an hour, the params and results of calls older
+    than call_record_days go (with their result files), and the session and call rows stay with their names and
+    times. Returns how many calls it emptied."""
+    end_tool_sessions(conn, at)
+    t = at or now()
+    if at is None and _CALL_MASK.get("pruned") and t - _CALL_MASK["pruned"] < timedelta(hours=1):
+        return 0  # once an hour: the old rows stay, so each run reads all of them
+    _CALL_MASK["pruned"] = t
+    days = int(setting(conn, "call_record_days") or 0)
+    cut = iso(t - timedelta(days=days))
+    old = "started_at<? AND (params IS NOT NULL OR result IS NOT NULL OR result_file IS NOT NULL)"
+    with tx(conn):
+        for r in conn.execute(f"SELECT result_file FROM tool_calls WHERE {old} AND result_file IS NOT NULL", (cut,)):
+            try:
+                os.unlink(r["result_file"])
+            except OSError:
+                pass
+        return conn.execute(f"UPDATE tool_calls SET params=NULL, result=NULL, result_file=NULL, error=NULL "
+                            f"WHERE {old}", (cut,)).rowcount
+
+
+def end_tool_sessions(conn, at=None):
+    """Set ended_at of each open tool session whose agent is gone (or stopped), or that has no agent and no call
+    for a day: the time of its last call."""
+    t = at or now()
+    rows = conn.execute("SELECT s.id, s.agent, s.started_at, (SELECT MAX(started_at) FROM tool_calls c "
+                        "WHERE c.session=s.id) AS last FROM tool_sessions s WHERE s.ended_at IS NULL").fetchall()
+    gone = []
+    for r in rows:
+        a = r["agent"] and conn.execute("SELECT * FROM agents WHERE name=?", (r["agent"],)).fetchone()
+        last = r["last"] or r["started_at"]
+        if (a and _agent_state(conn, a) in ("gone", "stopped")) or (r["agent"] and not a) or \
+                (not r["agent"] and t - _parse_ms(last) > timedelta(days=1)):
+            gone.append((last, r["id"]))
+    if gone:
+        with tx(conn):
+            conn.executemany("UPDATE tool_sessions SET ended_at=? WHERE id=?", gone)
+    return len(gone)
+
+
+def calls_list(conn, item=None, agent=None, session=None, limit=30, call_id=None):
+    """The recorded calls, newest first, each with its session's agent, agent type and session id: of one task, one
+    agent, one tool session (its row id), or all; call_id: that one call."""
+    where, args = [], []
+    for col, v in (("c.id", call_id), ("c.item_id", item), ("s.agent", agent), ("c.session", session)):
+        if v is not None:
+            where.append(f"{col}=?")
+            args.append(v)
+    sql = ("SELECT c.*, s.agent, s.agent_type, s.session_id FROM tool_calls c JOIN tool_sessions s ON s.id=c.session"
+           + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY c.id DESC LIMIT ?")
+    return [dict(r) for r in conn.execute(sql, (*args, max(1, int(limit))))]
+
+
 def push_guard(conn, agent, command):
     """Why MaximizePM refuses this shell command of the agent now, or None (#5381). A command that matches the setting
     push_guard (a push, gh pr merge, a launch) waits while the agent has an unread alert (it may say 'stop', 'do not
@@ -18947,10 +19235,12 @@ def hook_words(ad, folder=None):
     beside the queue), for an agent whose STATE['state'] is 'hook': without them its session reports no state at all
     (#5214, Grok: --agent <file>). [] for an agent whose state comes from the screen (DETECT), and for one that
     takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']: Claude Code's --settings, behind its
-    activity_hooks setting)."""
+    activity_hooks setting). An agent whose state hooks do not hold the call hooks (#5911) also gets its call_hooks
+    words (Codex: -c hooks...)."""
+    calls = [str(w) for w in ad.call_hooks(report_command())] if CALL_HOOKS else []
     if (ad.state or {}).get("state") != "hook" or ad.launch.get("hooks_file"):
-        return []
-    return [str(w) for w in ad.install_hooks(folder, report_command()) or ()]
+        return calls
+    return [str(w) for w in ad.install_hooks(folder, report_command()) or ()] + calls
 
 
 def with_hooks(ad, argv, folder=None):
