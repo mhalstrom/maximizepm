@@ -20,17 +20,23 @@ def call(t, model="claude-opus-5-5", input=0, cache_read=0, write_5m=0, write_1h
 
 class Base(unittest.TestCase):
     def setUp(self):
+        # Noon UTC today, in a UTC queue (#5902): the tests put calls up to 100 minutes before now and ask for
+        # 'today', and a run between 00:00 and 01:40 UTC (the v1.2.0 release checks at 00:06) found no calls.
+        self.now = core.now().replace(hour=12, minute=0, second=0)
+        clock = mock.patch.object(core, "now", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.c = core.connect(os.path.join(self.dir.name, "t.db"))
         self.addCleanup(self.c.close)
+        core.config_set(self.c, "timezone", "UTC")
         cost._REQS.clear()
         self.addCleanup(cost._REQS.clear)
         core.project_add(self.c, "app")
         core.project_add(self.c, "site")
         core.register(self.c, "mark", human=True)
         core.register(self.c, "dev")
-        self.now = core.now()
         self.logs = {}
         p = mock.patch.object(core, "_session_requests",
                               lambda sid, root=None: ({str(i): r for i, r in enumerate(self.logs[sid])}, False)

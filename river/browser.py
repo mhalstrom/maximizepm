@@ -5343,6 +5343,7 @@ def set_size(b, spec, who=None, dpr=None):
         b.start()
         if b.size:
             b._fit()
+            _size_held(b, b.size[0])
         elif b.session:
             b.call("Emulation.clearDeviceMetricsOverride", session=b.session)
             if b.touch:
@@ -5352,7 +5353,21 @@ def set_size(b, spec, who=None, dpr=None):
     b.forced = size_spec(spec, dpr, who)
     b.start()
     b._fit()
+    if not b.forced["mobile"]:  # a mobile page's width follows its viewport tag (980 with none), not the size
+        _size_held(b, b.forced["w"])
     return {**b.info(), "view": b.evaluate("[innerWidth, innerHeight]", 5)}
+
+
+SIZE_WAIT = 2.0  # seconds that a size command waits for the page to take its new width
+
+
+def _size_held(b, w):
+    """Wait until the page has the width that a size command gave it, at most SIZE_WAIT (#5902): Chrome applies the
+    emulated size after its call returns, and a GitHub run on Linux read the earlier width (390 after fit to 1000)
+    right after the command. A page that never shows that width (a page with its own minimum) costs the wait once."""
+    end = time.monotonic() + SIZE_WAIT
+    while b.evaluate("innerWidth", 5) != w and time.monotonic() < end:
+        time.sleep(0.05)
 
 
 def switch_tab(b, target):

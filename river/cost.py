@@ -11,7 +11,6 @@ project: the person gets one alert at 80% and one at 100% in each period. Nothin
 
 import re
 import time
-from datetime import datetime
 
 from . import core
 from .core import RiverError
@@ -30,7 +29,7 @@ def start_of(conn, period):
         return None
     if period == "today":
         zone = core.local_zone(core.setting(conn, "timezone"))
-        local = datetime.now(zone)
+        local = core.now().astimezone(zone)  # core.now, the one clock a test pins (#5902)
         return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(core.timezone.utc)
     return core.now() - core.parse_duration(period)
 
@@ -276,7 +275,7 @@ def watch(conn, force=False):
 
 def _period_key(conn, per):
     """The current day, week or month in the setting timezone: the key of one alert per period."""
-    d = datetime.now(core.local_zone(core.setting(conn, "timezone")))
+    d = core.now().astimezone(core.local_zone(core.setting(conn, "timezone")))
     return d.strftime("%Y-%m-%d") if per == "day" else d.strftime("%G-W%V") if per == "week" else d.strftime("%Y-%m")
 
 

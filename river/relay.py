@@ -553,14 +553,15 @@ class Link:
                     self.refused_token = cfg["token"]
                     _set_state(state="error", error=f"the relay ended the connection: {reason}; run maxpm connect")
                     continue
-                _set_state(state="waiting", error=f"the relay ended the connection: {reason}")
+                error = f"the relay ended the connection: {reason}"
                 if reason.startswith("already connected"):
                     pause = BACKOFF_MAX  # another computer holds the account; look again each minute
                 elif reason.startswith("protocol"):
                     # This MaximizePM and the relay speak other versions: update MaximizePM (or the relay is older).
-                    _set_state(state="waiting", error=f"the relay ended the connection: {reason} (this MaximizePM "
-                                                      f"speaks protocol {PROTOCOL}); update MaximizePM")
+                    error += f" (this MaximizePM speaks protocol {PROTOCOL}); update MaximizePM"
                     pause = 10 * BACKOFF_MAX
+                # One write (#5902): a reader between two writes saw the error without the protocol part.
+                _set_state(state="waiting", error=error)
             except (OSError, WebSocketError, ValueError) as e:
                 _set_state(state="waiting", error=str(e) or e.__class__.__name__)
             if self.stop.is_set():
