@@ -4574,7 +4574,9 @@ def on_element(b, target, fn, *args):
 # #5668: the aim. After the scroll, up to five points of each visible part of the element (the middle first) are hit
 # tested, through open shadow roots; the first point where the element itself (or its label) is on top is the point.
 # None: {covered: the middle}, and nothing is clicked (point_of names the cover).
-POINT_JS = r"""(el, at) => { el.scrollIntoView({block: 'center', inline: 'center'});
+# #5909: every scroll here is instant. A page with scroll-behavior: smooth otherwise moves after the boxes are read,
+# and the element is still below the window then: no point to click.
+POINT_JS = r"""(el, at) => { el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
   const a = el.closest('a[href]'); let link = null;
   if (a && (!a.target || a.target === '_self')) { const u = new URL(a.href, location.href), h = new URL(location.href);
     u.hash = h.hash = ''; if (u.origin === h.origin && u.href !== h.href) link = u.href; }
@@ -4589,7 +4591,7 @@ POINT_JS = r"""(el, at) => { el.scrollIntoView({block: 'center', inline: 'center
       return [r.left + Math.min(x, r.width - 0.5), r.top + Math.min(y, r.height - 0.5), x, y, r]; };
     let [x, y, dx, dy, r] = pos();
     if (dx < 0 || dy < 0 || dx > r.width || dy > r.height) return {outside: [Math.round(r.width), Math.round(r.height)]};
-    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) { scrollBy(x - innerWidth / 2, y - innerHeight / 2); [x, y] = pos(); }
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) { scrollBy({left: x - innerWidth / 2, top: y - innerHeight / 2, behavior: 'instant'}); [x, y] = pos(); }
     const h = deep(x, y);
     return h && mine(h) ? [x, y, link] : {covered: [x, y]};
   }
@@ -4616,7 +4618,7 @@ BOX_OF = r"""const boxOf = el => { const r = el.getBoundingClientRect();
 POINT_JS = POINT_JS.replace("/*BOX_OF*/", BOX_OF)
 # Focus a field and select what it holds, so the text that comes next replaces it. What kind of field it is: text
 # (Input.insertText types it), value (a date, a color: the value is set), select, or no:<what> (fill refuses).
-FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); el.focus();
+FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); el.focus();
   const t = el.tagName, ty = (el.type || '').toLowerCase();
   if (t === 'SELECT') return 'select';
   if (el.isContentEditable) { const r = document.createRange(); r.selectNodeContents(el);
@@ -5240,7 +5242,7 @@ def screenshot(b, full=False, cursor=False):
 # at each 10% of the box, with labels, so the agent names a point for --at. Never of a CAPTCHA test (policy g5).
 ELEMENT_LONG = 1000
 ELEMENT_MIN = 400
-BOX_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); /*BOX_OF*/ const r = boxOf(el);
+BOX_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); /*BOX_OF*/ const r = boxOf(el);
   const C = '[id*="captcha" i],[class*="captcha" i]';
   return {x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height, vw: innerWidth, vh: innerHeight,
     captcha: !!(el.closest(C) || el.querySelector(C + ',iframe[src*="captcha" i],iframe[src*="challenges.cloudflare.com"]'))}; }""" \

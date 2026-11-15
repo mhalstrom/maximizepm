@@ -2203,6 +2203,48 @@ FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choos
          b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
 
 
+SMOOTH = (b"<title>Smooth</title><style>html { scroll-behavior: smooth }</style>"
+          b"<p style='margin-top:3000px; width:200px'>Some words before it, then "
+          b"<a href='#' onclick=\"document.title = 'wrapped'; return false\">the best wrapped link alternatives</a>"
+          b" and words after it.</p><div style='height:3000px'></div>")
+
+
+class SmoothScroll(Base):
+    """#5909 in a real Chrome: on a page with scroll-behavior: smooth, a link far below the window that wraps over
+    two lines is clicked by name (the scroll before the click is instant)."""
+
+    def test_a_wrapped_link_below_the_window_is_clicked(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(SMOOTH)))
+                self.end_headers()
+                self.wfile.write(SMOOTH)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/")
+        self.assertGreaterEqual(b.evaluate("document.querySelector('a').getClientRects().length"), 2,
+                                "the link must wrap for this test")
+        act(action="click", selector="the best wrapped link alternatives")
+        self.assertEqual(b.evaluate("document.title"), "wrapped")
+
+
 class PageSize(Base):
     """#5676 in a real Chrome: maxpm browser size phone gives the page 390 px with touch and a screenshot 390 px wide
     with no pane open; a pane that opens does not change it, the person's use of the pane does; size pane and
