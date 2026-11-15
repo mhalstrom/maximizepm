@@ -918,6 +918,56 @@ class Waiting(TmuxBase):
         self.assertEqual(self.pane["keys"], [])
         self.assertIn("prompt_answer", server.TYPING_OPS)  # it needs the page's token
 
+    def test_the_trust_question_takes_only_its_options(self):
+        """#5904 (mark's test 2026-11-15): the card's Other on Claude Code's trust question sent the text and Enter,
+        Enter chose 'No, exit', and the text went to the shell. The trust card has its two options only."""
+        self.assertFalse(self.cards()[0]["waiting"][0]["fixed"])  # a permission prompt takes a text
+        self.pane["screen"] = TRUST
+        (w,) = self.cards()[0]["waiting"]
+        self.assertEqual((w["options"], w["fixed"]), (["No, exit", "Yes, I trust this folder"], True))
+        with self.assertRaisesRegex(core.RiverError, "takes only one of its options, no text"):
+            server.prompt_answer(self.c, "ag", w["sig"], other="do nothing", who="mark")
+        self.assertEqual(self.pane["keys"], [])
+        server.prompt_answer(self.c, "ag", w["sig"], pick=1, who="mark")
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+    def test_no_text_goes_to_a_shell(self):
+        """#5904: a text from the card goes to the pane only while its agent runs there."""
+        import time
+        # The agent ends at the Esc that should open its input box: the text does not follow it into the shell.
+        self.pane["screen"] = PERMISSION.replace("3. No, and tell Claude what to do differently (esc)", "3. No")
+        sig = self.cards()[0]["waiting"][0]["sig"]
+        fake = self.tmux
+
+        def runner(a):
+            out = fake(a)
+            if a[0] == "send-keys" and a[-1] == "Escape":
+                self.pane.update(running="zsh", started=str(int(time.time())))
+            return out
+        server.TMUX_RUNNER = runner
+        with self.assertRaisesRegex(core.RiverError, "no longer runs in its terminal after Escape"):
+            server.prompt_answer(self.c, "ag", sig, other="do nothing", who="mark")
+        self.assertEqual(self.pane["keys"], ["Escape"])
+        # The screen still shows the question, but a shell runs in the pane (in its first seconds): no key at all.
+        self.pane["keys"].clear()
+        with self.assertRaisesRegex(core.RiverError, "no longer runs in its terminal"):
+            server.prompt_answer(self.c, "ag", sig, pick=0, who="mark")
+        self.assertEqual(self.pane["keys"], [])
+
+
+TRUST = """ Accessing workspace:
+
+ /work
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open
+ source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+"""
+
 
 class Uploads(TmuxBase):
     """#4610, #4629: images attach; arbitrary files go to the session as readable paths."""

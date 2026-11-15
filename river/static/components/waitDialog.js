@@ -20,6 +20,8 @@ function promptBlock(w, n) {
   // The CLI's own option to type what to do instead (w.tell) is the Other choice with the text box: no second
   // Other under it (#5253).
   const own = Number.isInteger(w.tell) && w.tell < w.options.length;
+  // A question that takes only one of its options (a trust question: its Esc ends the CLI) has no Other (#5904).
+  const free = !w.fixed;
   const opts = w.options.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${own && i === w.tell ? "other" : i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
   return `<form class="wblock" data-kind="prompt" data-sig="${esc(w.sig)}"${own ? ` data-tell="${w.tell}"` : ""}>
     <div class="wkind">Prompt in its terminal</div>
@@ -29,8 +31,8 @@ function promptBlock(w, n) {
     <details class="wlines"${w.options.length ? "" : " open"}><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
     ${w.options.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
       numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
-    ${own ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
-    <textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>
+    ${own || !free ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
+    ${free ? `<textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>` : ""}
     ${keyButtons(w)}
   </form>`;
 }

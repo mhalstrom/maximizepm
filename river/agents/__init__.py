@@ -296,6 +296,8 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "header":       a regex of the line above a tool question that names the tool (group 1) and what it runs or
 #                      changes (group 2, optional): Gemini's "? Shell  touch notes.txt" (#5817). "": the built-in
 #                      reading (a line that starts with command, file, edit, fetch or tool),
+#      "fixed":        a regex of a question (its text or an option) that takes only one of its options, no typed text,
+#                      when it has no "tell_instead" option: the question card then has no Other (#5904). "": none,
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -308,7 +310,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "behind": str, "header": str}
+               "behind": str, "header": str, "fixed": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -322,6 +324,9 @@ DETECT_LAYOUT = {
     "row": "",
     "behind": "",
     "header": "",
+    # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Gemini's 'Trust folder', Cursor,
+    # Copilot, Grok, Pi): its Esc exits the CLI, so the card offers no Other there (#5904).
+    "fixed": r"(?i)\btrust\b",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in

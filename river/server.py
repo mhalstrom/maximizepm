@@ -2198,7 +2198,8 @@ def _layout(detect=None):
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
                                "behind": d["behind"] and re.compile(d["behind"]),
-                               "header": d["header"] and re.compile(d["header"])}
+                               "header": d["header"] and re.compile(d["header"]),
+                               "fixed": d["fixed"] and re.compile(d["fixed"])}
     return got
 
 
@@ -3977,7 +3978,7 @@ def pane_prompts(conn, terminals):
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
     the marker is on), tool, command, why, lines (the prompt's lines as the pane shows them), sig (what the page
     sends back with an answer, so a prompt that changed gets no keys), tell (the number of the option that lets the
-    person type what to do instead, or None)}. A session that ran no maxpm command yet has no agent type: its pane
+    person type what to do instead, or None), fixed (the question takes only one of its options: DETECT['fixed'])}. A session that ran no maxpm command yet has no agent type: its pane
     is read with the adapter of the program that runs there, as the pane watcher reads it (#5271: a new Amp session
     blocked at 'Approval Required' before its first command, and the card had no options)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
@@ -3998,8 +3999,11 @@ def pane_prompts(conn, terminals):
         # The option that lets the person type what to do instead (DETECT['tell_instead']): the page's Other is that
         # option, so the card shows no second Other (#5253: Hermes's '3. Other (type your answer)').
         tell = next((n for n, o in enumerate(options) if layout["tell"].search(o)), None)
+        # A question that takes only one of its options (a trust question, #5904): no Other on the card, and no text.
+        fixed = tell is None and bool(layout["fixed"]) and any(layout["fixed"].search(x)
+                                                               for x in [parts["question"] or "", *options])
         sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
-        out[agent] = {"question": parts["question"], "options": options,
+        out[agent] = {"question": parts["question"], "options": options, "fixed": fixed,
                       "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
                       "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
                       "lines": tail[parts["start"]:], "sig": sig, "tell": tell, "row": parts["row"],
@@ -4037,19 +4041,27 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
     shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
     tell the agent what to do instead (the option of its adapter's DETECT['tell_instead'], "No, and tell ... what to
     do", else Escape), then Enter. key: the key that chooses the pick, one of the prompt's keys (hint_keys: 's' for
-    this session only), else Enter. Refused when the pane shows another prompt than the one the person read (sig)."""
+    this session only), else Enter. Refused when the pane shows another prompt than the one the person read (sig),
+    when the question takes only one of its options (p['fixed']) and a text came, and when no agent runs in the pane:
+    a text is typed only while the agent runs there, never into a shell (#5904)."""
     pane = _typing_pane(conn, agent, who)
     p = pane_prompts(conn, {agent: pane}).get(agent)
     if not p or p["sig"] != sig:
         raise RiverError(f"the prompt in the terminal of {agent} changed or is gone; look at it again")
+    _agent_in_pane(agent, pane)  # the screen can still show the question after the agent ended
     opts, at = p["options"], p["selected"]
     text = " ".join(str(other or "").split())
     if text:
         if len(text) > 4000:
             raise RiverError("text is at most 4000 characters")
+        if p.get("fixed"):
+            raise RiverError(f"this question of {agent} takes only one of its options, no text: pick one")
         n = p["tell"]  # read with the pane's adapter, as the card was (#5271)
         terminal_keys(conn, agent, _menu_keys(at, n, p.get("row")) if n is not None else [{"key": "Escape"}], who)
         time.sleep(PROMPT_PAUSE)
+        # #5904: Esc or the pick can end the CLI (Claude Code's trust question: 'No, exit'); the text then went to the
+        # shell. Look again before the text goes.
+        _agent_in_pane(agent, pane, f"after {opts[n] if n is not None else 'Escape'}")
         terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
         core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
@@ -4059,6 +4071,19 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
         raise RiverError(f"{key!r} is no key of this menu: use {', '.join(k['key'] for k in p['keys']) or 'Enter'}")
     terminal_keys(conn, agent, _menu_keys(at, pick, p.get("row"), key or "Enter"), who)
     return {"agent": agent, "pane": pane, "picked": opts[pick], "text": "", "key": key or "Enter"}
+
+
+def _agent_in_pane(agent, pane, when=None):
+    """RiverError when no agent runs in the pane now: a shell runs there (also in its first seconds, which
+    _typing_pane allows), or the pane is gone. Read from tmux now, not from the memo of the request (#5904)."""
+    try:
+        row = next((p for p in _tmux_panes_now(everywhere=True) if p["pane"] == pane), None)
+    except RiverError:
+        row = None
+    if row is None or row["running"] in TMUX_SHELLS:
+        raise RiverError(f"the agent of {agent} no longer runs in its terminal{' ' + when if when else ''}, so "
+                         f"nothing more was typed: a shell would run it; look at the terminal, then start the session "
+                         f"again")
 
 
 # The side panel of the Sessions tab (#4619) shows local files: read only, with the page's token, and only under
