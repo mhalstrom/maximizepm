@@ -302,6 +302,11 @@ DEFAULT_SETTINGS = {
     # rule (#4943); reply text that asks a question, and the input box, are no prompt.
     "prompt_pattern": r"Do you (want to|trust)|Would you like to|[Ee]nter to confirm|[❯›]\s*\d+\.\s",
     "prompt_wait": "20s",
+    # A pane whose last lines stay the same for stuck_after with no question card, no idle prompt and no work (its
+    # adapter's screen rules; an agent with hooks: before its first hook) waits on a screen that no rule knows (a
+    # sign-in, an update, a question of a new CLI version): one alert with its last lines goes to the active manager
+    # (else each person), as for a prompt with no question MaximizePM can read (#5908). 0s: never.
+    "stuck_after": "3m",
     # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report
     # each tool call, prompt, permission prompt and turn end to river (maxpm report --hook claude, #4288). A session that holds
     # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,

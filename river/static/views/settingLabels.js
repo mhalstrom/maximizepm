@@ -23,6 +23,7 @@ export const LABELS = {
   default_model: "Model for new items", default_effort: "Effort for new items", default_min_model: "Weakest model allowed",
   default_max_model: "Strongest model allowed", effort_levels: "Effort levels", model_ladder: "Models, weakest to strongest",
   model_prices: "Model prices", prompt_pattern: "How a waiting prompt looks", prompt_wait: "Wait before a prompt counts",
+  stuck_after: "Unchanged screen before an alert",
   "agent_for.worker": "Agent for workers", "agent_for.manager": "Agent for the manager", "agent_for.reviewer": "Agent for reviews",
   "agent_for.deployer": "Agent for deploys", "agent_for.expert": "Agent for experts", "agent_for.context": "Agent for context sessions",
   // Sessions

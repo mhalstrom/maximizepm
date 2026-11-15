@@ -2807,7 +2807,9 @@ def watch_prompts(conn):
     can read go to the active manager instead, which looks at the screen (the person, when no manager is active).
     An agent with a stop request gets no alert: nobody needs its answer. When the prompt is gone (answered, or
     the agent ended), river marks the alert read, which closes the event. A prompt that stays on the screen
-    alerts once. Each pane is read with its agent's adapter (_pane_rule). The same look is the state source of an
+    alerts once. A screen that stays the same with no card, no idle prompt and no work for stuck_after alerts the
+    same way, with its last lines (_stuck, #5908). Each pane is read with its agent's adapter (_pane_rule). The same
+    look is the state source of an
     agent whose adapter's STATE['state'] is 'detect' (Codex): blocked, working or idle (_screen_state) goes to
     core.report as maxpm report does, when it changed (#5183). Returns {"waiting": {agent: question}, "told":
     [agents], "closed": [message ids]}, "reported": {agent: state} when it recorded a state, "session_ids":
@@ -2816,7 +2818,10 @@ def watch_prompts(conn):
     pattern = core.setting(conn, "prompt_pattern").strip()
     waiting, states, ids, procs = {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
-    for agent, pane in sorted(agent_terminals(conn).items()):
+    terminals = agent_terminals(conn)
+    for agent in [a for a in STILL if a not in terminals or a in stopped]:
+        del STILL[agent]
+    for agent, pane in sorted(terminals.items()):
         if agent in stopped:
             continue  # a stop request: an answer would only let it read the stop and end (#2713, alert #7392)
         try:
@@ -2840,6 +2845,12 @@ def watch_prompts(conn):
                                     "ORDER BY id", (agent,)).fetchone()
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
+                STILL.pop(agent, None)
+            elif (still := _stuck(conn, agent, tail, ad)):
+                held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                                    "ORDER BY id", (agent,)).fetchone()
+                body = stuck_alert(agent, screen["target"], tail, pane, held and dict(held), still)
+                waiting[agent] = (body, "\n".join(tail), None, held and held["id"], pane)
             if ad is not None and (ad.state or {}).get("state") == "detect" and ad.detect:
                 state = "blocked" if parts else _screen_state(tail, ad.detect)
                 if state:
@@ -2906,6 +2917,46 @@ def _pane_session_id(conn, agent, pane, ad):
         return None
     core.record_session(conn, agent, found[-1])
     return found[-1]
+
+
+STILL = {}  # agent -> {"lines": its pane's last lines, "since": when they last changed} (#5908)
+
+
+def _stuck(conn, agent, tail, ad):
+    """How long (the setting's text) the pane of agent has shown the same last lines with no question card (the
+    caller found none), no idle prompt and no work, when that is stuck_after or more; else None (#5908: Pi's trust
+    question had no card and its row stayed 'starting'; agents also stop at sign-in and update screens that no rule
+    knows). Idle or working: its adapter's screen rules say so, or, for an agent whose hooks report its state, a
+    hook reported anything (the hooks load after such a screen). An agent with no adapter: never. 0s: never."""
+    after = core.setting(conn, "stuck_after", agent=agent)
+    limit = core.parse_duration(after)
+    if ad is None or not limit.total_seconds():
+        return None
+    if ad.detect and _screen_state(tail, ad.detect) in ("idle", "working"):
+        STILL.pop(agent, None)
+        return None
+    if (ad.state or {}).get("state") == "hook" and conn.execute(
+            "SELECT 1 FROM agents WHERE name=? AND activity_event IS NOT NULL", (agent,)).fetchone():
+        STILL.pop(agent, None)
+        return None
+    lines, t = "\n".join(tail), core.now()
+    st = STILL.get(agent)
+    if not st or st["lines"] != lines:
+        STILL[agent] = {"lines": lines, "since": t}
+        return None
+    return after if t - st["since"] >= limit else None
+
+
+def stuck_alert(agent, target, tail, pane, item, after):
+    """The alert text for a pane that stays the same with no card (#5908): core.PROMPT_NOTE (so it closes when the
+    screen changes, and the page opens the agent's terminal for it), the pane, the item, and its last lines."""
+    where = f"{core.PROMPT_NOTE}: {agent} in tmux {target} (pane {pane})"
+    if item:
+        where += f", on #{item['id']} {item['title'][:80]}"
+    last = " | ".join(x.strip() for x in tail[-8:])
+    return (f"{where}, with no question river can read: its screen has shown the same lines for {after} "
+            f"(stuck_after), with no idle prompt and no work. Its last lines: {last[:600]}. Answer it in its pane "
+            f"(the Terminal on the Sessions tab), or tell the person what it needs")
 
 
 PANE_PROCESS = {}  # agent -> when the pane watcher last looked for its process (time.monotonic)

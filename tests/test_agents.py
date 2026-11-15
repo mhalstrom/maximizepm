@@ -547,6 +547,51 @@ class PaneState(Env):
         self.server.watch_prompts(self.c)
         self.assertEqual(len(looked), 1)  # recorded: no more ps for it
 
+    def test_a_screen_that_stays_with_no_card_alerts_once(self):
+        # #5908 (mark 2026-11-15: 'all I want is to ensure we have ways for the agents to make progress'): a pane stopped
+        # at a screen that no rule knows gets one alert with its last lines; an idle or working pane gets none.
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "prompt_wait", "0s", actor="mark")
+        self.addCleanup(self.server.STILL.clear)
+        name, pane = self.start("codex")
+        pane["running"] = "codex"
+        alerts = lambda: self.c.execute("SELECT id, body, read_at FROM messages WHERE kind='alert' AND from_agent=?",
+                                        (name,)).fetchall()
+
+        def later():  # the screen has stayed the same for stuck_after (3m)
+            self.server.STILL[name]["since"] -= core.timedelta(minutes=3)
+        for screen in ("• Done.\n\n› Ask Codex to do anything\n\n  100% context left",  # idle
+                       "• Running the tests\n\n◦ Working (12s • esc to interrupt)\n\n› Ask Codex to do anything"):
+            pane["screen"] = screen
+            self.server.watch_prompts(self.c)
+            self.assertNotIn(name, self.server.STILL)
+            self.assertEqual(self.server.watch_prompts(self.c)["waiting"], {})
+        pane["screen"] = "  Sign in with ChatGPT to use Codex\n\n  Open this link in your browser:\n  https://auth.example/x"
+        self.assertEqual(self.server.watch_prompts(self.c)["waiting"], {})  # not for stuck_after yet
+        later()
+        got = self.server.watch_prompts(self.c)
+        self.assertEqual(got["told"], [name])
+        (a,) = alerts()
+        self.assertIn(f"{core.PROMPT_NOTE}: {name} in tmux", a["body"])
+        self.assertIn("its screen has shown the same lines for 3m (stuck_after)", a["body"])
+        self.assertIn("Sign in with ChatGPT to use Codex | Open this link in your browser: | https://auth.example/x",
+                      a["body"])
+        self.assertEqual(self.server.watch_prompts(self.c)["told"], [])  # once
+        pane["screen"] = "• Done.\n\n› Ask Codex to do anything\n\n  100% context left"  # it went on
+        self.assertEqual(self.server.watch_prompts(self.c)["closed"], [a["id"]])
+        self.assertIsNotNone(alerts()[0]["read_at"])
+        # An agent whose hooks report its state (Pi): only before its first report.
+        other, opane = self.start("pi")
+        opane.update(running="pi", screen="  Pi needs an update\n\n  Press any key")
+        self.server.watch_prompts(self.c)
+        self.server.STILL[other]["since"] -= core.timedelta(minutes=3)
+        self.assertIn(other, self.server.watch_prompts(self.c)["waiting"])
+        self.c.execute("UPDATE agents SET activity_event='report:idle' WHERE name=?", (other,))
+        self.assertNotIn(other, self.server.watch_prompts(self.c)["waiting"])
+        core.config_set(self.c, "stuck_after", "0s", actor="mark")  # never
+        self.c.execute("UPDATE agents SET activity_event=NULL WHERE name=?", (other,))
+        self.assertNotIn(other, self.server.watch_prompts(self.c)["waiting"])
+
     def test_a_message_from_the_page_marks_a_detect_agent_working_at_once(self):
         # #5277: a short turn (Aider streams its reply after its spinner went) can start and end between two passes of
         # the watcher; the message that starts it records working, and the watcher reports idle when the prompt is back.
