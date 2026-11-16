@@ -269,10 +269,6 @@ DEFAULT_SETTINGS = {
     # everything the release ships. review_prompt tells the reviewer what to do (your review process);
     # review_cmd, when set, must exit 0 before maxpm review pass accepts the review.
     # Set them globally or on the deploy project (deploy-<target>).
-    # The outside tracker a project uses, in words an agent can act on: which tracker, where, and with
-    # what tool, e.g. "github owner/shop via gh" or "jira PROJ via the Jira MCP server". Set it per
-    # project (maxpm project tracker). River has no tracker API code: agents use their own tools.
-    "tracker": "",
     # A session with no work runs maxpm wait (in Claude Code as a background command, so a typed message reaches it;
     # elsewhere in the foreground; a blocking command costs no tokens), never idle at its prompt: it takes new work
     # when it comes, and ends after wait_max without any (0: end at once); a person's prompt starts that clock again.
@@ -812,17 +808,6 @@ CREATE TABLE IF NOT EXISTS item_goals (
   item_id  INTEGER NOT NULL REFERENCES items(id),
   goal_id  INTEGER NOT NULL REFERENCES goals(id),
   PRIMARY KEY (item_id, goal_id)
-);
-
--- Links to issues in outside trackers (Jira, GitHub Issues, Linear...). MaximizePM stores the link only;
--- agents read and update the tracker with their own tools.
-CREATE TABLE IF NOT EXISTS item_refs (
-  item_id     INTEGER NOT NULL REFERENCES items(id),
-  ref         TEXT NOT NULL,
-  url         TEXT,
-  created_at  TEXT NOT NULL,
-  synced_at   TEXT,
-  PRIMARY KEY (item_id, ref)
 );
 
 -- An agent's own queue: items it takes before the project queue, and instructions it reads first.
@@ -2010,7 +1995,7 @@ def _migrate_big_file_conflicts(conn):
 
 # The tables annotate reads, and their columns that a command renews without a change of the graph.
 GRAPH_TABLES = {"items": ("lease_expires_at", "hold_expires_at"), "deps": (), "projects": (),
-                "goals": ("owner_expires_at",), "item_goals": (), "queue_entries": (), "item_refs": (), "settings": ()}
+                "goals": ("owner_expires_at",), "item_goals": (), "queue_entries": (), "settings": ()}
 
 
 def _graph_triggers(conn):
@@ -2277,8 +2262,6 @@ def _migrate(conn):
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
-    if "synced_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(item_refs)")}:
-        conn.execute("ALTER TABLE item_refs ADD COLUMN synced_at TEXT")
     if "reserved_for" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN reserved_for TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN hold_expires_at TEXT")
@@ -2310,6 +2293,9 @@ def _migrate(conn):
         conn.execute("DROP TABLE expert_proposals")  # the manager's proposals of an expert are gone (#5992)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='changes'").fetchone():
         conn.execute("DROP TABLE changes")  # the change log of maxpm health is gone (#5992)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='item_refs'").fetchone():
+        conn.execute("DROP TABLE item_refs")  # the links to outside trackers are gone (#5992)
+    conn.execute("DELETE FROM settings WHERE key='tracker'")  # and the tracker of a project with them (#5992)
 
 
 LOCK_TRIES = 3  # a write waits busy_timeout (10s) this many times for the lock of the queue
@@ -3642,7 +3628,6 @@ def project_show(conn, name):
         working_now=holders,
         worked_recently=recent,
         goals=goal_list(conn, name, include_complete=False),
-        tracker=setting(conn, "tracker", project_id=p["id"]),
         result_look=setting(conn, "result_look", project_id=p["id"]),
         look=look_setup(conn, name),
         ops=ops_line(conn, name),
@@ -3661,23 +3646,8 @@ def project_list(conn):
         "AND i.backlog_at IS NOT NULL) backlog_items FROM projects p WHERE archived=0 ORDER BY rank, id")]
     lines = ops_lines(conn)
     for r in rows:
-        r["tracker"] = setting(conn, "tracker", project_id=r["id"])
         r["ops"] = lines.get(r["name"])  # the monitoring line (#5438)
     return rows
-
-
-def project_tracker(conn, name, text=None, actor=None):
-    """Show, set, or (with none) clear the outside tracker a project uses."""
-    p = _project(conn, name)
-    name = p["name"]
-    if text is not None:
-        text = text.strip()
-        if text.lower() in ("", "none"):
-            if conn.execute("SELECT 1 FROM settings WHERE scope=? AND key='tracker'", (f"project:{name}",)).fetchone():
-                config_unset(conn, "tracker", project=name, actor=actor)
-        else:
-            config_set(conn, "tracker", text, project=name, actor=actor)
-    return {"name": p["name"], "tracker": setting(conn, "tracker", project_id=p["id"])}
 
 
 def _names(conn, project):
@@ -9351,7 +9321,7 @@ def agent_now(conn, name, doing, headline=None):
 
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
+             goals=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
              kind=None, short=None, start=None, start_check=False):
     """Add an item. `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
@@ -9445,8 +9415,6 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             (actor, p["id"]))] if actor else []
         for g in names:
             _tag(conn, iid, g, actor)
-        if refs:
-            _add_refs(conn, iid, refs, actor)
         if models:
             _set_models(conn, conn.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone(), models, actor)
         if due:
@@ -9536,52 +9504,6 @@ def _set_models(conn, it, models, actor):
             _event(conn, it["id"], actor, f"{f.replace('_', ' ')} {new[f] or 'unset'}")
 
 
-REF_RE = re.compile(r"^[a-z][a-z0-9_.-]*:\S+$")
-
-
-def ref_url(ref):
-    """The web link a ref implies without settings: GitHub issues only."""
-    m = re.match(r"^github:([\w.-]+/[\w.-]+)#(\d+)$", ref)
-    return f"https://github.com/{m.group(1)}/issues/{m.group(2)}" if m else None
-
-
-def parse_refs(refs, urls=()):
-    """Pair --ref values with --ref-url values by position; check the form <tracker>:<key>."""
-    refs, urls = [r.strip() for r in refs or ()], [u.strip() for u in urls or ()]
-    if len(urls) > len(refs):
-        raise RiverError("more --ref-url than --ref: give each URL after the ref it belongs to")
-    out = []
-    for i, r in enumerate(refs):
-        if not REF_RE.match(r):
-            raise RiverError(f"ref {r!r} is not <tracker>:<key>, for example jira:PROJ-123, github:owner/repo#12, "
-                             f"linear:ENG-42")
-        u = urls[i] if i < len(urls) and urls[i] else ref_url(r)
-        if u and not re.match(r"^https?://\S+$", u):
-            raise RiverError(f"ref URL {u!r} is not a web link")
-        out.append((r, u))
-    return out
-
-
-def _add_refs(conn, item_id, pairs, actor):
-    """Link refs to an item. Refused when an open item in the same project already has the ref."""
-    it = _item(conn, item_id)
-    for ref, url in pairs:
-        other = conn.execute(f"SELECT i.id, i.title FROM item_refs r JOIN items i ON i.id=r.item_id WHERE r.ref=? "
-                             f"AND i.id<>? AND i.project_id=? AND i.status IN {OPEN_STATES}",
-                             (ref, it["id"], it["project_id"])).fetchone()
-        if other:
-            raise RiverError(f"{ref} is already linked to #{other['id']} {other['title']}, which is open in the "
-                             f"same project: maxpm show {other['id']}")
-        old = conn.execute("SELECT url FROM item_refs WHERE item_id=? AND ref=?", (it["id"], ref)).fetchone()
-        if old is None:
-            conn.execute("INSERT INTO item_refs(item_id, ref, url, created_at) VALUES (?,?,?,?)",
-                         (it["id"], ref, url, iso(now())))
-            _event(conn, it["id"], actor, f"linked {ref}")
-        elif url and url != old["url"]:
-            conn.execute("UPDATE item_refs SET url=? WHERE item_id=? AND ref=?", (url, it["id"], ref))
-            _event(conn, it["id"], actor, f"link {ref} URL changed")
-
-
 def project_for_add(conn, cwd, related=None):
     """The project a new item goes to when none is named: the related item's, else the folder's."""
     if related is not None:
@@ -9662,8 +9584,8 @@ def _changed(col, old):
 
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
-              context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
-              models=None, tier=None, kind=None, short=None, changed=None):
+              context=None, touches=None, check=None, due=None, goals=None, untag=None, models=None,
+              tier=None, kind=None, short=None, changed=None):
     tier = _check_tier(tier)
     kind = _check_kind(kind)
     short = check_short(short) if short is not None else None
@@ -9691,12 +9613,6 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
             _event(conn, it["id"], actor, f"tier {tier or 'normal'}")
         if models:
             _set_models(conn, it, models, actor)
-        if refs:
-            _add_refs(conn, it["id"], refs, actor)
-        for r in unref or ():
-            if not conn.execute("DELETE FROM item_refs WHERE item_id=? AND ref=?", (it["id"], r.strip())).rowcount:
-                raise RiverError(f"#{it['id']} has no link {r}")
-            _event(conn, it["id"], actor, f"unlinked {r.strip()}")
         for g in goals or ():
             _tag(conn, it["id"], g, actor)
         for g in untag or ():
@@ -11155,7 +11071,7 @@ def _append(old, other_id, text):
 
 
 def merge(conn, keep, other, note, actor=None):
-    """Close `other` as a duplicate of `keep`. Its notes, context, touches, tracker links, goal tags, messages,
+    """Close `other` as a duplicate of `keep`. Its notes, context, touches, goal tags, messages,
     links (what it waits on, what waits on it), queue places, reservation, and found-during links move to `keep`;
     `keep` takes the higher priority and the earlier due date. A person's item merges only with a person's item."""
     if not (note or "").strip():
@@ -11183,12 +11099,6 @@ def merge(conn, keep, other, note, actor=None):
                       _touches(touches_list(k["touches"]) + touches_list(o["touches"])) or "",
                       k["check"] or o["check"] or "", min(k["priority"], o["priority"]),
                       min(x for x in (k["due"], o["due"]) if x) if (k["due"] or o["due"]) else None, k["id"]))
-        for r in conn.execute("SELECT ref FROM item_refs WHERE item_id=?", (o["id"],)).fetchall():
-            if conn.execute("SELECT 1 FROM item_refs WHERE item_id=? AND ref=?", (k["id"], r["ref"])).fetchone():
-                conn.execute("DELETE FROM item_refs WHERE item_id=? AND ref=?", (o["id"], r["ref"]))
-            else:
-                conn.execute("UPDATE item_refs SET item_id=? WHERE item_id=? AND ref=?", (k["id"], o["id"], r["ref"]))
-                moved.append(r["ref"])
         conn.execute("INSERT OR IGNORE INTO item_goals(item_id, goal_id) SELECT ?, goal_id FROM item_goals "
                      "WHERE item_id=?", (k["id"], o["id"]))
         conn.execute("DELETE FROM item_goals WHERE item_id=?", (o["id"],))
@@ -11519,9 +11429,6 @@ def _annotate(conn, closed=True):
         (iso(now()),))}
     queued = {r["item_id"]: r["agent"] for r in conn.execute(
         "SELECT item_id, agent FROM queue_entries WHERE item_id IS NOT NULL")}
-    refs: dict[int, list] = {}
-    for r in conn.execute("SELECT item_id, ref, url, synced_at FROM item_refs ORDER BY created_at, ref"):
-        refs.setdefault(r["item_id"], []).append({"ref": r["ref"], "url": r["url"], "synced_at": r["synced_at"]})
     now_s = iso(now())
     soon_s = iso(now() + parse_duration(setting(conn, "due_warn_before")))
     model_defaults = _model_defaults(conn)
@@ -11600,7 +11507,6 @@ def _annotate(conn, closed=True):
             g = next((g for g in a["goals"] if g in goal_owners), None)
             if g:
                 a["reserved_for"], a["goal_reserved"] = goal_owners[g], g
-        a["refs"] = refs.get(i, [])
         a["due_text"] = show_time(a["effective_due"], zone)
         a["due_state"] = (None if not is_open[i] or not a["effective_due"]
                           else "overdue" if a["effective_due"] <= now_s
@@ -11618,7 +11524,7 @@ def _annotate(conn, closed=True):
         if not (graph and "n" in graph):
             return {i: one(i, it) for i, it in items.items()}
         # A done or dropped item is computed again only when something that one() reads for it changed (#5592): its
-        # row, its project, its links and the state of the items they name, its goal tags, tracker links and queue
+        # row, its project, its links and the state of the items they name, its goal tags and queue
         # entry, and the time zone and model settings. The done view's build computed all 5,300 of them on every
         # poll (100 of its 150 ms). The clock does not reach a closed item: it has no due state and no depth.
         inputs = (zone, model_defaults, ladder_text)
@@ -11637,7 +11543,7 @@ def _annotate(conn, closed=True):
             wo, cf = waits_on[i], conflicts[i]
             mark = (it, p["name"], p["rank"], p["archived"], wo, waited_by[i], feeds[i], cf,
                     (tuple(items[b] for b in wo) + tuple(items[c] for c in cf)) if wo or cf else (),
-                    tags.get(i), refs.get(i), queued.get(i))
+                    tags.get(i), queued.get(i))
             hit = old.get(i)
             a = hit[1] if hit is not None and hit[0] == mark else one(i, it)
             rows[i], keep[i] = a, (mark, a)
@@ -11653,7 +11559,7 @@ def _annotate(conn, closed=True):
     share = ANN_SHARE.get()
     graph = share.get(("graph", False)) if share is not None else None
     inputs = (zone, model_defaults, ladder_text, projects, goal_owners)  # the clock: _ann_times
-    redo = _ann_redo(conn, share.get("ann_kept"), graph, inputs, tags, queued, refs) if graph and "n" in graph else None
+    redo = _ann_redo(conn, share.get("ann_kept"), graph, inputs, tags, queued) if graph and "n" in graph else None
     if redo is None:
         rows, cache = {i: one(i, it) for i, it in items.items() if is_open[i]}, {}
         links = ({i: sorted(v) for i, v in waits_on.items()}, {i: sorted(v) for i, v in waited_by.items()})
@@ -11675,7 +11581,7 @@ def _annotate(conn, closed=True):
                       for o, new in zip(old, (waits_on, waited_by)))
     if graph and "n" in graph:
         share["ann_kept"] = {"db": graph["db"], "n": graph["n"], "lists": (waits_on, waited_by, conflicts),
-                             "inputs": inputs, "tags": tags, "queued": queued, "refs": refs, "rows": rows,
+                             "inputs": inputs, "tags": tags, "queued": queued, "rows": rows,
                              "cache": cache, "links": links}
     return OpenAnn(rows, {i: it for i, it in items.items() if not is_open[i]}, more, links, cache)
 
@@ -11683,12 +11589,12 @@ def _annotate(conn, closed=True):
 ANN_REDO_SHARE = 0.5  # a change that reaches more than this share of the open items: compute all of them again
 
 
-def _ann_redo(conn, kept, graph, inputs, tags, queued, refs):
+def _ann_redo(conn, kept, graph, inputs, tags, queued):
     """The items whose computed fields a change since the kept result can change (#5585), or None: compute all.
     A change of an item or a link (graph_changes) reaches the item, every item it waits on and every item that waits
     on it, over any number of links, in the links before and after, and the items it conflicts with: their
-    readiness, effective priority and due, unblock counts, depth and sort keys. A changed goal tag, queue entry or
-    tracker link reaches its own item; a change of a project, a goal owner or a setting, all items."""
+    readiness, effective priority and due, unblock counts, depth and sort keys. A changed goal tag or queue entry
+    reaches its own item; a change of a project, a goal owner or a setting, all items."""
     if not kept or kept["db"] != graph["db"] or kept["inputs"] != inputs or graph["n"] < kept["n"]:
         return None
     ids = set()
@@ -11699,7 +11605,7 @@ def _ann_redo(conn, kept, graph, inputs, tags, queued, refs):
         ids = {r[0] for r in conn.execute("SELECT DISTINCT item_id FROM graph_changes WHERE n > ?", (kept["n"],))}
         if len(ids) > GRAPH_CHANGED_MAX:
             return None
-    for new, old in ((tags, kept["tags"]), (queued, kept["queued"]), (refs, kept["refs"])):
+    for new, old in ((tags, kept["tags"]), (queued, kept["queued"])):
         if new != old:
             ids |= {i for i in new.keys() | old.keys() if new.get(i) != old.get(i)}
     if not ids:
@@ -14657,38 +14563,6 @@ def close_scan(conn, since, project=None, actor=None):
     return n
 
 
-def synced(conn, item_id, ref=None, actor=None):
-    """Record that the tracker issues of a closed item got the result (comment, close). One ref, or all."""
-    with tx(conn):
-        it = _item(conn, item_id)
-        if it["status"] not in CLOSED_STATES:
-            raise RiverError(f"#{item_id} is {it['status']}; the write-back comes after maxpm done {item_id}")
-        rows = conn.execute("SELECT ref FROM item_refs WHERE item_id=?" + (" AND ref=?" if ref else ""),
-                            (it["id"], ref.strip()) if ref else (it["id"],)).fetchall()
-        if not rows:
-            raise RiverError(f"#{item_id} has no tracker link" + (f" {ref}" if ref else "")
-                             + f"; its links: maxpm show {item_id}")
-        for r in rows:
-            if conn.execute("UPDATE item_refs SET synced_at=? WHERE item_id=? AND ref=? AND synced_at IS NULL",
-                            (iso(now()), it["id"], r["ref"])).rowcount:
-                _event(conn, it["id"], actor, f"tracker updated: {r['ref']}")
-    return item_show(conn, item_id)
-
-
-def unsynced(conn, actor=None):
-    """Closed items with tracker links not yet updated; with actor, only the items that agent closed."""
-    rows = conn.execute(
-        # From the few tracker links, not from every closed item (#5580: 3 ms of each go).
-        "SELECT DISTINCT i.id FROM item_refs r CROSS JOIN items i ON i.id=r.item_id WHERE r.synced_at IS NULL "
-        f"AND i.status IN {CLOSED_STATES}" + (" AND i.assignee=?" if actor else "") + " ORDER BY i.closed_at",
-        (actor,) if actor else ()).fetchall()
-    ann = annotate(conn, closed=False) if rows else {}
-    return [{"id": r["id"], "title": ann[r["id"]]["title"], "status": ann[r["id"]]["status"],
-             "project": ann[r["id"]]["project"], "output": ann[r["id"]]["output"],
-             "tracker": setting(conn, "tracker", item_id=r["id"]),
-             "refs": [x for x in ann[r["id"]]["refs"] if not x["synced_at"]]} for r in rows]
-
-
 def _approved_fixes(conn, it, actor):
     """A person approved the fixes a review proposed (an item of kind fixes is done): add each '- ' line
     of its notes as a fix item that the review it blocks waits on."""
@@ -14706,7 +14580,7 @@ def _approved_fixes(conn, it, actor):
     return [{"id": a["id"], "title": a["title"]} for a in added]
 
 
-def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synced_=False, force=None, changed=None):
+def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None):
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
     checked before the close."""
@@ -14729,9 +14603,6 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
         pass
     if res["kind"] == "fixes":
         res["fixes_added"] = _approved_fixes(conn, _item(conn, item_id), actor)
-    if synced_ and res["refs"]:
-        res = dict(synced(conn, item_id, actor=actor), now_ready=res["now_ready"], resumed=res["resumed"])
-    res["tracker"] = setting(conn, "tracker", item_id=item_id) if res["refs"] else ""
     if ship_it:
         shipped = ship(conn, item_id, actor)
         res["shipped_in"], res["ship_release"] = shipped["id"], shipped["release"]
@@ -16324,13 +16195,10 @@ def item_show(conn, item_id, ann=None):
     return a
 
 
-def item_list(conn, project=None, status=None, include_closed=False, goal=None, ref=None):
-    """Items in order. With ref: the items linked to that tracker issue, closed ones too (an import checks it)."""
-    ann = annotate(conn, closed=include_closed or status is not None or ref is not None)
+def item_list(conn, project=None, status=None, include_closed=False, goal=None):
+    """Items in order."""
+    ann = annotate(conn, closed=include_closed or status is not None)
     rows = [a for a in ann.values() if not a["project_archived"]]
-    if ref is not None:
-        rows = [a for a in rows if any(r["ref"] == ref.strip() for r in a["refs"])]
-        include_closed = True
     if goal is not None:
         _goal(conn, goal)
         rows = [a for a in rows if goal in a["goals"]]
@@ -18835,7 +18703,6 @@ def status(conn, recent=10):
         "due": [{"id": a["id"], "title": a["title"], "project": a["project"], "due_text": a["due_text"],
                  "due_state": a["due_state"]} for a in sorted(ann.values(), key=lambda a: a["due"] or "")
                 if a["due"] and a["status"] in OPEN_STATES and not a["backlog"] and not a["project_archived"]],
-        "unsynced": unsynced(conn),
         "spare_slots": cap["spare_slots"],
         "excess_sessions": cap["excess_sessions"],
         "advice": cap["advice"],
@@ -20817,11 +20684,10 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
 
     ann = annotate(conn, closed=False)
     descs = {p["name"]: p["notes"] for p in project_list(conn) if p["name"] in names}
-    trackers = {p["name"]: p["tracker"] for p in project_list(conn) if p["name"] in names and p["tracker"]}
     in_area = [a for a in ann.values() if a["project"] in names]
     open_in_area = [a for a in in_area if a["status"] in OPEN_STATES and not a["backlog"]]
     human_ready = sorted((a for a in in_area if a["ready"] and a["doer"] == "human"), key=lambda a: a["sort_key"])
-    brief = {"agent": actor, "new_name": new_name, "projects": names, "descriptions": descs, "trackers": trackers,
+    brief = {"agent": actor, "new_name": new_name, "projects": names, "descriptions": descs,
              "human_waiting": [{"id": a["id"], "title": a["title"],
                                 "blocks": [{"id": d, "title": ann[d]["title"], "priority": ann[d]["effective_priority"]}
                                            for d in a["unblocks"] if ann[d]["status"] in OPEN_STATES]}
@@ -20836,7 +20702,6 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
              "humans": [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")],
              "chat": chat}
 
-    brief["unsynced"] = unsynced(conn, actor)
     brief["workspace"] = workspace_of(conn, actor)  # its own git worktree (#5856), or None
     stop = stop_request(conn, actor)
     if stop:

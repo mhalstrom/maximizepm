@@ -282,14 +282,6 @@ like it that it is not linked to): read them before you start.
   starts in a new session with its own default model.
 - Give the next agent a start: `--context "why, where"`, `--touches <files>`,
   `--check "<command>"`, and `--doer human` for steps only a person can do.
-- The work comes from an outside tracker issue: link it with
-  `--ref <tracker>:<key>` (for example `github:owner/repo#12`, `jira:PROJ-123`).
-  The go briefing names the project's tracker (`maxpm project tracker`); when
-  the user names a tracker for the first time, record it there.
-  When you claim an item with links, mark the issues in progress there. When
-  it is done, post the output as a comment, close the issue, and record it:
-  `maxpm synced <id>` (or `maxpm done <id> --output "..." --synced` when you
-  did it first). Until then, `go` and `status` remind you.
 
 ## Items that may be done already
 

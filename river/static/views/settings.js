@@ -24,7 +24,7 @@ export const GROUPS = [
              "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every")(k)],
   ["work", "Work", "Reviews, releases, deploys, and how items are added, checked and cleaned up.",
     (k) => /^(review|release_|similar_|list_cleanup_)/.test(k)
-      || has("auto_review", "deploy_timeout", "result_look", "tracker", "push_guard", "due_warn_before",
+      || has("auto_review", "deploy_timeout", "result_look", "push_guard", "due_warn_before",
              "replan_threshold", "keep_prereq_limit", "default_prerequisite_mode", "stale_after", "unpushed_after",
              "conflict_max_lines", "hook_timeout", "cost_limit")(k)],
   ["monitoring", "Monitoring", "The checks that watch your projects, and what a fault does.",

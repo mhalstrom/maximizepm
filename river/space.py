@@ -443,7 +443,7 @@ ARCHIVE = "archive"
 # The tables that move with an item: (table, the columns that name the item, the columns that name a row).
 ARCHIVE_TABLES = (("items", ("id",), ("id",)), ("events", ("item_id",), ("id",)), ("messages", ("item_id",), ("id",)),
                   ("needs_you", ("item_id",), ("id",)), ("deps", ("item_id", "blocked_by"), ("item_id", "blocked_by")),
-                  ("item_goals", ("item_id",), ("item_id", "goal_id")), ("item_refs", ("item_id",), ("item_id", "ref")),
+                  ("item_goals", ("item_id",), ("item_id", "goal_id")),
                   ("holds", ("item_id",), ("id",)), ("item_usage", ("item_id",), ("item_id", "session_id")),
                   ("close_checks", ("closed_id", "item_id"), ("closed_id", "item_id")))
 ARCHIVE_BATCH = 200  # items in one move

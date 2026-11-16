@@ -5255,8 +5255,6 @@ try {
   await step('#setupSteps [data-ff="path"]', FOLDER, () => q("#suTaskTitle"),
              "the folder step is done, and the task step has its field");
   await step("#suTaskTitle", "add a README", () => !q("#suTaskTitle"), "the task step is done");
-  q("#setupSteps details.more").open = true;
-  await step("[data-tracker-for]", "github owner/repo via gh", () => !q("[data-tracker-for]"), "the tracker is saved");
   // Start an agent: Cancel in its dialog, and the next click opens the dialog again at once.
   const open = () => !q("#launchDlg").classList.contains("hidden");
   const cancel = () => [...document.querySelectorAll("#launchDlg button")].find((b) => b.textContent.trim() === "Cancel").click();
@@ -5273,7 +5271,7 @@ try {
         app = (server.STATIC / "app.js").read_text(encoding="utf-8")
         form = (server.STATIC / "components" / "folderForm.js").read_text(encoding="utf-8")
         self.assertRegex(app, r'\$\("#setupSteps"\)\.addEventListener\("keydown"')
-        for field in ('f.id === "suName"', 'f.id === "suTaskTitle"', "f.dataset.trackerFor"):
+        for field in ('f.id === "suName"', 'f.id === "suTaskTitle"'):
             self.assertIn(field, app)
         self.assertRegex(form, r'document\.addEventListener\("keydown"')
 
@@ -5331,12 +5329,6 @@ try {
             self.assertNotIn("error", result, result.get("error"))
             self.assertEqual((result["people"], result["projects"], result["items"], result["actor"]),
                              (["mark"], [["proj"]], [["add a README", "ai"]], "mark"))
-            c = core.connect()
-            try:
-                self.assertEqual([r["value"] for r in c.execute("SELECT value FROM settings WHERE key='tracker'")],
-                                 ["github owner/repo via gh"])
-            finally:
-                c.close()
             self.assertIn("MaximizePM", Path(folder, "AGENTS.md").read_text(encoding="utf-8"))  # the folder got its block
 
 

@@ -154,8 +154,6 @@ def _fmt_item(a, show_reason=True):
         flags.append("replan")
     if a.get("goals"):
         flags.append("goal " + ",".join(a["goals"]))
-    if a.get("refs"):
-        flags.append(" ".join(r["ref"] for r in a["refs"]))
     if a.get("effective_due") and a["status"] in core.OPEN_STATES:
         flags.append(("OVERDUE " if a["due_state"] == "overdue" else "due soon " if a["due_state"] == "soon" else "due ")
                      + a["due_text"] + (f" (from #{a['due_from']})" if a.get("due_from") else ""))
@@ -173,13 +171,6 @@ def _fmt_item(a, show_reason=True):
     if show_reason:
         line += f"\n       {a['reason']}"
     return line
-
-
-def _ref_args(x):
-    x.add_argument("--ref", action="append", default=[],
-                   help="link an outside tracker issue: <tracker>:<key>, e.g. jira:PROJ-123, github:owner/repo#12 (repeatable)")
-    x.add_argument("--ref-url", action="append", default=[], dest="ref_url",
-                   help="web link of the --ref at the same position (github: refs get one by themselves)")
 
 
 def _model_args(x, edit=False):
@@ -223,9 +214,6 @@ def _context_lines(a, indent="  "):
         out.append(f"{indent}touches: {', '.join(a['touches'])}")
     if a.get("check"):
         out.append(f"{indent}check:   {a['check']}")
-    for r in a.get("refs", []):
-        out.append(f"{indent}tracker: {r['ref']}" + (f"  {r['url']}" if r["url"] else "")
-                   + ("  (updated)" if r.get("synced_at") else ""))
     for f in a.get("fed_by_detail", []):
         if f["output"]:
             out.append(f"{indent}from #{f['id']}: {f['output']}")
@@ -937,9 +925,6 @@ def build_parser(only=None):
     x = prs.add_parser("show", help="a project's description, who works on it, and its ready items"); x.add_argument("name")
     x = prs.add_parser("target", help="put a project in a deploy target (no target clears it)")
     x.add_argument("name"); x.add_argument("target", nargs="?")
-    x = prs.add_parser("tracker", help="the outside tracker a project uses (agents import from it and update it)")
-    x.add_argument("name"); x.add_argument("text", nargs="?",
-                                          help="which tracker, where, what tool: \"github owner/repo via gh\"; none clears it")
     x = prs.add_parser("rank"); x.add_argument("name"); x.add_argument("rank", type=int)
     x = prs.add_parser("archive", help="archive a project: its items leave the queue and the lists; nothing is deleted")
     x.add_argument("name")
@@ -1732,7 +1717,6 @@ def build_parser(only=None):
     x.add_argument("--blocks", type=int, help="item that must wait on this new one (usually the one you hold)")
     x.add_argument("--found-during", type=int, dest="found_during",
                    help="the item you were working on when you found this (links them; not a dependency)")
-    _ref_args(x)
     g = x.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="mode", action="store_const", const="keep",
                    help="with --blocks: keep holding that item and do this one yourself now")
@@ -1802,15 +1786,12 @@ def build_parser(only=None):
     x.add_argument("--due", help="due date (2026-10-15, 'fri 17:00'), or none to remove it")
     x.add_argument("--goal", action="append", help="tag the item with a goal (repeatable)")
     x.add_argument("--untag", action="append", help="remove a goal tag (repeatable)")
-    _ref_args(x)
-    x.add_argument("--unref", action="append", help="remove a tracker link (repeatable)")
     x.add_argument("--unreserve", action="store_true", help="end the reservation of an open item (\"reserved for <agent>\"), "
                    "so every agent can take it: that agent, a person, or a manager (the same as maxpm push <id> --cancel)")
 
     x = sub.add_parser("list", help="list items (open by default)")
     x.add_argument("--project"); x.add_argument("--status"); x.add_argument("--all", action="store_true")
     x.add_argument("--goal", help="only items tagged with this goal")
-    x.add_argument("--ref", help="only items linked to this tracker issue, closed ones too (jira:PROJ-123)")
 
     x = sub.add_parser("show", help="one item with its links and history"); x.add_argument("id", type=int)
     x.add_argument("--brief", action="store_true", help="a few lines: the item, cut context and output, "
@@ -1875,7 +1856,6 @@ def build_parser(only=None):
     x.add_argument("--move", action="store_true", default=None,
                    help="move the rules in CLAUDE.md to AGENTS.md; CLAUDE.md becomes @AGENTS.md")
     x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md and AGENTS.md apart")
-    x.add_argument("--tracker", help="the outside tracker it uses: \"github owner/repo via gh\", \"jira PROJ via the Jira MCP server\"")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -2011,7 +1991,6 @@ def build_parser(only=None):
                    "(the pages show it; --output stays the note for agents)")
     x.add_argument("--ship", action="store_true", help="also ask for it to be deployed (maxpm ship)")
     x.add_argument("--note", help="why an agent may close a person's item (required then; the user is told)")
-    x.add_argument("--synced", action="store_true", help="you already posted the result to its tracker issues")
     x.add_argument("--force", metavar="REASON", help="close it although items it waits on are still open (not a deploy)")
     x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
                        "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
@@ -2027,8 +2006,6 @@ def build_parser(only=None):
     x = sub.add_parser("check", help="record what a check of a suspect item found: done, partial, or open")
     x.add_argument("id", type=int); x.add_argument("result", choices=core.CHECK_RESULTS)
     x.add_argument("--note", help="where the work is (done), what is left (partial), or what you looked at (open)")
-    x = sub.add_parser("synced", help="record that a done item's tracker issues got the result (comment, close)")
-    x.add_argument("id", type=int); x.add_argument("--ref", help="only this link (default: all of the item's links)")
     x = sub.add_parser("ship", help="ask for an item to be deployed: it joins its target's next deploy item")
     x.add_argument("id", type=int)
     rv = sub.add_parser("review", help="release reviews: pass one, or send the release back with fixes")
@@ -3528,10 +3505,6 @@ def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
-    if args.tracker:
-        for n in [name] if name else linked_here:
-            core.project_tracker(conn, n, args.tracker, args.actor)
-            lines.append(f"project {n}: tracker {args.tracker}")
     # AGENTS.md for Codex, OpenCode, and the other agents that read it; CLAUDE.md imports it for Claude Code.
     if args.file:
         lines += [_append_block(Path(f)) for f in args.file]
@@ -3548,8 +3521,6 @@ def init_folder(args):
     shown = name or linked_here[0]
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
-    if not core.setting(conn, "tracker", project_id=core._project(conn, shown)["id"]):
-        lines.append(f'if it uses an issue tracker: maxpm project tracker {shown} "github owner/repo via gh"')
     lines += look_setup_lines(shown, core.look_setup(conn, shown))
     lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
     print("\n".join(lines))
@@ -4016,8 +3987,6 @@ def dispatch(conn, a, actor):
             return core.project_show(conn, a.name)
         if a.pcmd == "target":
             return core.project_target(conn, a.name, a.target, actor)
-        if a.pcmd == "tracker":
-            return core.project_tracker(conn, a.name, a.text, actor)
         if a.pcmd == "archive":
             return core.project_archive(conn, a.name, actor)
         if a.pcmd == "restore":
@@ -4199,7 +4168,7 @@ def dispatch(conn, a, actor):
             project = core.project_for_add(conn, os.getcwd(), a.blocks if a.blocks is not None else a.found_during)
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
-                            [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
+                            [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True)
         if a.no_goal_context:
@@ -4211,10 +4180,10 @@ def dispatch(conn, a, actor):
         if a.goal_context is not None:
             core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
-                              a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a),
+                              a.due, a.goal, a.untag, _models(a),
                               tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
     if c == "list":
-        return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
+        return core.item_list(conn, a.project, a.status, a.all, a.goal)
     if c == "show":
         def show():
             res = core.item_show(conn, a.id)
@@ -4330,9 +4299,7 @@ def dispatch(conn, a, actor):
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
         return core.claim(conn, a.id, actor)
     if c == "done":
-        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.synced, a.force, a.changed)
-    if c == "synced":
-        return core.synced(conn, a.id, a.ref, actor)
+        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.force, a.changed)
     if c == "cleanup":
         if a.space or a.dry_run:  # the size limits (#5711)
             from . import space
@@ -4619,11 +4586,6 @@ def render_status(res):
         for d in res["due"]:
             tag = "OVERDUE " if d["due_state"] == "overdue" else "soon " if d["due_state"] == "soon" else ""
             print(f"  #{d['id']:<4} [{d['project']}] {_cut(d['title'])}  {tag}{d['due_text']}")
-    if res.get("unsynced"):
-        print()
-        print("Tracker not updated yet (post the output, close the issue, then maxpm synced <id>):")
-        for u in res["unsynced"]:
-            print(f"  #{u['id']:<4} [{u['project']}] {_cut(u['title'])}  " + " ".join(x["ref"] for x in u["refs"]))
     if res["human_waiting"]:
         print()
         print("Waiting on a human:")
@@ -5107,8 +5069,6 @@ def render_go(b):
     for n in b["projects"]:
         d = b["descriptions"].get(n)
         out.append(f"Project {n}: {d}" if d else f"Project {n}.")
-        if (b.get("trackers") or {}).get(n):
-            out.append(f"  tracker: {b['trackers'][n]} (items link its issues with --ref)")
     out.append("")
     out += policy_lines(b.get("policies") or [])
     if b.get("asked_open"):
@@ -5181,8 +5141,6 @@ def render_go(b):
             out.append(f"  e{n['id']} {'STOP REQUEST' if n['kind'] == 'stop' else 'instruction'}"
                        + (f" from {n['added_by']}" if n["added_by"] else "") + f": {n['body']}")
         out += [f"  When you have acted on one: {r} queue remove {me} e<id>", ""]
-    for u in b.get("unsynced") or []:
-        out += _writeback_lines(u, r, u.get("tracker", "")) + ["  Do this before your item below.", ""]
     gb = b.get("goal")
     if gb:
         out.append(f"YOUR GOAL {gb['name']} [{gb['project']}]: {gb['outcome'] or '(no outcome written)'}"
@@ -5290,8 +5248,6 @@ def render_go(b):
             out.append("  WAITING ON A PERSON: " + ", ".join(f"#{h['id']} {h['title']}" for h in w["on"])
                        + f". You wait {left} more (human_wait_max {b.get('human_wait_max')}); then MaximizePM releases"
                        + f" #{it['id']} and you take other work. Work on what does not need the answer meanwhile.")
-        if it.get("refs"):
-            out.append("  It comes from the tracker issue(s) above: mark them in progress there, if the tracker has that state.")
         if it.get("needs_check"):
             out += [f"  CHECK FIRST: a session held this item before and its lease ran out without done. Look at",
                     f"  {r} show {it['id']} (history), git log --grep '#{it['id']}', and the files it touches.",
@@ -5503,21 +5459,6 @@ def render_go(b):
             blocks = "; ".join(f"blocks #{d['id']} {d['title']} (P{d['priority']})" for d in h.get("blocks", [])[:2])
             out.append(f"  #{h['id']} {h['title']}" + (f"  ({blocks})" if blocks else ""))
     print("\n".join(out))
-
-
-def _writeback_lines(it, r="maxpm", tracker=""):
-    """What to do in the tracker after an item with links closes."""
-    todo = [x for x in it["refs"] if not x.get("synced_at")]
-    if not todo:
-        return []
-    verb = "close it" if it["status"] == "done" else "close it as not done"
-    out = [f"UPDATE THE TRACKER" + (f" ({tracker})" if tracker else "") + f": #{it['id']} {it['title']} is {it['status']}."]
-    for x in todo:
-        out.append(f"  {x['ref']}" + (f"  {x['url']}" if x["url"] else "") + f": post the output as a comment and {verb}.")
-    if it.get("output"):
-        out.append(f"  output: {it['output']}")
-    out.append(f"  Then: {r} synced {it['id']}")
-    return out
 
 
 def render_space(res):
@@ -6978,13 +6919,6 @@ def render(a, res):
         return render_space(res)
     if c == "cleanup":
         return render_cleanup(res, f"maxpm --as {a.actor}" if a.actor else "maxpm")
-    if c == "done" and isinstance(res, dict) and res.get("refs"):
-        _print_show(res)
-        lines = _writeback_lines(res, f"maxpm --as {a.actor}" if a.actor else "maxpm", res.get("tracker", ""))
-        if lines:
-            print()
-            print("\n".join(lines))
-        return
     if c == "keep" and isinstance(res, dict) and "kept" in res:
         print(f"kept after the close of #{res['closed']}: " + ", ".join(f"#{k['id']} {_cut(k['title'], 50)}" for k in res["kept"]))
         return
@@ -7087,9 +7021,6 @@ def render(a, res):
             for p in res:
                 print(policy_line(p))
         return
-    if c == "project" and a.pcmd == "tracker":
-        print(f"{res['name']}: tracker " + (res["tracker"] or "none"))
-        return
     if c == "project" and a.pcmd in ("archive", "restore"):
         n = f"{res['open_items']} open item{'s' * (res['open_items'] != 1)}" + (f" ({res['in_progress']} in progress: {', '.join(res['holders'])})"
                                                  if res["in_progress"] else "")
@@ -7122,7 +7053,6 @@ def render(a, res):
                       + "; cadence: " + (g["cadence"] or "off")
                       + (f" ({g['cadence_reason']})" if g["cadence_reason"] else
                          f" (why: maxpm target cadence {res['target']} <time>|off --reason \"...\")"))
-            print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
             if res.get("ops") is not None:
                 print("  monitoring: " + ops_line_text(res["name"], res["ops"]))
             if res.get("look"):

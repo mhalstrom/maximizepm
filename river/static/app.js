@@ -790,13 +790,6 @@ function renderSetup(st) {
       <option value="maxpm" ${open === "maxpm" ? "selected" : ""}>the MaximizePM page</option>
       <option value="agent" ${open === "agent" ? "selected" : ""}>the agent's own app (claude.ai/code, chatgpt.com/codex)</option></select>
       <div class="muted" style="font-size:12px">${esc(st.notify_phone || "")}</div>`, ""));
-  const noTracker = folderProjects.filter(p => !p.tracker);
-  if (folderProjects.length) more.push(extra(noTracker.length === 0, "Issue tracker",
-    folderProjects.map(p => `<div>${esc(p.name)}: ${p.tracker ? esc(p.tracker) : "none"}</div>`).join("")
-      + "If you use GitHub Issues, Jira, or Linear, agents can bring issues in and close them when they're done. Say which tracker, where, and with what tool.",
-    noTracker.map(p => `<span class="su-track">${esc(p.name)}
-      <input data-tracker-for="${esc(p.name)}" placeholder="github owner/repo via gh">
-      <button class="btn" data-su="tracker" data-project="${esc(p.name)}">Save</button></span>`).join("")));
   $("#setupSteps").innerHTML = out.join("") + `<details class="more"><summary>More (optional)</summary>${more.join("")}</details>`;
 }
 $("#setupSteps").addEventListener("click", async (e) => {
@@ -809,11 +802,6 @@ $("#setupSteps").addEventListener("click", async (e) => {
       $("#actor").value = n; store("river.actor", n);
     } else if (k === "block") await act("setup_block", { path: b.dataset.path,
       move: b.dataset.move === undefined ? null : b.dataset.move === "1" });
-    else if (k === "tracker") {
-      const v = document.querySelector(`[data-tracker-for="${CSS.escape(b.dataset.project)}"]`).value.trim();
-      if (!v) return toast("Say which tracker, for example: github owner/repo via gh", true);
-      await act("config_set", { key: "tracker", value: v, project: b.dataset.project });
-    }
     else if (k === "skills") await act("setup_skills", {});
     else if (k === "mode") await act("config_set", { key: "queue", value: b.dataset.mode });
     else if (k === "task") {
@@ -849,13 +837,12 @@ $("#setupSteps").addEventListener("click", async (e) => {
     await openSetup();
   } catch (err) { /* act() showed the error */ }
 });
-// Enter in a field of the guide does what the button next to it does (the name, the first task, a tracker).
+// Enter in a field of the guide does what the button next to it does (the name, the first task).
 // The fields of the folder form have their own (folderForm.js), and an option saves when it changes.
 $("#setupSteps").addEventListener("keydown", (e) => {
   const f = e.target;
   if (e.key !== "Enter" || e.isComposing || f.tagName !== "INPUT") return;
-  const b = f.id === "suName" ? '[data-su="register"]' : f.id === "suTaskTitle" ? '[data-su="task"]'
-    : f.dataset.trackerFor !== undefined ? `[data-su="tracker"][data-project="${CSS.escape(f.dataset.trackerFor)}"]` : null;
+  const b = f.id === "suName" ? '[data-su="register"]' : f.id === "suTaskTitle" ? '[data-su="task"]' : null;
   const btn = b && $("#setupSteps").querySelector(b);
   if (btn) { e.preventDefault(); btn.click(); }
 });

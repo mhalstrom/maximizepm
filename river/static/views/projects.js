@@ -41,11 +41,11 @@ export function renderProjects() {
     const closedSet = projClosed(), isClosed = closedSet.includes(p.name);
     const who = [...new Set(open.filter(i => i.assignee && ["in_progress", "held"].includes(i.status)).map(i => i.assignee))];
     const home = p.path ? p.path.replace(/^\/(Users|home)\/[^/]+/, "~") : "";
-    // The folder, the target and the tracker are a hover on the counts (#5082): nobody acts on them here.
+    // The folder and the target are a hover on the counts (#5082): nobody acts on them here.
     // Monitoring (#5438, mark 2026-11-12) is the stage after the release: its checks are a hover too, and an open fault
     // shows, as a link to the Operations view.
     const o = p.ops || { checks: 0, faults: [] };
-    const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "", p.tracker ? "tracker " + p.tracker : "",
+    const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "",
       o.checks ? `${o.checks} check${o.checks === 1 ? "" : "s"}` : "no checks"].filter(Boolean);
     const faults = o.faults.length ? button(`${o.faults.length} open fault${o.faults.length === 1 ? "" : "s"}`, { cls: "plain ops-faultbtn",
       data: { "plan-go": "ops", project: p.name }, title: "Open Operations" }) : "";

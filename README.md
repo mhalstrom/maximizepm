@@ -229,7 +229,7 @@ The first time you open the page, a setup guide shows what MaximizePM found,
 with a button to fix each step: your name, the `maxpm` command for agents, a
 project folder and its block, the agent to start, a first task, and the first
 agent. More steps are optional: how agents start, the Claude Code skills,
-phone notifications, and an issue tracker. "Don't show again" hides it;
+and phone notifications. "Don't show again" hides it;
 Open setup guide in Settings (the ⋯ menu) opens it again.
 
 ![Settings in the ⋯ menu of the header](site/img/menu.png)
@@ -559,36 +559,6 @@ MaximizePM; plain Chat mode reaches only remote servers, so it does not. In a
 chat, MaximizePM works as it does for the Claude desktop app (above). Codex CLI
 sessions see the MaximizePM server too, and in a project folder they work as
 usual. `--remove` takes MaximizePM out again.
-
-## Outside trackers
-
-MaximizePM works next to an issue tracker (GitHub Issues, Jira, Linear, and
-others) without any tracker code. Your agents read and update the tracker
-with their own tools; MaximizePM keeps the links and reminds them.
-
-1. Give your agents access to the tracker: `gh auth login` for GitHub, a Jira
-   or Linear MCP server, or a command line tool.
-2. Tell MaximizePM once which tracker a project uses, in words an agent can act on:
-
-   ```sh
-   maxpm project tracker shop "github acme/shop via gh"
-   maxpm project tracker api "jira API via the Jira MCP server"
-   maxpm project tracker web "linear team WEB via the Linear MCP server"
-   ```
-
-   `maxpm init --tracker "..."` does the same when you set up a folder.
-3. Import: the `maxpm go` briefing names the tracker; the manager or a session
-   adds each open issue that MaximizePM does not have yet, with a link:
-   `maxpm add "Fix login" --ref github:acme/shop#12` (GitHub links get a URL
-   by themselves), or `--ref jira:API-7 --ref-url https://acme.atlassian.net/browse/API-7`.
-   `maxpm list --ref <ref>` finds the items of an issue. MaximizePM refuses a
-   second open item with the same link in a project.
-4. Write back: `maxpm go` asks the agent to mark linked issues in progress.
-   `maxpm done` prints each link with the output to post as a comment, and
-   asks the agent to close the issue. `maxpm synced <id>` (or
-   `maxpm done --synced`) records that. Until then, the agent's next `go` and
-   `maxpm status` show the reminder, and the page marks the link
-   "tracker not updated".
 
 ## Tests
 

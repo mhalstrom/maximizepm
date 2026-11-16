@@ -207,7 +207,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .sub { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
 #setup .fix { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 #setup code { font-size: 12px; }
-/* The options of How agents start, Where a notification opens and the trackers (#4727): fields no wider than the
+/* The options of How agents start, Where a notification opens and the remote host (#4727): fields no wider than the
    dialog, labels that break between words (not inside one, as .sub's overflow-wrap would), and on a narrow screen
    one option on each line, so the fields start at one left edge. */
 #setup .su-opt { display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; max-width: 100%; overflow-wrap: normal; }

@@ -50,7 +50,7 @@ export const LABELS = {
   cost_limit: "Cost limit: an alert at 80% and 100% ($40/day, 20M/week)", review_cmd: "Review command", review_prompt: "Review prompt", review_timeout: "Stop a review command after",
   auto_review: "Start reviews by itself", release_approval: "Release gate", release_commits: "Command that lists a release's commits",
   deploy_timeout: "Stop a deploy after", hook_timeout: "Stop a hook after", result_look: "A finished result is looked at",
-  tracker: "Outside tracker", push_guard: "Commands held while an alert is unread", due_warn_before: "Warn before a due date",
+  push_guard: "Commands held while an alert is unread", due_warn_before: "Warn before a due date",
   replan_threshold: "Replan after this many new prerequisites", keep_prereq_limit: "Most prerequisites kept by the holder",
   default_prerequisite_mode: "A new prerequisite does to its item", stale_after: "An unclaimed item is stale after",
   unpushed_after: "Unpushed commits are a finding after", conflict_max_lines: "Shared files conflict up to this many lines",

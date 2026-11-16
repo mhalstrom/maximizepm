@@ -4556,57 +4556,6 @@ class ReleaseReview(Base):
         self.assertEqual([i for i in core.item_show(self.c, c)["unblocks"]], [self.deploy])
 
 
-class TrackerRefs(Base):
-    def setUp(self):
-        super().setUp()
-        core.project_add(self.c, "a")
-        core.project_add(self.c, "b")
-
-    def test_refs_link_show_and_refuse_duplicates_in_a_project(self):
-        refs = core.parse_refs(["github:o/r#12", "jira:PROJ-1"], ["", "https://x.atlassian.net/browse/PROJ-1"])
-        i = core.item_add(self.c, "a", "fix it", actor="t", refs=refs)
-        self.assertEqual([(r["ref"], r["url"]) for r in i["refs"]],
-                         [("github:o/r#12", "https://github.com/o/r/issues/12"),
-                          ("jira:PROJ-1", "https://x.atlassian.net/browse/PROJ-1")])
-        with self.assertRaises(RiverError) as e:
-            core.item_add(self.c, "a", "again", actor="t", refs=core.parse_refs(["jira:PROJ-1"]))
-        self.assertIn(f"#{i['id']}", str(e.exception))
-        self.assertEqual(len(core.item_list(self.c, "a")), 1)  # the refused add left nothing behind
-        core.item_add(self.c, "b", "other project", actor="t", refs=core.parse_refs(["jira:PROJ-1"]))
-        core.done(self.c, i["id"], "ok", "t")
-        core.item_add(self.c, "a", "reopened upstream", actor="t", refs=core.parse_refs(["jira:PROJ-1"]))
-        self.assertEqual(len(core.item_list(self.c, ref="jira:PROJ-1")), 3)  # closed ones too
-
-    def test_edit_adds_and_removes_refs_and_bad_forms_are_refused(self):
-        i = self.add("a", "x")
-        core.item_edit(self.c, i, refs=core.parse_refs(["linear:ENG-42"]), actor="t")
-        self.assertEqual([r["ref"] for r in core.item_show(self.c, i)["refs"]], ["linear:ENG-42"])
-        core.item_edit(self.c, i, unref=["linear:ENG-42"], actor="t")
-        self.assertEqual(core.item_show(self.c, i)["refs"], [])
-        with self.assertRaises(RiverError):
-            core.item_edit(self.c, i, unref=["linear:ENG-42"], actor="t")
-        for bad in (["PROJ-1"], ["jira: x"], ["Jira:X"]):
-            with self.assertRaises(RiverError):
-                core.parse_refs(bad)
-        with self.assertRaises(RiverError):
-            core.parse_refs(["jira:X"], ["https://a", "https://b"])
-        with self.assertRaises(RiverError):
-            core.parse_refs(["jira:X"], ["javascript:alert(1)"])
-
-
-class ProjectTracker(Base):
-    def test_set_show_clear_and_briefs(self):
-        core.project_add(self.c, "a", path=self.dir.name)
-        self.assertEqual(core.project_tracker(self.c, "a")["tracker"], "")
-        core.project_tracker(self.c, "a", "github o/r via gh", "t")
-        self.assertEqual(core.project_show(self.c, "a")["tracker"], "github o/r via gh")
-        self.assertEqual(core.project_list(self.c)[0]["tracker"], "github o/r via gh")
-        core.item_add(self.c, "a", "x", actor="t")
-        self.assertEqual(core.go(self.c, self.dir.name, "w")["trackers"], {"a": "github o/r via gh"})
-        core.project_tracker(self.c, "a", "none", "t")
-        self.assertEqual(core.project_tracker(self.c, "a", "none", "t")["tracker"], "")  # clearing twice is fine
-
-
 class ProjectArchive(Base):
     """#5197: archive a project, list the archived ones, and restore one."""
 
@@ -4656,45 +4605,6 @@ class ProjectArchive(Base):
         self.assertIn("project a is back, at rank 1", run("project", "restore", "a"))
         self.assertIn("(no archived projects)", run("project", "list", "--archived"))
         self.c = core.connect(self.path)
-
-
-class TrackerWriteBack(Base):
-    def setUp(self):
-        super().setUp()
-        core.project_add(self.c, "a")
-        core.register(self.c, "ag")
-        core.project_tracker(self.c, "a", "github o/r via gh")
-        self.i = core.item_add(self.c, "a", "fix", actor="t", refs=core.parse_refs(["github:o/r#3", "jira:P-1"]))["id"]
-        core.claim(self.c, self.i, "ag")
-
-    def test_done_leaves_a_reminder_until_synced(self):
-        with self.assertRaises(RiverError):
-            core.synced(self.c, self.i, actor="ag")  # not done yet
-        res = core.done(self.c, self.i, "abc", "ag")
-        self.assertEqual(res["tracker"], "github o/r via gh")
-        self.assertEqual([u["id"] for u in core.unsynced(self.c, "ag")], [self.i])
-        self.assertEqual(core.unsynced(self.c, "other"), [])
-        self.assertEqual(core.go(self.c, self.dir.name, "ag", project="a")["unsynced"][0]["id"], self.i)
-        core.synced(self.c, self.i, "jira:P-1", "ag")
-        self.assertEqual([x["ref"] for x in core.unsynced(self.c)[0]["refs"]], ["github:o/r#3"])
-        with self.assertRaises(RiverError):
-            core.synced(self.c, self.i, "jira:NOPE", "ag")
-        core.synced(self.c, self.i, actor="ag")
-        self.assertEqual(core.status(self.c)["unsynced"], [])
-
-    def test_done_synced_records_it_at_once(self):
-        res = core.done(self.c, self.i, "abc", "ag", synced_=True)
-        self.assertTrue(all(x["synced_at"] for x in res["refs"]))
-        self.assertEqual(core.unsynced(self.c), [])
-
-    def test_old_item_refs_table_gets_the_column(self):
-        self.c.execute("CREATE TABLE r2 AS SELECT item_id, ref, url, created_at FROM item_refs")
-        self.c.execute("DROP TABLE item_refs")
-        self.c.execute("ALTER TABLE r2 RENAME TO item_refs")
-        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
-        self.c.close()
-        self.c = core.connect(self.path)
-        self.assertIn("synced_at", {r["name"] for r in self.c.execute("PRAGMA table_info(item_refs)")})
 
 
 class Version(unittest.TestCase):
@@ -7551,6 +7461,24 @@ class AliasesTable(Base):
         self.assertIsNotNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='graph_changes'").fetchone())
         self.assertEqual(core.project_show(self.c, "old")["name"], "old")
 
+    def test_an_old_queue_loses_its_item_refs_table(self):
+        # The links to outside trackers are gone (#5992); connect drops their table and the projects' tracker setting.
+        core.project_add(self.c, "old")
+        i = self.add("old", "x")
+        self.c.execute("CREATE TABLE item_refs (item_id INTEGER NOT NULL REFERENCES items(id), ref TEXT NOT NULL, "
+                       "url TEXT, created_at TEXT NOT NULL, synced_at TEXT, PRIMARY KEY (item_id, ref))")
+        self.c.execute("CREATE TRIGGER graph_item_refs_insert AFTER INSERT ON item_refs BEGIN "
+                       "UPDATE graph_version SET n = n + 1 WHERE id = 1; END")
+        self.c.execute("INSERT INTO item_refs VALUES (?, 'jira:P-1', NULL, '2026-09-01T00:00:00Z', NULL)", (i,))
+        self.c.execute("INSERT INTO settings (scope, key, value) VALUES ('project:old', 'tracker', 'github o/r via gh')")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
+        self.c.commit()
+        self.c.close()
+        self.c = core.connect(self.path)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%item_refs%'").fetchone())
+        self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE key='tracker'").fetchone())
+        self.assertEqual(core.item_show(self.c, i)["title"], "x")
+
 
 class Locked(Base):
     """Other commands hold the write lock of the queue longer than busy_timeout (#1615)."""
@@ -9020,7 +8948,7 @@ class SimilarWork(TextQueue):
         a = self.add("Dark mode for the settings page", context="colors from the theme", touches=["web/settings.css"])
         self.at(-3 * 3600)
         b = self.add("Settings page in dark mode", actor="w2", context="use the theme colors", notes="see the mock",
-                     new="test", touches=["web/theme.css"], refs=[("github:o/r#7", None)], priority=1)
+                     new="test", touches=["web/theme.css"], priority=1)
         c = self.add("Dark mode for the settings page", actor="w3", new="test", after=[a, b])  # linked: not a duplicate
         g = core.duplicates(self.c)
         self.assertEqual(len(g), 1)
@@ -9041,7 +8969,6 @@ class SimilarWork(TextQueue):
         self.assertIn(f"[from #{b}] see the mock", k["notes"])
         self.assertIn("use the theme colors", k["context"])
         self.assertEqual(sorted(k["touches"]), ["web/settings.css", "web/theme.css"])
-        self.assertEqual([x["ref"] for x in k["refs"]], ["github:o/r#7"])
         self.assertIn(c, k["unblocks"])
         self.assertEqual(self.c.execute("SELECT item_id FROM messages WHERE body='about b'").fetchone()[0], a)
         self.assertEqual(self.c.execute("SELECT item_id FROM queue_entries WHERE agent='w2'").fetchone()[0], a)
