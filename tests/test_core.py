@@ -5826,6 +5826,34 @@ class BrokenRules(Base):
     def keys(self):
         return sorted(x["key"] for x in core.manager_findings(self.c)["broken_rules"])
 
+    def test_a_target_the_manager_releases_by_decision_lets_it_take_and_close_its_deploys(self):
+        """#6048 (maximizepm-github: the manager does the weekly release, mark 2026-11-15, policy p114): the manager
+        takes the deploy item, and the watch does not call it a broken rule."""
+        core.target_add(self.c, "web", "push")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "mgr"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        a = self.add("site", "page")
+        core.claim(self.c, a, "dev")
+        dep = core.done(self.c, a, "commit", "dev", ship_it=True)["shipped_in"]
+        with self.assertRaisesRegex(RiverError, "mgr is a manager session; it changes the plan"):
+            core.claim(self.c, dep, "mgr")
+        with self.assertRaises(RiverError):
+            core.target_releaser(self.c, "web", "manager", "dev", "dev wants it")  # a worker does not decide it
+        with self.assertRaisesRegex(RiverError, "say whose decision it is"):
+            core.target_releaser(self.c, "web", "manager", "mark")
+        shown = core.target_releaser(self.c, "web", "manager", "mark", "mark 2026-11-15: the manager releases")
+        self.assertEqual(shown["releaser"], "manager")
+        core.target_own(self.c, "web", "mgr")  # only the target's owner takes its deploy item, as before
+        self.assertEqual(core.claim(self.c, dep, "mgr")["assignee"], "mgr")
+        core.done(self.c, dep, "released v1.3.1", "mgr")
+        self.assertNotIn(f"manager-deploy:{dep}", self.keys())
+        core.target_releaser(self.c, "web", "none", "mark")
+        self.assertIn(f"manager-deploy:{dep}", self.keys())
+
     def test_each_broken_rule_shows(self):
         from river import cli
         core.target_add(self.c, "web", "push")

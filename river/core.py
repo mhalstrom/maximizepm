@@ -705,6 +705,7 @@ CREATE TABLE IF NOT EXISTS targets (
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
   risk              TEXT NOT NULL DEFAULT 'production',  -- low | production (maxpm target risk, #5968)
   mode              TEXT NOT NULL DEFAULT 'deploy',  -- deploy | push (maxpm target mode, #5968, #6043)
+  releaser          TEXT NOT NULL DEFAULT '',  -- manager: the manager does its releases by decision (#6048)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -2522,6 +2523,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN risk TEXT NOT NULL DEFAULT 'production'")
     if "mode" not in tcols:
         conn.execute("ALTER TABLE targets ADD COLUMN mode TEXT NOT NULL DEFAULT 'deploy'")
+    if "releaser" not in tcols:  # #6048
+        conn.execute("ALTER TABLE targets ADD COLUMN releaser TEXT NOT NULL DEFAULT ''")
     # #6043 (mark 2026-11-16): the mode push-on-yes is push; a person's yes only where release_approval person asks.
     conn.execute("UPDATE targets SET mode='push' WHERE mode='push-on-yes'")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -9128,6 +9131,31 @@ def _lead_refusal(conn, actor, what):
     return f"{actor} is an agent; only a person or the manager {what}. Ask the manager: maxpm ask <manager> \"...\""
 
 
+def manager_releases(conn, target):
+    """True when the manager does the target's releases by decision (#6048): it may take the deploy items, and the
+    watch's rule 'the manager does not deploy' skips the target."""
+    r = conn.execute("SELECT releaser FROM targets WHERE name=?", (target,)).fetchone() if target else None
+    return bool(r) and r["releaser"] == "manager"
+
+
+def target_releaser(conn, name, who, actor=None, why=None):
+    """maxpm target releaser <target> manager|none (#6048): manager when a person decided that the manager does each
+    release of the target (no hook, no deployer session; maximizepm-github, mark 2026-11-15, policy p114). A person
+    or the manager sets it; the reason goes in the history."""
+    if who not in ("manager", "none"):
+        raise RiverError("the releaser is manager (the manager does each release by decision) or none")
+    refusal = _lead_refusal(conn, actor, "names who releases a target")
+    if refusal:
+        raise RiverError(refusal)
+    if who == "manager" and not (why or "").strip():
+        raise RiverError("say whose decision it is: --reason \"<person> <date>: the manager does each release\"")
+    with tx(conn):
+        name = _target(conn, name)["name"]
+        conn.execute("UPDATE targets SET releaser=? WHERE name=?", ("" if who == "none" else who, name))
+        _event(conn, None, actor, f"target {name} releaser {who}" + (f": {' '.join(why.split())}" if why else ""))
+    return target_show(conn, name)
+
+
 def target_risk(conn, name, risk, actor=None):
     """maxpm target risk: low (a change that passes its tests and the next push undoes: the target owner or the
     manager releases it with no question to a person, p155) or production (the default: a release sooner than
@@ -15115,7 +15143,8 @@ def _claim_row(conn, item_id, actor):
                          f"{ag['assistant_for'] or 'the person'}, with them, and takes no queue work. Add the work "
                          f"(maxpm add \"<title>\" --found-during <id>): a worker session takes it. A person's item that "
                          f"you do yourself, with their yes: maxpm --as {actor} takeover <id> --note \"<how>\"")
-    if ag["role"] in ("planner", "manager"):
+    if ag["role"] in ("planner", "manager") and not (ag["role"] == "manager" and it0["kind"] == "deploy"
+                                                     and manager_releases(conn, it0["target"])):  # #6048
         raise RiverError(f"refused: {actor} is a {ag['role']} session; it changes the plan and does not take work. "
                          f"To work instead, run: maxpm --as {actor} go" + (
                              f". #{item_id} is reserved for you: start a session for it (maxpm launch --item {item_id}), "
@@ -23953,7 +23982,8 @@ def broken_rules(conn):
                         "fix": "maxpm serve runs the hook; a session releases the deploy item: maxpm release "
                                f"{r['id']}" if r["status"] == "in_progress" else "none now; see that it does not happen again"})
         elif r["status"] == "done" and by and r["closed_at"] >= DEPLOY_RULE_SINCE and conn.execute(
-                "SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (by,)).fetchone():
+                "SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (by,)).fetchone() \
+                and not manager_releases(conn, r["target"]):  # the manager releases it by decision (#6048)
             out.append({"key": f"manager-deploy:{r['id']}", "rule": "the manager does not deploy",
                         "text": f"deploy #{r['id']} of {r['target']} was closed by the manager {by}",
                         "fix": f"a deploy hook for {r['target']} (maxpm target hook {r['target']} deploy \"<release "

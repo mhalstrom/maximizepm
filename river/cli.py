@@ -1834,6 +1834,10 @@ def build_parser(only=None):
                        "closes with maxpm done: no ship, no deploy item, no hook, no deployer; a person's yes only "
                        "when the target says release_approval person)")
     x.add_argument("name"); x.add_argument("mode", nargs="?", choices=["deploy", "push"], help="none shows it")
+    x = tgs.add_parser("releaser", help="manager: a person decided that the manager does each release of the target "
+                       "(it takes the deploy items; the watch does not call it a broken rule); none undoes it (#6048)")
+    x.add_argument("name"); x.add_argument("who", nargs="?", choices=["manager", "none"], help="none shows it")
+    x.add_argument("--reason", help="whose decision it is, and when")
     x = tgs.add_parser("report", help="the review report of a release: the summary and numbers, the groups (risks "
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
                        "Plan > Releases")
@@ -4520,6 +4524,9 @@ def dispatch(conn, a, actor):
             return core.target_show(conn, a.name) if a.risk is None else core.target_risk(conn, a.name, a.risk, actor)
         if a.tcmd == "mode":
             return core.target_show(conn, a.name) if a.mode is None else core.target_mode(conn, a.name, a.mode, actor)
+        if a.tcmd == "releaser":  # #6048
+            return core.target_show(conn, a.name) if a.who is None else core.target_releaser(conn, a.name, a.who, actor,
+                                                                                               a.reason)
         if a.tcmd == "hook":
             if not actor and (a.command is not None or a.clear) and core.agent_type_from_env(os.environ):
                 raise RiverError("name yourself: maxpm --as <name> target hook ... (only a person or the manager "
@@ -7790,6 +7797,9 @@ def render(a, res):
             mode = "none: a push target has no deployer"
         print(f"  deployer: {mode}; change it: maxpm target deployer {res['name']} launch|standing|off")
         print("  " + core.target_mode_text(res))  # #5968
+        if res.get("releaser") == "manager":  # #6048
+            print(f"  releaser: the manager, by decision: it takes the deploy items; undo: maxpm target releaser "
+                  f"{res['name']} none")
         for line in _release_lines(res["release"]):
             print("  " + line)
         for line in _hook_lines(res["name"], res.get("hooks") or []):
