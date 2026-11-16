@@ -1130,15 +1130,11 @@ class LaunchAgent(unittest.TestCase):
         core.register(self.c, "mark", human=True)
         core.stop_agent(self.c, name, reason="done", actor="mark")
         self.assertEqual(server.workspace_sweep(self.c), {})
-        with self.assertRaisesRegex(RiverError, "still runs"):
-            server.workspace_drop(self.c, name)
         Path(wt, "cart.txt").write_text("cart\n")
         git("add", "cart.txt", cwd=wt)
         git("commit", "-q", "-m", "the cart", cwd=wt)
         core.unregister(self.c, name)
         self.assertEqual(server.workspace_sweep(self.c), {wt: f"1 commit on maxpm/{name} not in web's HEAD"})
-        with self.assertRaisesRegex(RiverError, "--force"):
-            server.workspace_drop(self.c, name)
         git("merge", "-q", "--ff-only", f"maxpm/{name}")  # the work goes to main
         self.c.execute("UPDATE workspaces SET checked_at=NULL")
         self.c.commit()
@@ -5549,8 +5545,7 @@ class CanvasOps(unittest.TestCase):
         op("canvas_resolve", {"comment": c1["id"], "note": "v3"}, "ag")
         self.assertEqual(op("canvas_list", {}, "mark")[0]["open_comments"], 0)
         self.assertEqual(op("canvas_show", {"name": "plan", "version": 1}, "mark")["shown"]["body"], "<h1>Plan</h1>")
-        op("canvas_delete", {"name": "plan"}, "ag")
-        self.assertEqual(op("canvas_list", {}, "mark"), [])
+        self.assertNotIn("canvas_delete", server.OPS)
         self.assertNotIn("canvas_save", server.OPS)  # writing a file stays with the command
 
 

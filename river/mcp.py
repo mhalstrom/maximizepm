@@ -65,7 +65,7 @@ TOOLS = [
                     "page or on the whole page. put (a new version; the same name in the same project is the same "
                     "canvas), list, show (a version's text, its versions and comments), comments (the comments with "
                     "their replies; open: only the ones that wait for you), comment, send (your draft comments to the "
-                    "session that wrote it), reply, resolve, delete, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file), "
+                    "session that wrote it), reply, resolve, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file), "
                     "section (a doc: replace or add one section of a Markdown canvas; pending shows it as being written), "
                     "answer (a decision of a doc, answered in place), kit (the starter page of the canvas kit: a "
                     "visual HTML page with a task graph, cards, side by side, bars, a timeline, a mockup, pictures "
@@ -73,7 +73,7 @@ TOOLS = [
                     "private realquicksite page; the user shares it there).",
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": ["put", "list", "show", "comments", "comment", "send", "reply",
-                                                "resolve", "open", "delete", "save", "section", "answer", "kit",
+                                                "resolve", "open", "save", "section", "answer", "kit",
                                                 "publish"]},
          "heading": {"type": "string", "description": "section: the heading of the section to replace or add (a doc)"},
          "pending": {"type": "string", "description": "section: what the section will say; the page shows it as being "
@@ -224,7 +224,7 @@ def browser_argv(a):
 def canvas_argv(a):
     """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
     act = a.get("action")
-    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "delete", "save",
+    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "save",
             "section", "answer", "kit", "publish")
     if act not in acts:
         raise RiverError(f"canvas action is one of {', '.join(acts)}")
@@ -265,7 +265,7 @@ def canvas_argv(a):
     opts = {"put": ("kind", "title", "note", "item", "project"), "list": ("project", "item"),
             "show": ("version", "project"), "comments": ("project",), "comment": ("quote", "path", "version", "project"),
             "send": ("project",), "resolve": ("note",),
-            "section": ("note", "project"), "answer": ("project",), "open": ("project", "session"), "delete": ("project",), "save": ("version", "project"),
+            "section": ("note", "project"), "answer": ("project",), "open": ("project", "session"), "save": ("version", "project"),
             "publish": ("version", "project")}
     for k in opts.get(act, ()):
         if act == "save" and k == "path":

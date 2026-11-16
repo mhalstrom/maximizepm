@@ -86,8 +86,6 @@ class CanvasRoutes(Base):
         svg = core.canvas_put(self.c, "chart", "<svg xmlns='http://www.w3.org/2000/svg'/>", "ag", kind="svg")["id"]
         _, ssig = self.key(f"canvas:{svg}")
         self.assertEqual(self.get(f"/canvas/{svg}/latest?{ssig}")["ctype"], "image/svg+xml")
-        core.canvas_delete(self.c, "notes", "ag")
-        self.assertEqual(self.get(f"/canvas/{md}/latest?{msig}")["code"], 404)
 
     def test_the_sandbox_and_the_setting_canvas_network(self):
         _, sig = self.key()

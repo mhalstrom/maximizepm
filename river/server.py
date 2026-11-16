@@ -406,41 +406,23 @@ def workspace_sweep(conn):
 WORKSPACE_LOOK = core.timedelta(minutes=10)
 
 
-def _workspace_remove(w, force=False):
-    """Remove one worktree and its branch; None when done (or its folder is gone). Without force, the reason it
-    stays when something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks."""
+def _workspace_remove(w):
+    """Remove one worktree and its branch; None when done (or its folder is gone). Else the reason it stays,
+    because something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks."""
     wt, repo = Path(w["path"]), Path(w["repo"])
     if not wt.is_dir():
         _git(repo, "worktree", "prune", check=False)
         return None
-    if not force:
-        dirty = _git(wt, "status", "--porcelain", check=False)
-        if dirty:
-            n = len(dirty.splitlines())
-            return f"{n} uncommitted change{'s' if n != 1 else ''}"
-        ahead = _git(repo, "rev-list", "--count", f"HEAD..{w['branch']}", check=False)
-        if ahead and ahead != "0":
-            return f"{ahead} commit{'s' if ahead != '1' else ''} on {w['branch']} not in {repo.name}'s HEAD"
-    _git(repo, "worktree", "remove", *(["--force"] if force else []), str(wt))
-    _git(repo, "branch", "-D" if force else "-d", w["branch"], check=False)
+    dirty = _git(wt, "status", "--porcelain", check=False)
+    if dirty:
+        n = len(dirty.splitlines())
+        return f"{n} uncommitted change{'s' if n != 1 else ''}"
+    ahead = _git(repo, "rev-list", "--count", f"HEAD..{w['branch']}", check=False)
+    if ahead and ahead != "0":
+        return f"{ahead} commit{'s' if ahead != '1' else ''} on {w['branch']} not in {repo.name}'s HEAD"
+    _git(repo, "worktree", "remove", str(wt))
+    _git(repo, "branch", "-d", w["branch"], check=False)
     return None
-
-
-def workspace_drop(conn, agent, force=False, actor=None):
-    """maxpm workspace drop <session> (#5856): remove a session's worktree now. Its session must have ended. Without
-    force it keeps one with uncommitted changes or unmerged commits, and says so; force removes them too."""
-    w = next((x for x in core.workspace_list(conn) if x["agent"] == agent), None)
-    if w is None:
-        raise RiverError(f"{agent} has no worktree; maxpm workspace list shows them")
-    if not _session_ended(conn, w):
-        raise RiverError(f"{agent} still runs in {w['path']}; end it first (End on the Sessions tab), and drop the "
-                         f"worktree when it has ended")
-    why = _workspace_remove(w, force)
-    if why:
-        raise RiverError(f"{w['path']} has {why}; merge or commit them, or remove them too: maxpm workspace drop "
-                         f"{agent} --force")
-    core.workspace_mark(conn, w["id"], removed=True, actor=actor or "maxpm")
-    return {"removed": w["path"], "branch": w["branch"]}
 
 
 def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, model=None, effort=None,
@@ -5147,7 +5129,6 @@ OPS = {
     "canvas_send": lambda c, a, who: core.canvas_send(c, a["name"], who, a.get("comments"), a.get("project")),
     "canvas_reply": lambda c, a, who: core.canvas_reply(c, a["comment"], a.get("text"), who),
     "canvas_resolve": lambda c, a, who: core.canvas_resolve(c, a["comment"], who, a.get("note")),
-    "canvas_delete": lambda c, a, who: core.canvas_delete(c, a["name"], who, a.get("project")),
     "canvas_discard": lambda c, a, who: core.canvas_discard(c, a["comment"], who),
     "canvas_edit": lambda c, a, who: core.canvas_edit(c, a["name"], a.get("text"), who, a.get("project")),
     "canvas_section": lambda c, a, who: core.canvas_section(c, a["name"], a.get("heading"), a.get("text"), who,
@@ -5196,8 +5177,6 @@ OPS = {
     "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
                                                      folder=a.get("folder") or None, **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
-    # maxpm workspace drop (#5856): git writes the repository's worktree list, which an agent's sandbox may block.
-    "workspace_drop": lambda c, a, who: workspace_drop(c, a["agent"], bool(a.get("force")), who),
     # New session (#5851): an agent in a folder with no item; maxpm launch --session hands it to serve from a sandbox.
     "start_session": lambda c, a, who: start_session(c, a.get("folder"), agent=a.get("agent"), actor=who,
                                                      prompt=a.get("prompt"), **_launch_args(a)),

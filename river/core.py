@@ -3140,16 +3140,6 @@ def set_agent_model(conn, name, model):
 
 # ---------------------------------------------------------------- projects
 
-def _new_name(conn, kind, row, new):
-    """Check the new name of a project or target (inside a tx): refused when the name is in use."""
-    if not re.match(r"^[a-z0-9][a-z0-9._-]*$", new or ""):
-        raise RiverError(f"{kind} names use lower-case letters, digits, '.', '_', '-'")
-    if new == row["name"]:
-        raise RiverError(f"{kind} {new} has that name already")
-    if conn.execute(f"SELECT 1 FROM {kind}s WHERE name=?", (new,)).fetchone():
-        raise RiverError(f"{kind} {new!r} exists; a rename needs a name that is free")
-
-
 def _project(conn, name):
     r = conn.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
     if not r:
@@ -3406,75 +3396,6 @@ def project_tracker(conn, name, text=None, actor=None):
 def _names(conn, project):
     """A project name or a comma list as the projects' names now."""
     return [_project(conn, n.strip())["name"] for n in str(project).split(",") if n.strip()]
-
-
-def _rename_project(conn, p, new, actor):
-    """Inside a tx: project row p gets the name new. Items, goals, review steps, the folder, the rank and the
-    target hold the project's id, so they follow; the settings of the project and the projects that waiting
-    agents named hold its name, so they change here. The old name stops at once."""
-    old = p["name"]
-    conn.execute("UPDATE projects SET name=? WHERE id=?", (new, p["id"]))
-    moved = conn.execute("UPDATE OR REPLACE settings SET scope=? WHERE scope=?",
-                         (f"project:{new}", f"project:{old}")).rowcount
-    waiting = 0
-    for a in conn.execute("SELECT name, waiting_in FROM agents WHERE waiting_in IS NOT NULL").fetchall():
-        names = a["waiting_in"].split(",")
-        if old in names:
-            conn.execute("UPDATE agents SET waiting_in=? WHERE name=?",
-                         (",".join(new if n == old else n for n in names), a["name"]))
-            waiting += 1
-    _event(conn, None, actor, f"project {old} renamed to {new}")
-    return {"name": new, "was": old, "settings": moved, "waiting_agents": waiting,
-            "items": conn.execute("SELECT COUNT(*) n FROM items WHERE project_id=?", (p["id"],)).fetchone()["n"],
-            "goals": conn.execute("SELECT COUNT(*) n FROM goals WHERE project_id=?", (p["id"],)).fetchone()["n"]}
-
-
-def project_rename(conn, old, new, actor=None):
-    """Give a project a new name, in one transaction. Refused when the new name is in use. Everything of
-    the project follows: items, goals, review steps, folder, rank, target, tracker and settings. The old
-    name stops at once. Agents keep their names; a new agent gets the new name as its prefix. History
-    keeps the old texts."""
-    with tx(conn):
-        p = _project(conn, old)
-        _new_name(conn, "project", p, new)
-        t = p["name"][len("deploy-"):] if p["name"].startswith("deploy-") else None
-        if t and conn.execute("SELECT 1 FROM targets WHERE name=?", (t,)).fetchone():
-            raise RiverError(f"project {p['name']} holds the deploy items of target {t} and takes its name from "
-                             f"it; rename the target: maxpm target rename {t} <new>")
-        if new.startswith("deploy-") and conn.execute("SELECT 1 FROM targets WHERE name=?", (new[7:],)).fetchone():
-            raise RiverError(f"{new} is the name for the deploy items of target {new[7:]}; pick another name")
-        return _rename_project(conn, p, new, actor)
-
-
-def target_rename(conn, old, new, actor=None):
-    """Give a deploy target a new name, in one transaction: its projects, its deploy and review
-    items (open ones also get the new name in their title), and its deploy project (deploy-<target>)
-    follow. Refused when the new name is in use. The old names stop at once."""
-    with tx(conn):
-        t = _target(conn, old)
-        old = t["name"]
-        _new_name(conn, "target", t, new)
-        dp = conn.execute("SELECT * FROM projects WHERE name=?", (f"deploy-{old}",)).fetchone()
-        if dp is not None:
-            _new_name(conn, "project", dp, f"deploy-{new}")
-        conn.execute("UPDATE targets SET name=? WHERE id=?", (new, t["id"]))
-        projects = conn.execute("UPDATE projects SET target=? WHERE target=?", (new, old)).rowcount
-        items = conn.execute("UPDATE items SET target=? WHERE target=?", (new, old)).rowcount
-        conn.execute("UPDATE hook_runs SET target=? WHERE target=?", (new, old))
-        for kind, was, now_ in (("deploy", f"Deploy {old}", f"Deploy {new}"),
-                                ("review", f"Review release {old}", f"Review release {new}")):
-            conn.execute(f"UPDATE items SET title=? WHERE kind=? AND target=? AND title=? AND status IN {OPEN_STATES}",
-                         (now_, kind, new, was))
-        res = {"name": new, "was": old, "projects": projects, "items": items,
-               "deploy_project": None}
-        if dp is not None:
-            res["deploy_project"] = _rename_project(conn, dp, f"deploy-{new}", actor)["name"]
-            was = f"Deploys to target {old},"
-            if dp["notes"].startswith(was):
-                conn.execute("UPDATE projects SET notes=? WHERE id=?",
-                             (f"Deploys to target {new}," + dp["notes"][len(was):], dp["id"]))
-        _event(conn, None, actor, f"target {old} renamed to {new}")
-    return res
 
 
 # ---------------------------------------------------------------- goals
@@ -4383,15 +4304,6 @@ def ops_edit(conn, scope, name, fields=None, form=None, actor=None):
         _ops_refuse(conn, actor, old, dict(col, scope_kind=old["scope_kind"], scope=old["scope"]))
         changed, c = _ops_update(conn, old, col, actor)
     return {"changed": "changed" if changed else None, "fields": changed, "check": c}
-
-
-def ops_rm(conn, scope, name, actor=None):
-    """maxpm ops rm: remove a check. Its runs and its events stay, so the history of faults stays whole."""
-    with tx(conn):
-        c = _ops_row(_ops_check(conn, scope, name))
-        _ops_refuse(conn, actor, c)
-        _ops_delete(conn, c, actor)
-    return {"changed": "removed", "check": c}
 
 
 # A profile is every check of one project or deploy target, and its ops_* settings, as one JSON file (#5436):
@@ -17472,16 +17384,6 @@ def canvas_answer(conn, ref, decision, answer, actor=None, project=None):
                          actor, {"path": f"decision:{n}", "text": f"Decision {n} of {d['of']}: {d['name']}"},
                          send_now=True)
     return dict(com, decision=n, name=d["name"])
-
-
-def canvas_delete(conn, ref, actor=None, project=None):
-    """Delete a canvas: it leaves every list. Its versions stay in the database, and a put of the same name in
-    the same project brings it back with a new version."""
-    c = _canvas_row(conn, ref, project)
-    with tx(conn):
-        conn.execute("UPDATE canvases SET deleted_at=? WHERE id=?", (iso(now()), c["id"]))
-        _event(conn, c["item_id"], actor, f"canvas {c['name']} deleted")
-    return {"canvas": c["name"], "id": c["id"], "deleted": True}
 
 
 def canvas_save(conn, ref, path, version=None, project=None, force=False):

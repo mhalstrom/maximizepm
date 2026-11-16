@@ -905,8 +905,6 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("text", nargs="?",
                                           help="which tracker, where, what tool: \"github owner/repo via gh\"; none clears it")
     x = prs.add_parser("rank"); x.add_argument("name"); x.add_argument("rank", type=int)
-    x = prs.add_parser("rename", help="give a project a new name; the old name stops at once")
-    x.add_argument("name"); x.add_argument("new")
     x = prs.add_parser("archive", help="archive a project: its items leave the queue and the lists; nothing is deleted")
     x.add_argument("name")
     x = prs.add_parser("restore", aliases=["unarchive"], help="bring an archived project back, with its items")
@@ -1149,7 +1147,6 @@ def build_parser(only=None):
     x = cvs.add_parser("answer", help="answer a decision of a doc (Decision <n> of <m>: ...) in place; it goes to the "
                        "session that writes the doc")
     x.add_argument("name"); x.add_argument("decision", type=int); x.add_argument("text"); x.add_argument("--project")
-    x = cvs.add_parser("delete", help="take a canvas off every list"); x.add_argument("name"); x.add_argument("--project")
     x = cvs.add_parser("save", help="write a version of a canvas as a file (for a page that goes into git)")
     x.add_argument("name"); x.add_argument("path"); x.add_argument("--version", type=int); x.add_argument("--project")
     x.add_argument("--force", action="store_true", help="write over the file")
@@ -1315,11 +1312,10 @@ def build_parser(only=None):
                    help="no owner, ever: maxpm go gives the goal to no agent, nobody can own it, and its items stay "
                    "open to every agent (several agents work on it at the same time). A person or a manager sets it")
     x.add_argument("--owned", dest="shared", action="store_false", help="undo --shared: one agent can own the goal again")
-    for verb in ("own", "take"):
-        x = gls.add_parser(verb, help="own a goal: you create and take the items that reach it; its agent items "
-                           "are reserved for you"); x.add_argument("name")
-        x.add_argument("--lease", help="how long the claim lasts without a maxpm command, and your leases on its "
-                       "items (default: the goal_lease setting, 4h)")
+    x = gls.add_parser("own", help="own a goal: you create and take the items that reach it; its agent items "
+                       "are reserved for you"); x.add_argument("name")
+    x.add_argument("--lease", help="how long the claim lasts without a maxpm command, and your leases on its "
+                   "items (default: the goal_lease setting, 4h)")
     x = gls.add_parser("give", help="hand a goal you own to another agent"); x.add_argument("name")
     x.add_argument("--to", required=True)
     x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
@@ -1457,8 +1453,6 @@ def build_parser(only=None):
     x = ops.add_parser("list", help="the checks, of one project or deploy target or of all")
     x.add_argument("scope", nargs="?")
     x = ops.add_parser("show", help="one check, its last runs and its last changes of state")
-    x.add_argument("scope"); x.add_argument("name")
-    x = ops.add_parser("rm", help="remove a check (its runs and changes of state stay)")
     x.add_argument("scope"); x.add_argument("name")
     x = ops.add_parser("probe", help="one of MaximizePM's own checks, on the Monitoring Plugins API (a status line, "
                        "a line for each subject, exit 0 OK or 2 CRITICAL), for a cmd check with --subject on: "
@@ -1670,8 +1664,6 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--reason", required=True, help="why this release cannot wait")
     x = tgs.add_parser("show", help="a target, its owner, its projects, and when its next release can start")
     x.add_argument("name")
-    x = tgs.add_parser("rename", help="give a target a new name; its projects, deploy items and deploy project follow")
-    x.add_argument("name"); x.add_argument("new")
     x = tgs.add_parser("own", help="become the one owner of a target (runs its deploys)"); x.add_argument("name")
     x.add_argument("--takeover", metavar="WHY", help="take the target from an owner who is away or gone; "
                    "says why, and the old owner is told")
@@ -1894,13 +1886,10 @@ def build_parser(only=None):
     x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder); else the folder "
                                     "for a project that has none: it becomes the project's folder (made when missing)")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
-    x = sub.add_parser("workspace", help="the git worktree of each session (setting workspace): list them, or remove one")
+    x = sub.add_parser("workspace", help="the git worktree of each session (setting workspace)")
     xs = x.add_subparsers(dest="wcmd")
     y = xs.add_parser("list", help="the worktrees, their sessions, and why maxpm serve keeps one after its session ended")
     y.add_argument("--all", action="store_true", help="also the removed ones")
-    y = xs.add_parser("drop", help="remove the worktree and branch of a session that has ended")
-    y.add_argument("session", help="the session's name")
-    y.add_argument("--force", action="store_true", help="also with uncommitted changes or commits that are not merged")
     x = sub.add_parser("expert", help="expert sessions: a session the person talks with for hours or days; it takes no "
                        "queue work, and MaximizePM never ends it as it ends a worker")
     xs = x.add_subparsers(dest="ecmd")
@@ -3916,8 +3905,6 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "visual":  # approve; run and show are plugin lines (run())
         from .plugins import visual
         return visual.approve(conn, a.name, a.shot, actor, a.note)
-    if a.ocmd == "rm":
-        return core.ops_rm(conn, a.scope, a.name, actor)
     if a.ocmd == "pause":
         return core.ops_pause(conn, a.scope, a.name, a.until, a.resume, actor)
     fields = {k: getattr(a, k) for k in _OPS_FIELDS}
@@ -3956,8 +3943,6 @@ def dispatch(conn, a, actor):
             return core.project_target(conn, a.name, a.target, actor)
         if a.pcmd == "tracker":
             return core.project_tracker(conn, a.name, a.text, actor)
-        if a.pcmd == "rename":
-            return core.project_rename(conn, a.name, a.new, actor)
         if a.pcmd == "archive":
             return core.project_archive(conn, a.name, actor)
         if a.pcmd in ("restore", "unarchive"):
@@ -3989,7 +3974,7 @@ def dispatch(conn, a, actor):
             return core.goal_rank(conn, a.name, a.rank, actor)
         if g == "edit":
             return core.goal_edit(conn, a.name, a.outcome, a.done_when, a.rename, actor, a.shared)
-        if g in ("own", "take"):
+        if g == "own":
             return core.goal_own(conn, a.name, actor, a.lease)
         if g == "give":
             return core.goal_give(conn, a.name, a.to, actor, a.no_handoff)
@@ -4013,12 +3998,6 @@ def dispatch(conn, a, actor):
         if g == "reopen":
             return core.goal_reopen(conn, a.name, actor)
     if c == "workspace":
-        if a.wcmd == "drop":
-            args = {"agent": a.session, "force": a.force}
-            if in_sandbox():  # git writes the repository's worktree list, outside the sandbox
-                return ask_server(conn, "workspace_drop", args, actor)
-            from . import server
-            return server.workspace_drop(conn, a.session, a.force, actor)
         return core.workspace_list(conn, removed=getattr(a, "all", False))
     if c == "expert":
         return _expert_cmd(conn, a, actor)
@@ -4102,8 +4081,6 @@ def dispatch(conn, a, actor):
             return core.target_describe(conn, a.name, a.text, actor)
         if a.tcmd == "show":
             return core.target_show(conn, a.name)
-        if a.tcmd == "rename":
-            return core.target_rename(conn, a.name, a.new, actor)
         if a.tcmd == "deployer":
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
         if a.tcmd == "watch":
@@ -5980,8 +5957,6 @@ def _canvas_dispatch(conn, a, actor):
                               actor=actor)
         except RiverError as e:
             raise RiverError(f"the page cannot open it now ({e}); the person sees the canvas in Sessions > Artifacts")
-    if v == "delete":
-        return core.canvas_delete(conn, a.name, actor, a.project)
     if v == "section":
         if sum(x is not None for x in (a.text, a.file, a.pending)) != 1:
             raise RiverError("give the section's text one way: a file, - for stdin, --text, or --pending")
@@ -6388,9 +6363,6 @@ def render_canvas(a, res):
         who = f"the side panel of {res['session']}" if res["session"] else "the side panel"
         print(f"canvas {res['canvas']} opens in {who} on the page (the Sessions tab shows it at once when it shows "
               f"that session; else the page offers a Show button)")
-        return
-    if v == "delete":
-        print(f"canvas {res['canvas']} deleted (a put of the same name brings it back)")
         return
     if v == "save":
         print(f"canvas {res['canvas']} version {res['version']} written to {res['path']}")
@@ -7077,12 +7049,6 @@ def render(a, res):
     if c == "project" and a.pcmd == "tracker":
         print(f"{res['name']}: tracker " + (res["tracker"] or "none"))
         return
-    if c == "project" and a.pcmd == "rename":
-        print(f"project {res['was']} is now {res['name']}: {res['items']} items, {res['goals']} goals, the folder, "
-              f"the rank, the target and the settings follow")
-        print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
-                  "gets the new name")
-        return
     if c == "project" and a.pcmd in ("archive", "restore", "unarchive"):
         n = f"{res['open_items']} open item{'s' * (res['open_items'] != 1)}" + (f" ({res['in_progress']} in progress: {', '.join(res['holders'])})"
                                                  if res["in_progress"] else "")
@@ -7144,15 +7110,13 @@ def render(a, res):
         _print_queue(res)
         return
     if c == "workspace":
-        if isinstance(res, dict):
-            print(f"removed {res['removed']} and its branch {res['branch']}")
-        elif not res:
+        if not res:
             print("No worktrees. The setting workspace (worktree or setup) gives each session one.")
-        for w in res if isinstance(res, list) else ():
+        for w in res:
             gone = w["removed_at"] or w["state"] in ("gone", "stopped")
             print(f"{w['agent']} ({w['project'] or 'no project'}, {'removed' if w['removed_at'] else w['state']}): "
                   f"{w['path']}, branch {w['branch']}"
-                  + (f"\n    kept: {w['kept_why']} (maxpm workspace drop {w['agent']} --force removes it)"
+                  + (f"\n    kept: {w['kept_why']} (merge or commit it, and maxpm serve removes it)"
                      if w["kept_why"] and not w["removed_at"] else "")
                   + ("" if gone else "\n    its session runs"))
         return
@@ -7237,13 +7201,6 @@ def render(a, res):
                       + (f"  owner {t['owner']}" if t["owner"] else ""))
                 if t["description"]:
                     print(f"    {t['description']}")
-            return
-        if a.tcmd == "rename":
-            print(f"target {res['was']} is now {res['name']}: {res['projects']} projects and {res['items']} deploy "
-                  f"and review items follow"
-                  + (f"; its deploy project is now {res['deploy_project']}" if res["deploy_project"] else ""))
-            print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
-                  "gets the new name")
             return
         if a.tcmd == "cut":
             d, ships = res["cut"], res["items"]

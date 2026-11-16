@@ -7470,69 +7470,11 @@ class BusyLease(Base):
         self.assertEqual(core.busy_now(self.c), set())
 
 
-class Rename(Base):
-    """maxpm project rename and maxpm target rename: everything follows, and the old name stops at once."""
-
-    def setUp(self):
-        super().setUp()
-        self.folder = os.path.realpath(self.dir.name)
-        core.target_add(self.c, "site", "push to main")
-        core.project_add(self.c, "old", notes="the tool", path=self.folder, target="site")
-        core.project_add(self.c, "other")
-        core.project_tracker(self.c, "old", "github o/r via gh")
-        core.goal_add(self.c, "old", "launch", "it is live", "the page answers")
-        core.review_step_add(self.c, "old", "read the diff")
-        self.item = self.add("old", "write it")
-        core.register(self.c, "w1")
-        self.c.execute("UPDATE agents SET role='waiting', waiting_in='other,old' WHERE name='w1'")
-
-    def test_everything_of_the_project_follows_the_new_name(self):
-        rank = core._project(self.c, "old")["rank"]
-        res = core.project_rename(self.c, "old", "new", "t")
-        self.assertEqual((res["name"], res["was"], res["items"], res["goals"], res["settings"], res["waiting_agents"]),
-                         ("new", "old", 1, 1, 1, 1))
-        p = core.project_show(self.c, "new")
-        self.assertEqual((p["rank"], p["path"], p["target"], p["tracker"], p["description"]),
-                         (rank, self.folder, "site", "github o/r via gh", "the tool"))
-        self.assertEqual([i["id"] for i in core.item_list(self.c, "new")], [self.item])
-        self.assertEqual([g["name"] for g in core.goal_list(self.c, "new")], ["launch"])
-        self.assertEqual([s["project"] for s in core.review_steps(self.c, "new")], ["new"])
-        self.assertEqual(core.projects_for_dir(self.c, self.folder), ["new"])
-        self.assertEqual(core.item_show(self.c, self.item)["project"], "new")
-        self.assertEqual(self.c.execute("SELECT scope FROM settings WHERE key='tracker'").fetchone()[0], "project:new")
-        self.assertEqual(self.c.execute("SELECT waiting_in FROM agents WHERE name='w1'").fetchone()[0], "other,new")
-        self.assertEqual(core.waiting_agent_for(self.c, "new"), "w1")
-        self.assertIn("project old renamed to new", [e["change"].split(";")[0] for e in core.recent_events(self.c)])
-        # A new agent in the folder gets the new name as its prefix; an agent with the old prefix keeps its name.
-        core.register(self.c, "old-1a2b")
-        self.assertTrue(core.go(self.c, self.folder)["agent"].startswith("new-"))
-        self.assertEqual(core.go(self.c, self.folder, "old-1a2b")["agent"], "old-1a2b")
-
-    def test_the_old_name_is_unknown_at_once(self):
-        res = core.project_rename(self.c, "old", "new", "t")
-        self.assertNotIn("alias_until", res)
-        self.assertNotIn("aliases", core.project_show(self.c, "new"))
-        for call in (lambda: core.project_show(self.c, "old"), lambda: core.item_list(self.c, "old"),
-                     lambda: core.item_add(self.c, "old", "more", actor="t")):
-            with self.assertRaisesRegex(RiverError, "no project 'old'"):
-                call()
-        # The old name is free at once, for a new project or for a rename.
-        self.assertEqual(core.project_add(self.c, "old")["name"], "old")
-        self.assertEqual(core.item_list(self.c, "old"), [])
-
-    def test_a_rename_needs_a_free_name_and_can_go_back(self):
-        for new, why in (("other", "exists"), ("New Name", "lower-case"), ("old", "has that name already")):
-            with self.assertRaisesRegex(RiverError, why):
-                core.project_rename(self.c, "old", new)
-        with self.assertRaisesRegex(RiverError, "no project 'gone'"):
-            core.project_rename(self.c, "gone", "new")
-        core.project_rename(self.c, "old", "new")
-        core.project_rename(self.c, "new", "old")
-        self.assertEqual([i["id"] for i in core.item_list(self.c, "old")], [self.item])
-        with self.assertRaisesRegex(RiverError, "no project 'new'"):
-            core.item_list(self.c, "new")
+class AliasesTable(Base):
+    """An old queue held the old names of renamed projects and targets; connect drops that table (#810)."""
 
     def test_an_old_queue_loses_its_aliases_table(self):
+        core.project_add(self.c, "old")
         self.c.execute("CREATE TABLE aliases (kind TEXT NOT NULL, alias TEXT NOT NULL, ref_id INTEGER NOT NULL, "
                        "created_at TEXT NOT NULL, until TEXT, PRIMARY KEY (kind, alias))")
         self.c.execute("INSERT INTO aliases VALUES ('project', 'older', 1, '2026-10-01T00:00:00Z', '2027-01-01T00:00:00Z')")
@@ -7542,67 +7484,6 @@ class Rename(Base):
         self.c = core.connect(self.path)
         self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='aliases'").fetchone())
         self.assertEqual(core.project_show(self.c, "old")["name"], "old")
-
-    def test_a_target_takes_its_projects_its_items_and_its_deploy_project(self):
-        dep = core.ship(self.c, self.item, "t")
-        core.config_set(self.c, "review", "on", project="deploy-site")
-        self.assertEqual((dep["project"], dep["title"], dep["target"]), ("deploy-site", "Deploy site", "site"))
-        with self.assertRaisesRegex(RiverError, "maxpm target rename site"):
-            core.project_rename(self.c, "deploy-site", "releases")
-        core.target_add(self.c, "taken")
-        with self.assertRaisesRegex(RiverError, "exists"):
-            core.target_rename(self.c, "site", "taken")
-        with self.assertRaisesRegex(RiverError, "deploy items of target taken"):
-            core.project_rename(self.c, "other", "deploy-taken")
-        res = core.target_rename(self.c, "site", "web", "t")
-        self.assertEqual((res["name"], res["was"], res["projects"], res["items"], res["deploy_project"]),
-                         ("web", "site", 2, 1, "deploy-web"))
-        dep = core.item_show(self.c, dep["id"])
-        self.assertEqual((dep["project"], dep["title"], dep["target"]), ("deploy-web", "Deploy web", "web"))
-        self.assertEqual(core.project_show(self.c, "old")["target"], "web")
-        self.assertTrue(core._project(self.c, "deploy-web")["notes"].startswith("Deploys to target web,"))
-        self.assertEqual(core.setting(self.c, "review", item_id=dep["id"]), "on")
-        shown = core.target_show(self.c, "web")
-        self.assertEqual((shown["name"], sorted(p["name"] for p in shown["projects"])), ("web", ["deploy-web", "old"]))
-        self.assertNotIn("aliases", shown)
-        # The old names of the target and of its deploy project are unknown at once.
-        with self.assertRaisesRegex(RiverError, "no target 'site'"):
-            core.target_show(self.c, "site")
-        with self.assertRaisesRegex(RiverError, "no project 'deploy-site'"):
-            core.project_show(self.c, "deploy-site")
-        # The next ship request joins the same deploy item.
-        second = self.add("old", "more")
-        self.assertEqual(core.ship(self.c, second, "t")["id"], dep["id"])
-        self.assertEqual(core.target_own(self.c, "web", "w1")["owner"], "w1")
-        self.assertEqual(core.project_target(self.c, "other", "web")["target"], "web")
-        self.assertEqual([t["name"] for t in core.targets_view(self.c) if t["pending"]], ["web"])
-
-    def test_the_command_renames_and_says_that_the_old_name_stops(self):
-        from river import cli
-        old_env = os.environ.get("MAXPM_DB")
-        os.environ["MAXPM_DB"] = self.path
-        try:
-            def run(*words):
-                out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    cli.run(list(words))
-                return out.getvalue(), err.getvalue()
-            out, err = run("project", "rename", "old", "new")
-            self.assertIn("project old is now new: 1 items, 1 goals", out)
-            self.assertIn("the old name old does not work from now on", out)
-            self.assertNotIn("old name", err)
-            self.assertIn("new  (1 open)  [target site]\n", run("project", "list")[0])
-            out, err = run("target", "rename", "site", "web")
-            self.assertIn("target site is now web: 1 projects and 0 deploy and review items follow", out)
-            self.assertIn("the old name site does not work from now on", out)
-            self.assertTrue(run("target", "show", "web")[0].startswith("web\n"))
-            with self.assertRaises(SystemExit):
-                run("project", "rename", "new", "newer", "--alias-for", "30d")
-        finally:
-            if old_env is None:
-                del os.environ["MAXPM_DB"]
-            else:
-                os.environ["MAXPM_DB"] = old_env
 
 
 class Locked(Base):
@@ -8629,16 +8510,15 @@ class Hooks(Base):
         self.assertEqual([(h["event"], h["command"]) for h in core.target_hook(self.c, "web")["hooks"]], want)
         self.assertEqual([(h["event"], h["command"]) for h in core.target_show(self.c, "web")["hooks"]], want)
         self.assertEqual(core.target_hook(self.c, "web", "deployed")["changed"], None)  # an event alone: a look
-        core.target_rename(self.c, "web", "www", "mark")  # the hooks follow a new name of the target
-        self.assertEqual([(h["event"], h["command"]) for h in core.target_hooks(self.c, "www")], want)
-        r = core.target_hook(self.c, "www", "release-cut", clear=True, actor="mark")
+        self.assertEqual([(h["event"], h["command"]) for h in core.target_hooks(self.c, "web")], want)
+        r = core.target_hook(self.c, "web", "release-cut", clear=True, actor="mark")
         self.assertEqual((r["changed"], [h["event"] for h in r["hooks"]]), ("removed", ["deployed"]))
         with self.assertRaisesRegex(RiverError, "has no release-cut hook"):
-            core.target_hook(self.c, "www", "release-cut", clear=True, actor="mark")
+            core.target_hook(self.c, "web", "release-cut", clear=True, actor="mark")
         with self.assertRaisesRegex(RiverError, "a command or --clear, not both"):
-            core.target_hook(self.c, "www", "deployed", "x", clear=True, actor="mark")
+            core.target_hook(self.c, "web", "deployed", "x", clear=True, actor="mark")
         with self.assertRaisesRegex(RiverError, "the command is empty"):
-            core.target_hook(self.c, "www", "deployed", "  ", actor="mark")
+            core.target_hook(self.c, "web", "deployed", "  ", actor="mark")
         with self.assertRaisesRegex(RiverError, "no target 'nowhere'"):
             core.target_hook(self.c, "nowhere", "deployed", "x")
 
@@ -9989,18 +9869,13 @@ class Canvas(Base):
             cli.render_go(brief)  # it prints the briefing
         self.assertIn("canvas notes v2: 1 open comment(s) wait for a change", buf.getvalue())
 
-    def test_list_delete_bring_back_and_save(self):
+    def test_list_and_save(self):
         core.canvas_put(self.c, "plan", "# Plan", "ag", kind="md")
         core.canvas_comment(self.c, "plan", "x", "mark")
         row = core.canvas_list(self.c, project="web")[0]
         self.assertEqual((row["name"], row["drafts"], row["open_comments"]), ("plan", 1, 0))
         self.assertEqual([r["name"] for r in core.canvas_list(self.c, mine="ag")], ["plan"])
-        core.canvas_delete(self.c, "plan", "ag")
-        self.assertEqual(core.canvas_list(self.c), [])
-        with self.assertRaisesRegex(core.RiverError, "no canvas plan"):
-            core.canvas_show(self.c, "plan")
-        back = core.canvas_put(self.c, "plan", "# Plan 2", "ag")
-        self.assertEqual(back["version"], 2)
+        core.canvas_put(self.c, "plan", "# Plan 2", "ag")
         path = os.path.join(self.dir.name, "out")
         os.mkdir(path)
         saved = core.canvas_save(self.c, "plan", path, version=1)
@@ -10977,12 +10852,9 @@ class OpsSystem(Base):
         self.assertEqual(self.body(), {"code": {"test": "make test"}})
         self.assertEqual(core.ops_system_show(self.c, "shop", version=1)["shown"]["body"]["code"]["build"], "make")
 
-    def test_it_follows_a_rename_and_stays_out_of_the_ops_profile(self):
+    def test_it_stays_out_of_the_ops_profile(self):
         core.ops_system_edit(self.c, "shop", {"infra.rollback": "deploy.sh --rollback"}, actor="mark")
-        core.project_rename(self.c, "shop", "store", actor="mark")
-        self.assertEqual(core.ops_system_show(self.c, "store")["shown"]["body"],
-                         {"infra": {"rollback": "deploy.sh --rollback"}})
-        self.assertNotIn("rollback", json.dumps(core.ops_profile_export(self.c, "store")))
+        self.assertNotIn("rollback", json.dumps(core.ops_profile_export(self.c, "shop")))
 
     def test_the_cli_shows_and_edits_it(self):
         from river import cli
@@ -11061,7 +10933,7 @@ class Ops(Base):
         core.ops_add(self.c, "prod", "api", "url", {"url": "https://example.com/", "repair": "restart"}, actor="mark")
         core.ops_add(self.c, "prod", "disk", "cmd", {"command": "df -h"})  # no name: a person at the terminal
 
-    def test_an_agent_cannot_turn_a_url_check_into_a_command_nor_change_pause_or_remove_a_command_check(self):
+    def test_an_agent_cannot_turn_a_url_check_into_a_command_nor_change_or_pause_a_command_check(self):
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
         with self.assertRaisesRegex(RiverError, "a cmd check"):
             core.ops_edit(self.c, "site", "home", {"command": "true"}, form="cmd", actor="dev")
@@ -11070,8 +10942,7 @@ class Ops(Base):
         self.assertIsNone(core.ops_edit(self.c, "site", "home", {"every": "1m"}, actor="dev")["changed"])
         core.ops_add(self.c, "site", "jobs", "cmd", {"command": "true"}, actor="boss")
         for act in (lambda: core.ops_edit(self.c, "site", "jobs", {"every": "1h"}, actor="dev"),
-                    lambda: core.ops_pause(self.c, "site", "jobs", "2h", actor="dev"),
-                    lambda: core.ops_rm(self.c, "site", "jobs", actor="dev")):
+                    lambda: core.ops_pause(self.c, "site", "jobs", "2h", actor="dev")):
             with self.assertRaisesRegex(RiverError, "only a person or the manager"):
                 act()
         r = core.ops_edit(self.c, "site", "jobs", {"command": "check_jobs --all"}, form="plugin", actor="boss")
@@ -11126,12 +10997,8 @@ class Ops(Base):
         self.assertEqual(core.ops_pause(self.c, "site", "home", resume=True, actor="dev")["check"]["state"], "new")
         with self.assertRaisesRegex(RiverError, "is not paused"):
             core.ops_pause(self.c, "site", "home", resume=True, actor="dev")
-        core.ops_rm(self.c, "site", "home", actor="dev")
         self.assertEqual([(r["key"], r["state"]) for r in self.c.execute("SELECT key, state FROM ops_events ORDER BY id")],
                          [("ops:site:home", "paused"), ("ops:site:home", "resumed")])
-        self.assertTrue(self.history()[-1].startswith("ops check site/home removed (was: url GET"))
-        with self.assertRaisesRegex(RiverError, "site has no check 'home'"):
-            core.ops_show(self.c, "site", "home")
 
     def test_the_command_line_adds_shows_and_refuses_an_unnamed_agent(self):
         from river import cli
@@ -11156,7 +11023,7 @@ class Ops(Base):
         code, out = run("--as", "mark", "ops", "show", "site", "errors")
         self.assertIn("pattern: ERROR", out)
         self.assertIn("a fault for each subject", out)
-        code, out = run("ops", "rm", "site", "errors", env={"CLAUDECODE": "1"})
+        code, out = run("ops", "pause", "site", "errors", "--until", "2h", env={"CLAUDECODE": "1"})
         self.assertEqual(code, 2)
         self.assertIn("name yourself", out)
 

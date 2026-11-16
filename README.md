@@ -254,9 +254,7 @@ maxpm register alex --human --note "owner"       # once per person or agent sess
 export MAXPM_AGENT=alex                          # or put --as alex before the command: maxpm --as alex next
 
 maxpm target add prod-web --description "rsync to the VPS, then restart nginx"
-maxpm project add website --path ~/code/shop --target prod-web --description "Storefront pages in web/; React"
-maxpm project rename website shop                # items, goals, folder and settings follow; the old name stops at once
-maxpm target rename prod-web prod                # its projects and deploy items follow
+maxpm project add shop --path ~/code/shop --target prod-web --description "Storefront pages in web/; React"
 maxpm project show shop                          # its description, who works on it, its ready items
 maxpm go                                         # in ~/code/shop: name, role, item, briefing
 maxpm add shop "Build the checkout page" -p 0 --doer ai --after 3 4
