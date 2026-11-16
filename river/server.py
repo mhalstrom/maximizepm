@@ -1880,6 +1880,25 @@ def revive_sessions(conn, runner=None):
                 core._event(conn, None, "maxpm", f"{name}: its recorded process {pid} ended, but process {live} still "
                                                  f"runs it ({cmd[:80]}); recorded that one, no resume")
             continue
+        # #5980 (fresh_min, policy p154): past its cache time a large chat costs more to resume than a fresh session
+        # that reads the item; its items go back to the queue with CHECK FIRST instead. Not the manager.
+        if a["holds"] and not manager and not a["owns"]:
+            cs = sessions.cache_state(conn, name, found=(kind, path)) or {}
+            limit = core._k_tokens(core.setting(conn, "fresh_min", agent=name))
+            if cs.get("state") == "cold" and (cs.get("context") or 0) > limit:
+                REVIVE["at"][name] = t
+                ended = core.end_cold(conn, name, f"ended with no stop (its process {pid} is gone) after its cache "
+                                                  f"time, with {cs['context']} tokens of context (above fresh_min "
+                                                  f"{limit})")
+                if ended:
+                    to = core.active_manager(conn, but=name)
+                    if to:
+                        with core.tx(conn):
+                            core._send(conn, "notice", "maxpm", f"{name} ended with no stop; its chat is too large to "
+                                       f"resume after its cache time ({cs['context']} tokens, fresh_min {limit}), so "
+                                       f"its items went back to the queue with CHECK FIRST: "
+                                       + ", ".join(f"#{i}" for i in ended["released"]), to=to)
+                continue
         try:
             cwd = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)["cwd"]
         except (OSError, ValueError, EOFError):
@@ -3229,9 +3248,87 @@ def _has_background(conn, agent, news):
     return bool(work)
 
 
+def _chat_of(conn, agent):
+    """The chat of an agent that a late answer may continue (#5980): {agent, kind, path, sid, cwd, context}, or None
+    when its log is not found. context: the tokens its next model call reads (sessions.cache_state)."""
+    from . import sessions
+    try:
+        kind, path = sessions.transcript(conn, agent)
+        if not path:
+            return None
+        ad = sessions._adapter(kind)
+        a = core._agent(conn, agent)
+        sid = a["native_address"] if ad and ad.chat_ref() == "address" else sessions.session_ref(conn, agent, ad, path)
+        cwd = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)["cwd"]
+        cs = sessions.cache_state(conn, agent, found=(kind, path)) or {}
+    except Exception as e:  # noqa: BLE001 - no record: the answer starts a fresh session, as before
+        print(f"_chat_of: {agent}: {type(e).__name__}: {e}", flush=True)
+        return None
+    if not sid:
+        return None
+    return {"agent": agent, "kind": kind, "path": path, "sid": sid, "cwd": cwd, "context": cs.get("context"),
+            "model": a["model"], "session": a["session"]}
+
+
+def _resume_for_answer(conn, item_id, why, runner=None):
+    """A late answer continues the chat that asked (#5980, policy p154): when the item's record (end_for_answer) names
+    a chat whose context is at most fresh_min, whose log is still there, and whose name nobody uses now, that chat
+    resumes in a tmux pane under the same name, with the item reserved for it. Returns the start, or None: then a
+    fresh session starts, as before. The record is used once."""
+    r = conn.execute("SELECT resume_from, project_id FROM items WHERE id=?", (item_id,)).fetchone()
+    if not r or not r["resume_from"]:
+        return None
+    with core.tx(conn):
+        conn.execute("UPDATE items SET resume_from=NULL WHERE id=?", (item_id,))
+    try:
+        c = json.loads(r["resume_from"])
+    except ValueError:
+        return None
+    name, limit = c.get("agent"), core._k_tokens(core.setting(conn, "fresh_min", item_id=item_id))
+    if c.get("context") is None or c["context"] > limit:
+        why_not = (f"its context ({c.get('context')} tokens) is above fresh_min ({limit})" if c.get("context")
+                   else "its context size is not known")
+    elif conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        why_not = f"the name {name} is in use"
+    elif not c.get("path") or not os.path.exists(c["path"]):
+        why_not = "its chat log is gone"
+    else:
+        why_not = None
+    if why_not:
+        with core.tx(conn):
+            core._event(conn, item_id, "maxpm", f"the answer starts a fresh session, not {name}'s chat: {why_not}")
+        return None
+    try:
+        core.register(conn, name, note=f"{core.STARTED_NOTE} #{item_id} (its chat resumes for the answer)")
+        core.push(conn, item_id, name, f"from maxpm serve: {why}; the same chat resumes", "maxpm")
+        platform = core._platform_of(core._adapters().get(c["kind"]))
+        first = (f"{why}: the answer to your question is in the notes of #{item_id}. Run maxpm --as {name} go: it "
+                 f"gives you #{item_id} again.")
+        t = core.resume_command(conn, name, platform, c["sid"], r["project_id"], {"prompt": first, "model": c.get("model")},
+                                transcript=c["path"])
+        spec = {"command": t["command"], "path": c.get("cwd") or core._project(conn, r["project_id"])["path"],
+                "project": name, "session_title": c.get("session") or name, "platform": t.get("platform"),
+                "first_prompt": t.get("first_prompt")}
+        _open_terminal(spec, {**t["env"], "MAXPM_FOCUS": f"item:{item_id}"}, runner, conn)
+    except Exception as e:  # noqa: BLE001 - the start is taken back; a fresh session starts instead
+        try:
+            _undo_start(conn, name, e, item_id=item_id, actor="maxpm")
+        except RiverError:
+            pass
+        return None
+    with core.tx(conn):
+        core._event(conn, item_id, "maxpm", f"{name}'s chat resumes for the answer ({c['context']} tokens of context, "
+                                            f"at most fresh_min {limit})")
+    return {"session_name": name, "resumed": True, "tmux_pane": spec.get("tmux_pane")}
+
+
 def start_fresh(conn, item_id, why, runner=None):
     """Start a new session for one ready item, with the item's model and effort: river names it, reserves the
-    item for it, and opens the agent in the project folder. The item's notes are its context."""
+    item for it, and opens the agent in the project folder. The item's notes are its context. A late answer first
+    tries to continue the chat that asked (_resume_for_answer, #5980)."""
+    resumed = _resume_for_answer(conn, item_id, why, runner)
+    if resumed:
+        return resumed
     it = core.annotate(conn)[item_id]
     p = core._project(conn, it["project"])
     label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
@@ -3328,7 +3425,7 @@ def fresh_sessions(conn, runner=None):
             continue  # its items wait in the queue: a person stopped it, so nothing starts for them by itself
         if agent in asked:
             try:
-                ended = core.end_for_answer(conn, agent, asked[agent])
+                ended = core.end_for_answer(conn, agent, asked[agent], resume=_chat_of(conn, agent))
             except RiverError:
                 ended = None
             if ended:

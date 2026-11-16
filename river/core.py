@@ -466,12 +466,16 @@ DEFAULT_SETTINGS = {
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
-    # expert_fresh_min tokens or more, the page offers a fresh expert that reads only the old one's handoff.
+    # fresh_min tokens or more, the page offers a fresh expert that reads only the old one's handoff.
+    # fresh_min (#5980, policy p154, mark 2026-11-15: one size for all): a session past its cache time with more
+    # context than this gets a fresh session; below it the same chat continues. It decides a late answer (the
+    # session that asked ended after question_wait_end), the resume of a session that ended with no stop
+    # (revive_sessions) when its cache is cold, and the fresh-expert offer.
     # cache_ttl: how long a cache entry lives when the transcript does not say (Claude Code's says: 1h, or 5m in usage
     # overage; a Codex log does not). model_prices: dollars per million tokens of each model family, as
     # input/cache read/5-minute cache write/1-hour cache write/output (Anthropic's prices of 2026-11, output at five
     # times the input for each family, #5857; a model of no family here shows tokens only).
-    "expert_fresh_min": "150k",
+    "fresh_min": "70k",
     "cache_ttl": "5m",
     "model_prices": "fable=8/0.2/10/16/40, opus=4/0.2/5/8/20, sonnet=2/0.1/2.5/4/10, haiku=0.1/0.01/0.125/0.2/0.5",
     # The Sessions tab opens 'Waits for you' by itself for a question of the open session (and when a person picks
@@ -487,7 +491,10 @@ DEFAULT_SETTINGS = {
     # each answer read the whole context again at the cache write price): maxpm serve releases the item, which then
     # waits on the answer (QUESTION_BY), and ends the session; the answer starts a fresh session for the item with the
     # question and the answer in its notes. The prompt cache lasts 1h. 0s: the session waits at its prompt.
-    "question_wait_end": "1h",
+    # Policy p154 (mark 2026-11-15, #5980): it waits while its cache is warm, about 55 minutes (80% of questions to
+    # the person were answered within 1 hour); a later answer continues the same chat when its context is at most
+    # fresh_min, else a fresh session starts.
+    "question_wait_end": "55m",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
     # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
@@ -775,6 +782,7 @@ CREATE TABLE IF NOT EXISTS items (
   takeover_seen     INTEGER NOT NULL DEFAULT 0,
   needs_check       INTEGER NOT NULL DEFAULT 0,
   fresh_start       TEXT,                     -- maxpm serve starts a fresh session for it (an answer came)
+  resume_from       TEXT,                     -- JSON: the chat that a late answer may continue (#5980)
   cut_at            TEXT,                     -- a deploy item: when its release was cut (its list of items is fixed)
   cut_rev           TEXT,                     -- a deploy item: the revision its cut pinned (maxpm target cut --rev)
   model             TEXT,                     -- recommended model (NULL: the default_model setting)
@@ -2445,6 +2453,10 @@ def _migrate(conn):
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
+    if "resume_from" not in icols:  # #5980
+        conn.execute("ALTER TABLE items ADD COLUMN resume_from TEXT")
+    # One size for a fresh session (#5980): expert_fresh_min became fresh_min.
+    conn.execute("UPDATE OR REPLACE settings SET key='fresh_min' WHERE key='expert_fresh_min'")
     if "reserved_for" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN reserved_for TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN hold_expires_at TEXT")
@@ -2972,7 +2984,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
         from . import space
         space.parse_size(value)
-    elif key == "expert_fresh_min":
+    elif key == "fresh_min":
         _k_tokens(value)
     elif key == "ops_deadman_url":
         if value.strip() and not re.match(r"^https?://\S+$", value.strip()):
@@ -9311,31 +9323,59 @@ def waits_ended(conn, waiting, t=None):
     return out
 
 
-def end_for_answer(conn, agent, qid):
+def end_for_answer(conn, agent, qid, resume=None):
     """maxpm serve ends an agent that waited at its prompt for a person's answer for question_wait_end (#5776). Each
     item it holds goes back to the queue with CHECK FIRST (its changes may be in the folder, not committed); the item
-    of the question waits on the answer (_wait_on_question), and the answer starts a fresh session for it with the
-    question and the answer in its notes. Returns {"ended", "why", "released"}, or None when it owns a target or
-    no longer waits (it stays)."""
+    of the question waits on the answer (_wait_on_question), and the answer starts a session for it with the
+    question and the answer in its notes. resume (#5980, policy p154): the chat that the answer may continue
+    ({agent, kind, path, sid, cwd, context}): serve resumes it when its context is at most fresh_min, else starts a
+    fresh session. Returns {"ended", "why", "released"}, or None when it owns a target or no longer waits (it
+    stays)."""
     with tx(conn):
+        if resume and q_item(conn, qid):
+            conn.execute("UPDATE items SET resume_from=? WHERE id=?", (json.dumps(resume), q_item(conn, qid)))
         q = _message(conn, qid)
         if q["state"] != "open" or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone():
             return None
         waited = _short(now() - parse_iso(q["created_at"]))
         why = f"waited {waited} at its prompt for {q['to_agent']}'s answer to question #{qid} (question_wait_end)"
-        released = []
-        for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
-                              (agent,)).fetchall():
-            _add_note(conn, r["id"], f"[maxpm] {agent} {why} and maxpm ended it. CHECK FIRST: its changes may be in the "
-                      f"folder, not committed (git status, git log --grep '#{r['id']}'), and its own notes above say "
-                      f"what is left.")
-            conn.execute("UPDATE items SET needs_check=1 WHERE id=?", (r["id"],))
-            _unhold(conn, r["id"], "maxpm", f"released: {agent} {why}")
-            released.append(r["id"])
+        released = _release_with_check(conn, agent, why)
     out = end_idle(conn, agent, why)
     if out is None:
         return None
     return {**out, "released": released}
+
+
+def _release_with_check(conn, agent, why):
+    """Inside a tx: each item the agent holds goes back to the queue with CHECK FIRST and a note why. The ids."""
+    released = []
+    for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                          (agent,)).fetchall():
+        _add_note(conn, r["id"], f"[maxpm] {agent} {why} and maxpm ended it. CHECK FIRST: its changes may be in the "
+                  f"folder, not committed (git status, git log --grep '#{r['id']}'), and its own notes above say "
+                  f"what is left.")
+        conn.execute("UPDATE items SET needs_check=1 WHERE id=?", (r["id"],))
+        _unhold(conn, r["id"], "maxpm", f"released: {agent} {why}")
+        released.append(r["id"])
+    return released
+
+
+def end_cold(conn, agent, why):
+    """A session that ended with no stop and whose chat is too large to resume after its cache time (#5980,
+    fresh_min): its items go back to the queue with CHECK FIRST, and it is unregistered, so a fresh session takes
+    them. None when it owns a target (it stays for a person to decide)."""
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone():
+            return None
+        released = _release_with_check(conn, agent, why)
+    out = end_idle(conn, agent, why, force=True)  # its process is gone: nobody waits on it at a prompt
+    return {**out, "released": released} if out else None
+
+
+def q_item(conn, qid):
+    """The item of a message, or None."""
+    r = conn.execute("SELECT item_id FROM messages WHERE id=?", (qid,)).fetchone()
+    return r["item_id"] if r else None
 
 
 def target_handoff(conn, name, to, why):
@@ -17250,15 +17290,19 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
     if kind == "question" and item is not None and _is_person(conn, to) and not _is_person(conn, actor):
         it = _item(conn, item)
         if it["assignee"] == actor and it["status"] in ("in_progress", "held") and it["kind"] in ANSWER_KINDS:
-            # #5776 (policy p154): a session that waits at its prompt for hours reads its whole context again at the
-            # cache write price when the answer comes. It ends, and the answer starts a fresh session.
+            # Policy p154 as changed (mark 2026-11-15, #5980): the session waits at its prompt while its cache is warm
+            # (80% of answers come within the hour; the wait costs no tokens). maxpm serve ends it after
+            # question_wait_end; a later answer continues its chat when its context is at most fresh_min, else a
+            # fresh session starts with the question, the answer and its notes.
             end = setting(conn, "question_wait_end", item_id=item, agent=actor)
-            res["then"] = (f"do not wait at your prompt for the answer. Save your work: commit, or name the uncommitted "
-                           f"files in the note. Then: maxpm release {item} --note \"<what is done, what is left, where "
-                           f"the work is>\", and run maxpm go. #{item} waits on the answer, and the answer starts a "
-                           f"fresh session with the question, the answer and your note"
-                           + (f". A session still at its prompt after {end} is ended by maxpm serve"
-                              if parse_duration(end).total_seconds() > 0 else ""))
+            if parse_duration(end).total_seconds() > 0:
+                res["then"] = (f"save your work first: commit, or name the uncommitted files in a note (maxpm send note "
+                               f"\"<what is done, what is left, where>\" --item {item}). Then wait at your prompt: an "
+                               f"answer within {end} comes to you here, and the wait costs nothing. After {end} maxpm "
+                               f"serve ends this session; a later answer continues this chat when its context is small "
+                               f"(fresh_min), else a fresh session starts with the question, the answer and your notes")
+            else:
+                res["then"] = "wait at your prompt for the answer (question_wait_end is 0s: maxpm serve ends no session)"
     if manager and not res["blocked"] and not _is_person(conn, actor):
         # For the sender: how long the manager's watch lets it wait (the command says how to shorten that).
         res["manager_wait"] = setting(conn, "manage_wait_" + res["level"], agent=to)

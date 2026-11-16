@@ -1,7 +1,7 @@
 // The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause its next message
 // reads the whole context again at the cache write price. The badge on its row and in its chat header says warm (with
 // the minutes left) or cold, and what the next message costs; c is sessions.cache_state from the server. Before a
-// message to a cold expert with a large context (c.fresh: expert_fresh_min tokens or more), askCold offers a fresh
+// message to a cold expert with a large context (c.fresh: fresh_min tokens or more), askCold offers a fresh
 // expert that reads only the old one's handoff (op expert_fresh), or Send anyway.
 import { esc } from "../lib.js";
 import { makeDialog } from "./dialog.js";

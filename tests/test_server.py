@@ -3523,6 +3523,42 @@ class LaunchInTmux(unittest.TestCase):
             notify.loop(stop, interval_s=1)
         self.assertEqual(looks, [1])
 
+    def test_fresh_or_the_same_chat_for_a_late_answer_by_the_size_of_its_context(self):
+        """#5980 (policy p154 as changed, mark 2026-11-15): after the cache time, a late answer continues the chat that
+        asked when its context is at most fresh_min (70k), else a fresh session starts that reads the item."""
+        from unittest import mock
+        log = os.path.join(self.dir.name, "chat.jsonl")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        y = core.item_add(self.c, "shop", "publish the shop")["id"]
+
+        def record(item, context):
+            with core.tx(self.c):
+                self.c.execute("UPDATE items SET resume_from=? WHERE id=?", (json.dumps(
+                    {"agent": f"asker-{item}", "kind": "claude", "path": log, "sid": "s-1", "cwd": self.dir.name,
+                     "context": context, "model": None, "session": f"asker-{item}"}), item))
+        record(x, 30_000)
+        record(y, 200_000)
+        resumed = []
+
+        def resume_command(conn, agent, platform, sid, project_id, overrides=None, transcript=None):
+            resumed.append((agent, sid, overrides["prompt"]))
+            return {"command": f"claude --resume {sid}", "env": {"MAXPM_AGENT": agent}, "platform": platform,
+                    "first_prompt": None, "agent": "claude"}
+        with mock.patch.object(core, "resume_command", resume_command):
+            a = server.start_fresh(self.c, x, "an answer came for it")
+            b = server.start_fresh(self.c, y, "an answer came for it")
+        self.assertEqual((a["session_name"], a["resumed"]), (f"asker-{x}", True))
+        self.assertEqual([r[:2] for r in resumed], [(f"asker-{x}", "s-1")])
+        self.assertIn(f"the answer to your question is in the notes of #{x}", resumed[0][2])
+        self.assertEqual(core.item_show(self.c, x)["reserved_for"], f"asker-{x}")
+        self.assertNotEqual(b["session_name"], f"asker-{y}")  # 200k is above fresh_min: a fresh session
+        self.assertTrue(any("above fresh_min" in e["change"] for e in core.item_show(self.c, y)["events"]))
+        self.assertIsNone(self.c.execute("SELECT resume_from FROM items WHERE id=?", (x,)).fetchone()[0])  # used once
+        self.assertEqual(core.DEFAULT_SETTINGS["fresh_min"], "70k")
+        self.assertEqual(core.DEFAULT_SETTINGS["question_wait_end"], "55m")
+
     def test_a_session_that_waits_at_its_prompt_for_an_answer_ends_and_the_answer_starts_a_fresh_one(self):
         """#5776 (mark 2026-11-13, policy p154): four sessions waited 6h to 7.5h at their prompts for mark's 'deploy'
         or 'push', and each answer read the whole context again at the cache write price. The ask tells the worker to
@@ -3548,18 +3584,20 @@ class LaunchInTmux(unittest.TestCase):
             core.activity(self.c, "boss")
             server.watch_busy(self.c)
             return server.fresh_sessions(self.c)
+        core.config_set(self.c, "question_wait_end", "1h")  # the times this test was written for; the default is 55m
         clock[0] += core.timedelta(seconds=1)
         core.activity(self.c, name)
         core.claim(self.c, x, name)
         sent = core.send(self.c, "question", "Push the page?", to="mark", item=x, actor=name)
         q = sent["id"]
-        self.assertIn(f"do not wait at your prompt for the answer. Save your work: commit, or name the uncommitted "
-                      f"files in the note. Then: maxpm release {x} --note", sent["then"])
-        self.assertIn("A session still at its prompt after 1h is ended by maxpm serve", sent["then"])
+        # Policy p154 as changed (#5980): save first, then wait at the prompt while the cache is warm.
+        self.assertIn(f"save your work first: commit, or name the uncommitted files in a note (maxpm send note "
+                      f"\"<what is done, what is left, where>\" --item {x}). Then wait at your prompt", sent["then"])
+        self.assertIn("After 1h maxpm serve ends this session; a later answer continues this chat", sent["then"])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render(cli.build_parser().parse_args(["ask", "mark", "Push?", "--item", str(x)]), [sent])
-        self.assertIn("  Now: do not wait at your prompt", out.getvalue())
+        self.assertIn("  Now: save your work first", out.getvalue())
         # A question to another agent, or about an item it does not hold, gets no such line.
         self.assertNotIn("then", core.send(self.c, "question", "which header?", to="boss", item=x, actor=name))
         pane["screen"] = "⏺ I asked mark and wait for the yes.\n\n╭────╮\n│ >  │\n╰────╯"

@@ -1710,8 +1710,8 @@ class ExpertCache(Base):
         self.assertFalse(c["fresh"])
         c = self.state(61)
         self.assertEqual((c["state"], c["left"], c["next_usd"], c["next_eq"]), ("cold", 0, round(ctx * 8 / 1e6, 4), ctx * 2))
-        self.assertTrue(c["fresh"])  # cold, and 200k tokens is above expert_fresh_min (150k)
-        core.config_set(self.c, "expert_fresh_min", "300k")
+        self.assertTrue(c["fresh"])  # cold, and 200k tokens is above fresh_min (70k)
+        core.config_set(self.c, "fresh_min", "300k")
         self.assertFalse(self.state(61)["fresh"])
         # A later call that only reads keeps the lifetime of the entry it read; a 5-minute write (usage overage)
         # makes it 5m.

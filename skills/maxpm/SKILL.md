@@ -374,13 +374,15 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   marks the item done, a fresh session finishes what is left.
 - A step that must not run without the person's yes each time (a release to
   production, a deletion of data): ask in the queue,
-  `maxpm ask <person> "<what to approve>" --item <the item you hold>`, and do
-  not wait at your prompt for the answer. Commit what is finished (or name the
-  uncommitted files in the note), then `maxpm release <id> --note "<what is
-  done, what is left, where the work is>"` and run `maxpm go`. The item waits
-  on the answer, and the answer starts a fresh session with the question, the
-  answer and your note. A session still at its prompt `question_wait_end` (1h)
-  after its question is ended by `maxpm serve` the same way.
+  `maxpm ask <person> "<what to approve>" --item <the item you hold>`. Save
+  your work first: commit what is finished, or name the uncommitted files in a
+  note (`maxpm send note "<what is done, what is left, where>" --item <id>`).
+  Then wait at your prompt (policy p154): an answer within `question_wait_end`
+  (55m) comes to you there, while your prompt cache is warm, and the wait costs
+  nothing. After that `maxpm serve` ends your session and releases the item,
+  which waits on the answer; a later answer continues your chat when its
+  context is at most `fresh_min` (70k tokens), else a fresh session starts with
+  the question, the answer and your notes.
   For a deletion, or a post that needs the yes on its day, add the ask as a
   person's item instead: `maxpm add "Approve: <what>" --doer human --once`
   (or `--on <day>`, `--blocks <id>`). Right before the step, run
@@ -564,7 +566,7 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
   minutes left, or cold, and what the next message costs. When the user is in
   the middle of a question and your cache goes cold within a few minutes, tell
   the user in one line. When a cold expert has a large context
-  (`expert_fresh_min`, 150k tokens), the page offers a fresh expert on the same
+  (`fresh_min`, 70k tokens), the page offers a fresh expert on the same
   model and task that reads only your notes (`maxpm expert fresh <you>`): your
   notes are then all that it knows.
 

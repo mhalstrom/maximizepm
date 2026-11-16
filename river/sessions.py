@@ -976,7 +976,7 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
     comes from (transcript or setting), context (tokens the next call reads), last_call, model, next_usd and
     next_eq (the cost of the next message's context: at the read price while warm, else at the write price of the
     lifetime in force, in dollars and in input-token equivalents; no dollars for a model of no model_prices family),
-    and fresh: cold with a context of expert_fresh_min or more, so a fresh expert from the handoff costs less."""
+    and fresh: cold with a context of fresh_min or more, so a fresh expert from the handoff costs less."""
     kind, path = found or transcript(conn, name, root, croot)
     if not path:
         return None
@@ -1007,7 +1007,7 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
     else:
         usd, eq = None, context * (core.EQ_READ if warm else core.EQ_WRITE_1H if life >= core.timedelta(hours=1)
                                     else core.EQ_WRITE_5M if write else 1)
-    fresh_min = core._k_tokens(core.setting(conn, "expert_fresh_min", agent=name))
+    fresh_min = core._k_tokens(core.setting(conn, "fresh_min", agent=name))
     return {"state": "warm" if warm else "cold", "until": core.iso(until),
             "left": max(0, int((until - t).total_seconds())), "ttl": ttl, "ttl_from": ttl_from, "context": context,
             "last_call": last["at"], "model": model, "next_usd": round(usd, 4) if usd is not None else None,
