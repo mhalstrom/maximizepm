@@ -13404,3 +13404,103 @@ class SameAnswer(Base):
         self.assertEqual(self.answers(), (None, None, None))  # it starts in a new session on its own model (#5546)
         core.push(self.c, x, "w", "you know the logs", "mark")  # a person may still push one to it
         self.assertEqual(self.answers(), (x, x, x))
+
+
+class Scopes(Base):
+    """#5973: the manager gives a session a scope; the session takes only its scope's tasks, from any folder, and an
+    empty or waiting scope goes to the manager once."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = tempfile.TemporaryDirectory()
+        self.addCleanup(self.other.cleanup)
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.project_add(self.c, "b", path=self.other.name)
+        core.register(self.c, "w")
+        core.register(self.c, "w2")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+
+    def test_scope_limits_go_wait_and_next_to_its_tasks_from_any_folder(self):
+        a1 = core.item_add(self.c, "a", "urgent here", priority=0)["id"]
+        b1 = core.item_add(self.c, "b", "the scope's task")["id"]
+        res = core.scope_set(self.c, "w", ["project:b"], "boss")
+        self.assertEqual((res["text"], res["open"]), ("project b", 1))
+        self.assertEqual(core.next_item(self.c, "a", actor="w"), [])  # outside its scope
+        self.assertIn(f"#{b1}", core._work_for(self.c, "w", ["b"]))
+        b = core.go(self.c, self.dir.name, "w")  # it runs in the folder of a, and takes b's task
+        self.assertEqual((b["item"]["id"], b["scope"]), (b1, "project b"))
+        self.assertIn("Your scope is now project b",
+                      self.c.execute("SELECT body FROM messages WHERE to_agent='w'").fetchone()["body"])
+        # A push or a queue entry from the manager still comes: the manager chose it.
+        core.done(self.c, b1, "ok", "w")
+        core.queue_add(self.c, "w", a1, actor="boss")
+        self.assertEqual(core.go(self.c, self.dir.name, "w")["item"]["id"], a1)
+
+    def test_scope_empty_or_waiting_goes_to_the_manager_once(self):
+        y = core.item_add(self.c, "a", "the base")["id"]
+        x = core.item_add(self.c, "a", "on top", after=[y])["id"]
+        core.claim(self.c, y, "w2")
+        core.scope_set(self.c, "w", [f"tasks:{x}"], "boss")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual((b["role"], b["scope_state"]), ("idle", "waits"))
+        self.assertIn(f"waits on #{y}", b["why"])
+        self.assertIn("held by w2", b["why"])
+        alerts = lambda: [dict(m) for m in self.c.execute(  # noqa: E731
+            "SELECT * FROM messages WHERE to_agent='boss' AND body LIKE '%scope of w %'")]
+        self.assertEqual(len(alerts()), 1)
+        self.assertEqual(alerts()[0]["blocked"], "waits")  # the session stands still: the manager wakes at once
+        core.go(self.c, self.dir.name, "w")
+        self.assertEqual(len(alerts()), 1)  # once per state
+        core.done(self.c, y, "ok", "w2")
+        core.claim(self.c, x, "w")
+        core.done(self.c, x, "ok", "w")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual(b["scope_state"], "empty")
+        self.assertIn("no open task", b["why"])
+        self.assertEqual(len(alerts()), 2)
+
+    def test_scope_a_prerequisite_added_with_blocks_joins_the_scope(self):
+        x = core.item_add(self.c, "a", "the task")["id"]
+        core.scope_set(self.c, "w", [f"tasks:{x}"], "boss")
+        core.claim(self.c, x, "w")
+        p = core.item_add(self.c, "a", "found first", blocks=x, mode="release", actor="w")["id"]
+        self.assertIn(p, core.scope_items(self.c, core.agent_scope(self.c, "w")))
+        self.assertEqual(core.go(self.c, self.dir.name, "w")["item"]["id"], p)
+        # An item that is not its prerequisite stays outside.
+        q = core.item_add(self.c, "a", "something else")["id"]
+        self.assertNotIn(q, core.scope_items(self.c, core.agent_scope(self.c, "w")))
+
+    def test_scope_refusals_and_overlap_warnings(self):
+        core.goal_add(self.c, "a", "g", "the outcome", "it works")
+        core.goal_add(self.c, "a", "g1", "a part", "it works", parent="g")
+        core.item_add(self.c, "a", "part one", goals=["g1"])
+        with self.assertRaisesRegex(RiverError, "a person or a manager gives scopes"):
+            core.scope_set(self.c, "w2", ["goal:g"], "w")
+        core.scope_set(self.c, "w", ["goal:g"], "boss")
+        with self.assertRaisesRegex(RiverError, "w's scope holds goal g"):
+            core.scope_set(self.c, "w2", ["goal:g1"], "boss")  # a sub-goal of a goal another session holds
+        res = core.scope_set(self.c, "w2", ["project:a"], "mark")
+        self.assertEqual([o["agent"] for o in res["overlaps"]], ["w"])
+        with self.assertRaisesRegex(RiverError, "a scope is kind:value"):
+            core.scope_set(self.c, "w2", ["a"], "boss")
+        core.scope_set(self.c, "w2", [], "boss", "end")
+        self.assertIsNone(core.agent_scope(self.c, "w2"))
+
+    def test_scope_command_and_launch(self):
+        from river import cli
+        x = core.item_add(self.c, "b", "for the scope")["id"]
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(list(words))
+            return out.getvalue()
+
+        self.assertIn("w: scope project b (1 open task(s))", run("--as", "boss", "scope", "set", "w", "project:b"))
+        self.assertIn(f"w: scope project b, tasks #{x}", run("--as", "boss", "scope", "widen", "w", f"tasks:{x}"))
+        self.assertIn("w: project b", run("--as", "boss", "scope", "show"))
+        self.assertIn("w: scope none", run("--as", "boss", "scope", "end", "w"))
+        with self.assertRaisesRegex(RiverError, "--scope: w is an agent"):
+            run("--as", "w", "launch", "--project", "b", "--scope", "project:b")

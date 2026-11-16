@@ -1900,6 +1900,9 @@ def build_parser(only=None):
     x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder); else the folder "
                                     "for a project that has none: it becomes the project's folder (made when missing)")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
+    x.add_argument("--scope", action="append", default=[], metavar="KIND:VALUE",
+                   help="the session's scope (maxpm scope set): project:web, goal:checkout, release:web, target:web, "
+                        "tasks:12,13")
     x = sub.add_parser("workspace", help="the git worktree of each session (setting workspace)")
     xs = x.add_subparsers(dest="wcmd")
     y = xs.add_parser("list", help="the worktrees, their sessions, and why maxpm serve keeps one after its session ended")
@@ -1974,6 +1977,19 @@ def build_parser(only=None):
     x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
                                          "and item); --message then types a message into it at once (a person, or the manager)")
     x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
+    x = sub.add_parser("scope", help="the scope of a session (the manager or a person): it takes only these tasks")
+    scs = x.add_subparsers(dest="scmd", required=True)
+    for name, text in (("set", "give a session this scope (it replaces the old one)"), ("widen", "add parts"),
+                       ("narrow", "take parts out")):
+        y = scs.add_parser(name, help=text)
+        y.add_argument("agent")
+        y.add_argument("parts", nargs="+", metavar="KIND:VALUE",
+                       help="project:web, goal:checkout (and its sub-goals), release:web (its reviews and fixes), "
+                            "target:web (its deploys), tasks:12,13")
+    y = scs.add_parser("end", help="the session has no scope again")
+    y.add_argument("agent")
+    y = scs.add_parser("show", help="the scopes of the sessions, with what is open, ready and waiting")
+    y.add_argument("agent", nargs="?")
     q = sub.add_parser("queue", help="one agent's own ordered queue: items it takes first, and instructions")
     qs = q.add_subparsers(dest="qcmd", required=True)
     x = qs.add_parser("add", help="add an item (at the end, --first, or --before <id>) or an instruction (--message); a push of the item to another agent ends, and that agent hears it")
@@ -4041,6 +4057,19 @@ def dispatch(conn, a, actor):
         return core.workspace_list(conn, removed=getattr(a, "all", False))
     if c == "expert":
         return _expert_cmd(conn, a, actor)
+    if c == "launch" and getattr(a, "scope", None):
+        # launch --scope (#5973): the scope is checked first, then the session starts, then it gets the scope.
+        specs, a.scope = a.scope, []
+        why = core.may_change_queue(conn, actor, None)
+        if why:
+            raise RiverError(f"refused: --scope: {why.replace('changes queues', 'gives scopes')}")
+        for s in specs:
+            core.parse_scope(conn, s)
+        res = dispatch(conn, a, actor)
+        name = res.get("session_name") or res.get("pushed_to")
+        if name and not res.get("dry_run"):
+            res["scope"] = core.scope_set(conn, name, specs, actor, "set")
+        return res
     if c == "launch":
         from . import server
         opts = {}
@@ -4104,6 +4133,10 @@ def dispatch(conn, a, actor):
             from . import server
             return server.kill_agent(conn, a.agent, a.reason, actor)  # also an agent with only a tmux pane (#5278)
         return core.stop_agent(conn, a.agent, a.reason, actor)
+    if c == "scope":
+        if a.scmd == "show":
+            return {"scopes": core.scope_show(conn, a.agent)}
+        return core.scope_set(conn, a.agent, getattr(a, "parts", ()), actor, a.scmd)
     if c == "queue":
         if a.qcmd == "add":
             return core.queue_add(conn, a.agent, a.id, a.message, a.first, a.before, actor)
@@ -5036,6 +5069,8 @@ def render_go(b):
     out = []
     out.append(f"You are MaximizePM agent {me}. Role: {'SESSION' if b['role'] == 'plain' else b['role'].upper()}. "
                f"({b['why']})")
+    if b.get("scope"):  # #5973: the manager gave this session a scope
+        out.append(f"SCOPE: {b['scope']}. You take only its tasks; the manager changes it (maxpm scope).")
     if b["role"] == "plain":
         # A session with no item (#5851): the person's own talk, no queue loop.
         off = b.get("queue_off") or []
@@ -7076,6 +7111,19 @@ def render(a, res):
                 print(f"    {p['notes']}")
             if p.get("look") and getattr(a, "pcmd", None) == "add":
                 print("\n".join(look_setup_lines(p["name"], p["look"])))
+        return
+    if c == "scope":
+        if "scopes" in res:
+            if not res["scopes"]:
+                print("(no session has a scope)")
+            for s in res["scopes"]:
+                print(f"{s['agent']}: {s['text'] or 'no scope'} ({s['open']} open, {s['ready']} ready)"
+                      + (f"\n    {s['state']['why']}" if s["text"] and not s["ready"] else ""))
+            return
+        print(f"{res['agent']}: scope {res['text'] or 'none'}" + (f" ({res['open']} open task(s))" if res["text"] else ""))
+        for o in res["overlaps"]:
+            print(f"  overlaps the scope of {o['agent']}: {o['count']} open task(s), "
+                  + ", ".join(f"#{i}" for i in o["items"]) + " (both may take them: narrow one scope if that is wrong)")
         return
     if c == "queue":
         _print_queue(res)

@@ -943,6 +943,10 @@ CREATE TABLE IF NOT EXISTS agents (
   person_said_at TEXT,                       -- the last prompt that a person typed in its chat (its hooks; #5629)
   seen_at        TEXT,                       -- the last time a person had its chat open on the page (status inbox, #5852)
   assistant_for  TEXT,                       -- an assistant session (role assistant): the person whose list it goes through (#5110)
+  scope          TEXT,                       -- the scope the manager gave it (#5973): JSON parts; NULL: none
+  scope_by       TEXT,
+  scope_at       TEXT,
+  scope_told     TEXT,                       -- the last 'scope empty / waits' line the manager got about it
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
 );
@@ -2041,6 +2045,10 @@ def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
+    # The scope of a session (#5973).
+    if "scope" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:
+        for c in ("scope", "scope_by", "scope_at", "scope_told"):
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {c} TEXT")
     # The session of the command that wrote a history entry or sent a message (#5969).
     for t in ("events", "messages"):
         if "session" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}:
@@ -9439,6 +9447,7 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         if blocks is not None:
             _dep_add(conn, int(blocks), iid, actor)
             _prereq_mode(conn, int(blocks), [iid], actor, mode)
+            _scope_join(conn, iid, [int(blocks)])  # a prerequisite of a scope's task joins the scope (#5973)
         if backlog is not None:
             why = backlog.strip() or "added to the backlog"
             conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
@@ -11719,6 +11728,8 @@ def _in_tree(item_id, tree):
 def tree_mode(conn, actor):
     """The tree of this session when auto_continue is tree and it held a task already; else None (any work)."""
     if not actor or setting(conn, "auto_continue", agent=actor) != "tree" or not _is_ai(conn, actor):
+        return None
+    if agent_scope(conn, actor):  # a scope (#5973) takes the place of the tree
         return None
     return session_tree(conn, actor)
 
@@ -14128,6 +14139,11 @@ class WorkView:
                                                     (iso(now() - FRESH_GRACE),))}
         self.still = still_worked(conn) if actor else {}
         self.ops_first = operational_session(conn, actor) if actor else None
+        # Its scope (#5973): only these items, from any folder; a scope takes the place of its tree.
+        self.parts = agent_scope(conn, actor) if actor else None
+        self.scope = scope_items(conn, self.parts) if self.parts else None
+        if self.parts:
+            self.tree = None
 
     def chosen(self, a):
         """The item is this session's by a choice: pushed or given to it, in its own queue, or of a goal it owns."""
@@ -14156,6 +14172,8 @@ def work_refusal(conn, a, view):
         return (f"reserved for {a['reserved_for']}", False)
     if view.tree is not None and a["id"] not in view.tree and not view.chosen(a):
         return ("not in this session's tree", False)
+    if view.scope is not None and a["id"] not in view.scope and not view.chosen(a):
+        return (f"outside this session's scope ({scope_text(view.parts)})", False)
     if a["kind"] == "deploy" and actor and a["target"] not in view.targets:
         return (f"deploys to target {a['target']}, which this session does not own", False)
     if view.kind == "ai" and a["kind"] == "deploy":
@@ -14207,6 +14225,218 @@ def session_work(conn, view, pool, skipped=None):
             skipped.append({"id": a["id"], "title": a["title"], "why": why[0]})
     return sorted(out, key=lambda a: (a["id"] not in view.qpos, view.qpos.get(a["id"], 0),
                                       not (a["reserved_for"] == view.actor and a["reserved_until"])))
+
+
+# ---------------------------------------------------------------- scopes (#5973)
+#
+# The manager gives a session a scope (mark 2026-11-15, talk #5935): a project, a goal with its sub-goals, a release
+# (the reviews of a target, and their fixes), a target (its deploys), or a list of tasks. The session then takes only
+# its scope's tasks (work_refusal), from any folder; an item pushed or queued to it still comes. A prerequisite added
+# with --blocks to a task of the scope joins the scope; one outside it makes the task wait. When nothing in the scope
+# can move, go says why, and the manager hears it once. A session with no scope works as before.
+
+SCOPE_KINDS = ("project", "goal", "release", "target", "tasks")
+
+
+def agent_scope(conn, agent):
+    """The parts of an agent's scope ([{'kind', 'value'}]), or None when it has none."""
+    r = conn.execute("SELECT scope FROM agents WHERE name=?", (agent,)).fetchone() if agent else None
+    return json.loads(r["scope"]) if r and r["scope"] else None
+
+
+def scope_text(parts):
+    return ", ".join(f"{p['kind']} " + (", ".join(f"#{i}" for i in p["value"]) if isinstance(p["value"], list)
+                                        else p["value"]) for p in parts or [])
+
+
+def parse_scope(conn, spec):
+    """One part of a scope from 'kind:value' (project:web, goal:g, release:web, target:web, tasks:12,13)."""
+    kind, sep, value = str(spec).partition(":")
+    kind, value = kind.strip(), value.strip()
+    if not sep or kind not in SCOPE_KINDS or not value:
+        raise RiverError(f"a scope is kind:value, kind one of {', '.join(SCOPE_KINDS)}: project:web, goal:checkout, "
+                         f"release:web, target:web, tasks:12,13")
+    if kind == "project":
+        value = _project(conn, value)["name"]
+    elif kind == "goal":
+        value = _goal(conn, value)["name"]
+    elif kind in ("release", "target"):
+        value = _target(conn, value)["name"]
+    else:
+        ids = [int(x) for x in re.split(r"[,\s]+", value.replace("#", "")) if x]
+        for i in ids:
+            _item(conn, i)
+        value = ids
+    return {"kind": kind, "value": value}
+
+
+def scope_items(conn, parts, ann=None):
+    """The ids of the items in a scope: open and closed, so a closed task still counts as the scope's."""
+    ann = ann if ann is not None else annotate(conn, closed=False)
+    out = set()
+    for p in parts or []:
+        k, v = p["kind"], p["value"]
+        if k == "project":
+            out |= {i for i, a in ann.items() if a["project"] == v}
+        elif k == "goal":
+            goals = {v} | {r["name"] for r in conn.execute(
+                "SELECT c.name FROM goals c JOIN goals g ON g.id=c.parent_id WHERE g.name=?", (v,))}
+            out |= {i for i, a in ann.items() if goals & set(a["goals"] or [])}
+        elif k == "release":
+            reviews = {i for i, a in ann.items() if a["kind"] == "review" and a["target"] == v}
+            out |= reviews | {b for r in reviews for b in ann[r]["waits_on"]
+                              if b in ann and ann[b]["kind"] == "fixes"}
+        elif k == "target":
+            out |= {i for i, a in ann.items() if a["kind"] == "deploy" and a["target"] == v}
+        else:  # tasks, joined
+            out |= set(v)
+    return out
+
+
+def _open_in(ann, ids):
+    """The annotated open items among ids (a closed task of a scope is not in ann)."""
+    return [ann[i] for i in ids if i in ann and ann[i]["status"] in OPEN_STATES]
+
+
+def _live_scopes(conn, but=None):
+    """{agent: parts} of the sessions that have a scope and have not ended."""
+    out = {}
+    for r in conn.execute("SELECT * FROM agents WHERE scope IS NOT NULL AND kind='ai'"):
+        if r["name"] != but and _agent_state(conn, r) not in ("gone", "stopped"):
+            out[r["name"]] = json.loads(r["scope"])
+    return out
+
+
+def scope_set(conn, agent, specs=(), actor=None, mode="set"):
+    """The manager (or a person) gives agent a scope (mode set), adds parts (widen), takes parts out (narrow), or
+    ends it (end). Refused: a release scope for a session that worked on that release, and a goal that another
+    session's scope holds (or a goal above or below it). Returns the scope, and the sessions whose scopes overlap
+    (a warning: no automatic conflict links)."""
+    why = may_change_queue(conn, actor, agent)
+    if why:
+        raise RiverError(f"refused: {why.replace('changes queues', 'gives scopes').replace('queue', 'scope')}")
+    ag = _agent(conn, agent)
+    if ag["kind"] != "ai":
+        raise RiverError(f"{agent} is a person; a scope is for an agent session")
+    parts = [parse_scope(conn, s) for s in specs]
+    if mode in ("set", "widen", "narrow") and not parts:
+        raise RiverError(f"name the scope: maxpm scope {mode} {agent} <kind:value> ...")
+    old = agent_scope(conn, agent) or []
+    if mode == "set":
+        new = parts
+    elif mode == "widen":
+        new = old + [p for p in parts if p not in old]
+    elif mode == "narrow":
+        new = [p for p in old if p not in parts]
+    else:
+        new = []
+    ann = annotate(conn, closed=False)
+    for p in new:
+        if p["kind"] == "release":
+            for r in scope_items(conn, [p], ann):
+                if ann[r]["kind"] == "review" and ann[r]["status"] in OPEN_STATES and reviewer_refusal(conn, ann[r], agent):
+                    raise RiverError(f"refused: {agent} may not review release {p['value']} (#{r}): "
+                                     f"{reviewer_refusal(conn, ann[r], agent)}. A new session reviews it")
+        if p["kind"] == "goal":
+            mine = _goal_family(conn, p["value"])
+            for other, oparts in _live_scopes(conn, but=agent).items():
+                held = {q["value"] for q in oparts if q["kind"] == "goal"} & mine
+                if held:
+                    raise RiverError(f"refused: {other}'s scope holds goal {', '.join(sorted(held))}: one session "
+                                     f"works on a goal and its sub-goals. Narrow {other}'s scope first "
+                                     f"(maxpm scope narrow {other} goal:{sorted(held)[0]}), or give another goal")
+    ids = scope_items(conn, new, ann)
+    overlaps = []
+    for other, oparts in _live_scopes(conn, but=agent).items():
+        both = {a["id"] for a in _open_in(ann, ids & scope_items(conn, oparts, ann))}
+        if both:
+            overlaps.append({"agent": other, "items": sorted(both)[:10], "count": len(both)})
+    t = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE agents SET scope=?, scope_by=?, scope_at=?, scope_told=NULL WHERE name=?",
+                     (json.dumps(new) if new else None, actor, t, agent))
+        _event(conn, None, actor, f"scope of {agent}: {scope_text(new) or 'none'}")
+        _send(conn, "notice", COMMAND, (f"Your scope is now {scope_text(new)}: you take only its tasks. Run maxpm go."
+                                        if new else "Your scope ended: run maxpm go."), to=agent)
+    return {"agent": agent, "scope": new, "text": scope_text(new), "open": len(_open_in(ann, ids)), "overlaps": overlaps}
+
+
+def _goal_family(conn, name):
+    """The goal, its parent, and its sub-goals: one session works on them."""
+    g = _goal(conn, name)
+    out = {g["name"]} | {r["name"] for r in conn.execute("SELECT name FROM goals WHERE parent_id=?", (g["id"],))}
+    if g["parent_id"]:
+        out |= {r["name"] for r in conn.execute("SELECT name FROM goals WHERE id=?", (g["parent_id"],))}
+    return out
+
+
+def scope_show(conn, agent=None):
+    """The scopes of the live sessions (or of one agent), each with its open, ready and waiting tasks."""
+    ann = annotate(conn, closed=False)
+    rows = {agent: agent_scope(conn, agent) or []} if agent else _live_scopes(conn)
+    out = []
+    for name, parts in sorted(rows.items()):
+        open_ = _open_in(ann, scope_items(conn, parts, ann))
+        out.append({"agent": name, "scope": parts, "text": scope_text(parts), "open": len(open_),
+                    "ready": len([a for a in open_ if a["ready"]]), "state": scope_state(conn, name, parts, ann)})
+    return out
+
+
+def scope_state(conn, agent, parts, ann):
+    """Why a scoped session has nothing to take: 'empty' (no open task), or what its first waiting task waits on."""
+    open_ = sorted((a for a in _open_in(ann, scope_items(conn, parts, ann)) if not a["backlog"]),
+                   key=lambda a: a["sort_key"])
+    if not open_:
+        return {"state": "empty", "why": f"your scope ({scope_text(parts)}) has no open task"}
+    held = [a for a in open_ if a["status"] in ("in_progress", "held") and a["assignee"] != agent]
+    for a in open_:
+        for b in a["open_blockers"]:
+            if b in ann:
+                who = ann[b]["assignee"] or ("a person" if ann[b]["doer"] == "human" else None)
+                return {"state": "waits", "item": b, "holder": who,
+                        "why": f"your scope ({scope_text(parts)}) waits on #{b} {ann[b]['title']}"
+                               + (f" (held by {who})" if who else "")}
+        if a["blocked_reason"]:
+            return {"state": "waits", "item": a["id"], "holder": None,
+                    "why": f"your scope ({scope_text(parts)}) waits on #{a['id']}: {a['blocked_reason']}"}
+    if held:
+        return {"state": "waits", "item": held[0]["id"], "holder": held[0]["assignee"],
+                "why": f"your scope ({scope_text(parts)}): #{held[0]['id']} is held by {held[0]['assignee']}"}
+    return {"state": "waits", "item": open_[0]["id"], "holder": None,
+            "why": f"your scope ({scope_text(parts)}) has no task that this session may take now"}
+
+
+def _tell_scope_state(conn, agent, st):
+    """Tell the manager once (per state line) that a scoped session has nothing to take: one message, from MaximizePM,
+    blocked when the whole scope waits (the session stands still until the manager widens it or reassigns)."""
+    r = conn.execute("SELECT scope_told FROM agents WHERE name=?", (agent,)).fetchone()
+    line = st["why"].replace("your scope", f"the scope of {agent}")
+    if not r or r["scope_told"] == line:
+        return
+    to = active_manager(conn)
+    with tx(conn):
+        conn.execute("UPDATE agents SET scope_told=? WHERE name=?", (line, agent))
+        if to and to != agent:
+            _send(conn, "alert", COMMAND, f"{line}: give it a new scope (maxpm scope set {agent} <kind:value>), widen "
+                                          f"it, or end the session (maxpm stop {agent})", to=to, blocked="waits")
+
+
+def _scope_join(conn, new_id, blocked_ids):
+    """Inside a tx: a prerequisite added with --blocks to a task of a scope joins that scope (#5973)."""
+    rows = conn.execute("SELECT name, scope FROM agents WHERE scope IS NOT NULL").fetchall()
+    if not rows or not blocked_ids:
+        return
+    ann = annotate(conn, closed=False)
+    for r in rows:
+        parts = json.loads(r["scope"])
+        if set(blocked_ids) & scope_items(conn, parts, ann) and new_id not in scope_items(conn, parts, ann):
+            joined = next((p for p in parts if p["kind"] == "joined"), None)
+            if joined is None:
+                parts.append({"kind": "joined", "value": [new_id]})
+            else:
+                joined["value"].append(new_id)
+            conn.execute("UPDATE agents SET scope=? WHERE name=?", (json.dumps(parts), r["name"]))
+            _event(conn, new_id, COMMAND, f"joined the scope of {r['name']} (it blocks a task of it)")
 
 
 def _reviews_for(conn, ann, view, names, any_project=False):
@@ -20688,6 +20918,11 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         set_agent_type(conn, actor, agent_type)
     with tx(conn):
         conn.execute("UPDATE agents SET role=NULL WHERE name=? AND role='planner'", (actor,))
+    scope = agent_scope(conn, actor)
+    if scope and not project:  # a scoped session works on its scope's projects, from any folder (#5973)
+        ann = annotate(conn, closed=False)
+        names = sorted({a["project"] for a in _open_in(ann, scope_items(conn, scope, ann))}) or names
+        area = ",".join(names)
 
     ann = annotate(conn, closed=False)
     descs = {p["name"]: p["notes"] for p in project_list(conn) if p["name"] in names}
@@ -20700,6 +20935,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                                            for d in a["unblocks"] if ann[d]["status"] in OPEN_STATES]}
                                for a in human_ready],
              "has_history": bool(history(conn, actor, limit=1)),
+             "scope": scope_text(scope) if scope else None,
              "auto_continue": setting(conn, "auto_continue", agent=actor) in ("on", "tree"),
              "continue_mode": setting(conn, "auto_continue", agent=actor),
              "session": _agent(conn, actor)["session"],
@@ -20996,6 +21232,16 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             _set_role_note(conn, actor, "unblocker", item["id"])
             return brief
 
+    if scope and role in (None, "worker", "owner", "unblocker"):
+        # A scoped session takes nothing outside its scope (#5973): it says why its scope cannot move, and the
+        # manager hears it once.
+        st = scope_state(conn, actor, scope, annotate(conn, closed=False))
+        _tell_scope_state(conn, actor, st)
+        brief.update(role="idle", item=None, held_by_others=[], scope_state=st["state"],
+                     why=st["why"] + (": the manager gives you a new scope" if st["state"] == "empty"
+                                      else ": the manager widens your scope or gives the task to another session"))
+        _set_role_note(conn, actor, "idle", None)
+        return brief
     if brief.get("goal_action") == "wait":
         brief.update(role="owner", item=None,
                      why=f"the open items of your goal {brief['goal']['name']} wait on other sessions or people")
@@ -21258,6 +21504,10 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
                          f"and MaximizePM never ends it for that. Answer the person; maxpm --as {actor} go shows your "
                          f"news")
     names = _names(conn, project) if project else projects_for_dir(conn, cwd)
+    scope = agent_scope(conn, actor)
+    if scope and not project:  # as go: a scoped session works on its scope's projects (#5973)
+        ann = annotate(conn, closed=False)
+        names = sorted({a["project"] for a in _open_in(ann, scope_items(conn, scope, ann))}) or names
     role = focus_role(focus)
 
     def stopped():

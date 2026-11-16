@@ -301,6 +301,12 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm launch` then asks the running `maxpm serve` to open the session. The sandbox must allow the host
   `127.0.0.1:<serve_port>` (8765) for that command (Claude Code: the command's `allowed_domains`); the error
   names it. `maxpm view` needs a terminal outside the sandbox.
+- `maxpm scope set|widen|narrow <agent> <kind:value> ...`, `maxpm scope end <agent>`, `maxpm scope show`
+  (or `maxpm launch ... --scope <kind:value>`): the session takes only these tasks, from any folder:
+  `project:P`, `goal:G` (with its sub-goals), `release:T` (the reviews of target T and their fixes),
+  `target:T` (its deploys), `tasks:12,13`. A prerequisite added to a scope task joins the scope. When the
+  scope is empty or waits, you get one blocked alert: give a new scope, widen it, or stop the session.
+  Refused: a release a session worked on, a goal that another session's scope holds.
 - `maxpm queue add <agent> <id> [--first|--before <id>]`, `maxpm queue add <agent> --message "..."`,
   `maxpm queue list|move|remove`: an agent's own queue comes before the project queue.
 - `maxpm note|alert|ask <agent> "..."`: messages (they also go through the
