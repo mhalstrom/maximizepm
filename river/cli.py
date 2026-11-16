@@ -796,10 +796,10 @@ def _fmt_msg(m, indent="", states=False):
     return "\n".join(lines)
 
 
-LEVEL_HELP = ("to the manager: how long it waits before it wakes the manager's watch: high (the default; "
-              "manage_wait_high, 10m) or low (manage_wait_low, 30m); with --blocked it does not wait")
-BLOCKED_HELP = ("your item cannot move until the answer: you have no other part of it to do, and nobody else can do "
-                "the next step; it wakes the manager's watch at once")
+LEVEL_HELP = ("a person's message to the manager: high (the default; manage_wait_high, 10m) or low (manage_wait_low, "
+              "30m). An agent's level counts no more: its state escalates (#5976)")
+BLOCKED_HELP = ("a person's message that cannot wait wakes the manager's watch at once. An agent's flag counts no more: "
+                "its message escalates when it stops working (#5976)")
 
 
 class _Null:
@@ -2859,6 +2859,13 @@ def _run(args, conn):
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
     _rights(conn, args, actor)  # the permission table (#5974)
+    # Escalation by state (#5976, mark 2026-11-15: the session does not set the priority): an agent's --blocked and
+    # --level of a message change nothing; its message escalates when it stops working (core.escalate_by_state).
+    if args.cmd != "secret" and (_inside_agent() or (actor and core._is_ai(conn, actor))):
+        if getattr(args, "blocked", None) is True:
+            args.blocked = False
+        if getattr(args, "level", None) in core.MESSAGE_LEVELS:
+            args.level = None
     if args.cmd not in ("go", "plan"):
         core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
@@ -7483,10 +7490,9 @@ def render(a, res):
         for m in res if isinstance(res, list) else [res]:
             to = m["to_agent"] or f"the next holder of #{m['item_id']} (nobody holds it now)"
             if m.get("manager_wait") and m["kind"] in ("alert", "question"):
-                # The place where a sender learns the flag (#1608): six of ten such messages came from a
-                # sender that went on with its item (#1597).
-                more = (f" (the manager's watch brings it within {m['manager_wait']}; with --blocked at once: use it "
-                        f"when your item cannot move until the answer)")
+                # Escalation by state (#5976): the sender learns when the manager sees it.
+                more = (f" (the manager's watch brings it within {m['manager_wait']}; at once when you stop working: "
+                        f"maxpm wait, the end of your turn, a release of its item)")
             else:
                 more = f" (native: {m['native_status']})" if m.get("native_status") else ""
             print(f"sent #{m['id']} {m['kind']} to {to}" + (", blocked" if m.get("blocked") else "") + more)

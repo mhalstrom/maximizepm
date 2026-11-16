@@ -549,7 +549,7 @@ def loop(stop, interval_s=None):
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)
                 server.paste_answers,  # an answer for an asker that waits at its prompt: type it there (#5303)
                 server.paste_pending,  # a message held during a turn: type it at the idle prompt (#5587)
-                core.activity_watch,  # an agent whose hooks reported nothing for activity_silence: tell the manager
+                core.escalate_by_state,  # a message to the manager whose sender stopped working wakes it now (#5976)
                 server.watch_busy,  # an agent that is busy with no river command keeps its leases
                 core.sample_sessions,  # once a minute: what each live session does, for maxpm health (#5352)
                 core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person

@@ -65,9 +65,12 @@ MESSAGE_STATES = ("open", "accepted", "declined", "answered", "read")
 MESSAGE_LEVELS = ("high", "low")
 DEFAULT_LEVEL = "high"
 WAKE_LEVEL = "now"  # river's own notice that wakes the manager's watch at once (_wake_manager); no sender picks it
-# What messages.blocked holds: who said that the message's item stands still. sender: the flag --blocked. waits:
-# the sender then ran maxpm inbox --wait. item: the sender released or blocked the item near the send.
-BLOCKED_SIGNS = ("sender", "waits", "item")
+# What messages.blocked holds: why the message escalated, so the manager's watch wakes at once. Escalation by state
+# (#5976, mark 2026-11-15: 'the session does not set the priority; when the agent stops being active, maxpm
+# escalates'): waits: the sender then ran maxpm wait or inbox --wait; item: it released or blocked the item; idle: its
+# turn ended (its hooks or pane); gone: its session ended or its process is gone. sender: a person's or MaximizePM's
+# own message that cannot wait (an agent's --blocked no longer counts).
+BLOCKED_SIGNS = ("sender", "waits", "item", "idle", "gone")
 # MaximizePM marks an alert or a question to a manager as blocked when its sign comes this long before or after
 # the send (#1597: one of the two signs showed 39 of the 50 messages whose item stood still).
 BLOCKED_WINDOW = timedelta(minutes=3)
@@ -15818,27 +15821,6 @@ def _talk(prompt):
     return bool(text) and not text.startswith(("<task-notification", "[maxpm "))
 
 
-TURN_END_NOTE = "it ended its turn while it holds"  # the text of the turn-end alert after ACTIVITY_NOTE
-
-
-def _turn_end_told(conn, agent, item, said_at):
-    """Inside a tx. True when a turn end of the agent with item in hand is no news for the manager (#5812, #5773): the
-    person typed in the agent's chat in the last activity_silence (the turn end answers the person, who sees the
-    session), or the manager got a turn-end alert about this item in this hold within activity_silence (read or
-    not: the session ends its turn again after each note of the manager or line of the person, and each alert
-    woke the manager again). A stand that lasts gets the silence alert of activity_watch."""
-    window = parse_duration(setting(conn, "activity_silence", item_id=item, agent=agent))
-    t = now()
-    if window and said_at and t - parse_iso(said_at) < window:
-        return True
-    claimed = conn.execute("SELECT claimed_at FROM items WHERE id=?", (item,)).fetchone()["claimed_at"]
-    since = max(filter(None, [claimed, iso(t - window) if window else None]), default=None)
-    head = f"{agent} {ACTIVITY_NOTE}: {TURN_END_NOTE}"
-    return bool(conn.execute(
-        "SELECT 1 FROM messages WHERE kind='alert' AND from_agent=? AND item_id=? AND substr(body, 1, ?)=? "
-        "AND created_at>=?", (agent, item, len(head), head, since or "")).fetchone())
-
-
 def _activity_item(conn, agent):
     """The item whose holder the stand-still and silence alerts are about; a test-tier task waits by design (#5565)."""
     return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' "
@@ -15854,12 +15836,11 @@ def hook_report(conn, agent_id, payload, env=None):
     """maxpm report --hook <agent>: an agent's hook passes its own input on stdin, and the adapter's read_hook says
     what it means (a hook report: river/agents HOOK_REPORT_KEYS). Stored as maxpm report stores a state:
     activity_at, activity_event 'report:<state>' (a report with no state keeps only the time), and for a blocked
-    call the tool call that waits (activity_prompt; working clears it). A permission prompt that shows, or a turn
-    that ends, while the agent holds an item alerts the active manager at once (_activity_alert): not a turn end
-    while the agent waits on a person's answer (maxpm ask), has a stop request, or waits on its own background
-    work (the report's waits: a background command or subagent, a wakeup; recorded in activity_waits until its
-    next working report, #4293). That work wakes the session, and its next turn end is judged again. Nor a turn end
-    in a talk with the person, or a repeat within activity_silence (_turn_end_told). A prompt that
+    call the tool call that waits (activity_prompt; working clears it). A permission prompt that shows while the
+    agent holds an item alerts the active manager at once (_activity_alert). A turn end records the background work
+    that will wake the session (the report's waits: a background command or subagent, a wakeup; activity_waits until
+    its next working report, #4293); with none, the session's open messages to the manager escalate
+    (escalate_by_state, #5976). A prompt that
     a person typed (working with a prompt) closes the questions it answers and moves the clock of maxpm wait.
     Returns {"agent", "event", "state", "prompt": bool, "alert": message id or None, "answered", "remind"}."""
     from . import agents
@@ -15912,11 +15893,8 @@ def hook_report(conn, agent_id, payload, env=None):
                                 + (f"; it asks to run {call}" if call else "")
                                 + f" ({(rep['message'] or '')[:160]}). Answer it in its terminal or "
                                   f"its session, or tell the person.")
-        elif held and state == "idle" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]) \
-                and not _turn_end_told(conn, agent, held["id"], a["person_said_at"]):
-            alert = _activity_alert(conn, agent, held["id"],
-                                f"{TURN_END_NOTE} #{held['id']} {held['title'][:80]}: it sits at its "
-                                f"prompt and runs no maxpm wait. Look at its terminal or session.")
+        # A turn end no longer alerts the manager (#5976: false alarms #5565, #5773, #5812): the session's open
+        # messages to the manager escalate by its state instead (escalate_by_state).
         if alert:
             conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
         if state == "idle" and not rep["again"]:
@@ -15978,34 +15956,9 @@ def _state_source(conn, agent):
     return (a.state or {}).get("state") if a else None
 
 
-def activity_watch(conn):
-    """One look of maxpm serve (each pass): an agent with hooks that holds an item and reported no hook event
-    and ran no maxpm command for activity_silence alerts the active manager, once for each silence. Not an agent
-    in maxpm wait, one that waits on a person's answer, one with a stop request, or one that runs a background
-    command: one whose last turn ended while its own background work runs (activity_waits, for at most busy_max),
-    or one with a process below it (busy_now). Returns the agents it alerted about."""
-    told = []
-    silent = silent_holders(conn)
-    if not silent:
-        return []
-    with tx(conn):
-        for s in silent:
-            r, held, t = s["row"], s["held"], now()
-            quiet = _short(t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])))
-            call = _activity_call(r["activity_prompt"])
-            last = (f"it waits on a permission prompt for {call}" if call
-                    else f"its last event: {r['activity_event']} at {show_time(r['activity_at'])}")
-            if _activity_alert(conn, r["name"], held["id"], f"nothing for {quiet} while it holds #{held['id']} "
-                           f"{held['title'][:80]} ({last}). Look at its terminal or session."):
-                told.append(r["name"])
-            conn.execute("UPDATE agents SET activity_told=activity_at WHERE name=?", (r["name"],))
-    return told
-
-
 def silent_holders(conn, told_too=False):
-    """The agents that activity_watch alerts about (it reads no more than this): each {"row", "held", "quiet"}.
-    told_too: also those it told already about this silence (the probe stuck-session, #5440, reports a silence for as
-    long as it lasts)."""
+    """The agents that hold an item and reported nothing for activity_silence: each {"row", "held", "quiet"}. The probe
+    stuck-session (#5440) reads them (told_too: also those it reported already, for as long as the silence lasts)."""
     limit = parse_duration(setting(conn, "activity_silence"))
     if not limit:
         return []
@@ -16562,6 +16515,47 @@ def _raise_blocked(conn, sender, sign, item_id=None):
         (sign, sender, iso(now() - BLOCKED_WINDOW), item_id, item_id)).rowcount
 
 
+ESCALATE_WITHIN = timedelta(days=1)  # older unread messages to a manager stay as they are
+
+
+def escalate_by_state(conn):
+    """Escalation by state (#5976): an alert or a question to a manager that nobody read wakes the manager's watch at
+    once when its sender stopped working after it sent it: its session ended or its process is gone (gone), it runs
+    maxpm wait (waits), its turn ended with no background work of its own (idle; not an expert, assistant or plain
+    session, which wait at their prompt for a person), or it released the message's item (item). maxpm serve runs it
+    each pass, and the manager's watch at each poll. Returns the ids of the messages it escalated."""
+    rows = conn.execute(
+        "SELECT m.id, m.from_agent, m.item_id, m.created_at FROM messages m WHERE m.blocked IS NULL AND m.read_at IS NULL "
+        "AND m.kind IN ('alert','question') AND m.from_agent<>? AND m.created_at>=? "
+        "AND m.to_agent IN (SELECT name FROM agents WHERE role='manager')",
+        (COMMAND, iso(now() - ESCALATE_WITHIN))).fetchall()
+    out = []
+    for m in rows:
+        a = conn.execute("SELECT * FROM agents WHERE name=?", (m["from_agent"],)).fetchone()
+        if a is not None and a["kind"] != "ai":
+            continue  # a person's message wakes the watch at once anyway
+        sign = None
+        if a is None or _agent_state(conn, a) == "gone" or (a["activity_event"] == REPORT_GONE
+                                                           and (a["activity_at"] or "") >= m["created_at"]):
+            sign = "gone"
+        elif a["role"] == "manager":
+            continue  # one manager's message to the next one
+        elif a["role"] == "waiting" and (a["waiting_since"] or "") >= m["created_at"]:
+            sign = "waits"
+        elif (a["activity_event"] == "report:idle" and (a["activity_at"] or "") >= m["created_at"]
+              and not a["activity_waits"] and (a["role"] or "") not in ("expert", "assistant", "plain")):
+            sign = "idle"
+        elif m["item_id"] and conn.execute(
+                "SELECT 1 FROM events WHERE item_id=? AND actor=? AND at>=? AND change LIKE 'released%'",
+                (m["item_id"], m["from_agent"], m["created_at"])).fetchone():
+            sign = "item"
+        if sign:
+            with tx(conn):
+                conn.execute("UPDATE messages SET blocked=? WHERE id=? AND blocked IS NULL", (sign, m["id"]))
+            out.append(m["id"])
+    return out
+
+
 def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False):
     """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. For a message to
     the manager, level (high, low) says how long it waits before it wakes the manager's watch, and blocked says
@@ -16601,7 +16595,8 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
         if to is not None and not gone:
             _agent(conn, to)
         manager = _is_manager(conn, to)
-        # What MaximizePM knows without the flag: the sender released or blocked the item just before.
+        # What MaximizePM knows at the send: the sender released or blocked the item just before. blocked: MaximizePM's
+        # own code, or a person (the command drops an agent's --blocked and --level: escalation by state, #5976).
         sign = "sender" if blocked else ("item" if manager and kind in ("alert", "question")
                                          and _item_stands(conn, actor, item) else None)
         mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
@@ -22632,6 +22627,10 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     settled = None  # when the first new finding that is not low has waited manage_settle
     low_due = None  # when the first new low finding has waited manage_wait_low
     while True:
+        try:
+            escalate_by_state(conn)  # a sender that stopped working makes its message wake the watch now (#5976)
+        except (sqlite3.OperationalError, RiverError):
+            pass  # a locked queue: the next poll escalates it (a locked queue never ends the watch)
         f = manager_findings(conn)
         keys = set(_finding_keys(f))
         st = stop_request(conn, actor)

@@ -41,12 +41,12 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    it exits after `manage_every` with one line. Each message has a level,
    and each level a wait before it wakes you: high after `manage_wait_high`
    (10m: the default, also an alert and a question), low after
-   `manage_wait_low` (30m: a message sent with `--level low`). A ship
+   `manage_wait_low` (30m: a person's message sent with `--level low`). A ship
    request, a review that passed, and a deploy that is done wake you at once
-   (a notice of level now): the release waits on you. A blocked message wakes you at once: the sender set
-   `--blocked` because its item cannot move until your answer, or MaximizePM
-   saw that the sender stands still (it runs `maxpm inbox --wait`, or it
-   released or blocked the item). `maxpm inbox` shows "blocked" on such a
+   (a notice of level now): the release waits on you. A blocked message wakes you at once: its
+   sender stopped working after it sent it (it runs `maxpm wait` or `inbox --wait`, its turn ended, it
+   released or blocked the item, or its session ended); an agent's own `--blocked` and `--level` count no
+   more. `maxpm inbox` shows "blocked" on such a
    message: answer it first. A blocked message stays open until you answer it
    (`maxpm answer`, `send --reply`) or act on its item: each watch lists it at
    the top (UNANSWERED, with its age) and wakes you again after

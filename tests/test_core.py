@@ -3027,7 +3027,7 @@ class Experts(Base):
                             {"MAXPM_AGENT": "fab"})
         self.assertNotEqual(core._agent(self.c, "fab")["talked_at"], old)
         core.activity_event(self.c, {"hook_event_name": "Stop"}, {"MAXPM_AGENT": "fab"})
-        self.assertEqual(core.activity_watch(self.c), [])
+        self.assertEqual(core.escalate_by_state(self.c), [])  # an expert waits at its prompt for the person
 
     def test_the_sessions_tab_shows_an_expert_as_talking_not_idle(self):
         from river import sessions
@@ -7242,20 +7242,21 @@ class Manager(Base):
                     mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
                 cli.run(list(words))
             return out.getvalue()
-        self.assertRegex(run("--as", "w1", "note", "boss", "no action needed", "--level", "low"), r"^sent #\d+ note to boss\n")
-        # An alert or a question to the manager says how long it waits, and how to make it not wait.
+        core.register(self.c, "mark", human=True)
+        self.assertRegex(run("--as", "mark", "note", "boss", "no action needed", "--level", "low"), r"^sent #\d+ note to boss\n")
+        # An alert or a question to the manager says how long it waits, and when it wakes the manager at once.
         self.assertRegex(run("--as", "w1", "alert", "boss", "main is red"),
-                         r"^sent #\d+ alert to boss \(the manager's watch brings it within 10m; with --blocked at once: "
-                         r"use it when your item cannot move until the answer\)\n")
-        self.assertRegex(run("--as", "w1", "ask", "boss", "which db? I cannot go on", "--blocked"),
-                         r"^sent #\d+ question to boss, blocked\n")
-        self.assertRegex(run("--as", "w1", "send", "note", "read this now", "--to", "boss", "--blocked"), r"to boss, blocked\n")
+                         r"^sent #\d+ alert to boss \(the manager's watch brings it within 10m; at once when you stop "
+                         r"working: maxpm wait, the end of your turn, a release of its item\)\n")
+        # An agent's --blocked counts no more (#5976); a person's does.
+        self.assertNotIn("blocked", run("--as", "w1", "ask", "boss", "which db? I cannot go on", "--blocked"))
+        self.assertRegex(run("--as", "mark", "send", "note", "read this now", "--to", "boss", "--blocked"), r"to boss, blocked\n")
         self.assertRegex(run("--as", "w1", "alert", "w2", "to a worker"), r"^sent #\d+ alert to w2\n")
         out = run("--as", "boss", "inbox", "--peek")
-        self.assertRegex(out, r"note from w1 to boss  \(.*, level low, new\)\n    no action needed")
+        self.assertRegex(out, r"note from mark to boss  \(.*, level low, new\)\n    no action needed")
         self.assertRegex(out, r"alert from w1 to boss  \([^,]*, new\)\n    main is red")
-        self.assertRegex(out, r"question from w1 to boss  \(.*, open, blocked, new\)\n    which db\?")
-        self.assertRegex(out, r"note from w1 to boss  \([^,]*, blocked, new\)\n    read this now")
+        self.assertRegex(out, r"question from w1 to boss  \([^)]*, open, new\)\n    which db\?")
+        self.assertRegex(out, r"note from mark to boss  \([^,]*, blocked, new\)\n    read this now")
         # A level of #1583 is refused with the way to say it now; MaximizePM shows what it saw.
         with self.assertRaisesRegex(RiverError, "the level is one of high, low; for a message that cannot wait, "
                                                 "leave it out and add --blocked"):
@@ -9416,7 +9417,7 @@ class Activity(Base):
         return [r["body"] for r in self.c.execute(
             "SELECT body FROM messages WHERE to_agent='boss' AND kind='alert' AND read_at IS NULL ORDER BY id")]
 
-    def test_a_permission_prompt_or_a_turn_end_with_an_item_alerts_the_manager_at_once(self):
+    def test_a_permission_prompt_with_an_item_alerts_the_manager_at_once_and_a_turn_end_escalates(self):
         self.assertEqual(self.event("PostToolUse", tool_name="Read")["alert"], None)
         a = core.agent_status(self.c, "w")
         row = self.c.execute("SELECT activity_at, activity_event FROM agents WHERE name='w'").fetchone()
@@ -9437,13 +9438,14 @@ class Activity(Base):
         self.assertIsNone(self.event("Notification", notification_type="idle_prompt", message="waiting")["alert"])
         self.event("PostToolUse", tool_name="Bash")
         self.assertIsNone(self.c.execute("SELECT activity_prompt FROM agents WHERE name='w'").fetchone()[0])
-        # The turn ends while it holds the item: it sits at its prompt.
-        self.assertIsNotNone(self.event("Stop")["alert"])
-        self.assertIn("it ended its turn while it holds", self.alerts()[-1])
-        # Not while it waits on a person's answer (maxpm ask), and not with nothing in hand.
-        core.message(self.c, "question", "Push to production?", to="mark", item=self.item, actor="w")
+        # The turn ends while it holds the item: no alert of its own (#5976); its open question to the manager
+        # escalates by its state.
         self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        q = core.send(self.c, "question", "Which branch?", to="boss", item=self.item, actor="w")["id"]
+        self.clock[0] += core.timedelta(seconds=5)
         self.assertIsNone(self.event("Stop")["alert"])
+        self.assertEqual(core.escalate_by_state(self.c), [q])
+        self.assertEqual(core.message_show(self.c, q)["blocked"], "idle")
         core.release(self.c, self.item, "w")
         self.assertIsNone(self.event("Notification", notification_type="permission_prompt", message="x")["alert"])
         # A session river does not know: nothing recorded.
@@ -9485,36 +9487,51 @@ class Activity(Base):
         self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q3)["state"]),
                          ("mark", "in the chat", "answered"))
 
-    def test_a_turn_end_in_a_talk_with_the_person_or_again_soon_alerts_nobody(self):
-        """#5812, #5773: maximizepm-0ede asked mark a question (held for the manager, then forwarded); mark answered
-        in its chat and went on talking with it, and each turn end sent the manager a blocked 'stands still' alert,
-        again after the manager read the last one (six in an hour)."""
-        q = core.send(self.c, "question", "Click Sign in now?", to="mark", item=self.item, actor="w")["id"]
-        core.forward(self.c, q, "mark asked to be told", "boss")
-        self.assertEqual(core.waits_on_person(self.c, ["w"]), {"w": q})
-        self.assertIsNone(self.event("Stop")["alert"])  # it waits on the forwarded question
-        self.event("UserPromptSubmit", prompt="done, I signed in")
-        self.assertEqual(core.message_show(self.c, q)["state"], "answered")
-        for _ in range(3):  # it answers the person and ends its turn: the person sees it
-            self.clock[0] += timedelta(seconds=40)
-            self.event("UserPromptSubmit", prompt="and now?")
-            self.assertIsNone(self.event("Stop")["alert"])
-        self.assertEqual(self.alerts(), [])
-        # The person went away: the next turn end alerts once, and not again in activity_silence, read or not.
-        self.clock[0] += timedelta(minutes=11)
-        self.assertIsNotNone(self.event("Stop")["alert"])
-        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
-        for _ in range(3):
-            self.clock[0] += timedelta(seconds=30)
-            self.event("UserPromptSubmit", prompt="[maxpm note from boss] go on")
-            self.assertIsNone(self.event("Stop")["alert"])
-        self.clock[0] += timedelta(minutes=10)
-        self.assertIsNotNone(self.event("Stop")["alert"])
-        # A new hold of another item alerts at its first turn end.
-        other = self.add("shop", "Fix the header")
-        core.release(self.c, self.item, "w")
-        core.claim(self.c, other, "w")
-        self.assertIsNotNone(self.event("Stop")["alert"])
+    def test_escalate_a_message_when_its_sender_stops_working(self):
+        """#5976 (mark 2026-11-15: the session does not set the priority; when the agent stops being active, maxpm
+        escalates): a message to the manager waits until its sender stops: a turn end with no background work, maxpm
+        wait, a release of its item, or the end of its session. A turn end in a talk with the person sent the
+        manager six false 'stands still' alerts in an hour (#5812, #5773); no turn end alerts now."""
+        def ask(text, item=None):
+            self.clock[0] += core.timedelta(seconds=5)
+            return core.send(self.c, "question", text, to="boss", item=item, actor="w")["id"]
+        q1 = ask("which db?")
+        self.assertEqual(core.escalate_by_state(self.c), [])  # it works on
+        self.event("PostToolUse", tool_name="Bash")
+        self.assertEqual(core.escalate_by_state(self.c), [])
+        gate = [{"id": "b1", "type": "local_bash", "status": "running", "description": "gate", "command": "make check"}]
+        self.event("Stop", background_tasks=gate, session_crons=[])  # its own work wakes it: it works on
+        self.assertEqual(core.escalate_by_state(self.c), [])
+        self.event("UserPromptSubmit")
+        self.event("Stop", background_tasks=[], session_crons=[])  # it stands at its prompt
+        self.assertEqual(core.escalate_by_state(self.c), [q1])
+        self.assertEqual(core.message_show(self.c, q1)["blocked"], "idle")
+        # maxpm wait, a release of the message's item, the end of the session.
+        q2 = ask("and the port?")
+        self.event("UserPromptSubmit")
+        self.c.execute("UPDATE agents SET role='waiting', waiting_since=? WHERE name='w'", (core.iso(core.now()),))
+        self.assertEqual((core.escalate_by_state(self.c), core.message_show(self.c, q2)["blocked"]), ([q2], "waits"))
+        self.c.execute("UPDATE agents SET role=NULL, waiting_since=NULL WHERE name='w'")
+        q3 = ask("may I change the schema?", self.item)
+        self.clock[0] += core.timedelta(seconds=5)
+        core.release(self.c, self.item, "waits on the answer", actor="w")  # the release marks it at once
+        core.escalate_by_state(self.c)
+        self.assertEqual(core.message_show(self.c, q3)["blocked"], "item")
+        self.clock[0] += core.BLOCKED_WINDOW  # a message soon after a release is marked at its send (_item_stands)
+        q4 = ask("one more")
+        core.unregister(self.c, "w")
+        self.assertEqual((core.escalate_by_state(self.c), core.message_show(self.c, q4)["blocked"]), ([q4], "gone"))
+
+    def test_escalate_an_agent_flag_counts_no_more(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "w", "ask", "boss", "which db? I cannot go on", "--blocked", "--level", "low"])
+        m = self.c.execute("SELECT blocked, level FROM messages WHERE body LIKE 'which db%'").fetchone()
+        self.assertEqual((m["blocked"], m["level"]), (None, None))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "mark", "ask", "boss", "is it done?", "--blocked"])  # a person's flag still counts
+        self.assertEqual(self.c.execute("SELECT blocked FROM messages WHERE body='is it done?'").fetchone()[0], "sender")
 
     def test_the_stop_hook_asks_serve_to_type_a_held_message(self):
         """#5587: a message that the person sent during the turn waits (pending_sends); the turn's Stop hook asks
@@ -9589,7 +9606,7 @@ class Activity(Base):
         self.assertNotIn("open question", err.getvalue())
 
     def test_the_probe_stuck_session_reports_a_silence_while_it_lasts(self):
-        # #5440: the probe reads the same rule as activity_watch, writes nothing, and reports after the alert too.
+        # #5440: the probe reads silent_holders, writes nothing, and reports for as long as the silence lasts.
         self.event("PostToolUse", tool_name="Bash")
         self.assertEqual(core.ops_probe(self.c, "stuck-session")["status"], "ok")
         self.clock[0] += core.timedelta(minutes=11)
@@ -9597,27 +9614,7 @@ class Activity(Base):
             res = core.ops_probe(self.c, "stuck-session")
             self.assertEqual((res["status"], list(res["subjects"])), ("critical", ["w"]))
             self.assertIn("nothing for 11m while it holds #", res["subjects"]["w"])
-        self.assertEqual(core.activity_watch(self.c), ["w"])  # the probe did not mark it told
-        self.assertEqual(core.ops_probe(self.c, "stuck-session")["status"], "critical")
-
-    def test_silence_with_an_item_in_hand_alerts_the_manager_once(self):
-        self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make deploy"})
-        self.assertEqual(core.activity_watch(self.c), [])
-        self.clock[0] += core.timedelta(minutes=11)
-        self.assertEqual(core.activity_watch(self.c), ["w"])
-        self.assertIn("nothing for 11m while it holds", self.alerts()[0])
-        self.assertIn("it waits on a permission prompt for Bash: make deploy", self.alerts()[0])
-        self.clock[0] += core.timedelta(minutes=11)
-        self.assertEqual(core.activity_watch(self.c), [])  # once for one silence
-        # A new event, then silence again: a new alert. Not while it waits in maxpm wait.
-        self.event("PostToolUse", tool_name="Bash")
-        self.clock[0] += core.timedelta(minutes=11)
-        self.c.execute("UPDATE agents SET waiting_since=? WHERE name='w'", (core.iso(core.now()),))
-        self.assertEqual(core.activity_watch(self.c), [])
-        self.c.execute("UPDATE agents SET waiting_since=NULL WHERE name='w'")
-        self.assertEqual(core.activity_watch(self.c), ["w"])
-        core.config_set(self.c, "activity_silence", "0s")
-        self.assertEqual(core.activity_watch(self.c), [])
+        self.assertEqual(self.alerts(), [])  # no silence alert to the manager (#5976)
 
     def test_the_word_manager_reaches_the_active_manager(self):
         (m,) = core.message(self.c, "alert", "the gate is red", to="manager", actor="w")
@@ -9693,20 +9690,15 @@ class Activity(Base):
         self.assertEqual(json.loads(waits()), ["local_bash: make check-all-once"])
         self.event("Notification", notification_type="idle_prompt", message="waiting")  # keeps what it waits on
         self.assertIsNotNone(waits())
-        # The silence watch waits too, for at most busy_max.
-        self.clock[0] += core.timedelta(minutes=30)
-        self.assertEqual(core.activity_watch(self.c), [])
-        self.clock[0] += core.timedelta(hours=4)
-        self.c.execute("UPDATE agents SET last_seen=? WHERE name='boss'", (core.iso(core.now()),))  # still active
-        self.assertEqual(core.activity_watch(self.c), ["w"])
-        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        q = core.send(self.c, "question", "which gate?", to="boss", actor="w")["id"]
+        self.assertEqual(core.escalate_by_state(self.c), [])  # its own work wakes it: no escalation (#5976)
         # The command ends and wakes the session: it works, then ends its turn with nothing in flight.
         self.event("UserPromptSubmit")
         self.assertIsNone(waits())
         done = [{**gate[0], "status": "completed"}]
-        self.assertIsNotNone(self.event("Stop", background_tasks=done, session_crons=[])["alert"])
-        self.assertIn("it ended its turn while it holds", self.alerts()[-1])
-        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        self.assertIsNone(self.event("Stop", background_tasks=done, session_crons=[])["alert"])
+        self.assertEqual(core.escalate_by_state(self.c), [q])
+        self.assertEqual(self.alerts(), [])
         # A background subagent and a wakeup count too.
         sub = [{"id": "a1", "type": "local_agent", "status": "running", "agent_type": "Explore", "description": "x"}]
         self.assertIsNone(self.event("Stop", background_tasks=sub)["alert"])
@@ -9723,10 +9715,10 @@ class Activity(Base):
         self.addCleanup(setattr, core, "PROC_RUNNER", old)
         core.PROC_RUNNER = lambda: "\n".join(procs) + "\n"
         self.clock[0] += core.timedelta(seconds=30)
-        self.assertIsNotNone(self.event("Stop")["alert"])  # only the hook runs below it
-        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        self.event("Stop")  # only the hook runs below it: it waits on nothing of its own
+        self.assertIsNone(self.c.execute("SELECT activity_waits FROM agents WHERE name='w'").fetchone()[0])
         procs.append("555 100 0:05")  # a command it started in the background
-        self.assertIsNone(self.event("Stop")["alert"])
+        self.event("Stop")
         self.assertEqual(json.loads(self.c.execute("SELECT activity_waits FROM agents WHERE name='w'").fetchone()[0]),
                          ["a process"])
 

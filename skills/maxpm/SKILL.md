@@ -653,16 +653,10 @@ the command again only when it still applies.
 An alert means stop and read now. A notice comes from MaximizePM itself, for
 example when your lease expired.
 
-A message to the manager does not wake it at once: its watch brings an alert,
-a question, or a note within 10 minutes (`manage_wait_high`), and a low one
-(`--level low`: a line that needs no action) within 30. Each wake costs the
-manager a read of its whole context. Add `--blocked` to `maxpm alert`, `ask`,
-`note`, or `send` when your item cannot move until the answer: you have no
-other part of it to do, and nobody else can do the next step. A blocked
-message wakes the manager at once. Leave the flag out when you continue with
-the item and the answer only changes what you do later. MaximizePM also marks
-your alert or question blocked when it sees that you stand still: you run
-`maxpm inbox --wait` after it, or you release or block its item.
+A message to the manager wakes it within 10 minutes (`manage_wait_high`). It
+wakes the manager at once when you stop working after you sent it: you run
+`maxpm wait` or `inbox --wait`, end your turn, release or block its item, or
+your session ends. You set no priority yourself.
 
 ## Policies
 
