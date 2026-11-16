@@ -734,6 +734,17 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   projects (`maxpm ops add`) run at once, then every minute for a few runs. A
   fault opens its own item, found during the deploy item. A fix that names its
   check (`--check ops:<scope>:<check>`) opens again when that check fails.
+- Operations: MaximizePM keeps watching your projects after they ship. Add
+  checks with `maxpm ops add`, or run `maxpm ops setup` for a guided start: a
+  URL to fetch, a heartbeat your own job sends, a command, a log to scan, or
+  any Monitoring Plugins script. When a check keeps failing, MaximizePM opens
+  one task with the evidence, sorts it by kind (a vendor outage, a full disk,
+  a bad release, a bug), and starts a fresh agent session to find the cause
+  and prove it. A check marked `page` reaches your phone only when the fault
+  doesn't heal and nobody picked it up within 15 minutes; `ops_page` changes
+  that for a project. A watchdog keeps checking while `maxpm serve` is down.
+  `maxpm ops profile export` saves a project's checks as one file you can keep
+  in its repository. Agents read `maxpm guide ops`.
 - Review before release (`maxpm config set review on`): each release gets one
   review item that waits on everything it ships, and the deploy waits on the
   review. `review_prompt` holds your review process (for example
