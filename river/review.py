@@ -407,12 +407,18 @@ def counts(conn_factory=None):
     return dict(_COUNTS["n"])
 
 
+def _root_of(conn, agent):
+    f = folder_of(conn, agent)
+    return repo_root(f) if f else None
+
+
 def count_of(conn, agent):
     """The number of files the session changed against GitHub main (committed or not, new files too), or None."""
-    f = folder_of(conn, agent)
-    root = repo_root(f) if f else None
-    if not root:
-        return None
+    root = _root_of(conn, agent)
+    return _files_in(root) if root else None
+
+
+def _files_in(root):
     main = main_ref(root)
     mb = (git(root, "merge-base", "HEAD", main) or "").strip() if main else ""
     names = set(x for x in ((git(root, "diff", "--name-only", mb) or "") if mb else "").split("\n") if x)
@@ -421,14 +427,20 @@ def count_of(conn, agent):
 
 
 def _count(factory):
+    """Count the changed files of each live session. A repository that two or more live sessions work in gets no
+    count: its files are the work of all of them (and of anyone else there), so the number is no one session's own
+    (#6022: seven sessions whose chats run in the main tree each showed the same 1392, of which 1355 were untracked
+    files of tools). Their Changes view still shows the diff and names the other sessions."""
     try:
         conn = factory()
         try:
-            out = {}
+            roots = {}
             for name in live_agents(conn):
-                out_n = count_of(conn, name)
-                if out_n is not None:
-                    out[name] = out_n
+                root = _root_of(conn, name)
+                if root:
+                    roots[name] = root
+            many = {r for r in roots.values() if list(roots.values()).count(r) > 1}
+            out = {name: _files_in(root) for name, root in roots.items() if root not in many}
             _COUNTS["n"] = out
         finally:
             conn.close()

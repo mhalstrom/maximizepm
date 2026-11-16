@@ -10,3 +10,4 @@ desktop/out/
 desktop/build/
 river/bin/
 .DS_Store
+.playwright-mcp/

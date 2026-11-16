@@ -109,6 +109,21 @@ class SessionDiff(Base):
         core.claim(self.c, it, "dev2")
         self.assertEqual(review.session_diff(self.c, "dev")["shared"], ["dev2"])
 
+    def test_sessions_that_share_a_folder_get_no_count_of_their_own(self):
+        # #6022: every session whose chat ran in the main tree showed the same 1392 changed files, most of them
+        # untracked files of tools: the files of a shared folder are no one session's own.
+        db = os.path.join(self.dir.name, "t.db")
+        self.write("new.txt", "hello\n")
+        with unittest.mock.patch.dict(review._COUNTS, {"n": {}}):
+            review._count(lambda: core.connect(db))
+            self.assertEqual(review._COUNTS["n"], {"dev": 1})  # alone in its folder: its count
+            core.register(self.c, "dev2")
+            it = core.item_add(self.c, "app", "other", actor="t")["id"]
+            core.claim(self.c, it, "dev2")
+            review._count(lambda: core.connect(db))
+            self.assertEqual(review._COUNTS["n"], {})  # two in one folder: no count; the view names the other
+        self.assertEqual(review.count_of(self.c, "dev"), 1)
+
     def test_bad_base_and_unknown_session(self):
         with self.assertRaises(RiverError):
             review.session_diff(self.c, "dev", "yesterday")
