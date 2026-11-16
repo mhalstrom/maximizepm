@@ -2929,6 +2929,30 @@ class Wsl(Base):
 
 
 class AddingWork(Base):
+    def test_project_for_add_picks_by_topic_in_a_folder_of_several_projects(self):
+        """#5967 (toolscaledcore p12): a folder that links several projects gives a new item to the one whose
+        description and recent items fit its words clearly best; with no clear winner it refuses, names the best
+        ones, and says to ask the person when none fits. A project named, or a related item, still wins."""
+        d = self.dir.name
+        core.project_add(self.c, "models", path=d, notes="The model catalog: model prices, context sizes, providers")
+        core.project_add(self.c, "payments", path=d, notes="Stripe checkout, invoices, refunds and subscriptions")
+        core.project_add(self.c, "website", path=d, notes="The public pages: landing page, legal pages, blog")
+        for p, t in (("models", "Add the prices of the new Gemini models"), ("models", "Context size of each provider"),
+                     ("payments", "Refund an invoice from the Stripe dashboard"), ("payments", "Retry a failed checkout"),
+                     ("website", "Fix the footer of the legal pages"), ("website", "A blog post page with dates")):
+            self.add(p, t)
+        self.assertEqual(core.project_for_add(self.c, d, title="Update the prices of the Claude models"), "models")
+        self.assertEqual(core.project_for_add(self.c, d, title="Stripe refund of a subscription invoice"), "payments")
+        self.assertEqual(core.project_for_add(self.c, d, title="Odd text", context="on the legal pages of the blog"),
+                         "website")
+        with self.assertRaisesRegex(RiverError, r"belongs to models, payments, website; its words fit none of them.*"
+                                                r"ask the person when none fits"):
+            core.project_for_add(self.c, d, title="Rotate the backup keys")
+        with self.assertRaisesRegex(RiverError, r"fits (models or payments|payments or models), with no clear winner"):
+            core.project_for_add(self.c, d, title="The prices of the models in the Stripe checkout")
+        src = self.add("website", "work")
+        self.assertEqual(core.project_for_add(self.c, d, related=src, title="Update the model prices"), "website")
+
     def test_found_during_links_and_project_inference(self):
         core.project_add(self.c, "a", path=self.dir.name)
         core.project_add(self.c, "b")

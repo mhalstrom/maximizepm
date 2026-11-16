@@ -9916,17 +9916,50 @@ def _set_models(conn, it, models, actor, tier=None):
             _event(conn, it["id"], actor, f"{f.replace('_', ' ')} {new[f] or 'unset'}")
 
 
-def project_for_add(conn, cwd, related=None):
-    """The project a new item goes to when none is named: the related item's, else the folder's."""
+def project_for_add(conn, cwd, related=None, title="", context=""):
+    """The project a new item goes to when none is named: the related item's, else the folder's. A folder of several
+    projects (#5967, toolscaledcore p12): the one whose description and recent items fit the title's words clearly
+    best (project_by_topic); with no clear winner, a refusal that names the best ones and the command."""
     if related is not None:
         return _project_name(conn, _item(conn, related)["project_id"])
     names = projects_for_dir(conn, cwd)
     if len(names) == 1:
         return names[0]
     if names:
-        raise RiverError(f"this folder belongs to {', '.join(names)}; name one: maxpm add <project> \"<title>\"")
+        best, ranked = project_by_topic(conn, names, f"{title}\n{context or ''}")
+        if best:
+            return best
+        top = [n for n, s in ranked if s > 0][:3] or names
+        fits = (f"by its words it fits {' or '.join(top)}, with no clear winner" if any(s > 0 for _, s in ranked)
+                else "its words fit none of them")
+        raise RiverError(f"this folder belongs to {', '.join(names)}; {fits}. Name one: maxpm add {top[0]} "
+                         f"\"<title>\" (maxpm project list says what each covers; ask the person when none fits)")
     raise RiverError("no project named and this folder is not linked to one; "
                      "use: maxpm add <project> \"<title>\" (or --blocks/--found-during <id>)")
+
+
+# Calibrated on the live queue (2026-11-16: 158 older titles of 14 projects in one folder): 0.12 and 2.0 picked 50
+# right and 3 wrong, and refused the rest with the best names; 1.5 picked 71 right but 8 wrong.
+TOPIC_MIN = 0.12    # the cosine a project's text must reach to win (#5967)
+TOPIC_LEAD = 2.0    # and how many times the score of the next one
+TOPIC_ITEMS = 60    # the newest item titles that describe a project, beside its description
+
+
+def project_by_topic(conn, names, text):
+    """(the project of names whose description and newest item titles fit text clearly best, or None; every
+    (name, score), best first). Clearly: a score of at least TOPIC_MIN and TOPIC_LEAD times the next one."""
+    idf = _idf(conn)
+    q = _vector(_words(text), idf)
+    ranked = []
+    for name in names:
+        p = conn.execute("SELECT id, notes FROM projects WHERE name=?", (name,)).fetchone()
+        titles = [r[0] for r in conn.execute("SELECT title FROM items WHERE project_id=? ORDER BY id DESC LIMIT ?",
+                                             (p["id"], TOPIC_ITEMS))]
+        words = _words(name.replace("-", " ")) * 3 + _words(p["notes"] or "") * 2 + _words("\n".join(titles))
+        ranked.append((name, round(_cosine(q, _vector(words, idf)), 3) if q else 0.0))
+    ranked.sort(key=lambda x: -x[1])
+    first, second = ranked[0][1], ranked[1][1] if len(ranked) > 1 else 0.0
+    return (ranked[0][0] if first >= TOPIC_MIN and first >= TOPIC_LEAD * second else None), ranked
 
 
 def _project_name(conn, pid):

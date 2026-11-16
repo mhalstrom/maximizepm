@@ -4487,7 +4487,7 @@ def dispatch(conn, a, actor):
             if len(a.words) > 1:
                 raise RiverError("with --from, give at most a project: maxpm add [project] --from plan.md")
             text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text(encoding="utf-8")
-            project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None)
+            project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None, text)
             return core.add_plan(conn, project, text, actor, a.priority, a.doer, a.dry_run)
         if a.dry_run:  # a one-item add has no preview: it would add the item
             raise RiverError("--dry-run goes with --from <plan file>; a one-item maxpm add has no dry run. "
@@ -4500,7 +4500,8 @@ def dispatch(conn, a, actor):
             project, title = a.words
         else:
             title = a.words[0]
-            project = core.project_for_add(conn, os.getcwd(), a.blocks if a.blocks is not None else a.found_during)
+            project = core.project_for_add(conn, os.getcwd(), a.blocks if a.blocks is not None else a.found_during,
+                                           title, a.context)  # a folder of several projects: by topic (#5967)
         if a.tries:  # several tries and the Look card (#5996)
             if a.doer == "human" or a.blocks is not None:
                 raise RiverError("--tries is for agent work, with no --blocks: maxpm add \"<title>\" --tries 3")

@@ -243,7 +243,8 @@ without a goal stay in the normal queue.
 ## Adding work
 
 One command, no ids copied by hand. The project comes from the item you name
-with `--blocks` or `--found-during`, or from the folder you are in; name it
+with `--blocks` or `--found-during`, or from the folder you are in (a folder
+of several projects: the one that the title's words fit clearly best); name it
 first only when neither applies (`maxpm add <project> "<title>"`).
 Give each item a short title, `--short "<about 6 plain words>"` (no ids, no
 file names, no quotes): every page shows it, and the title stays the full text.
