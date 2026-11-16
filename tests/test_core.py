@@ -11323,6 +11323,30 @@ class Ops(Base):
         return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id IS NULL AND change LIKE 'ops %' "
                                              "ORDER BY id")]
 
+    def test_a_session_on_a_fault_may_not_ship_release_deploy_or_change_a_hook(self):
+        """#5965 (global policy g7): a session that holds a fault item investigates and changes nothing in
+        production; it adds the fix as an item. MaximizePM refuses ship, cut, release-now, deploy and a hook change
+        while it holds the fault, and allows them again when it holds none."""
+        fault = core.item_add(self.c, "site", "ops:prod:home down", kind="operational", doer="ai", actor="maxpm")["id"]
+        work = self.add("site", "Fix the home page")
+        self.c.execute("UPDATE items SET status='in_progress', assignee='boss' WHERE id=?", (fault,))
+        self.c.commit()
+        calls = (lambda: core.ship(self.c, work, "boss"), lambda: core.target_cut(self.c, "prod", actor="boss"),
+                 lambda: core.release_now(self.c, "prod", "urgent fix", "boss"),
+                 lambda: core.deploy_now(self.c, "prod", actor="boss"),
+                 lambda: core.target_hook(self.c, "prod", "deployed", "echo hi", actor="boss"))
+        for call in calls:
+            with self.assertRaisesRegex(RiverError, rf"you hold the fault #{fault}.*policy g7.*--found-during {fault}"):
+                call()
+        # Another session, and the same one after the fault closed, are not refused for it.
+        self.assertIsNone(core._fault_refusal(self.c, "dev", "deploy"))
+        core.target_hook(self.c, "prod", "deployed", "echo hi", actor="mark")
+        self.c.execute("UPDATE items SET status='done', assignee=NULL WHERE id=?", (fault,))
+        self.c.commit()
+        self.assertIsNone(core._fault_refusal(self.c, "boss", "deploy"))
+        core.target_hook(self.c, "prod", "deployed", "echo again", actor="boss")
+        core.ship(self.c, work, "boss")
+
     def test_project_show_has_a_monitoring_line_with_the_checks_of_the_project_and_its_target(self):
         from river import cli
 

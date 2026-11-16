@@ -4435,7 +4435,7 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
         else:
             _hook_event(event)
             if clear or command is not None:
-                why = may_set_hook(conn, actor)
+                why = may_set_hook(conn, actor) or _fault_refusal(conn, actor, "change a hook")
                 if why:
                     raise RiverError(why)
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
@@ -6899,6 +6899,21 @@ def _ops_cause_proven(conn, item_id):
     return conn.execute("SELECT 1 FROM ops_causes WHERE item_id=? AND passed=1", (item_id,)).fetchone() is not None
 
 
+def _fault_refusal(conn, actor, what):
+    """#5965 (global policy g7): a session that holds a fault item investigates; it changes nothing in production.
+    Why it may not do `what` (ship, cut a release, release now, deploy, change a hook) while it holds one, or None."""
+    if not actor:
+        return None
+    for r in conn.execute("SELECT id, title, kind FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                          "AND kind='operational' AND title LIKE 'ops:%' ORDER BY id", (actor,)):
+        if fault_key(r):
+            return (f"refused: you hold the fault #{r['id']}, and a session on a fault investigates and changes "
+                    f"nothing in production (policy g7), so it may not {what}. Write the cause (maxpm ops cause "
+                    f"{r['id']} ...) and add the fix as an item (maxpm add \"<fix>\" --found-during {r['id']}): it goes "
+                    f"out through its review and release")
+    return None
+
+
 def _ops_fix_refusal(conn, actor, doer, found_during, blocks):
     """Why an agent may not add this item yet: it is a fix of a fault item whose cause has no proof (#5513). A
     person's item (a person's step), MaximizePM itself, a person and the manager may add one."""
@@ -9065,6 +9080,9 @@ def target_cut(conn, name, rev=None, actor=None):
     fixes its list of items before the review starts, for example when it pins the commit that the release
     builds from (rev: that commit, or any word for it; it goes into the history and the notes of the deploy
     item). Refused while the release waits (an earlier release is not done, or the cadence): release-now first."""
+    why = _fault_refusal(conn, actor, "cut a release")  # #5965, policy g7
+    if why:
+        raise RiverError(why)
     with tx(conn):
         _sweep(conn)
         tg = _target(conn, name)
@@ -9147,6 +9165,9 @@ def release_now(conn, target, reason, actor=None):
     no approval is necessary, but a worker cannot, or each one would send its own change out. The reason goes in
     the history of the deploy item, and the target owner is told. It counts for this release only; the cadence
     then counts from the end of this release."""
+    why = _fault_refusal(conn, actor, "start a release")  # #5965, policy g7
+    if why:
+        raise RiverError(why)
     reason = (reason or "").strip()
     with tx(conn):
         _sweep(conn)
@@ -9489,6 +9510,9 @@ def deploy_now(conn, target, review=False, actor=None):
     Refuses when it collects nothing. With review, the release first waits on one review of everything
     it ships, also when the review setting is off. Returns what to start (the review or the deploy item),
     whether it is ready, and what it still waits on; a ready deploy item alerts the target owner."""
+    why = _fault_refusal(conn, actor, "deploy")  # #5965, policy g7
+    if why:
+        raise RiverError(why)
     with tx(conn):
         _sweep(conn)
         tg = _target(conn, target)
@@ -15543,6 +15567,9 @@ def ship(conn, item_id, actor=None):
     more ship requests: the item joins the next deploy item, which waits until the cut release is done (#1619).
     Not a fix that a review of the cut release waits on: it goes out with that release.
     """
+    why = _fault_refusal(conn, actor, "ship a change")  # #5965, policy g7
+    if why:
+        raise RiverError(why)
     with tx(conn):
         it = _item(conn, item_id)
         if it["status"] == "dropped":

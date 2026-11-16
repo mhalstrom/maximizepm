@@ -81,6 +81,8 @@ steps. In order:
 - Not a problem (a bot, a closed connection): `maxpm ops noise add <scope> <check> [--pattern <regex>] --reason "<why nobody acts>"`, then close the item.
 - A fact you lacked: `maxpm ops system edit <project> --set <part.field>="..." --why "<the fact, and this fault>"`.
 - A recovery adds a note and leaves the item open: you close it.
+- While you hold a fault item, MaximizePM refuses ship, target cut, target
+  release-now, deploy, and a hook change: the fix goes out as its own item.
 - After `ops_fix_max` (2) released fixes did not clear a fault, no more agents
   start for it; the manager decides.
 
