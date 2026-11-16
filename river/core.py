@@ -15195,6 +15195,10 @@ def _claim_row(conn, item_id, actor):
     chosen = it0["reserved_for"] == actor or bool(q and q["agent"] == actor) or bool(conn.execute(
         "SELECT 1 FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.status='open' "
         "AND g.owner=? AND g.owner_expires_at >= ?", (item_id, actor, iso(now()))).fetchone())
+    if ag["kind"] == "ai" and not chosen:
+        fix = reviewed_fixes(conn, actor).get(item_id)
+        if fix:
+            raise RiverError(f"refused: {reviewed_fix_text(item_id, fix)}. Take other work: maxpm go")
     why = _model_refusal(conn, it0, actor, any_type=chosen)
     if why:
         raise RiverError(f"refused: #{item_id} {why}. Take other work (maxpm go), or a session with an allowed "
@@ -15261,6 +15265,27 @@ def _refuse_model_to(conn, it, to, verb):
 # work_refusal is the one rule for one item; session_work orders what passes it. Each path asks them; the steps
 # that only go has (a role, a free goal or target, a focus) ask work_refusal for each item they take.
 
+def reviewed_fixes(conn, actor):
+    """{fix id: (review id, target)}: the items that an open release review waits on, of each review this agent
+    claimed. The reviewer of a failed review takes none of its fixes, and no launch or go gives it one (#5932, p100):
+    it reviews the release again after them, and a fix it wrote would make it an author of the release
+    (release_authors), so a new reviewer would start cold."""
+    if not actor:
+        return {}
+    return {r["blocked_by"]: (r["id"], r["target"]) for r in conn.execute(
+        "SELECT d.blocked_by, r.id, r.target FROM items r JOIN deps d ON d.item_id=r.id JOIN items f ON f.id=d.blocked_by "
+        "WHERE r.kind='review' AND r.status IN ('open','in_progress','held') AND d.kind<>'conflicts' "
+        "AND f.status IN ('open','in_progress','held') AND EXISTS (SELECT 1 FROM events e "
+        "WHERE e.item_id=r.id AND e.actor=? AND e.change LIKE 'claimed%') ORDER BY r.id DESC", (actor,))}
+
+
+def reviewed_fix_text(item_id, review):
+    """The reason that go, next and claim give when the reviewer of a review meets one of its fixes."""
+    rid, target = review
+    return (f"#{item_id} is a fix of release review #{rid} ({target or 'a release'}), which you reviewed: another "
+            f"session takes the fix, and you review the release again after it")
+
+
 class WorkView:
     """What the rule needs to know about one session, read once: its kind, model and agent type, the targets it owns,
     its queue, the raw reservations, the items whose answer starts a fresh session, the items whose old session still
@@ -15286,6 +15311,7 @@ class WorkView:
                                                     (iso(now() - FRESH_GRACE),))}
         self.still = still_worked(conn) if actor else {}
         self.ops_first = operational_session(conn, actor) if actor else None
+        self.fixes = reviewed_fixes(conn, actor) if self.kind == "ai" else {}
         # Its scope (#5973): only these items, from any folder; a scope takes the place of its tree.
         self.parts = agent_scope(conn, actor) if actor else None
         self.scope = scope_items(conn, self.parts) if self.parts else None
@@ -15339,6 +15365,8 @@ def work_refusal(conn, a, view):
         return ("you worked on the release it reviews" if author_refusal(conn, a, actor)
                 else f"{'a try' if is_try(a) else 'a review' if a['kind'] == 'review' else 'an operational task'} "
                      f"starts in a new session; this one held a task", True)
+    if a["id"] in view.fixes and not view.chosen(a):  # a person or the manager may still push it (#5932)
+        return (reviewed_fix_text(a["id"], view.fixes[a["id"]]), True)
     if view.ops_first and a["kind"] != "operational" and not view.chosen(a):  # a person may still push one to it
         return (f"this session started for operational task #{view.ops_first} on its own model; other work starts "
                 f"in a new session", True)

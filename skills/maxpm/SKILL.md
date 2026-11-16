@@ -21,7 +21,8 @@ most important item that is ready (nothing it waits on is open).
   the task says how:
   - work: build it, and add the tasks you find;
   - review: judge a release; it always starts in a new session;
-  - fixes: repair what a review found (the reviewer may take them);
+  - fixes: repair what a review found (another session: the reviewer reviews
+    the release again after them);
   - deploy: release, then watch the release (a target with a deploy plan
     releases by a hook that `maxpm serve` runs: no session types the command);
   - operational: work on the system of work (a cleanup of a list, the order of

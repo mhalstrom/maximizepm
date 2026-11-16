@@ -4543,6 +4543,27 @@ class ReleaseReview(Base):
         core.done(self.c, fix, "fixed", "dev")
         self.assertTrue(core.annotate(self.c)[self.review]["ready"])  # the review comes back after the fix
 
+    def test_the_reviewer_of_a_failed_review_gets_none_of_its_fixes(self):
+        # #5932: maxpm launch --item gave fix #5931 to the session that had just failed review #5928 and waited in
+        # maxpm wait (p100: the reviewer takes no fix and reviews the release again after them).
+        core.claim(self.c, self.review, "rev")
+        fix = core.review_fail(self.c, self.review, ["null check"], actor="rev")["fixes"][0]["id"]
+        core.wait(self.c, self.dir.name, "rev", step="0s", sleep=lambda s: None)
+        self.assertIsNone(core.waiting_agent_for(self.c, "site", fix))  # launch --item starts a new session
+        self.assertNotEqual((core.go(self.c, self.dir.name, "rev").get("item") or {}).get("id"), fix)
+        self.assertNotIn(fix, [i["id"] for i in core.next_item(self.c, "site", actor="rev", limit=5)])
+        with self.assertRaisesRegex(RiverError, f"fix of release review #{self.review} \\(web\\), which you reviewed"):
+            core.claim(self.c, fix, "rev")
+        # Another waiting session gets it; a fix of a review that the session did not take is ordinary work.
+        core.register(self.c, "w2")
+        core.wait(self.c, self.dir.name, "w2", step="0s", sleep=lambda s: None)
+        self.assertEqual(core.waiting_agent_for(self.c, "site", fix), "w2")
+        # A person may still push it to the reviewer on purpose.
+        core.push(self.c, fix, "rev", "take it anyway", "mark")
+        core.claim(self.c, fix, "rev")
+        core.done(self.c, fix, "fixed", "rev")
+        self.assertEqual(core.reviewed_fixes(self.c, "rev"), {})  # the review waits on no open fix now
+
     def test_fail_with_ask_then_drop_adds_no_fixes(self):
         core.claim(self.c, self.review, "rev")
         h = core.review_fail(self.c, self.review, ["something"], actor="rev", ask=True)["asked"]["id"]
@@ -4661,18 +4682,25 @@ class ReleaseReview(Base):
         core.claim(self.c, y, "ops")
         core.give(self.c, y, "fresh", actor="ops")
         self.assertIn(f"held #{y}", core.reviewer_refusal(self.c, core._item(self.c, self.review), "fresh"))
-        # A new session takes the review; after it, the session takes any work, and fixes.
+        # A new session takes the review; after it, the session takes any work, but none of the review's fixes
+        # (#5932, p100): it reviews the release again after them.
         core.register(self.c, "rev2")
         core.wait(self.c, self.dir.name, "rev2", step="0s", sleep=lambda s: None)
         self.assertEqual(core.waiting_agent_for(self.c, "site", self.review), "rev2")
         b = core.go(self.c, self.dir.name, "rev2")
         self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
         fix = core.review_fail(self.c, self.review, ["escape the form input"], "XSS", actor="rev2")["fixes"][0]["id"]
-        b = core.go(self.c, self.dir.name, "rev2")
-        self.assertEqual((b["role"], b["item"]["id"]), ("worker", fix))
-        core.done(self.c, fix, "fixed", "rev2")
-        # The review comes back: the used session does not get it; the same name in a new session does.
+        self.assertIsNone(core.go(self.c, self.dir.name, "rev2").get("item"))
+        core.claim(self.c, fix, "dev")
+        core.done(self.c, fix, "fixed", "dev")
         self.assertTrue(core.annotate(self.c)[self.review]["ready"])
+        b = core.go(self.c, self.dir.name, "rev2")  # the same reviewer reviews the release again
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        core.release(self.c, self.review, actor="rev2")
+        z = self.add("site", "other work")
+        core.claim(self.c, z, "rev2")
+        core.done(self.c, z, "done", "rev2")
+        # A session that held another task does not get the review; the same name in a new session does.
         self.assertNotEqual((core.go(self.c, self.dir.name, "rev2").get("item") or {}).get("id"), self.review)
         self.assertNotIn("rev2", [core._item(self.c, self.review)["assignee"]])
         core.unregister(self.c, "rev")
