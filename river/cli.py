@@ -6677,7 +6677,8 @@ def render_canvas(a, res):
             return
         print(f"{res['canvas']}: {len(plans)} plan version(s)")
         for p in plans:
-            change = [f"+#{i}" for i in p["added"]] + [f"-#{i}" for i in p["removed"]]
+            change = ([f"+#{i}" for i in p["added"]] + [f"-#{i}" for i in p["removed"]]
+                      + [f"~#{i}" for i in p.get("changed", [])])  # ~: moved to another part (#6014)
             print(f"  plan v{p['plan_version']} = canvas v{p['version']}, {core.show_time(p['at'])} by "
                   f"{p['author'] or 'nobody'}: {len(p['tasks'])} task(s)"
                   + (f"; {' '.join(change)}" if change and p["plan_version"] > 1 else "")

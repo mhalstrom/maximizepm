@@ -345,6 +345,17 @@ def rqs_wait(h, path):
         conn.close()
 
 
+def canvas_plan(h, path):
+    """GET /api/plan/<canvas id>: the plan versions of a design document, with their tasks and changes (#6014)."""
+    conn = core.connect()
+    try:
+        return h._send(200, core.plan_versions(conn, int(path.rstrip("/").rsplit("/", 1)[1])))
+    except (RiverError, ValueError) as e:
+        return h._send(404, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 def card_shared(h, path):
     """GET /api/card-share/<question|item>/<id>: the shared page of a card and its comments and votes (#6006)."""
     parts = path.rstrip("/").split("/")
@@ -359,6 +370,7 @@ def card_shared(h, path):
 
 GET = [
     (lambda path: path.startswith("/api/card-share/"), card_shared),
+    (lambda path: path.startswith("/api/plan/"), canvas_plan),
     (lambda path: bool(PATH.match(path)), canvas),
     (lambda path: path == RQS_CALLBACK, rqs_callback),
     (lambda path: bool(RQS_WAIT.match(path)), rqs_wait),

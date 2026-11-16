@@ -485,6 +485,17 @@ button.srow-it { cursor: pointer; }
 .doc-part.writing .doc-dot { background: var(--muted); }
 .doc-part.open .doc-dot { background: var(--human); }
 .doc-part .doc-ps { color: var(--muted); font-size: var(--fs-xs); }
+/* The plan versions of a design document (#6014, components/planView.js). */
+.sp-outline .doc-plan-b { margin-top: var(--sp-2); font-size: var(--fs-s); }
+.sp-plan { flex: none; margin: var(--sp-2) var(--sp-4) 0; padding: var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-m);
+  display: flex; flex-direction: column; gap: var(--sp-1); }
+.sp-plan[hidden] { display: none; }
+.pl-head { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: baseline; }
+.pl-cmp { margin-left: auto; font-size: var(--fs-s); display: inline-flex; gap: var(--sp-2); align-items: baseline; }
+.pl-t { overflow-wrap: anywhere; }
+.pl-t .pl-m { display: inline-block; width: var(--sp-5); color: var(--muted); }
+.pl-t.added .pl-m { color: var(--ready); } .pl-t.removed { color: var(--muted); text-decoration: line-through; }
+.pl-t.removed .pl-m { color: var(--warn); } .pl-t.changed .pl-m { color: var(--human); }
 /* Comment mode on a Markdown canvas: the part under the mouse, and a part that Show finds. */
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: var(--hair-2) solid var(--accent); outline-offset: var(--sp-0); }

@@ -18567,6 +18567,9 @@ def design_doc(conn, name, actor=None, title=None, item=None, project=None):
     return dict(res, sections=[h for h, _ in DESIGN_OUTLINE])
 
 
+_DONE_WHEN = re.compile(r"\bdone[ -]when\b", re.I)  # a done-when line of a plan (#6014)
+
+
 def _plan_part(text):
     """The Plan section of a Markdown text, as (its text, {task id: the deepest heading inside Plan that names it}),
     or (None, {}) when it has no Plan section or the section is still pending."""
@@ -18605,12 +18608,21 @@ def plan_versions(conn, ref, project=None):
     for v in conn.execute("SELECT version, body, author, note, created_at FROM canvas_versions WHERE canvas_id=? "
                           "ORDER BY version", (c["id"],)):
         body, refs = _plan_part(v["body"])
-        if body is None or body == (last or {}).get("text"):
+        if body is None:
             continue
-        before = set((last or {}).get("refs") or {})
+        # A new plan version only for a change of its tasks, their parts, or a done-when line (#6014, v7: not for
+        # each typo); the newest text of the same plan version is kept.
+        done_when = [ln.strip() for ln in body.split("\n") if _DONE_WHEN.search(ln)]
+        key = (sorted(refs.items()), done_when)
+        if last is not None and key == last["key"]:
+            last["text"] = body
+            continue
+        before = (last or {}).get("refs") or {}
         out.append({"plan_version": len(out) + 1, "version": v["version"], "at": v["created_at"],
-                    "author": v["author"], "note": v["note"], "text": body, "refs": refs,
-                    "added": sorted(set(refs) - before), "removed": sorted(before - set(refs))})
+                    "author": v["author"], "note": v["note"], "text": body, "refs": refs, "key": key,
+                    "done_when": done_when, "added": sorted(set(refs) - set(before)),
+                    "removed": sorted(set(before) - set(refs)),
+                    "changed": sorted(i for i in set(refs) & set(before) if refs[i] != before[i])})
         last = out[-1]
     ids = sorted({i for p in out for i in p["refs"]} | {i for p in out for i in p["removed"]})
     state = {}
@@ -18622,8 +18634,8 @@ def plan_versions(conn, ref, project=None):
         p["tasks"] = [{"id": i, "part": p["refs"][i], **state.get(i, {"title": None, "status": "unknown"})}
                       for i in p["refs"]]
     for p in out:
-        del p["refs"]
-    return {"canvas": c["name"], "title": c["title"], "project": _project_name(conn, c["project_id"]),
+        del p["refs"], p["key"]
+    return {"canvas": c["name"], "id": c["id"], "title": c["title"], "project": _project_name(conn, c["project_id"]),
             "plans": out}
 
 

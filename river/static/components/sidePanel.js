@@ -20,6 +20,7 @@ import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targe
 import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
 import { mdBlocks, spliceBlock } from "./mdBlocks.js";
 import { docParts, outlineHtml } from "./docOutline.js";
+import { planHtml } from "./planView.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
@@ -289,13 +290,20 @@ async function showCanvas(t, box, note) {
       side.scrollIntoView({ block: "nearest" });
     }, true);
     t.outline = document.createElement("div"); t.outline.className = "sp-outline";
+    t.planBox = document.createElement("div"); t.planBox.className = "sp-plan"; t.planBox.hidden = true;
+    t.planBox.addEventListener("change", (e) => {
+      const w = e.target.dataset.pl; if (!w) return;
+      if (w === "a") t.planA = +e.target.value; else t.planB = +e.target.value;
+      drawPlan(t);
+    });
     t.outline.addEventListener("click", (e) => {  // a part of the outline: its heading in view (#6013)
+      if (e.target.closest("[data-pl-open]")) { t.planOpen = !t.planOpen; t.outline._html = null; drawOutline(t); drawPlan(t); return; }
       const a = e.target.closest("[data-doc-part]"); if (!a) return;
       e.preventDefault();
       const h = t.md && t.md.querySelector("#" + CSS.escape(a.dataset.docPart));
       if (h) h.scrollIntoView({ block: "start", behavior: "smooth" });
     });
-    box.append(t.outline, d, side);
+    box.append(t.outline, t.planBox, d, side);
     drawOutline(t);
     box.scrollTop = (t.scroll && t.scroll.y) || 0;
     box.onscroll = () => { if (on === t.id) t.scroll = { x: 0, y: box.scrollTop }; };
@@ -391,8 +399,27 @@ function drawDoc(t, text, meta) {
 // version and answer.
 function drawOutline(t) {
   if (!t.outline || !t.md) return;
-  const html = outlineHtml(docParts(t.md), esc);
+  const parts = docParts(t.md), plan = parts.some(x => /^plan$/i.test(x.title) && x.state !== "writing");
+  const html = outlineHtml(parts, esc) + (plan ? button(t.planOpen ? "Hide the plan versions" : "Plan versions",
+    { cls: "doc-plan-b", data: { "pl-open": 1 }, title: "What each plan version changed" }) : "");
   if (t.outline._html !== html) { t.outline.innerHTML = html; t.outline._html = html; }
+  if (t.planOpen) loadPlan(t);
+}
+
+// The plan versions of a design document (#6014, planView.js), under the outline; Compare picks two of them.
+async function loadPlan(t) {
+  if (!t.planBox) return;
+  try {
+    const r = await fetch("api/plan/" + canvasOf(t.target));
+    t.planData = r.ok ? await r.json() : null;
+  } catch (e) { t.planData = null; }
+  drawPlan(t);
+}
+function drawPlan(t) {
+  if (!t.planBox) return;
+  t.planBox.hidden = !t.planOpen;
+  if (!t.planOpen) return;
+  t.planBox.innerHTML = t.planData ? planHtml(t.planData, t.planA, t.planB, esc) : `<div class="muted t-s">Reading the plan…</div>`;
 }
 
 // A new version of a drawn doc (#4844): the sections whose text is the same keep their elements (with the words a

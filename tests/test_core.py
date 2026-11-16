@@ -14038,6 +14038,20 @@ class DesignDoc(Base):
             core.design_doc(self.c, "phone", "ex", project="app")
         self.assertIn("maxpm canvas section phone", str(e.exception))
 
+    def test_a_plan_version_only_for_tasks_parts_or_done_when(self):
+        # #6014: a typo in the plan is no plan version; a task in another part is a change; a done-when line too.
+        core.design_doc(self.c, "phone", "ex", project="app")
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell\n\n### 4.2 Pairing\n\n#{self.b} pairing", "first")
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app's shell\n\n### 4.2 Pairing\n\n#{self.b} pairing", "a typo")
+        p = core.plan_versions(self.c, "phone")["plans"]
+        self.assertEqual(len(p), 1)
+        self.assertIn("the app's shell", p[0]["text"], "the plan version keeps its newest text")
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell\n\n#{self.b} pairing", "pairing joins the shell")
+        p = core.plan_versions(self.c, "phone")["plans"]
+        self.assertEqual((len(p), p[1]["changed"], p[1]["added"], p[1]["note"]), (2, [self.b], [], "pairing joins the shell"))
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell\n\n#{self.b} pairing\n\nDone when: a phone pairs.", "done-when")
+        self.assertEqual(core.plan_versions(self.c, "phone")["plans"][-1]["done_when"], ["Done when: a phone pairs."])
+
     def test_design_doc_tasks_link_back_and_plan_versions_keep_the_old_plan(self):
         core.design_doc(self.c, "phone", "ex", project="app")
         self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell. See https://x.test/#{self.d} and &#{self.d};\n\n"
