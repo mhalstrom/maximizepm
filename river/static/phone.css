@@ -91,7 +91,7 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   header.tabs-open #tabBtn .caret { transform: rotate(180deg); }
   header > .spacer { display: block; flex: 1 1 0; }
   #search { display: none; }
-  #searchBtn, #hdrMore { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
+  #searchBtn, #hdrMore, #notifyBtn { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
     border: 0; background: none; color: var(--ink); font-size: 20px; }
   /* The sheet of the tabs: each tab is a row of 48 px; the one on shows a mark at its left. */
   header nav { display: none; }

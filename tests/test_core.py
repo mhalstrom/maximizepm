@@ -3609,6 +3609,61 @@ class SessionLinks(Base):
         self.assertEqual(notify.compose(self.c, [row(step), row(other, q["id"])])[2], "https://claude.ai/code/session_01Abc")
 
 
+class NotifySwitch(Base):
+    """All notices on or off (#6001): the bell of the top bar, maxpm notify on|off."""
+
+    def setUp(self):
+        super().setUp()
+        from river import notify
+        self.notify = notify
+        self.sent = []
+        notify.register_channel("fake", lambda conn: lambda title, body, url: self.sent.append(title))
+        self.addCleanup(lambda: notify.ADAPTERS.pop("fake", None))
+        core.project_add(self.c, "a")
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "notify_channels", "fake")
+
+    def test_off_sends_nothing_and_drops_what_was_queued_and_needs_you_still_shows_it(self):
+        before = self.add("a", "Sign the form", doer="human")
+        self.notify.run(self.c)  # the event opens, its notice waits for the batch window
+        self.assertEqual(len(core.outbox(self.c)), 1)
+        core.config_set(self.c, "notifications", "off")
+        later = self.add("a", "Approve the release", doer="human")
+        res = self.notify.run(self.c, now_=True)
+        self.assertEqual(res, [{"off": True, "dropped": 1}])
+        self.assertEqual((self.sent, core.outbox(self.c)), ([], []))
+        self.assertEqual({e["item_id"] for e in core.needs_you(self.c)}, {before, later})
+        self.assertEqual([r["error"] for r in self.notify.direct(self.c, "Down", "serve is down")],
+                         ["notifications are off (maxpm notify on)"])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(core.state(self.c)["notifications"], "off")
+        # On again: new notices go; the ones from the off time do not come in a pile.
+        core.config_set(self.c, "notifications", "on")
+        self.add("a", "Pick a name", doer="human")
+        self.notify.run(self.c, now_=True)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual([r["ok"] for r in self.notify.direct(self.c, "Down", "serve is down")], [True])
+
+    def test_the_switch_is_one_global_setting_with_on_or_off(self):
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "notifications", "quiet")
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "notifications", "off", project="a")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "mark", "notify", "off"])
+        self.assertIn("Notifications off", out.getvalue())
+        self.assertEqual(core.setting(self.c, "notifications"), "off")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "mark", "notify", "status"])
+        self.assertIn("NOTIFICATIONS OFF", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["-q", "--as", "mark", "notify", "on"])
+        self.assertEqual(core.setting(self.c, "notifications"), "on")
+
+
 class NotifyOpen(Base):
     """notify_open (#4673): a tap opens the MaximizePM page at the thing, or the agent's own app."""
 

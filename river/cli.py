@@ -1795,6 +1795,8 @@ def build_parser(only=None):
     x.add_argument("--once", action="store_true", help="one pass, for launchd or cron")
     x.add_argument("--now", action="store_true", help="do not wait for the batch window")
     x = nts.add_parser("test", help="send a test message on one channel"); x.add_argument("channel")
+    nts.add_parser("on", help="send notices again (the phone, the Mac): the bell in the page's top bar")
+    nts.add_parser("off", help="send no notice on any channel until maxpm notify on; Needs you works as before")
     nts.add_parser("status", help="per channel: configured, pending, last send, last error")
     x = nts.add_parser("setup", help="set up a channel (ntfy: makes a secret topic and prints the phone steps)")
     x.add_argument("channel", choices=["ntfy"]); x.add_argument("--url", help="ntfy server (default https://ntfy.sh)")
@@ -4326,10 +4328,13 @@ def dispatch(conn, a, actor):
         return {"prompt": core.prompt_for(conn, a.id, person)}
     if c == "notify":
         from . import notify
+        if a.ncmd in ("on", "off"):
+            core.config_set(conn, "notifications", a.ncmd, actor=actor)
+            return {"notifications": a.ncmd}
         if a.ncmd == "test":
             return notify.test(conn, a.channel)
         if a.ncmd == "status":
-            return notify.status(conn)
+            return {**notify.status(conn), "notifications": core.setting(conn, "notifications")}
         if a.ncmd == "setup":
             return notify.setup_ntfy(conn, a.url, a.token, actor, a.open)
         if a.once or a.now:
@@ -7388,7 +7393,18 @@ def render(a, res):
         if "subscribe" in res:
             print("\n".join(res["subscribe"]))
             return
+        if set(res) == {"notifications"}:
+            print("Notifications on: the phone and the Mac get notices again." if res["notifications"] == "on" else
+                  "Notifications off: no notice goes to the phone or the Mac until maxpm notify on. "
+                  "Needs you on the page works as before.")
+            return
+        if res.get("notifications") == "off" and "channels" in res:
+            print("NOTIFICATIONS OFF: nothing is sent (maxpm notify on)")
         if "results" in res:
+            if res["results"] and res["results"][0].get("off"):
+                print(f"notifications are off: nothing sent; {res['results'][0]['dropped']} queued notice(s) dropped "
+                      f"(maxpm notify on)")
+                return
             if not res["results"]:
                 print("(nothing to send)")
             for r in res["results"]:

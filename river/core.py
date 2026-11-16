@@ -112,6 +112,10 @@ DEFAULT_SETTINGS = {
     "question_nudge_after": "30m",
     "serve_port": "8765",
     "notify_channels": "",
+    # All notices on or off (#6001, mark 2026-11-15: 'give us a button to toggle notifications on and off'): off sends
+    # nothing on any channel of notify_channels, for any notice; Needs you and the sessions' messages work as before.
+    # The bell in the page's top bar, maxpm notify on|off. notify_channels stays as it is.
+    "notifications": "on",
     "notify_interval": "30s",
     "notify_batch_window": "60s",
     # The status inbox (#5852): which states of a session send a push notice on notify_channels when a session
@@ -2887,6 +2891,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("ntfy_url is the server address, for example https://ntfy.sh")
     elif key == "ntfy_topic" and value and not re.match(r"^[A-Za-z0-9_-]{1,64}$", value):
         raise RiverError("ntfy_topic uses letters, digits, '-' and '_' (up to 64); maxpm notify setup ntfy makes one")
+    elif key == "notifications" and value not in ("on", "off"):
+        raise RiverError("notifications is on or off: maxpm notify on|off")
     elif key == "notify_channels" and not all(re.match(r"^[a-z0-9_-]+$", c) for c in _channels(value)):
         raise RiverError("notify_channels is a comma list of channel names, for example: mac,ntfy (empty sends nothing)")
     elif key == "tailnet_logins" and not all(re.match(r"^[^\s,]{1,200}$", x) for x in _channels(value)):
@@ -2896,6 +2902,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("notify_status is off or a comma list of " + ", ".join(SESSION_STATUSES)
                          + ", for example: needs_you,done")
     sc = _scope(conn, project, item, agent, kind)
+    if key == "notifications" and sc != "global":
+        raise RiverError("notifications is one switch for all notices: maxpm notify on|off (no --project, --item, "
+                         "--agent or --kind)")
     if key == "release_approval" and not sc.startswith("project:"):
         raise RiverError("release_approval is set for each project from its needs, never for all of them: "
                          "maxpm config set release_approval review|person --project <name> (the deploy project "
@@ -13602,11 +13611,17 @@ def _channels(value):
     return [c.strip() for c in (value or "").split(",") if c.strip()]
 
 
+def notices_on(conn):
+    """The switch of all notices (#6001): False while the person turned them off."""
+    return setting(conn, "notifications") != "off"
+
+
 def _open_event(conn, kind, summary, item_id=None, message_id=None, human=None):
     t = iso(now())
     eid = conn.execute("INSERT INTO needs_you(kind,item_id,message_id,human,summary,opened_at) VALUES (?,?,?,?,?,?)",
                        (kind, item_id, message_id, human, summary, t)).lastrowid
-    for ch in _channels(setting(conn, "notify_channels", item_id=item_id, agent=human)):
+    # Notices off (#6001): the event opens (Needs you shows it) with no notice to send, also not later.
+    for ch in _channels(setting(conn, "notify_channels", item_id=item_id, agent=human)) if notices_on(conn) else ():
         conn.execute("INSERT OR IGNORE INTO notifications(event_id,channel,created_at) VALUES (?,?,?)", (eid, ch, t))
     if item_id is not None:
         _event(conn, item_id, "maxpm", f"needs you: {summary}")
@@ -20433,6 +20448,7 @@ def state(conn, closed=True):
             closed_counts[a["project"]] = closed_counts.get(a["project"], 0) + 1
     return {
         "now": iso(now()),
+        "notifications": setting(conn, "notifications"),  # the bell of the top bar (#6001)
         "projects": project_list(conn),
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
         "items": _state_rows(shown, closed),

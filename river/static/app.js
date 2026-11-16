@@ -7,6 +7,7 @@ import { agentStart, newSession } from "./components/agentStart.js";
 import { chooseLaunch, launchArgs, PLAIN } from "./components/launchDialog.js";
 import { archiveProject, restoreProject } from "./components/archiveProject.js";
 import { openTerminal } from "./components/terminalDialog.js";
+import { drawBell, wireBell } from "./components/notifyBell.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
@@ -261,6 +262,7 @@ async function refresh() {
   if (newCode(S.page_build, S.state_shape)) return;
   renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderEvents(); settings.renderSettings(); settings.renderPolicies(); settings.renderPeople(); renderCredentials(); goals.renderGoals(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
   renderRelay();
+  drawBell($("#notifyBtn"), S.notifications);
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
@@ -985,6 +987,7 @@ function renderRelay() {
       + `\nFrom anywhere: ${r.tunnel || r.url}\nClick to disconnect this computer.`;
   }
 }
+wireBell($("#notifyBtn"), () => (S && S.notifications) || "on");
 $("#relayBtn").onclick = async () => {
   const r = S.relay || {};
   if (r.pending) return void window.open(r.pending.link, "_blank", "noopener");

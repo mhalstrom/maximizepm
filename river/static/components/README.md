@@ -37,6 +37,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
 | Empty list | `empty.js`: `empty(html, {inline})` | "No open items." |
+| Notices on or off | `notifyBell.js`: `drawBell(btn, value)`, `wireBell(btn, current)` | the bell `#notifyBtn` of the top bar, crossed and `--warn` while off; the setting `notifications` with the op `config_set` (#6001) |
 | Table | `table.js` (Tabulator) | |
 | Message box of a chat | `composer.js`: `composerHtml(prefix, {...})`, `composerState(form, hasText)` | round + to attach, one pill field, the mic while empty, a round send arrow with text; line icons `PLUS_SVG`, `MIC_SVG`, `SEND_SVG` (#5078); `stopTitle` adds Stop, a square (`STOP_SVG`) in the arrow's place while the form has `can-now` and the field is empty (#5587) |
 | Chat | `chat.js` | `drawWaiting(host, rows)`: the messages held until the session's turn ends, each with Send now (`data-now`, #5587) |

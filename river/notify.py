@@ -404,6 +404,14 @@ def _adapter(conn, channel):
 def run(conn, now_=False):
     """Send every channel batch that is due. Returns one result per channel batch it tried."""
     core.sync_needs_you_now(conn)
+    if not core.notices_on(conn):
+        # Notices off (#6001): what was queued before the switch never goes, also not when they are on again (a
+        # pile of old notices at once); Needs you still holds each event.
+        with core.tx(conn):
+            n = conn.execute("UPDATE notifications SET state='failed', attempts=?, last_error='notifications were off' "
+                             "WHERE state='pending' OR (state='failed' AND attempts < ?)",
+                             (core.NOTIFY_MAX_ATTEMPTS, core.NOTIFY_MAX_ATTEMPTS)).rowcount
+        return [{"off": True, "dropped": n}]
     t = core.now()
     by_channel = {}
     for r in core.outbox(conn):
@@ -449,7 +457,10 @@ def test(conn, channel):
 def direct(conn, title, body, url=None):
     """Send one notice now on each channel of notify_channels (the queue's and each person's), outside the outbox.
     For the watchdog (#5441): it runs when maxpm serve, which sends the outbox, may be down; and for the status inbox
-    (#5852, url: the session's page). Never raises: each channel's result is returned."""
+    (#5852, url: the session's page). Never raises: each channel's result is returned. Notices off (#6001): nothing
+    goes, and the result says so."""
+    if not core.notices_on(conn):
+        return [{"channel": "all", "ok": False, "error": "notifications are off (maxpm notify on)"}]
     out = []
     people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
     channels = dict.fromkeys(ch for who in [None, *people]
