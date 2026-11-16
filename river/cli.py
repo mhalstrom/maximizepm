@@ -2974,27 +2974,39 @@ def _run(args, conn):
             args.blocked = False
         if getattr(args, "level", None) in core.MESSAGE_LEVELS:
             args.level = None
+    # #5975: a process that cannot write the queue skips the bookkeeping writes of a command (serve does them), and
+    # a write of the command itself ends in core.READONLY_REFUSAL.
     if args.cmd not in ("go", "plan"):
-        core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
+        with core.unless_readonly():
+            core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
-    _record_self(conn, actor, args.cmd, for_other)  # before done measures the item
+    with core.unless_readonly():
+        _record_self(conn, actor, args.cmd, for_other)  # before done measures the item
     changes = conn.total_changes
     try:
         res = dispatch(conn, args, actor)
     except RiverError:
         # An event that occurred before the refusal still runs its hook.
-        for line in _hook_result_lines(run_hooks(conn, actor)):
-            print(line, file=sys.stderr)
+        with core.unless_readonly():
+            for line in _hook_result_lines(run_hooks(conn, actor)):
+                print(line, file=sys.stderr)
+        raise
+    except core.sqlite3.OperationalError as e:
+        if core.is_readonly(e):
+            raise RiverError(core.READONLY_REFUSAL) from None
         raise
     # The events of this command (a release cut, a review, a deploy): their hooks run now.
-    hooks = run_hooks(conn, actor)
+    hooks = []
+    with core.unless_readonly():
+        hooks = run_hooks(conn, actor)
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
     me = (res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else
           args.name if args.cmd == "register" and not args.human else actor)
-    _record_self(conn, me, args.cmd, for_other)
+    with core.unless_readonly():
+        _record_self(conn, me, args.cmd, for_other)
     if conn.total_changes != changes:  # the command may have made a human item ready, or sent a question to a person
         core.sync_needs_you_now(conn)
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
@@ -6121,7 +6133,7 @@ def _canvas_dispatch(conn, a, actor):
             names = core.projects_for_dir(conn, os.getcwd())
             project = names[0] if len(names) == 1 else None
         res = core.canvas_put(conn, a.name, body, actor, a.kind, a.title, a.item, project, a.note,
-                              a.file if a.file and a.file != "-" else None)
+                              core.CALLER_FILES.get(a.file, a.file) if a.file and a.file != "-" else None)
         return dict(res, pictures_inline=pictures[0], pictures_missing=pictures[1]) if any(pictures) else res
     if v == "kit":
         return core.canvas_kit()

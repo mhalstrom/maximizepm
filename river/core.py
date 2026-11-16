@@ -7,6 +7,7 @@ plain dicts and lists, so the CLI and the web server share one code path.
 from __future__ import annotations
 
 import collections
+import contextlib
 import contextvars
 import functools
 import importlib
@@ -1903,6 +1904,8 @@ CALLER_PPID = None
 # The one-time token of that command (#5845): cli.ask_server sends it, so serve checks the session of the caller's
 # connection, not of its own runner. Never in the environment of a process that the command starts.
 CALLER_TOKEN = None
+# #5975: in a runner, the runner's copy of a file that the caller read -> the caller's own path (what a command records).
+CALLER_FILES = {}
 
 
 class _ResidentConnection(sqlite3.Connection):
@@ -1970,15 +1973,43 @@ def _upgrade(conn):
             return
     except sqlite3.OperationalError:
         pass  # a new database: no meta table yet
-    conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
-    with tx(conn):
-        _migrate(conn)
-        _graph_triggers(conn)
-    _migrate_launch_agents(conn)
-    _migrate_levels(conn)
-    _migrate_big_file_conflicts(conn)
-    with tx(conn):
-        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
+    try:
+        conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
+        with tx(conn):
+            _migrate(conn)
+            _graph_triggers(conn)
+        _migrate_launch_agents(conn)
+        _migrate_levels(conn)
+        _migrate_big_file_conflicts(conn)
+        with tx(conn):
+            conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
+    except sqlite3.OperationalError as e:
+        if not is_readonly(e):
+            raise
+        # A process that cannot write the queue (#5975): maxpm serve runs the migrations of its code.
+
+
+# #5975: only maxpm serve writes the queue. A process that cannot write its file (an agent's sandbox denies it) reads
+# it, and a write ends in this refusal: the command ran here because serve did not take it.
+READONLY_REFUSAL = ("only maxpm serve writes the queue, and this command ran in its own process (maxpm serve does "
+                    "not answer, every runner was busy, or the command reads a file that serve cannot get); nothing "
+                    "changed. Run it again in a moment; when maxpm serve does not run, a person starts it: maxpm serve")
+
+
+def is_readonly(e):
+    """The error of a write to a queue that this process cannot write."""
+    return isinstance(e, sqlite3.OperationalError) and "readonly database" in str(e)
+
+
+@contextlib.contextmanager
+def unless_readonly():
+    """Skip the writes of the block (the bookkeeping of a command: activity, needs-you) when this process cannot
+    write the queue (#5975); serve does them at its next pass."""
+    try:
+        yield
+    except sqlite3.OperationalError as e:
+        if not is_readonly(e):
+            raise
 
 
 def _migrate_big_file_conflicts(conn):

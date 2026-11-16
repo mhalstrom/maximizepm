@@ -98,7 +98,23 @@ def run_one(cli, core, conn, req, env):
     core.CALLER_TOKEN = req.get("caller") or None  # #5845: serve's one-time token of the caller's connection
     # #5972: the processes above the caller, which serve read from the kernel (a session token is checked on them).
     core.CALLER_CHAIN = [tuple(c) for c in req["chain"]] if isinstance(req.get("chain"), list) else None
-    sys.argv = ["maxpm", *req["argv"]]
+    # #5975: the files that the caller read for the command (client.reads) go into a folder of this runner, and the
+    # words name them; stdin that the caller read is the command's stdin.
+    argv = list(req["argv"])
+    tmp = tempfile.mkdtemp(prefix="maxpm-run-") if req.get("files") else None
+    for i, f in enumerate(req.get("files") or []):
+        sub = os.path.join(tmp, str(i))
+        os.mkdir(sub)
+        path = os.path.join(sub, os.path.basename(f.get("name") or "file") or "file")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f.get("text") or "")
+        if isinstance(f.get("at"), int) and 0 <= f["at"] < len(argv):
+            argv[f["at"]] = (f.get("prefix") or "") + path
+        core.CALLER_FILES[path] = f.get("source") or path  # what the command records as its source
+    saved_stdin = sys.stdin
+    if isinstance(req.get("stdin"), str):
+        sys.stdin = io.StringIO(req["stdin"])
+    sys.argv = ["maxpm", *argv]
     out, err = io.StringIO(), io.StringIO()
     fd_out, fd_err = _capture(), _capture()
     saved = os.dup(1), os.dup(2)
@@ -108,7 +124,7 @@ def run_one(cli, core, conn, req, env):
         os.dup2(fd_err.fileno(), 2)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                code = cli.run(req["argv"])
+                code = cli.run(argv)
             except SystemExit as e:
                 code = e.code
             except core.RiverError as e:  # as cli.main prints it
@@ -127,6 +143,11 @@ def run_one(cli, core, conn, req, env):
         core.CALLER_PPID = None
         core.CALLER_TOKEN = None
         core.CALLER_CHAIN = None
+        sys.stdin = saved_stdin
+        core.CALLER_FILES.clear()
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
         if conn.in_transaction:  # a command that stopped inside a transaction: none stays open for the next
             conn.rollback()
             for k in ("ann", "ann_open", "ann_kept", "ann_closed_kept", ("graph", True), ("graph", False)):  # they may hold changes that are gone

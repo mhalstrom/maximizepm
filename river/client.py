@@ -60,7 +60,14 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config",
-          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser"}
+          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser", "canvas"}
+# #5975 (only serve writes the queue): a file that a command reads is read here, in the caller's own sandbox, and
+# serve's runner gets its text in a file of its own; serve, outside every sandbox, never opens a path that a caller
+# names. '-' (stdin) is read here too. Options per (command, subcommand) and positions per (command, subcommand).
+READ_OPTS = {("add", None): ("--from",), ("goal", "handoff"): ("--file",)}
+READ_POS = {("canvas", "put"): 0, ("canvas", "section"): 2}
+READ_MAX = 8 << 20  # a larger file runs in the caller's process
+CANVAS_LOCAL = {"save"}  # it writes a file
 # Words that keep a command in its own process: it waits, it reads stdin, or it reads or writes a file it names.
 FILE_WORDS = ("--wait", "--watch", "--from", "--file", "--put", "--out", "--summary-file")
 # maxpm browser (#5665): a screenshot writes a PNG file, and batch reads stdin; they run in their own process. Its
@@ -92,6 +99,86 @@ def _at(words):
         else:
             return i
     return len(words)
+
+
+def _sub(words, i):
+    """The first word after words[i] that is not an option, or None."""
+    for w in words[i + 1:]:
+        if not w.startswith("-"):
+            return w
+    return None
+
+
+def reads(words):
+    """(index, prefix, path) of each word that names a file the command reads (READ_OPTS, READ_POS): the word at
+    index becomes prefix + the runner's own file. None when a word names one in a form this cannot read."""
+    i = _at(words)
+    if i >= len(words):
+        return []
+    cmd, sub = words[i], _sub(words, i)
+    out = []
+    opts = READ_OPTS.get((cmd, sub)) or READ_OPTS.get((cmd, None)) or ()
+    for k in range(i + 1, len(words)):
+        w = words[k]
+        for o in opts:
+            if w == o:
+                if k + 1 >= len(words):
+                    return None
+                out.append((k + 1, "", words[k + 1]))
+            elif w.startswith(o + "="):
+                out.append((k, o + "=", w[len(o) + 1:]))
+    pos = READ_POS.get((cmd, sub))
+    if pos is not None:
+        k, n = words.index(sub, i + 1) + 1, 0
+        while k < len(words):
+            w = words[k]
+            if w in ("-q", "--quiet", "--json"):
+                k += 1
+            elif w.startswith("-") and w != "-":
+                k += 1 if "=" in w else 2  # every other option of these subcommands takes a value
+            elif n == pos:
+                out.append((k, "", w))
+                break
+            else:
+                n, k = n + 1, k + 1
+    return out
+
+
+def _local_pictures(text):
+    """The page names a picture by a path (canvas put puts it inline from the page's folder, #4983): it runs in the
+    caller's process, which can read that folder. Links to the web, data and anchors need nothing."""
+    for mark in ('src="', "src='", "](", "url(", "href=\""):
+        at = text.find(mark)
+        while at >= 0:
+            rest = text[at + len(mark):at + len(mark) + 12].lstrip("'\" <")
+            if rest and not rest.startswith(("http:", "https:", "data:", "#", "//", "mailto:", "{", "$")):
+                return True
+            at = text.find(mark, at + 1)
+    return False
+
+
+def _inline(words, found):
+    """The files and stdin of a request ({"files": [...], "stdin": text}), or None when one cannot be read here."""
+    files, stdin = [], None
+    for k, prefix, path in found:
+        if path == "-":
+            if stdin is None:
+                if not sys.stdin or sys.stdin.isatty():
+                    return None
+                stdin = sys.stdin.read()
+            continue
+        try:
+            if os.path.getsize(path) > READ_MAX:
+                return None
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if path.endswith((".md", ".html", ".htm", ".markdown")) and _local_pictures(text):
+            return None
+        files.append({"at": k, "prefix": prefix, "name": os.path.basename(path) or "file", "text": text,
+                      "source": os.path.abspath(path)})
+    return {"files": files, "stdin": stdin}
 
 
 def serve_file(env=None):
@@ -186,9 +273,17 @@ def run_remote(words, env=None, cwd=None):
         if _command(words[_at(words) + 1:]) in BROWSER_LOCAL:
             return None
         files = tuple(w for w in FILE_WORDS if w != "--wait")
-    if cmd not in REMOTE or "-" in words or any(w.split("=", 1)[0] in files for w in words):
+    if cmd not in REMOTE:
+        return None
+    found = reads(words)
+    if found is None:
+        return None
+    inlined = {k for k, _, _ in found} | {k - 1 for k, prefix, _ in found if not prefix}  # the values and options
+    if any(k not in inlined and (w == "-" or w.split("=", 1)[0] in files) for k, w in enumerate(words)):
         return None
     if cmd == "artifacts" and "show" in words:  # it prints the text of a file
+        return None
+    if cmd == "canvas" and _sub(words, _at(words)) in CANVAS_LOCAL:
         return None
     try:
         with open(serve_file(env), encoding="utf-8") as f:
@@ -200,12 +295,19 @@ def run_remote(words, env=None, cwd=None):
         cwd = cwd or os.getcwd()
     except OSError:
         return None
+    extra = _inline(words, found) if found else {}
+    if extra is None:
+        return None
     body = _dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(), "pid": os.getpid(),
-                       "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False}).encode()
+                   "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False,
+                   **extra}).encode()
     status, answer = _post(port, body, token, timeout=None)
     if status is None or 400 <= status < 500 or status == 503:
         # No connection, a proxy or serve that refused it (403, an older serve: 404), older code or another queue
         # (409), every runner busy (503): serve did not run it, so it runs here.
+        if extra.get("stdin") is not None:  # the command here reads the text that this read from stdin
+            import io
+            sys.stdin = io.StringIO(extra["stdin"])
         return None
     try:
         res = _loads(answer)
