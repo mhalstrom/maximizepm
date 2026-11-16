@@ -40,9 +40,11 @@ export function makeComments(box, { id, ref, reload, show }) {
   const kept = () => { try { return JSON.parse(store(KEEP + id) || "null"); } catch (e) { return null; } };
   const keep = (v) => store(KEEP + id, v ? JSON.stringify(v) : "");
 
-  function compose(anchor) {
-    const old = kept();
-    keep({ anchor: anchor || null, text: old && JSON.stringify(old.anchor) === JSON.stringify(anchor || null) ? old.text : "" });
+  // opts.suggest (#6004): a suggested change of the anchor's quote; a second box holds the new words.
+  function compose(anchor, opts = {}) {
+    const old = kept(), same = old && JSON.stringify(old.anchor) === JSON.stringify(anchor || null);
+    keep({ anchor: anchor || null, text: same ? old.text : "",
+      ...(opts.suggest && anchor && anchor.quote ? { suggest: same && old.suggest != null ? old.suggest : anchor.quote } : {}) });
     sig = ""; draw();
     const ta = box.querySelector(".cv-compose textarea"); if (ta) ta.focus();
   }
@@ -64,8 +66,11 @@ export function makeComments(box, { id, ref, reload, show }) {
     for (const inp of box.querySelectorAll("[data-cv-reply-text]")) if (inp.value) replies[inp.dataset.cvReplyText] = inp.value;
     box.innerHTML = `<div class="cv-head"><b>Comments</b> <span class="muted">${open.length} open${drafts.length ? ` · ${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : ""}</span>
         <span class="cv-sp"></span>${drafts.length ? `<button class="btn primary" type="button" data-cv-sendall>Send ${drafts.length === 1 ? "the draft" : `all ${drafts.length} drafts`} to the session</button>` : ""}</div>
-      ${k ? `<div class="cv-compose"><div class="muted">On ${esc(partText(k.anchor))}${k.anchor && k.anchor.path ? ` <code>${esc(clip(k.anchor.path, 60))}</code>` : ""}</div>
-        <textarea rows="3" placeholder="Your comment: what to change, and why" aria-label="Your comment">${esc(k.text || "")}</textarea>
+      ${k ? `<div class="cv-compose">${k.suggest != null
+          ? `<div class="muted">Suggest new words for <del>${esc(clip(k.anchor.quote, 300))}</del></div>
+             <textarea class="cv-sug" rows="3" aria-label="The new words">${esc(k.suggest)}</textarea>`
+          : `<div class="muted">On ${esc(partText(k.anchor))}${k.anchor && k.anchor.path ? ` <code>${esc(clip(k.anchor.path, 60))}</code>` : ""}</div>`}
+        <textarea class="cv-text" rows="${k.suggest != null ? 2 : 3}" placeholder="${k.suggest != null ? "Why (you can leave it empty)" : "Your comment: what to change, and why"}" aria-label="Your comment">${esc(k.text || "")}</textarea>
         <div class="cv-acts"><button class="btn primary" type="button" data-cv-now>Send now</button>
           <button class="btn" type="button" data-cv-draft>Save as draft</button>
           <button class="btn" type="button" data-cv-cancel>Cancel</button></div></div>` : ""}
@@ -73,12 +78,13 @@ export function makeComments(box, { id, ref, reload, show }) {
         return `<div class="cv-c cv-${st}" data-cid="${c.id}">
           <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>
             ${c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" title="Show this part of the page">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
+          ${c.anchor && c.anchor.suggest != null ? `<div class="cv-sugg"><del>${esc(clip(c.anchor.quote, 400))}</del> <ins>${esc(clip(c.anchor.suggest, 400)) || "(deleted)"}</ins></div>` : ""}
           <div class="cv-b">${esc(c.body)}</div>
           ${(c.replies || []).map(r => `<div class="cv-r"><b>${esc(r.author || "")}</b> <span class="muted">${ago(r.created_at)}</span>: ${esc(r.body)}</div>`).join("")}
           ${c.state === "resolved" ? `<div class="muted cv-r">resolved by ${esc(c.resolved_by || "")}${c.resolve_note ? ": " + esc(c.resolve_note) : ""}</div>` : ""}
           <div class="cv-acts">${c.state === "draft"
             ? `<button class="btn primary" type="button" data-cv-send="${c.id}">Send</button><button class="btn" type="button" data-cv-discard="${c.id}">Discard</button>`
-            : c.state === "resolved" ? "" : `<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
+            : c.state === "resolved" ? "" : `${c.anchor && c.anchor.suggest != null ? `<button class="btn primary" type="button" data-cv-accept="${c.id}" title="Put the new words in a new version">Accept</button><button class="btn" type="button" data-cv-reject="${c.id}">Reject</button>` : ""}<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
               <button class="btn" type="button" data-cv-reply="${c.id}">Reply</button><button class="btn" type="button" data-cv-resolve="${c.id}">Resolve</button>`}</div>
         </div>`; }).join("") || (k ? "" : `<div class="muted cv-none">No comments yet. Comment picks a part of the page; Comment on the page takes the whole page.</div>`)}`;
     for (const [cid, v] of Object.entries(replies)) {
@@ -105,7 +111,8 @@ export function makeComments(box, { id, ref, reload, show }) {
   }
 
   box.addEventListener("input", (e) => {
-    if (e.target.matches(".cv-compose textarea")) { const k = kept(); if (k) keep({ ...k, text: e.target.value }); }
+    if (e.target.matches(".cv-compose .cv-text")) { const k = kept(); if (k) keep({ ...k, text: e.target.value }); }
+    if (e.target.matches(".cv-compose .cv-sug")) { const k = kept(); if (k) keep({ ...k, suggest: e.target.value }); }
   });
   box.addEventListener("keydown", (e) => {
     const r = e.target.closest && e.target.closest("[data-cv-reply-text]");
@@ -118,15 +125,25 @@ export function makeComments(box, { id, ref, reload, show }) {
     if (t.dataset.cvShow) return show(t.dataset.cvShow);
     if (t.hasAttribute("data-cv-cancel")) { keep(null); sig = ""; return draw(); }
     if (t.hasAttribute("data-cv-now") || t.hasAttribute("data-cv-draft")) {
-      const text = (box.querySelector(".cv-compose textarea").value || "").trim();
+      let text = (box.querySelector(".cv-compose .cv-text").value || "").trim();
+      const sug = k && k.suggest != null ? box.querySelector(".cv-compose .cv-sug").value : null;
+      if (sug != null && sug.trim() === k.anchor.quote.trim()) return toast("Change the words first", true);
+      if (sug != null && !text) text = "Suggested change";
       if (!text) return toast("Write the comment first", true);
       const now = t.hasAttribute("data-cv-now");
-      return run("canvas_comment", { name: ref, text, anchor: k && k.anchor, version: meta.version, send: now },
+      const anchor = sug != null ? { ...k.anchor, suggest: sug } : k && k.anchor;
+      return run("canvas_comment", { name: ref, text, anchor, version: meta.version, send: now },
         (r) => { keep(null); toast(r.again ? `c${r.id} went already` : now ? `Sent c${r.id} to the session` : `Saved c${r.id} as a draft`); }, t);
     }
     if (t.hasAttribute("data-cv-sendall")) return run("canvas_send", { name: ref }, (r) => toast(`Sent ${r.sent.length} comment(s) to ${r.to}`), t);
     if (t.dataset.cvSend) return run("canvas_send", { name: ref, comments: [+t.dataset.cvSend] }, (r) => toast(`Sent to ${r.to}`), t);
     if (t.dataset.cvDiscard) return run("canvas_discard", { comment: +t.dataset.cvDiscard }, null, t);
+    if (t.dataset.cvAccept) return run("canvas_accept", { comment: +t.dataset.cvAccept }, (r) => toast(`Accepted: version ${r.version}`), t);
+    if (t.dataset.cvReject) {
+      const why = prompt("Why not? (one line; you can leave it empty)");
+      if (why === null) return;
+      return run("canvas_reject", { comment: +t.dataset.cvReject, note: why }, () => toast("Rejected; the page stays"), t);
+    }
     if (t.dataset.cvResolve) return run("canvas_resolve", { comment: +t.dataset.cvResolve, note: "resolved in the page" }, null, t);
     if (t.dataset.cvReply) {
       const inp = box.querySelector(`[data-cv-reply-text="${t.dataset.cvReply}"]`), text = (inp && inp.value || "").trim();

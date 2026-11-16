@@ -315,9 +315,11 @@ try {
   await fetch("/__reply");
   await until(() => chips().includes("answered"), "the session's reply");
   out.reply = q(".cv-r").textContent.replace(/\s+/g, " ").trim();
-  q("[data-cv-edit]").click();
-  await until(() => q(".cv-edit textarea"), "the editor");
-  q(".cv-edit textarea").value = "# Notes\n\n## Dates\n\nMay 1."; q("[data-cv-save]").click();
+  q("[data-cv-edit]").click();  // Edit (#6004): the parts in place; the whole text is one click more
+  await until(() => q(".cv-edit [data-cv-whole]"), "the editor");
+  q(".cv-edit [data-cv-whole]").click();
+  await until(() => q(".cv-edit textarea"), "the whole text");
+  q(".cv-edit textarea").value = "# Notes\n\n## Dates\n\nMay 1."; q("[data-cv-save-whole]").click();
   await until(() => q(".sp-cver") && q(".sp-cver").value === "2" && q(".sp-canvas h2"), "version 2 by mark");
   out.v2 = q(".sp-canvas").textContent.replace(/\s+/g, " ").trim();
   post(out);
@@ -653,7 +655,7 @@ try {
     document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     out.outside = vis("[data-cv-page]");
     q(".sp-cbar .cv-more").click(); q("[data-cv-edit]").click();
-    await until(() => q(".cv-edit textarea"), "the edit box");
+    await until(() => q(".cv-edit [data-blk]"), "the parts to edit");
     out.after_edit = vis(".sp-cbar.more .cv-menu");
   }
   post(out);

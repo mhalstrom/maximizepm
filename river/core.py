@@ -17978,6 +17978,11 @@ def _anchor(anchor):
     if not isinstance(anchor, dict):
         raise RiverError("a comment's part is {path, text, quote} (or leave it out for the whole page)")
     a = {k: str(anchor[k])[:500] for k in ("path", "text", "quote") if anchor.get(k)}
+    # A suggested change (#6004): suggest is the new text for the quote ("" deletes it); it needs the quote.
+    if anchor.get("suggest") is not None:
+        if not a.get("quote"):
+            raise RiverError("a suggestion replaces words of the page: select them first (the anchor's quote)")
+        a["suggest"] = str(anchor["suggest"])[:2000]
     return json.dumps(a) if a else None
 
 
@@ -18053,6 +18058,11 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
             part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:120]}\"") + \
                    (f" ({a['path']})" if a.get("path") else "")
         on = "" if r["version"] == latest else f", on version {r['version']}"
+        if a and a.get("suggest") is not None:  # #6004
+            lines.append(f"  c{r['id']} suggests replacing \"{a['quote'][:200]}\" with \"{a['suggest'][:200]}\"{on}"
+                         + (f": {r['body']}" if r["body"] else "") + f" (maxpm canvas accept c{r['id']}, or "
+                         f"maxpm canvas reject c{r['id']} --note \"<why>\")")
+            continue
         lines.append(f"  c{r['id']} on {part}{on}: {r['body']}")
     lines.append(f"Read them: maxpm canvas comments {c['name']} --open; change the page (maxpm canvas put), then "
                  f"answer each: maxpm canvas reply c<id> \"...\" and maxpm canvas resolve c<id> --note \"...\"")
@@ -18168,6 +18178,49 @@ def canvas_resolve(conn, comment_id, actor=None, note=None):
         conn.execute("UPDATE canvas_comments SET state='resolved', resolved_at=?, resolved_by=?, resolve_note=? WHERE id=?",
                      (iso(now()), actor, (note or "").strip() or None, r["id"]))
     return _comment_dict(_canvas_comment(conn, r["id"]))
+
+
+def canvas_accept(conn, comment_id, actor=None):
+    """Accept a suggested change (#6004, design-doc-mockup v7): its quote is replaced by its new text in the newest
+    version of the Markdown canvas, as a new version by the actor, and the suggestion is resolved with that version.
+    A person, or the session that wrote the canvas, decides. Refused when the quote is no longer in the page once."""
+    if not actor:
+        raise RiverError("accepting needs a name: set MAXPM_AGENT or pass --as <name>")
+    r = _canvas_comment(conn, comment_id)
+    a = json.loads(r["anchor"]) if r["anchor"] else {}
+    if r["parent_id"] or a.get("suggest") is None:
+        raise RiverError(f"c{r['id']} is no suggested change; a comment is answered with maxpm canvas reply or resolve")
+    if r["state"] == "resolved":
+        raise RiverError(f"suggestion c{r['id']} is already resolved")
+    c = _canvas_row(conn, r["canvas_id"])
+    if c["kind"] != "md":
+        raise RiverError(f"canvas {c['name']} is {c['kind']}: a suggestion is applied by hand on it")
+    if not _is_person(conn, actor) and actor != _canvas_writer(conn, c):
+        raise RiverError(f"refused: a person or the session that wrote canvas {c['name']} decides on c{r['id']}")
+    body = _canvas_latest(conn, c["id"])["body"]
+    n = body.count(a["quote"])
+    if n != 1:
+        raise RiverError(f"the words of c{r['id']} are {'no longer' if n == 0 else f'{n} times'} in the newest version "
+                         f"of canvas {c['name']}: change the page by hand, then maxpm canvas resolve c{r['id']}")
+    res = canvas_put(conn, c["name"], body.replace(a["quote"], a["suggest"], 1), actor,
+                     project=_project_name(conn, c["project_id"]), item=c["item_id"],
+                     note=f"accepted c{r['id']} of {r['author']}")
+    canvas_resolve(conn, r["id"], actor, f"accepted in version {res['version']}")
+    to = _canvas_writer(conn, c)
+    if to and to != actor:  # the session reads the change before its next version, as after an edit
+        send(conn, "note", f"{actor} accepted the suggestion c{r['id']} on canvas {c['name']}: version "
+             f"{res['version']}. Read it before your next version: maxpm canvas show {c['name']}", to=to,
+             item=c["item_id"], actor=actor, level="low")
+    return {"accepted": r["id"], "version": res["version"], "canvas": c["name"]}
+
+
+def canvas_reject(conn, comment_id, actor=None, note=None):
+    """Reject a suggested change: it is resolved with the reason, and the page stays."""
+    r = _canvas_comment(conn, comment_id)
+    a = json.loads(r["anchor"]) if r["anchor"] else {}
+    if a.get("suggest") is None:
+        raise RiverError(f"c{r['id']} is no suggested change; close a comment with maxpm canvas resolve")
+    return canvas_resolve(conn, r["id"], actor, "rejected" + (f": {note.strip()}" if (note or "").strip() else ""))
 
 
 # Docs (#4708): a doc is a Markdown canvas that a session writes section by section, as on claude.ai. A section is a

@@ -10141,6 +10141,37 @@ class Canvas(Base):
         with self.assertRaisesRegex(core.RiverError, "no item"):
             core.canvas_send(self.c, "loose", "mark")
 
+    def test_a_suggested_change_is_accepted_or_rejected(self):
+        # #6004: a suggestion is a comment whose part carries the new text; accept puts it in a new version.
+        core.canvas_put(self.c, "plan", "# Plan\n\nShip in March. Ask the team.", "ag", kind="md")
+        with self.assertRaisesRegex(core.RiverError, "select them first"):
+            core.canvas_comment(self.c, "plan", "x", "mark", anchor={"path": "p", "suggest": "y"})
+        s = core.canvas_comment(self.c, "plan", "March is too soon", "mark",
+                                anchor={"path": "p", "quote": "Ship in March.", "suggest": "Ship in May."}, send_now=True)
+        self.assertEqual(s["anchor"]["suggest"], "Ship in May.")
+        msg = [m["body"] for m in core.inbox(self.c, "ag", mark_read=False) if "suggests" in m["body"]][0]
+        self.assertIn(f'c{s["id"]} suggests replacing "Ship in March." with "Ship in May."', msg)
+        self.assertIn(f"maxpm canvas accept c{s['id']}", msg)
+        core.register(self.c, "other")
+        with self.assertRaisesRegex(core.RiverError, "a person or the session that wrote"):
+            core.canvas_accept(self.c, s["id"], "other")
+        res = core.canvas_accept(self.c, s["id"], "ag")  # the expert decides
+        self.assertEqual(res["version"], 2)
+        self.assertEqual(core.canvas_show(self.c, "plan")["shown"]["body"], "# Plan\n\nShip in May. Ask the team.")
+        done = core._comment_dict(core._canvas_comment(self.c, s["id"]))
+        self.assertEqual((done["state"], done["resolve_note"]), ("resolved", "accepted in version 2"))
+        with self.assertRaisesRegex(core.RiverError, "already resolved"):
+            core.canvas_accept(self.c, s["id"], "mark")
+        # Words that are gone from the page: refused, with the next step.
+        gone = core.canvas_comment(self.c, "plan", "hm", "mark", anchor={"quote": "Ship in March.", "suggest": "Later."})
+        with self.assertRaisesRegex(core.RiverError, "no longer in the newest version"):
+            core.canvas_accept(self.c, gone["id"], "mark")
+        r = core.canvas_reject(self.c, gone["id"], "mark", "the date is set")
+        self.assertEqual(r["resolve_note"], "rejected: the date is set")
+        plain = core.canvas_comment(self.c, "plan", "Shorter", "mark")
+        with self.assertRaisesRegex(core.RiverError, "no suggested change"):
+            core.canvas_accept(self.c, plain["id"], "mark")
+
     def test_a_persons_edit_discard_and_the_go_briefing(self):
         core.canvas_put(self.c, "notes", "# Notes", "ag", kind="md")
         res = core.canvas_edit(self.c, "notes", "# Notes\n\nMore.", "mark")

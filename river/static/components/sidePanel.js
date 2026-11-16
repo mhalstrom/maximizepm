@@ -18,6 +18,7 @@
 // shows (in an HTML canvas through its helper script), with "n of m", Enter and Shift+Enter, and Esc.
 import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targetKey, ownSignIn } from "../lib.js";
 import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
+import { mdBlocks, spliceBlock } from "./mdBlocks.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
@@ -278,13 +279,21 @@ async function showCanvas(t, box, note) {
       // The part's own words, without the doc's controls (an edit link, a decision's answer bar).
       const words = el ? el.cloneNode(true) : null;
       if (words) words.querySelectorAll(".doc-edit, .doc-answer").forEach(x => x.remove());
-      t.comments.pick(el ? { path: pathIn(el, d), text: (words.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
-                              quote: String(getSelection() || "").trim().slice(0, 500) } : null);
+      const said = (words ? words.textContent : "").replace(/\s+/g, " ").trim();
+      const quote = String(getSelection() || "").trim().slice(0, 500);
+      const part = el ? { path: pathIn(el, d), text: said.slice(0, 200), quote } : null;
+      // Suggest (#6004): the selected words, else the part's words, with a box for the new words.
+      if (t.mode === "suggest" && part) { if (!part.quote) part.quote = said.slice(0, 500); t.comments.compose(part, { suggest: true }); setCommenting(t, true); }
+      else t.comments.pick(part);
       side.scrollIntoView({ block: "nearest" });
     }, true);
     box.append(d, side);
     box.scrollTop = (t.scroll && t.scroll.y) || 0;
     box.onscroll = () => { if (on === t.id) t.scroll = { x: 0, y: box.scrollTop }; };
+    // The mode stays while the tab is drawn again (#6004); an older version is only read.
+    if (t.pin) t.mode = "read";
+    if (t.mode === "edit") editCanvas(t, box, src);
+    else if (t.mode === "suggest") setCommenting(t, true);
     return;
   }
   box.onscroll = null;
@@ -310,7 +319,7 @@ function drawBar(t, meta) {
     ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
     <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Click a part or select text to comment">Comment</button>`}
     <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Edit the text as a new version">Edit</button>` : ""}
+    ${meta.kind === "md" && !t.pin ? modesHtml(t.mode || "read") : ""}
     ${publishButton()}</span>
     ${iconButton("⋯", "More: comment, edit, publish", { cls: "cv-more", data: { "cv-more": "" } })}`;
   bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
@@ -319,8 +328,7 @@ function drawBar(t, meta) {
   const mode = bar.querySelector("[data-cv-mode]");
   if (mode) mode.onclick = () => setCommenting(t, !t.commenting);
   bar.querySelector("[data-cv-page]").onclick = () => { setCommenting(t, false); t.comments.compose(null); t.side.scrollIntoView({ block: "nearest" }); };
-  const edit = bar.querySelector("[data-cv-edit]");
-  if (edit) edit.onclick = () => editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`, t.side);
+  bar.querySelectorAll("[data-cv-to]").forEach(b => { b.onclick = () => setMode(t, b.dataset.cvTo); });
   // The newest meta at the click: the page row changes while the bar stays drawn.
   bar.querySelector("[data-cv-rqs]").onclick = () => openOnRqs(canvasOf(t.target), t.meta, t.pin || t.meta.version);
   // #5361: on a phone the bar is one row; Comment on the page and Edit sit under its ⋯. A choice closes the menu, and
@@ -499,25 +507,90 @@ async function loadComments(t) {
     if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
   } catch (e) { /* the next state asks again */ }
 }
-// Edit a Markdown canvas: its text in a box; Save makes a new version by the person, and the session gets a note.
-async function editCanvas(t, box, src, side) {
+// Read, Edit and Suggest of a Markdown canvas (#6004, design-doc-mockup v7). Read: the page as it is. Edit: each part
+// of the text edits in place, and Done puts the whole text as a new version by the person at once (the session that
+// wrote it gets a note, core.canvas_edit). Suggest: a click on selected words writes a suggested change, which the
+// session or the person accepts or rejects under the page (canvasComments.js).
+function modesHtml(mode) {
+  const b = (m, label, title) => button(label, { cls: "cv-modeb", data: { "cv-to": m, ...(m === "edit" ? { "cv-edit": 1 } : {}) }, title,
+    attrs: `aria-pressed="${mode === m}"` });
+  return `<span class="cv-modes" role="group" aria-label="Read, edit or suggest">${b("read", "Read", "Read the page")}${
+    b("edit", "Edit", "Change the text in place: each Done is a new version by you")}${
+    b("suggest", "Suggest", "Select words to suggest a change")}</span>`;
+}
+function setMode(t, mode) {
+  if (t.mode === mode) return;
+  t.mode = mode;
+  setCommenting(t, mode === "suggest");
+  if (mode === "edit") return editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`);
+  t.barSig = null;
+  show(t);
+}
+
+async function editCanvas(t, box, src) {
   const r = await fetch(src); if (!r.ok || on !== t.id) return;
-  const text = await r.text();
-  const ed = document.createElement("div"); ed.className = "cv-edit";
-  ed.innerHTML = `<textarea aria-label="The text of the canvas (Markdown)"></textarea>
-    <div class="cv-acts"><button class="btn primary" type="button" data-cv-save>Save as a new version</button>
-      <button class="btn" type="button" data-cv-stop>Cancel</button><span class="muted">The session that wrote it gets a note.</span></div>`;
-  ed.querySelector("textarea").value = text;
-  (t.md || box.querySelector(".sp-canvas")).replaceWith(ed);
-  ed.querySelector("textarea").focus();
-  ed.querySelector("[data-cv-stop]").onclick = () => show(t);
-  ed.querySelector("[data-cv-save]").onclick = async () => {
+  let text = await r.text(), open = null, whole = false;
+  t.barSig = null; if (t.meta) drawBar(t, t.meta);
+  const ed = document.createElement("div"); ed.className = "cv-edit sp-md md";
+  // back: the whole text was saved, so the page shows it as it reads (as before #6004); a part's Done stays in Edit.
+  const save = async (next, back = false) => {
     try {
-      const res = await act("canvas_edit", { name: "c" + canvasOf(t.target), text: ed.querySelector("textarea").value });
+      const res = await act("canvas_edit", { name: "c" + canvasOf(t.target), text: next });
+      text = next; open = null; whole = false;
       toast(res.unchanged ? "No change" : `Saved as version ${res.version}`);
-      t.pin = null; show(t);
+      if (back) { t.mode = "read"; t.pin = null; t.barSig = null; return show(t); }
+      draw();
     } catch (e) { /* toast shown */ }
   };
+  const draw = () => {
+    const blocks = mdBlocks(text);
+    ed._blocks = blocks;
+    if (whole) {
+      ed.innerHTML = `<textarea class="cv-whole" aria-label="The text of the canvas (Markdown)"></textarea>
+        <div class="cv-acts">${button("Save as a new version", { kind: "primary", data: { "cv-save-whole": 1 } })}${button("Cancel", { data: { "cv-cancel-whole": 1 } })}</div>`;
+      ed.querySelector("textarea").value = text;
+      ed.querySelector("textarea").focus();
+      return;
+    }
+    ed.innerHTML = `<div class="cv-ehead muted t-s">Click a part to change it. Each Done is a new version by you; the session that wrote it gets a note.
+        <span class="link" data-cv-whole>Edit the whole text</span></div>`
+      + blocks.map((b, i) => open === i
+        ? `<div class="cv-blk on" data-blk="${i}"><textarea rows="${Math.min(14, b.src.split("\n").length + 1)}" aria-label="This part (Markdown)"></textarea>
+            <div class="cv-acts">${button("Done", { kind: "primary", data: { "cv-blk-done": i } })}${button("Cancel", { data: { "cv-blk-cancel": 1 } })}${button("Delete", { data: { "cv-blk-del": i }, title: "Take this part out" })}</div></div>`
+        : `<div class="cv-blk" data-blk="${i}" tabindex="0" role="button" aria-label="Edit this part">${canvasMarkdown(b.src)}</div>`).join("")
+      + (open === "add" ? `<div class="cv-blk on"><textarea rows="4" aria-label="A new part (Markdown)"></textarea>
+            <div class="cv-acts">${button("Done", { kind: "primary", data: { "cv-blk-done": "add" } })}${button("Cancel", { data: { "cv-blk-cancel": 1 } })}</div></div>`
+        : `<div class="cv-blk cv-blk-add muted" data-blk-add tabindex="0" role="button">+ Add a part at the end</div>`);
+    const ta = ed.querySelector(".cv-blk.on textarea");
+    if (ta) { ta.value = open === "add" ? "" : blocks[open].src; ta.focus(); }
+    drawDiagrams(ed);
+  };
+  ed.addEventListener("click", (e) => {
+    const x = e.target;
+    if (x.closest("[data-cv-whole]")) { whole = true; return draw(); }
+    if (x.closest("[data-cv-cancel-whole]")) { whole = false; return draw(); }
+    if (x.closest("[data-cv-save-whole]")) return save(ed.querySelector("textarea").value, true);
+    if (x.closest("[data-cv-blk-cancel]")) { open = null; return draw(); }
+    const dn = x.closest("[data-cv-blk-done]");
+    if (dn) {
+      const v = ed.querySelector(".cv-blk.on textarea").value;
+      if (dn.dataset.cvBlkDone === "add") return v.trim() ? save(text.replace(/\s*$/, "") + "\n\n" + v.replace(/\s+$/, "") + "\n") : (open = null, draw());
+      return save(spliceBlock(text, ed._blocks[+dn.dataset.cvBlkDone], v));
+    }
+    const del = x.closest("[data-cv-blk-del]");
+    if (del) return save(spliceBlock(text, ed._blocks[+del.dataset.cvBlkDel], ""));
+    if (open !== null || x.closest("a")) return;
+    const blk = x.closest("[data-blk]");
+    if (blk) { open = +blk.dataset.blk; return draw(); }
+    if (x.closest("[data-blk-add]")) { open = "add"; return draw(); }
+  });
+  ed.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.matches("[data-blk]:not(.on), [data-blk-add]")) { e.preventDefault(); e.target.click(); }
+    if (e.key === "Escape" && open !== null) { e.stopPropagation(); open = null; draw(); }
+  });
+  draw();
+  (t.md || box.querySelector(".sp-canvas, .cv-edit")).replaceWith(ed);
+  t.md = null;
 }
 
 // The answers to the decision cards of a kit page (#4983), for its script: {n: {author, text, state}}.

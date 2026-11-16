@@ -454,6 +454,20 @@ button.srow-it { cursor: pointer; }
 .cv-acts .btn { font-size: var(--fs-s); padding: var(--sp-0) var(--sp-3); }
 .cv-edit { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); flex: 1; }
 .cv-edit textarea { flex: 1; min-height: var(--h-pre); font-family: ui-monospace, Menlo, monospace; font-size: calc(var(--fs-s) + var(--hair) / 2); }
+/* Read, Edit and Suggest of a document (#6004): the switch in the bar, the parts in Edit, a suggestion's change. */
+.cv-modes { display: inline-flex; border: var(--hair) solid var(--line); border-radius: var(--r-m); overflow: hidden; }
+.cv-modes .cv-modeb { border: 0; border-radius: 0; }
+.cv-modes .cv-modeb[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.cv-ehead { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: baseline; }
+.cv-blk { border: var(--hair) dashed transparent; border-radius: var(--r-s); padding: 0 var(--sp-2); cursor: text; }
+.cv-blk:hover, .cv-blk:focus-visible { border-color: var(--line); }
+.cv-blk.on { border: var(--hair) solid var(--accent); padding: var(--sp-2); display: flex; flex-direction: column; gap: var(--sp-2); cursor: auto; }
+.cv-edit .cv-blk textarea, .cv-edit .cv-whole { flex: none; min-height: auto; }
+.cv-edit .cv-whole { min-height: var(--h-pre); flex: 1; }
+.cv-blk-add { padding: var(--sp-2); }
+.cv-sugg { overflow-wrap: anywhere; }
+.cv-sugg del, .cv-compose del { color: var(--warn); background: var(--warn-bg); }
+.cv-sugg ins { color: var(--ready); background: var(--ready-bg); text-decoration: none; }
 /* Comment mode on a Markdown canvas: the part under the mouse, and a part that Show finds. */
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: var(--hair-2) solid var(--accent); outline-offset: var(--sp-0); }

@@ -5199,6 +5199,8 @@ OPS = {
     "canvas_send": lambda c, a, who: core.canvas_send(c, a["name"], who, a.get("comments"), a.get("project")),
     "canvas_reply": lambda c, a, who: core.canvas_reply(c, a["comment"], a.get("text"), who),
     "canvas_resolve": lambda c, a, who: core.canvas_resolve(c, a["comment"], who, a.get("note")),
+    "canvas_accept": lambda c, a, who: core.canvas_accept(c, a["comment"], who),
+    "canvas_reject": lambda c, a, who: core.canvas_reject(c, a["comment"], who, a.get("note")),
     "canvas_discard": lambda c, a, who: core.canvas_discard(c, a["comment"], who),
     "canvas_edit": lambda c, a, who: core.canvas_edit(c, a["name"], a.get("text"), who, a.get("project")),
     "canvas_section": lambda c, a, who: core.canvas_section(c, a["name"], a.get("heading"), a.get("text"), who,

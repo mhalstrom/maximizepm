@@ -1248,6 +1248,11 @@ def build_parser(only=None):
     x = cvs.add_parser("reply", help="answer a comment in its thread"); x.add_argument("comment"); x.add_argument("text")
     x = cvs.add_parser("resolve", help="close a comment: say what changed, or why nothing needs to")
     x.add_argument("comment"); x.add_argument("--note")
+    x = cvs.add_parser("accept", help="a suggested change: put it in a new version of the canvas, and resolve it (a "
+                       "person, or the session that wrote the canvas)")
+    x.add_argument("comment")
+    x = cvs.add_parser("reject", help="a suggested change: resolve it with the reason; the page stays")
+    x.add_argument("comment"); x.add_argument("--note")
     x = cvs.add_parser("open", help="put a canvas in front of the person: the page opens it in the side panel of your "
                        "session (or --session); maxpm serve must run")
     x.add_argument("name"); x.add_argument("--project")
@@ -6233,6 +6238,10 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_reply(conn, a.comment, a.text, actor)
     if v == "resolve":
         return core.canvas_resolve(conn, a.comment, actor, a.note)
+    if v == "accept":
+        return core.canvas_accept(conn, a.comment, actor)
+    if v == "reject":
+        return core.canvas_reject(conn, a.comment, actor, a.note)
     if v == "open":
         core.canvas_show(conn, a.name, a.project)  # a wrong name says so before maxpm serve is asked
         try:
@@ -6307,6 +6316,9 @@ def _comment_lines(r, indent="  "):
         part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:80]}\"") + \
                (f" ({a['path']})" if a.get("path") else "")
     out = [f"{indent}c{r['id']} [{r['state']}] {r['author']} on {part} (v{r['version']}): {r['body']}"]
+    if a and a.get("suggest") is not None:  # a suggested change (#6004)
+        out.append(f"{indent}  suggests: \"{a['suggest']}\" in place of \"{a['quote']}\""
+                   + ("" if r["state"] == "resolved" else f" (maxpm canvas accept c{r['id']} | reject c{r['id']})"))
     for x in r.get("replies", []):
         out.append(f"{indent}  reply c{x['id']} {x['author']}: {x['body']}")
     if r.get("resolve_note") or r["state"] == "resolved":
@@ -6670,6 +6682,12 @@ def render_canvas(a, res):
         return
     if v == "resolve":
         print(f"comment c{res['id']} resolved")
+        return
+    if v == "accept":
+        print(f"suggestion c{res['accepted']} accepted: canvas {res['canvas']} version {res['version']}")
+        return
+    if v == "reject":
+        print(f"suggestion c{res['id']} rejected; the page stays")
         return
     if v == "open":
         who = f"the side panel of {res['session']}" if res["session"] else "the side panel"

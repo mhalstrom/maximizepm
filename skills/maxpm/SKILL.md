@@ -466,6 +466,8 @@ this computer, with each version, and that the user opens in the MaximizePM page
   comment: `maxpm canvas reply c<id> "..."` and `maxpm canvas resolve c<id> --note "<version, or why not>"`.
   When your session has ended, a fresh session takes the canvas's item with the comments; the go briefing
   names the item's canvases and their open comments.
+- A comment can be a suggested change (it shows new words for a quote): decide it with
+  `maxpm canvas accept c<id>` (a new version with those words) or `maxpm canvas reject c<id> --note "<why>"`.
 - The user can edit a Markdown canvas in the page: that is a new version by the user, and you get a note.
   Read it (`maxpm canvas show <name>`) before you put your next version, so you keep the user's change.
 - A doc (a proposal, a plan, a report for the user to answer) is a Markdown canvas that you write section by
