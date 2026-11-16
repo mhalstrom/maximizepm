@@ -1,8 +1,8 @@
 /* The Overview view of Plan (#5102 step 5): its two columns, the Work rows and Claim next (the Board's), and the
-   capacity numbers, advice and the step bars over the graph (the Capacity tab's). */
+   the capacity boxes (Sessions uses them) and the step bars over the graph. */
 .ov-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
 @media (max-width: 1000px) { .ov-grid { grid-template-columns: minmax(0, 1fr); } }
-.ov-idle { margin-top: var(--sp-3); }
+.ov-grid.ov-one { grid-template-columns: minmax(0, 1fr); }  /* no items blocked outside: one column (#6005) */
 /* Agents are neutral and people keep the people color, so the two read apart in both themes (#5330). */
 .sw-a { background: var(--muted); } .sw-h { background: var(--human); }
 .graph-steps { margin: 0 0 var(--sp-6); }

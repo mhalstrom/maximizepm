@@ -6,7 +6,6 @@ import { $, esc, act, toast, ago, clip, shortTitle, store } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { agentStart, queueOn, queueAnywhere } from "../components/agentStart.js";
 import { button } from "../components/button.js";
-import { capacityHtml } from "./overview.js";
 import { S } from "../page.js";
 
 const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
@@ -22,7 +21,23 @@ export function renderStart() {
   put($("#sessStart"), agentStart(S.launch_agents, { label: "Start an agent", cls: "primary",
     attrs: `data-launch="${q && ready ? 1 : "plain"}"`,
     title: q && ready ? "Start an agent" : "Start an agent in a folder" }));
-  put($("#sessCap"), capacityHtml(S, "stats-narrow", true));
+  put($("#sessCap"), capacityHtml(S, "stats-narrow"));
+}
+
+// The capacity boxes (#5886; only here since #6005: Plan > Overview showed them too): open slots, idle, sessions, in
+// progress, for people. The advice and the sessions that wait for work are the hover of the boxes.
+export function capacityHtml(S, cls = "") {
+  const c = S && S.capacity; if (!c) return "";
+  const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");
+  const hover = [...(c.advice || []).map(a => a.text),
+    idle.length ? "Waiting for work: " + idle.map(a => (S.session_names || {})[a.name] || a.name).join(", ") : ""].filter(Boolean).join("\n");
+  return `<div class="stats ${cls}"${hover ? ` title="${esc(hover)}"` : ""}>
+      <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions you can still start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
+      <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + esc(idle.map(a => a.name).join(", ")) : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
+      <div class="stat" title="Active agent sessions; ${c.agents_busy} of them busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
+      <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
+      <div class="stat hum" title="Ready items that wait on a person"><div class="n">${c.ready_for_humans.length}</div><div class="l">for people</div></div>
+    </div>`;
 }
 
 // The ended sessions (stopped or gone agents with no running session), newest first; a click shows the chat read only.

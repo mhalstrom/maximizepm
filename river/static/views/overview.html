@@ -1,6 +1,6 @@
 <!-- The Overview view of Plan (#5102 step 5, design #4657): the first view of Plan. Next up with Claim next, the open
-     work of each project (or each goal of the chosen project), Capacity with Start an agent, and the items blocked
-     outside the queue, all for the scope. maxpm serve puts it into plan.html, at view: overview. -->
+     work of each project (or each goal of the chosen project), and the items blocked outside the queue, all for
+     the scope. Capacity and Start an agent are in the left column of Sessions only (#6005). maxpm serve puts it into plan.html, at view: overview. -->
 <div id="plan-overview" class="plan-view hidden">
   <div class="ov-grid">
     <div class="ov-col">
@@ -18,10 +18,6 @@
       </div>
     </div>
     <div class="ov-col">
-      <div class="panel">
-        <h2 title="Slots, idle sessions and advice">Capacity <span class="spacer"></span><span id="capStart"></span></h2>
-        <div id="capacity"></div>
-      </div>
       <div class="panel hidden" id="blockedPanel">
         <h2 title="Items blocked outside the queue">Blocked outside the queue</h2>
         <div id="blockedList"></div>

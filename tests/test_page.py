@@ -161,7 +161,7 @@ try {
   await until(() => q("#work .wp"), "Plan > Overview: Work");
   q("#work [data-wp]").click();
   await until(() => q("#work .wp-items"), "a click opens a project of Work");
-  check(q("#capacity .stats") && q("#next"), "Capacity and Next up");
+  check(!q("#capacity") && q("#next"), "Next up, and no Capacity: it is in Sessions only (#6005)");
   const seen = {};
   for (const name of ["plan", "settings", "sessions"]) {
     q(name === "settings" ? "#settingsBtn" : `nav button[data-tab="${name}"]`).click();  // Settings: from the ⋯ (#5116)

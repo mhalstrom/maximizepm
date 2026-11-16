@@ -1,12 +1,11 @@
 // The Overview view of Plan (#5102 step 5, design #4657): Next up with Claim next (the Board's), the open work of
-// each project or, with one project in the scope, of each of its goals (the Board's Work), Capacity with Start an
-// agent (the Capacity tab's numbers and advice), and the items blocked outside the queue (from Projects). Every part
-// shows the scope of Plan's left bar. The step bars of Capacity are above the graph (renderSteps).
+// each project or, with one project in the scope, of each of its goals (the Board's Work), and the items blocked
+// outside the queue (from Projects). Every part shows the scope of Plan's left bar. Capacity and Start an agent are in
+// the left column of Sessions only (#6005, mark's page-map choice); the step bars are above the graph (renderSteps).
 import { $, esc, store, actor, toast, act, ago, left, clip, shortTitle } from "../lib.js";
 import { doerChip, projectChip } from "../components/chip.js";
 import { nyCard } from "../components/card.js";
 import { itemRow, itemOrder } from "../components/itemRow.js";
-import { agentStart } from "../components/agentStart.js";
 import { capacityBars } from "../components/bar.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { S, nav, scope, inScope } from "../page.js";
@@ -49,33 +48,6 @@ export function renderWork() {
   }).join("") || `<div class="muted">No open items.</div>`);
 }
 
-// Capacity: the open slots, the sessions with nothing ready, the sessions, items in progress, ready items for people;
-// the advice; Start an agent when an agent can take something.
-export function renderCapacity() {
-  const c = S.capacity; if (!c) return;
-  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)).length;
-  put($("#capStart"), ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
-    title: "Start an agent on the top ready item" }) : "");
-  put($("#capacity"), capacityHtml(S));
-}
-
-// The numbers, Waiting for work and the advice. The top of the Sessions list (#5886) shows only the numbers: numbersOnly,
-// with the class cls.
-export function capacityHtml(S, cls = "", numbersOnly = false) {
-  const c = S && S.capacity; if (!c) return "";
-  const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");
-  const more = numbersOnly ? "" : `${idle.length ? `<div class="muted t-s ov-idle">Waiting for work: ${idle.map(a => `<span class="link" data-session-go="${esc(a.name)}">${esc((S.session_names || {})[a.name] || a.name)}</span>`).join(", ")}</div>` : ""}
-    <ul class="advice">${c.advice.map(a => `<li class="${a.kind}">${esc(a.text)}</li>`).join("")}</ul>`;
-  return `<div class="stats ${cls}">
-      <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions you can still start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
-      <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + idle.map(a => a.name).join(", ") : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
-      <div class="stat" title="Active agent sessions; ${c.agents_busy} of them busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
-      <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
-      <div class="stat hum" title="Ready items that wait on a person"><div class="n">${c.ready_for_humans.length}</div><div class="l">for people</div></div>
-    </div>
-    ${more}`;
-}
-
 // The step bars above the graph: the open items by step, agents and people.
 export function renderSteps() {
   const c = S.capacity; if (!c) return;
@@ -87,11 +59,12 @@ export function renderSteps() {
 export function renderBlocked() {
   const B = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status) && inScope(i));
   $("#blockedPanel").classList.toggle("hidden", !B.length);
+  $("#plan-overview .ov-grid").classList.toggle("ov-one", !B.length);  // no empty right column (#6005)
   put($("#blockedList"), B.map(i => nyCard(`<b class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(shortTitle(i))}</b> ${projectChip(i.project)}${i.doer === "human" ? doerChip(i) : ""}`, `<div class="ny-c t-s" title="${esc(i.blocked_reason)}">${esc(clip(i.blocked_reason, 90))}</div>
       <div class="muted t-s"${i.blocked_set_by ? ` title="set by ${esc(i.blocked_set_by)}"` : ""}>${i.blocked_at ? ago(i.blocked_at) : ""}${i.blocked_until ? `${i.blocked_at ? " · " : ""}<span title="${esc(i.blocked_until_text)}; then ready by itself">${left(i.blocked_until)} left</span>` : ""}</div>`)).join(""));
 }
 
-export function renderOverview() { renderNext(); renderWork(); renderCapacity(); renderBlocked(); renderSteps(); }
+export function renderOverview() { renderNext(); renderWork(); renderBlocked(); renderSteps(); }
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
