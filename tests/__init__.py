@@ -9,17 +9,38 @@ the MCP server there would read them (#2261). A test that needs one sets it itse
 
 MAXPM_DB names a queue in a temporary folder before any test runs: a test names its own database, and one that does
 not (cli.run of a command that needs no queue, such as agent-login) writes its run log row there, never to the real
-queue (#5969)."""
+queue (#5969).
+
+Many tests take MAXPM_DB out of the environment when they end, so a later core.connect() with no path fell back to
+the person's real queue and ran this code's migrations on it: a test run in a worktree dropped a table that main
+still read (#6000). So the default queue of a test run is a file in the temporary folder too (core.HOME_DB), and
+core.connect refuses the real queue file outright."""
 import atexit
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 _queue_dir = tempfile.mkdtemp(prefix="maxpm-tests-")
 atexit.register(shutil.rmtree, _queue_dir, True)
 os.environ["MAXPM_DB"] = os.path.join(_queue_dir, "maxpm.db")
 
 from river import core, dictation, server  # noqa: E402
+
+REAL_HOME_DB = core.HOME_DB  # the default of a real run, for the test of the default (DbLocation)
+REAL_QUEUE = Path(server._main_db())  # the person's queue, in the real home folder (a test may change HOME)
+core.HOME_DB = Path(_queue_dir, "home", "maxpm.db")
+_connect = core.connect
+
+
+def _test_connect(path=None):
+    p = Path(path) if path else core.db_path()
+    if p.expanduser().resolve() == REAL_QUEUE:
+        raise AssertionError(f"a test opened the real queue {REAL_QUEUE}; give it a temporary database (#6000)")
+    return _connect(path)
+
+
+core.connect = _test_connect
 
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS",
               "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL"):

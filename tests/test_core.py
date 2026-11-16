@@ -2192,13 +2192,32 @@ class DbLocation(unittest.TestCase):
         from pathlib import Path
         old = os.environ.pop("MAXPM_DB", None)
         try:
-            self.assertEqual(core.HOME_DB, Path("~/.maximizepm/maxpm.db"))
+            from tests import REAL_HOME_DB
+            self.assertEqual(REAL_HOME_DB, Path("~/.maximizepm/maxpm.db"))
             self.assertEqual(core.db_path(), core.HOME_DB.expanduser())
             os.environ["MAXPM_DB"] = "/tmp/other.db"
             self.assertEqual(core.db_path(), Path("/tmp/other.db"))
             self.assertIn("set by MAXPM_DB", core.queue_note())
         finally:
             os.environ.pop("MAXPM_DB", None)
+            if old is not None:
+                os.environ["MAXPM_DB"] = old
+
+    def test_a_test_never_opens_the_real_queue(self):
+        """#6000: with MAXPM_DB gone, a connect with no path opens the test run's own default queue, and a connect to
+        the person's real queue file is refused."""
+        from pathlib import Path
+        from tests import REAL_QUEUE, _queue_dir
+        old = os.environ.pop("MAXPM_DB", None)
+        try:
+            conn = core.connect()
+            conn.close()
+            self.assertEqual(core.db_path(), core.HOME_DB.expanduser())
+            self.assertEqual(core.db_path().parent.parent, Path(_queue_dir))
+            self.assertNotEqual(core.db_path().resolve(), REAL_QUEUE)
+            with self.assertRaisesRegex(AssertionError, "real queue"):
+                core.connect(REAL_QUEUE)
+        finally:
             if old is not None:
                 os.environ["MAXPM_DB"] = old
 
