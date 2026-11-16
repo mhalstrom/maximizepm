@@ -18290,6 +18290,117 @@ def canvas_edit(conn, ref, body, actor=None, project=None):
     return res
 
 
+# Edit of an HTML canvas (#6015, design-doc-mockup v7 part 3): the person changes the words and swaps the pictures;
+# the layout, the styles and the scripts stay as the agent wrote them. The page sends each change as the text it had
+# (a text node of the page, as the browser read it) and the new text, or the old and new src of a picture. Only text
+# outside script, style, template and textarea changes, and a picture only to a data: picture (a canvas loads nothing).
+_HTML_RAW = ("script", "style", "template", "textarea", "noscript")
+_IMG_DATA = re.compile(r"^data:image/(png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=\s]+$", re.I)
+_SRC_ATTR = re.compile(r"""(\bsrc\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
+
+
+def _html_parts(body):
+    """([(start, end, text)] of the text pieces, [(start, end, src)] of the img src values) of an HTML text, with
+    offsets into it; the text decoded as a browser reads it."""
+    import html as _html
+    from html.parser import HTMLParser
+    lines = [0]
+    for m in re.finditer("\n", body):
+        lines.append(m.end())
+    off = lambda pos: lines[pos[0] - 1] + pos[1]
+    events, imgs, stack = [], [], []
+
+    class P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            start = off(self.getpos())
+            events.append((start, None))
+            if tag == "img":
+                raw = self.get_starttag_text() or ""
+                m = _SRC_ATTR.search(raw)
+                if m:
+                    g = 3 if m.group(3) is not None else 4 if m.group(4) is not None else 5
+                    imgs.append((start + m.start(g), start + m.end(g), _html.unescape(m.group(g))))
+            if tag in _HTML_RAW:
+                stack.append(tag)
+
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+            if tag in _HTML_RAW and stack and stack[-1] == tag:
+                stack.pop()
+
+        def handle_endtag(self, tag):
+            events.append((off(self.getpos()), None))
+            if stack and stack[-1] == tag:
+                stack.pop()
+
+        def handle_data(self, data):
+            events.append((off(self.getpos()), None if stack else data))
+
+        def handle_comment(self, data):
+            events.append((off(self.getpos()), None))
+
+        handle_decl = handle_pi = unknown_decl = handle_comment
+
+    p = P(convert_charrefs=True)
+    p.feed(body)
+    p.close()
+    texts = []
+    for i, (start, data) in enumerate(events):
+        if data is None or not data.strip():
+            continue
+        end = events[i + 1][0] if i + 1 < len(events) else len(body)
+        texts.append((start, end, data))
+    return texts, imgs
+
+
+def canvas_edit_html(conn, ref, texts=None, images=None, actor=None, project=None):
+    """The person's changes of an HTML canvas's words and pictures, as a new version by the person (#6015); the
+    session that wrote it gets a note, as after an edit of a Markdown canvas. texts: [{old, new}]; images:
+    [{old, new}] of an img src, new a data: picture. A change whose old text is not in the page once is refused."""
+    import html as _html
+    c = _canvas_row(conn, ref, project)
+    if c["kind"] != "html":
+        raise RiverError(f"canvas {c['name']} is {c['kind']}: this edit is for an HTML canvas (a Markdown canvas has "
+                         f"its own Edit)")
+    texts, images = list(texts or []), list(images or [])
+    if not texts and not images:
+        raise RiverError("no change: click a text or a picture in Edit first")
+    body = _canvas_latest(conn, c["id"])["body"]
+    found, imgs = _html_parts(body)
+    swaps = []
+    for t in texts:
+        old, new = str(t.get("old") or ""), str(t.get("new") or "")
+        at = [x for x in found if x[2] == old]
+        if len(at) != 1:
+            raise RiverError(f"the text \"{old.strip()[:80]}\" is {'not' if not at else f'{len(at)} times'} in the newest "
+                             f"version of canvas {c['name']}: reload it, or ask the session for the change in a comment")
+        if not new.strip():
+            raise RiverError("a text cannot become empty here: the layout stays as the session wrote it; comment instead")
+        swaps.append((at[0][0], at[0][1], _html.escape(new, quote=False)))
+    for m in images:
+        old, new = str(m.get("old") or ""), str(m.get("new") or "")
+        if not _IMG_DATA.match(new):
+            raise RiverError("a new picture is a PNG, JPEG, GIF, WebP or SVG file: a canvas loads nothing from the network")
+        at = [x for x in imgs if x[2] == old]
+        if len(at) != 1:
+            raise RiverError(f"that picture is {'not' if not at else f'{len(at)} times'} in the newest version of canvas "
+                             f"{c['name']}: reload it")
+        swaps.append((at[0][0], at[0][1], _html.escape(re.sub(r"\s+", "", new), quote=True)))
+    spans = sorted(swaps)
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        raise RiverError("two changes touch the same text: make one change of it")
+    for start, end, rep in reversed(spans):
+        body = body[:start] + rep + body[end:]
+    res = canvas_put(conn, c["name"], body, actor, project=_project_name(conn, c["project_id"]), item=c["item_id"],
+                     note=f"edited by {actor}: {len(texts)} text(s), {len(images)} picture(s)")
+    to = _canvas_writer(conn, c)
+    if not res.get("unchanged") and (to or c["item_id"]) and to != actor:
+        send(conn, "note", f"{actor} edited the text of canvas {c['name']} in the page: version {res['version']}. Read "
+             f"it before your next version: maxpm canvas show {c['name']}", to=to, item=c["item_id"], actor=actor,
+             level="low")
+    return res
+
+
 def canvas_comments(conn, ref, actor=None, open_only=False, project=None):
     """The comments of a canvas with their replies. When an agent reads them, the sent ones become read."""
     c = _canvas_row(conn, ref, project)

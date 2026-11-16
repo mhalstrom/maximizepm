@@ -37,7 +37,7 @@ PATH = re.compile(r"^/canvas/c?(\d+)/(latest|meta|\d+)$")
 FIND_JS = re.sub(r"^export ", "", (Path(__file__).resolve().parent.parent / "static" / "components" / "findText.js")
                  .read_text(encoding="utf-8"), flags=re.M)
 HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () {
-  var t, P = window.parent, mode = false, hi = null, finder = false, fq = "", fm = [], fi = 0;
+  var t, P = window.parent, mode = false, hi = null, finder = false, fq = "", fm = [], fi = 0, edit = false, box = null;
   if (!P || P === window) return;
 """ + FIND_JS + """
   var css = document.createElement("style");
@@ -60,8 +60,53 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () 
   function mark(el) { if (hi) hi.classList.remove("maxpm-hi"); hi = el; if (el) el.classList.add("maxpm-hi"); }
   addEventListener("scroll", function () { clearTimeout(t); t = setTimeout(function () {
     P.postMessage({ maxpmCanvas: "scroll", x: scrollX, y: scrollY }, "*"); }, 120); }, { passive: true });
-  addEventListener("mouseover", function (e) { if (mode) mark(e.target); }, true);
+  addEventListener("mouseover", function (e) { if (mode || (edit && !(box && box.contains(e.target)))) mark(e.target); }, true);
+  // Edit (#6015): a click on a text opens a box for its words; a click on a picture asks the panel for a new one.
+  // Each change goes to the panel as the text the page had first (old) and the new text; the panel saves them.
+  function textAt(x, y) {
+    if (document.caretRangeFromPoint) { var r = document.caretRangeFromPoint(x, y); return r && r.startContainer; }
+    if (document.caretPositionFromPoint) { var q = document.caretPositionFromPoint(x, y); return q && q.offsetNode; }
+    return null;
+  }
+  function closeBox() { if (box) { box.remove(); box = null; } }
+  function editText(n) {
+    closeBox();
+    if (n.__maxpmOld === undefined) n.__maxpmOld = n.data;
+    var lead = n.data.slice(0, n.data.length - n.data.trimStart().length), trail = n.data.slice(n.data.trimEnd().length);
+    box = document.createElement("div");
+    box.setAttribute("style", "position:fixed;left:8px;right:8px;bottom:8px;z-index:2147483647;background:#fff;color:#111;"
+      + "border:1px solid #1f6feb;border-radius:8px;padding:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);font:14px system-ui");
+    var ta = document.createElement("textarea");
+    ta.setAttribute("style", "width:100%;box-sizing:border-box;min-height:64px;font:14px system-ui");
+    ta.setAttribute("aria-label", "The words");
+    ta.value = n.data.trim();
+    var ok = document.createElement("button"); ok.textContent = "Done";
+    var no = document.createElement("button"); no.textContent = "Cancel";
+    [ok, no].forEach(function (b) { b.setAttribute("style", "margin:6px 6px 0 0;font:13px system-ui;padding:4px 12px"); });
+    ok.onclick = function () {
+      var nv = lead + ta.value.trim() + trail;
+      if (ta.value.trim() && nv !== n.data) { n.data = nv; P.postMessage({ maxpmCanvas: "edit-text", old: n.__maxpmOld, new: nv }, "*"); }
+      closeBox();
+    };
+    no.onclick = closeBox;
+    box.appendChild(ta); box.appendChild(ok); box.appendChild(no);
+    document.body.appendChild(box);
+    ta.focus();
+  }
   addEventListener("click", function (e) {
+    if (edit) {
+      if (box && box.contains(e.target)) return;
+      e.preventDefault(); e.stopPropagation(); mark(null);
+      if (e.target.tagName === "IMG") {
+        var img = e.target, i = Array.prototype.indexOf.call(document.images, img);
+        if (img.__maxpmOld === undefined) img.__maxpmOld = img.getAttribute("src") || "";
+        P.postMessage({ maxpmCanvas: "edit-img", i: i, src: img.__maxpmOld }, "*");
+        return;
+      }
+      var n = textAt(e.clientX, e.clientY), up = n && n.parentElement;
+      if (n && n.nodeType === 3 && n.data.trim() && !(up && up.closest("script,style,template,textarea,noscript"))) editText(n);
+      return;
+    }
     if (!mode) return;
     e.preventDefault(); e.stopPropagation();
     var el = e.target, quote = String(getSelection() || "").trim();
@@ -81,6 +126,8 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () 
     if (e.source !== P) return;
     if (d.maxpmCanvas === "scrollTo") scrollTo(d.x || 0, d.y || 0);
     if (d.maxpmCanvas === "mode") { mode = !!d.on; if (!mode) mark(null); }
+    if (d.maxpmCanvas === "edit") { edit = !!d.on; mode = false; mark(null); if (!edit) closeBox(); }
+    if (d.maxpmCanvas === "img-set" && document.images[+d.i] && /^data:image[/]/.test(String(d.src || ""))) document.images[+d.i].src = d.src;
     if (d.maxpmCanvas === "show") {
       var el = null;
       try { el = d.path ? document.querySelector(d.path) : null; } catch (x) { el = null; }

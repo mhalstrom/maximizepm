@@ -68,7 +68,7 @@ OPS = {op: ANY for op in (
     "accept", "activate", "answer", "backlog", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
     "browser_input", "browser_secret", "browser_steps", "canvas_answer", "canvas_comment", "canvas_comments",
     "canvas_discard", "canvas_edit", "canvas_kit", "canvas_list", "canvas_open", "canvas_publish", "canvas_put",
-    "canvas_accept", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
+    "canvas_accept", "canvas_edit_html", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
     "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "launch_agent", "message_read", "move",
     "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_repair",

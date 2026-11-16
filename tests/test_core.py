@@ -10245,6 +10245,36 @@ class Canvas(Base):
         with self.assertRaisesRegex(core.RiverError, "no suggested change"):
             core.canvas_accept(self.c, plain["id"], "mark")
 
+    def test_the_text_and_pictures_of_an_html_canvas_change_and_the_rest_stays(self):
+        # #6015: only the words and the img sources change; the layout, styles and scripts stay.
+        page = ('<!doctype html><html><head><style>h1{color:red}</style></head><body class="x">\n'
+                '  <h1>Ship in March</h1>\n  <p>Tom &amp; Ann <b>decide</b>.</p>\n'
+                '  <img alt="a" src="data:image/png;base64,AAAA">\n'
+                '  <script>var s = "Ship in March";</script>\n</body></html>')
+        core.canvas_put(self.c, "page", page, "ag", kind="html")
+        res = core.canvas_edit_html(self.c, "page", [{"old": "Ship in March", "new": "Ship in <May>"},
+                                                     {"old": "Tom & Ann ", "new": "Tom, Ann & Lee "}],
+                                    [{"old": "data:image/png;base64,AAAA", "new": "data:image/png;base64,BBBB"}], "mark")
+        body = core.canvas_show(self.c, "page")["shown"]["body"]
+        self.assertEqual(res["version"], 2)
+        self.assertIn("<h1>Ship in &lt;May&gt;</h1>", body)
+        self.assertIn("<p>Tom, Ann &amp; Lee <b>decide</b>.</p>", body)
+        self.assertIn('src="data:image/png;base64,BBBB"', body)
+        self.assertIn('<script>var s = "Ship in March";</script>', body, "a script stays as it was")
+        self.assertIn("<style>h1{color:red}</style>", body)
+        self.assertTrue(any("mark edited the text of canvas page" in m["body"]
+                            for m in core.inbox(self.c, "ag", mark_read=False)))
+        with self.assertRaisesRegex(core.RiverError, "is not in the newest version"):
+            core.canvas_edit_html(self.c, "page", [{"old": "Ship in March", "new": "x"}], None, "mark")
+        with self.assertRaisesRegex(core.RiverError, "loads nothing from the network"):
+            core.canvas_edit_html(self.c, "page", None, [{"old": "data:image/png;base64,BBBB",
+                                                          "new": "https://x.test/a.png"}], "mark")
+        with self.assertRaisesRegex(core.RiverError, "cannot become empty"):
+            core.canvas_edit_html(self.c, "page", [{"old": "decide", "new": "  "}], None, "mark")
+        core.canvas_put(self.c, "notes", "# n", "ag", kind="md")
+        with self.assertRaisesRegex(core.RiverError, "is md"):
+            core.canvas_edit_html(self.c, "notes", [{"old": "n", "new": "m"}], None, "mark")
+
     def test_a_persons_edit_discard_and_the_go_briefing(self):
         core.canvas_put(self.c, "notes", "# Notes", "ag", kind="md")
         res = core.canvas_edit(self.c, "notes", "# Notes\n\nMore.", "mark")

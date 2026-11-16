@@ -336,7 +336,7 @@ function drawBar(t, meta) {
     ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
     <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Click a part or select text to comment">Comment</button>`}
     <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? modesHtml(t.mode || "read") : ""}
+    ${["md", "html"].includes(meta.kind) && !t.pin ? modesHtml(t.mode || "read", meta.kind) : ""}
     ${publishButton()}</span>
     ${iconButton("⋯", "More: comment, edit, publish", { cls: "cv-more", data: { "cv-more": "" } })}`;
   bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
@@ -556,20 +556,69 @@ async function loadComments(t) {
 // of the text edits in place, and Done puts the whole text as a new version by the person at once (the session that
 // wrote it gets a note, core.canvas_edit). Suggest: a click on selected words writes a suggested change, which the
 // session or the person accepts or rejects under the page (canvasComments.js).
-function modesHtml(mode) {
+function modesHtml(mode, kind = "md") {
   const b = (m, label, title) => button(label, { cls: "cv-modeb", data: { "cv-to": m, ...(m === "edit" ? { "cv-edit": 1 } : {}) }, title,
     attrs: `aria-pressed="${mode === m}"` });
   return `<span class="cv-modes" role="group" aria-label="Read, edit or suggest">${b("read", "Read", "Read the page")}${
     b("edit", "Edit", "Change the text in place: each Done is a new version by you")}${
-    b("suggest", "Suggest", "Select words to suggest a change")}</span>`;
+    kind === "md" ? b("suggest", "Suggest", "Select words to suggest a change") : ""}</span>`;
 }
 function setMode(t, mode) {
   if (t.mode === mode) return;
+  if (t.kind === "html") return htmlMode(t, mode);
   t.mode = mode;
   setCommenting(t, mode === "suggest");
   if (mode === "edit") return editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`);
   t.barSig = null;
   show(t);
+}
+
+// Edit of an HTML canvas (#6015): the frame's helper script lets the person change a text or swap a picture; the
+// changes collect here (old -> new) and Save puts them as a new version by the person (core.canvas_edit_html), which
+// keeps the layout, styles and scripts. Cancel, or Read, draws the page again as it was.
+function htmlMode(t, mode) {
+  t.mode = mode; t.barSig = null; if (t.meta) drawBar(t, t.meta);
+  if (mode !== "edit") { t.hedits = null; if (t.hbar) t.hbar.remove(); return show(t); }
+  t.hedits = { texts: new Map(), images: new Map() };
+  t.hbar = document.createElement("div"); t.hbar.className = "cv-hedit";
+  t.frame.before(t.hbar);
+  drawHtmlBar(t);
+  if (t.frame.contentWindow) t.frame.contentWindow.postMessage({ maxpmCanvas: "edit", on: true }, "*");
+  t.hbar.addEventListener("click", async (e) => {
+    if (e.target.closest("[data-hed-cancel]")) return setMode(t, "read");
+    if (!e.target.closest("[data-hed-save]")) return;
+    const ed = t.hedits;
+    try {
+      const r = await act("canvas_edit_html", { name: "c" + canvasOf(t.target),
+        texts: [...ed.texts].map(([old, nw]) => ({ old, new: nw })), images: [...ed.images].map(([old, nw]) => ({ old, new: nw })) });
+      toast(r.unchanged ? "No change" : `Saved as version ${r.version}`);
+      t.hedits = null; t.mode = "read"; t.pin = null; t.barSig = null; show(t);
+    } catch (err) { /* act showed it */ }
+  });
+}
+function drawHtmlBar(t) {
+  if (!t.hbar || !t.hedits) return;
+  const n = t.hedits.texts.size + t.hedits.images.size;
+  t.hbar.innerHTML = `<span class="muted t-s">Edit: click a text to change its words, or a picture to swap it. The layout stays; ask the session for other changes.</span>
+    <span class="cv-sp"></span>${button(n ? `Save ${n} change${n === 1 ? "" : "s"}` : "Save", { kind: "primary", data: { "hed-save": 1 }, disabled: !n })}${button("Cancel", { data: { "hed-cancel": 1 } })}`;
+}
+// A picture of the page to swap: a file the person picks, read here as a data: picture (a canvas loads nothing else).
+function pickPicture(t, win, i, src) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
+  inp.onchange = () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    if (f.size > 5 * 1024 * 1024) return toast("Pick a picture under 5 MB", true);
+    const rd = new FileReader();
+    rd.onload = () => {
+      if (!t.hedits) return;
+      t.hedits.images.set(src, String(rd.result));
+      win.postMessage({ maxpmCanvas: "img-set", i, src: String(rd.result) }, "*");
+      drawHtmlBar(t);
+    };
+    rd.readAsDataURL(f);
+  };
+  inp.click();
 }
 
 async function editCanvas(t, box, src) {
@@ -685,6 +734,12 @@ addEventListener("message", (e) => {
   if (d.maxpmCanvas === "found" && findOpen() && String(d.q || "") === find.q) findCount(+d.n || 0, +d.i || 0);
   if (d.maxpmCanvas === "find-open") openFind(typeof d.text === "string" ? d.text.slice(0, 200) : "");
   if (d.maxpmCanvas === "escape") setCommenting(t, false);
+  if (d.maxpmCanvas === "ready" && t.hedits) e.source.postMessage({ maxpmCanvas: "edit", on: true }, "*");
+  // What the frame says is data from a page a session wrote: strings only (#6015).
+  if (d.maxpmCanvas === "edit-text" && t.hedits && typeof d.old === "string" && typeof d.new === "string") {
+    t.hedits.texts.set(d.old.slice(0, 20000), d.new.slice(0, 20000)); drawHtmlBar(t);
+  }
+  if (d.maxpmCanvas === "edit-img" && t.hedits && typeof d.src === "string") pickPicture(t, e.source, +d.i || 0, d.src);
   if (d.maxpmCanvas === "answers?" && !t.pin) canvasMeta(t).then(m => postAnswers(e.source, m)).catch(() => {});
   if (d.maxpmCanvas === "answer" && !t.pin) frameAnswer(t, e.source, d);
   if (d.maxpmCanvas === "shown" && !d.found) toast("That part is not in this version of the page", true);
