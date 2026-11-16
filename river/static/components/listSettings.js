@@ -1,7 +1,7 @@
 // The settings of the Sessions list (#5883, mark 2026-11-14: 'maybe we move the settings for all of these into a
 // settings modal acessible from that button in the bottom left'): the ⚙ at the foot of the list opens one dialog with
 // a tab for each of its parts: Sessions, Agents, Browsers (the browser and canvas keys: canvases are artifacts), and
-// Cost and notices. Each row is the row of the Settings tab (views/settings.js settingRow): a value for every project,
+// Cost. Each row is the row of the Settings tab (views/settings.js settingRow): a value for every project,
 // saved on Enter or when the field loses focus. All settings opens the Settings tab on the same group.
 import { $, esc, store } from "../lib.js";
 import { makeDialog } from "./dialog.js";
@@ -15,7 +15,7 @@ const PARTS = [
   ["sessions", "Sessions", (k) => groupOf(k) === "sessions", "sessions"],
   ["agents", "Agents", (k) => groupOf(k) === "agents" && !programOf(k), "agents"],
   ["browsers", "Browsers", (k) => groupOf(k) === "browser", "browser"],
-  ["cost", "Cost and notices", (k) => ["cost_limit", "notify_status"].includes(k), "work"],
+  ["cost", "Cost", (k) => k === "cost_limit", "work"],
 ];
 const KEY = "river.listSettings";
 let dlg = null, part = PARTS.some(p => p[0] === store(KEY)) ? store(KEY) : "sessions";

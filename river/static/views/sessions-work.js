@@ -7,6 +7,7 @@ import { chip } from "../components/chip.js";
 import { agentStart, queueOn, queueAnywhere } from "../components/agentStart.js";
 import { button } from "../components/button.js";
 import { S } from "../page.js";
+import { youCount } from "./you.js";
 
 const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
 
@@ -25,7 +26,9 @@ export function renderStart() {
 }
 
 // The capacity boxes (#5886; only here since #6005: Plan > Overview showed them too): open slots, idle, sessions, in
-// progress, for people. The advice and the sessions that wait for work are the hover of the boxes.
+// progress, need you. The advice and the sessions that wait for work are the hover of the boxes. The last box is the
+// count of Your action items under it (you.js youCount, which also sets it on each poll of Needs you): it counted the
+// ready items for any person, and the two disagreed (#6021).
 export function capacityHtml(S, cls = "") {
   const c = S && S.capacity; if (!c) return "";
   const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");
@@ -36,7 +39,7 @@ export function capacityHtml(S, cls = "") {
       <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + esc(idle.map(a => a.name).join(", ")) : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
       <div class="stat" title="Active agent sessions; ${c.agents_busy} of them busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
       <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
-      <div class="stat hum" title="Ready items that wait on a person"><div class="n">${c.ready_for_humans.length}</div><div class="l">for people</div></div>
+      <div class="stat hum" title="Your action items" data-cap-you="1"><div class="n">${youCount()}</div><div class="l">need you</div></div>
     </div>`;
 }
 

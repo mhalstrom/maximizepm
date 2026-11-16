@@ -30,7 +30,7 @@ import { S } from "../page.js";
 import { renderGive, showAll, showingAll } from "./sessions-work.js";
 import { queueAnywhere } from "../components/agentStart.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
-import { statusRowHtml, statusHtml, togglePush } from "./status.js";
+import { sessionsLine, dotOf } from "./sessionsLine.js";
 import { openBrowserRow } from "./browsers.js";
 import { openListSettings } from "../components/listSettings.js";
 
@@ -148,10 +148,12 @@ function headerItem(s) {
     { cls: "sess-itembtn", data: { open: h.id }, title: `#${h.id} ${h.title || ""}` })).join("");
 }
 
-// The state of a session in its head: a dot and its word (#5115), the same dot as its row of the list.
-function stateDot(s) {
+// The state of a session in its head: a dot and its word (#5115), the same dot and word as its row of the list. The
+// shell commands that run in it are the hover (#6021: no '1 running' chip).
+function stateDot(s, row) {
   const tip = s.state === "prompt" ? "A permission prompt waits in its terminal or session: answer it there" : s.state_label;
-  return `<span class="sess-stw" title="${esc(tip || "")}"><span class="dot ${DOT[s.state] || "away"}"></span>${esc(s.state_label || "")}</span>`;
+  const hover = [tip, ...(row ? shellLines(row).map(x => "Runs " + x) : [])].filter(Boolean).join("\n");
+  return `<span class="sess-stw" title="${esc(hover)}"><span class="dot ${dotOf(s)}"></span>${esc(s.state_label || "")}</span>`;
 }
 
 // The chat provider of a session (#4627): a small label from the server's provider table, only when its agent is
@@ -161,14 +163,12 @@ function provTag(p) {
   return tagged(p) ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
 }
 
-// The shell commands that run in a session now, foreground and background (#5830; maxpm serve reads them): a chip
-// with their number, and each one's age and command in the hover of the row and of the chip.
+// The shell commands that run in a session now, foreground and background (#5830; maxpm serve reads them): each one's
+// age and command, in the hover of the row and of the state in the head. A chip with their number said '1 running' on
+// nearly every row, also for a session that only waits (maxpm wait, the manager's watch): it is gone (#6021). What a
+// session waits on in plain words is its second line ('Running: <what>').
 export function shellLines(s) {
   return (s.shells || []).map(x => `${ago(x.started).replace(" ago", "")}: ${x.label}`);
-}
-export function shellChip(s) {
-  const n = (s.shells || []).length;
-  return n ? chip("c-in_progress shchip", `${n} running`, shellLines(s).join("\n")) : "";
 }
 
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
@@ -198,8 +198,7 @@ function pinButton(s) {
 // time; the pin and End show on hover (the pin also while it is on). The agent id, the item, the target and the last
 // message are the hover of the row and the head of the opened session. A session that waits at a prompt or for an
 // answer stands out (class "needs").
-const DOT = { working: "active", expert: "active", prompt: "needs", answer: "needs", idle: "away", starting: "away",
-              stopping: "gone", ended: "gone", gone: "gone" };
+// The state dot: dotOf (views/sessionsLine.js), which the Sessions line counts.
 // #5364: the head of the opened session shows the state of its row, so the two never disagree: the list applies
 // rules that one session's read does not (no transcript and no process: not connected yet; a pane that shows a shell:
 // ended; a question the person answered in the chat). A session that left the list has ended. Before the first read
@@ -222,12 +221,9 @@ function rowHover(s) {
 function provIcon(p) {
   return tagged(p) ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
 }
-// The count of files the session changed against GitHub main (#5855); its head's Changes button shows it too.
+// The count of files the session changed against GitHub main (#5855): its head's Changes button shows it. The rows
+// showed it too, as '±1387' on every row with no word (#6021): it is gone from them.
 const changesOf = (name) => +(((S && S.changes) || {})[name] || 0);
-function changesChip(s) {
-  const n = changesOf(s.name);
-  return n ? `<span class="sp-count srow-changes" title="${n} file${n === 1 ? "" : "s"} changed: Changes">±${n}</span>` : "";
-}
 export function markChanges(name) {
   const n = changesOf(name);
   for (const el of document.querySelectorAll("[data-changes-count]")) el.textContent = n ? String(n) : "";
@@ -241,7 +237,7 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${changesChip(s)}${shellChip(s)}${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${dotOf(s)}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
       <span class="srow-acts">${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</span>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
@@ -283,22 +279,12 @@ function renderList(el, list, picked, empty) {
 
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
   let list = [], busy = false, again = false, listRead = false;
-  // A pane in place of a session's chat (#5102): "you" (what waits on the person), "status" (every session by its
-  // state, #5852), "arts" (the artifacts of all sessions), "cost" (what they used, #5857) or "browsers" (every browser
-  // that runs, #5879); null while a session shows.
+  // A pane in place of a session's chat (#5102): "you" (what waits on the person), "arts" (the artifacts of all
+  // sessions), "cost" (what they used, #5857) or "browsers" (every browser that runs, #5879); null while a session shows.
   let pane = null;
-  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts", cost: "#sessCost", browsers: "#sessBrowsers" };
+  const PANES = { you: "#sessYou", arts: "#sessArts", cost: "#sessCost", browsers: "#sessBrowsers" };
   // The tab of the list (#5883), kept in this browser; loaded: the first draw ran (the tab's view shows at load).
   let tab = TABS[store(TAB)] ? store(TAB) : "agents", loaded = false;
-  let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
-  const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
-  // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
-  let replyTo = null, replyDict = null;
-  function closeReply() {
-    if (replyDict) replyDict.stop();
-    replyTo = null;
-    $("#statusReply").classList.add("hidden");
-  }
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
   // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
   let waiting = [];
@@ -410,7 +396,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  for (const b of ["#youBack", "#statusBack", "#artsBack", "#costBack", "#brwBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  for (const b of ["#youBack", "#artsBack", "#costBack", "#brwBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head (#4903; at every width since #5115): a card under it at the right with Open session,
   // Give work, Settings, the links to Plan and End (on a phone also the item). A choice, Esc, or a click outside closes it.
   const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
@@ -427,7 +413,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       await loadAgents();  // once: the rows ask it about each session's agent
       const j = await getJson("api/sessions");
       list = j.sessions; listRead = true;
-      push = j.notify_status || "off";
       forgetDrafts(list);
       draw();
     } catch (e) {
@@ -440,7 +425,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function drawState() {
     if (!agent || !lastRead || lastRead.agent !== agent) return;
     const row = list.find(x => x.name === agent), st = headState(row, lastRead, listRead);
-    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st) + (row ? shellChip(row) : ""));
+    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st, row));
     const s = { ...(row || {}), provider: lastRead.provider, running: !!row, terminal: lastRead.terminal };
     // Stop and Send now are in the message bar (#5587): the square while the box is empty, the bolt with text.
     $("#sessBar").classList.toggle("can-now", canStop(s, st.state) && stopKeys(s).length > 0);
@@ -477,16 +462,14 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     autoWait();
   }
 
-  // The Sessions row of the list (#5852, #5886: with the browsers that run) and the Status view, from the same read as
-  // the rows. The view draws only while it shows; its HTML goes in only when it changed, so a row keeps its hover and focus.
+  // The Sessions line of the list (#5886: with the browsers that run), from the same read as the rows (sessionsLine):
+  // its counts are the dots of the rows. Its HTML goes in only when it changed.
   function drawStatus() {
     // Active | All at its right (#5886): All also lists the ended sessions under the running ones.
     const all = showingAll(), seg = `<span class="sess-show" role="group" aria-label="Which sessions">${
       button("Active", { cls: "sess-seg", pressed: !all, data: { "sess-show": "active" }, title: "Running sessions" })}${
       button("All", { cls: "sess-seg", pressed: all, data: { "sess-show": "all" }, title: "Also the ended ones" })}</span>`;
-    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0, listRead) + seg);
-    if (pane === "status") putHtml($("#statusList"), statusHtml(list, push, listRead));
-    document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
+    putHtml($("#sessStatusRow"), sessionsLine(list, (S && S.browsers) || 0, listRead) + seg);
   }
 
   // The tabs of the list (#5883, mark 2026-11-14: 'there should be tabs. Agents, artifacts, browsers'). Agents: the
@@ -527,29 +510,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   document.addEventListener("maxpm-browsers", (e) => { brwRows = e.detail.rows; drawBrwRows(); });
   drawBrwRows();
   drawArtRows();
-  // The person has this session's chat open while its turn has ended (#5852): it is seen, and moves from Done to Idle.
-  // Once for each turn end (its row's time), and only while the page shows.
-  function markSeen(s) {
-    if (!s || s.status !== "done" || document.hidden || !isShown()) return;
-    const at = Date.parse(s.at || "") || 0;
-    if (seenAt[s.name] === at) return;
-    seenAt[s.name] = at;
-    s.status = "idle";
-    drawStatus();
-    fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "session_seen", args: { agent: s.name }, actor: actor() }) }).catch(() => {});
-  }
-  // Push of one state on or off: the setting notify_status for every project.
-  async function setPush(key) {
-    const value = togglePush(push, key);
-    push = value; drawStatus();
-    try {
-      await act("config_set", { key: "notify_status", value });
-      toast(value === "off" ? "No push notices for session states" : "Push notices for: " + value.replace(/_/g, " ").replace(/,/g, ", "));
-    } catch (_) { /* act showed why */ }
-    await refresh();
-  }
-
   // Pin or unpin a worker (#5007), from its row or the ⋯ menu (#5400). The rows and the menu change at once, not at
   // the next read of the sessions (about 5 s later); a refused pin reads them again.
   async function setPin(name, on) {
@@ -588,7 +548,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       drawPend(j.pending || []);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
-      markSeen(list.find(x => x.name === agent));
       lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label, terminal: j.terminal };
       drawState();
       waitLine(j);
@@ -618,8 +577,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     markYou(pane === "you");
     $("#sessCostRow .srow").classList.toggle("on", pane === "cost");
     if (pane === "arts" || pane === "browsers") setTab(pane);
-    else if (pane === "status") setTab("agents");
-    if (pane !== "status") closeReply();
     drawStatus();
     drawArtRows();
   }
@@ -1110,7 +1067,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   bar.addEventListener("click", async (e) => {
     if (listControl(e.target)) return;
     if (e.target.closest("[data-you]")) return showPane("you");
-    if (e.target.closest("[data-status]")) return showPane("status");
     if (e.target.closest("[data-cost]")) return showPane("cost");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
@@ -1129,9 +1085,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-art-session], [data-brw-row]")) {
       e.preventDefault(); return listControl(e.target);
     }
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-cost]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-cost]")) {
       e.preventDefault();
-      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status" : "cost");
+      return showPane(e.target.closest("[data-you]") ? "you" : "cost");
     }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
@@ -1141,58 +1097,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
-  // The Status view (#5852): a row opens its session, with what waits for the person first, as a row of the list does;
-  // Push turns the notices of that state on or off.
-  // Under a row (#5853): Answer opens what waits in its dialog; Esc goes to its tmux pane; Reply opens the sheet.
-  const rForm = $("#stReplyForm"), byName = (n) => list.find(x => x.name === n);
-  rForm.innerHTML = composerHtml("stR", { placeholder: "Message", label: "Message for the session", attachTitle: "Attach files", sendTitle: "Send" });
-  const rText = $("#stRText"), rState = () => composerState(rForm, rText.value.trim());
-  replyDict = makeDictation({ button: $("#stRMic"), input: rText, status: $("#stReplyDictate"), changed: rState });
-  function openReply(name) {
-    replyTo = name;
-    const s = byName(name) || {};
-    $("#stReplyName").textContent = s.title || name;
-    $("#statusReply").classList.remove("hidden");
-    replyDict.showFor(true);
-    rState();
-    rText.focus();
-  }
-  rText.addEventListener("input", rState);
-  rText.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); rForm.requestSubmit(); } });
-  rForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (replyDict.listening()) await replyDict.finish();
-    const to = replyTo, text = rText.value.trim();
-    if (!to || !text) return;
-    const s = byName(to) || {};
-    try {
-      // While its turn runs, maxpm serve holds the message and types it when the turn has ended (#5587).
-      const r = await typeAction("session_send", { agent: to, text, hold: s.status === "working" });
-      toast(r && r.waiting ? `${s.title || to}: it gets it when its turn ends` : `Sent to ${s.title || to}`);
-      rText.value = ""; rState(); closeReply();
-    } catch (err) { return toast(err.message, true); }
-    await refresh();
-  });
-  $("#stReplyClose").addEventListener("click", closeReply);
-  $("#stReplyChat").addEventListener("click", () => { const n = replyTo; closeReply(); if (n) pick(n); });
-  async function sendEsc(name) {
-    try { await typeAction("terminal_keys", { agent: name, keys: [{ key: "Escape" }] }); } catch (err) { return toast(err.message, true); }
-    toast(`Esc sent to ${(byName(name) || {}).title || name}`);
-    await refresh();
-  }
-  $("#statusList").addEventListener("click", (e) => {
-    const p = e.target.closest("[data-status-push]"); if (p) return setPush(p.dataset.statusPush);
-    const an = e.target.closest("[data-st-answer]");
-    if (an) { const s = byName(an.dataset.stAnswer); return s && showWaiting(s); }
-    const es = e.target.closest("[data-st-esc]"); if (es) return sendEsc(es.dataset.stEsc);
-    const rp = e.target.closest("[data-st-reply]"); if (rp) return openReply(rp.dataset.stReply);
-    const r = e.target.closest("[data-status-go]"); if (!r) return;
-    pick(r.dataset.statusGo);
-    const s = list.find(x => x.name === r.dataset.statusGo);
-    if (s && popsUp(s).length) showWaiting(s);
-  });
   return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
-           showStatus: (byPerson = true) => showPane("status", byPerson),
            showArts: (byPerson = true) => showPane("arts", byPerson),
            showCost: (byPerson = true) => showPane("cost", byPerson),
            showBrowsers: (byPerson = true) => showPane("browsers", byPerson), pane: () => pane };

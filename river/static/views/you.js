@@ -23,8 +23,11 @@ export function youCount() {
 // you and the inbox, and replaces its HTML only when it changed, so a row keeps its hover and focus.
 export function renderYou() {
   const row = $("#sessYouRow"); if (!row) return;
-  const n = youCount(), N = needsCount(), msgs = inboxOpenCount(), T = ((S && S.takeovers) || []).length;
-  const line = [N ? `${N} need${N === 1 ? "s" : ""} you` : "", T ? `${T} taken off your list` : "",
+  // One number for what needs you (#6021): the badge, the line and the last capacity box all say youCount. The box
+  // counted the ready items for any person ('46 for people' over '47 need you').
+  const n = youCount(), msgs = inboxOpenCount(), T = ((S && S.takeovers) || []).length;
+  const box = document.querySelector("#sessCap [data-cap-you] .n"); if (box) box.textContent = String(n);
+  const line = [n ? `${n} need${n === 1 ? "s" : ""} you` : "", T ? `${T} taken off your list` : "",
                 msgs ? `${msgs} message${msgs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") || "Nothing waits on you";
   const on = row.dataset.on === "1";
   const html = `<div class="srow srow-you${n ? " needs" : ""}${on ? " on" : ""}" data-you="1">

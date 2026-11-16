@@ -456,9 +456,8 @@ def test(conn, channel):
 
 def direct(conn, title, body, url=None):
     """Send one notice now on each channel of notify_channels (the queue's and each person's), outside the outbox.
-    For the watchdog (#5441): it runs when maxpm serve, which sends the outbox, may be down; and for the status inbox
-    (#5852, url: the session's page). Never raises: each channel's result is returned. Notices off (#6001): nothing
-    goes, and the result says so."""
+    For the watchdog (#5441): it runs when maxpm serve, which sends the outbox, may be down. Never raises: each
+    channel's result is returned. Notices off (#6001): nothing goes, and the result says so."""
     if not core.notices_on(conn):
         return [{"channel": "all", "ok": False, "error": "notifications are off (maxpm notify on)"}]
     out = []
@@ -543,14 +542,13 @@ def loop(stop, interval_s=None):
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
             from . import cost, server, space, vault
-            from .routes import canvas as canvas_routes, sessions as session_routes
+            from .routes import canvas as canvas_routes
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
             steps = (
                 sweep,  # expired leases, holds and reservations, and needs-you, as every command does (#5597)
                 server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
                 server.failed_starts,  # a session whose agent exited in its pane before it connected ends (#5892)
-                session_routes.status_push,  # notify_status: a session entered a state the person wants a push for (#5852)
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)
                 server.paste_answers,  # an answer for an asker that waits at its prompt: type it there (#5303)
                 server.paste_pending,  # a message held during a turn: type it at the idle prompt (#5587)

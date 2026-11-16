@@ -67,8 +67,6 @@ button.srow-it { cursor: pointer; }
 .srow-h .wbadge { flex: none; min-width: var(--w-tool); text-align: center; box-sizing: border-box; }
 /* No ! badge: no empty slot. The badge stands left of the dot, so the dot and the time keep their column (#5402). */
 .srow-h .wbadge-slot { display: none; }
-/* The number of shell commands that run in the session now (#5830): it never wraps or shrinks the title's room much. */
-.srow-h .chip.shchip, .sess-st .chip.shchip { flex: none; white-space: nowrap; font-size: var(--fs-xs); }
 .srow .srow-main > .sub { font-size: var(--fs-m); }
 .prov.prov-ic { font-size: var(--fs-xs); padding: 0 var(--sp-1); border-radius: var(--r-xs); line-height: 1.3; }
 .srow:not(:hover):not(:focus-within) .srow-pin:not(.on), .srow:not(:hover):not(:focus-within) .srow-end.iconbtn { visibility: hidden; }
@@ -586,7 +584,6 @@ button.srow-it { cursor: pointer; }
 .sp-count { margin-left: var(--sp-1); padding: 0 var(--sp-1); border-radius: var(--r-pill); background: var(--bg);
   color: var(--muted); font-size: var(--fs-xs); font-weight: 500; font-variant-numeric: tabular-nums; }
 .sp-count:empty { display: none; }
-.srow-changes { margin: 0 var(--sp-1) 0 0; }
 /* An item in a panel tab (#4685): the drawer's content, to read. */
 .sp-item { padding: var(--sp-5) var(--sp-6); font-size: var(--fs-m); }
 .sp-item .spi-top { display: flex; align-items: center; gap: var(--sp-3); }
@@ -659,8 +656,12 @@ button.srow-it { cursor: pointer; }
 .stats-narrow .stat .n { font-size: var(--fs-l); }
 .stats-narrow .stat .l { font-size: var(--fs-xs); overflow-wrap: anywhere; }
 /* The Sessions line with Active | All at its right (#5886): two joined buttons; the chosen one is filled. */
-#sessStatusRow { display: flex; align-items: center; gap: var(--sp-2); }
+#sessStatusRow { flex: none; display: flex; align-items: center; gap: var(--sp-2); }
 #sessStatusRow > .srow { flex: 1 1 auto; }
+/* A heading, not a button (#6021). */
+#sessStatusRow .srow-main { cursor: default; }
+#sessStatusRow .srow-main:hover { background: none; }
+#sessStatusRow .srow-t { font-weight: 700; }
 .sess-show { flex: none; display: inline-flex; }
 .sess-show .sess-seg { border-radius: 0; padding: var(--sp-0) var(--sp-3); font-size: var(--fs-s); }
 .sess-show .sess-seg:first-child { border-radius: var(--r-s) 0 0 var(--r-s); }

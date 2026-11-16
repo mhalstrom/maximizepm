@@ -144,59 +144,6 @@ def cards(conn):
     return rows
 
 
-# The status of each session at the last pass of status_push: {agent: status}. None until the first pass, which only
-# records: a restart of maxpm serve sends no notice for the states that were there before it.
-STATUS_LAST = {"by": None}
-STATUS_WORDS = {"needs_you": "needs you", "done": "is done", "working": "works", "idle": "is idle"}
-
-
-def status_push(conn):
-    """A push notice for each session that entered a state of notify_status since the last pass (#5852; the notify
-    loop of maxpm serve, every notify_interval). The setting of the session's project wins over the global one. A
-    session that is new since the last pass sends nothing. needs_you sends nothing while a manager is active (it
-    sees prompts and questions first), nor for a session with an open needs-you notice of the queue (its question
-    or prompt alert already went out). Several changes in one pass go out as one notice. Returns the changes sent."""
-    if core.setting(conn, "notify_status") == "off" and not conn.execute(
-            "SELECT 1 FROM settings WHERE key='notify_status' AND value!='off' LIMIT 1").fetchone():
-        STATUS_LAST["by"] = None  # off everywhere: no pass, and the next pass after it is set only records
-        return []
-    if not conn.execute("SELECT 1 FROM settings WHERE key='notify_channels' AND value!='' LIMIT 1").fetchone():
-        return []  # no channel for the queue or any person (notify.direct)
-    rows = cards(conn)
-    before, now_by = STATUS_LAST["by"], {r["name"]: r["status"] for r in rows}
-    STATUS_LAST["by"] = now_by
-    if before is None:
-        return []
-    pids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM projects")}
-    manager = core.active_manager(conn)
-    sent = []
-    for r in rows:
-        old, new = before.get(r["name"]), r["status"]
-        if old is None or old == new:
-            continue
-        want = core._channels(core.setting(conn, "notify_status", project_id=pids.get(r.get("project"))))
-        if new not in want:
-            continue
-        if new == "needs_you" and (manager or conn.execute(
-                "SELECT 1 FROM needs_you n JOIN messages m ON m.id=n.message_id WHERE n.closed_at IS NULL AND "
-                "m.from_agent=? LIMIT 1", (r["name"],)).fetchone()):
-            continue
-        sent.append(r)
-    if not sent:
-        return []
-    from .. import notify
-    lines = [f"{r['title']} {STATUS_WORDS[r['status']]}" + (f" ({r['project']})" if r.get("project") else "")
-             + (f": {r['doing']}" if r.get("doing") else "") for r in sent]
-    if len(sent) == 1:
-        title, body = f"MaximizePM: {sent[0]['title']} {STATUS_WORDS[sent[0]['status']]}", lines[0]
-        url = notify.page_url(conn, terminal=sent[0]["name"])
-    else:
-        title, body = f"MaximizePM: {len(sent)} sessions changed", "\n".join(lines[:10])
-        url = notify.page_url(conn) + "status"  # the status inbox of the page
-    notify.direct(conn, title, body, url)
-    return [{"agent": r["name"], "status": r["status"]} for r in sent]
-
-
 def running(h, path):
     """The Sessions tab: running sessions, read only (#4592)."""
     from urllib.parse import parse_qs, urlsplit
@@ -206,11 +153,7 @@ def running(h, path):
     try:
         if path == "/api/sessions":
             rows = cards(conn)
-            with server.read_memo():
-                body = {"sessions": rows,
-                        # The status inbox (#5852): which states send a push notice (the global value; Push on the page).
-                        "notify_status": core.setting(conn, "notify_status")}
-            return h._send(200, body)
+            return h._send(200, {"sessions": rows})
         terminals = server.agent_terminals(conn)
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
         if "file" in q:  # scrolling up: the page of lines before a byte of one of its transcripts (#5120)
@@ -252,6 +195,4 @@ OPS = {
                                                                 bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: server.prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"),
                                                             a.get("other"), who, a.get("key")),
-    # The person has the session's chat open (#5852): done becomes idle in the status inbox.
-    "session_seen": lambda c, a, who: core.session_seen(c, a["agent"], who),
 }

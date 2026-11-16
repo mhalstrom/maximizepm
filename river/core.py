@@ -125,11 +125,6 @@ DEFAULT_SETTINGS = {
     "notifications": "on",
     "notify_interval": "30s",
     "notify_batch_window": "60s",
-    # The status inbox (#5852): which states of a session send a push notice on notify_channels when a session
-    # enters them: a comma list of needs_you, done, working, idle; or off (the default). needs_you sends only what
-    # no notice of the queue sends already (an open question or prompt alert of that session), and nothing while a
-    # manager is active: the manager sees prompts and questions first.
-    "notify_status": "off",
     # The page over Tailscale (#5863, river/tailnet.py): the Tailscale logins whose phone or computer may use the page
     # that tailscale serve forwards, a comma list. Empty: only the login that owns this computer in the tailnet.
     "tailnet_logins": "",
@@ -959,7 +954,6 @@ CREATE TABLE IF NOT EXISTS agents (
   expert_project TEXT,                       -- the project whose folder it starts in (maxpm expert start)
   talked_at      TEXT,                       -- the last prompt that someone typed or sent to it (its hooks)
   person_said_at TEXT,                       -- the last prompt that a person typed in its chat (its hooks; #5629)
-  seen_at        TEXT,                       -- the last time a person had its chat open on the page (status inbox, #5852)
   assistant_for  TEXT,                       -- an assistant session (role assistant): the person whose list it goes through (#5110)
   scope          TEXT,                       -- the scope the manager gave it (#5973): JSON parts; NULL: none
   scope_by       TEXT,
@@ -2365,7 +2359,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
-    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at", "seen_at"):
+    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at",
@@ -2485,6 +2479,7 @@ def _migrate(conn):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_bases'").fetchone():
         conn.execute("DROP TABLE goal_bases")  # the context sessions of goals and their forked workers are gone (#5992)
     conn.execute("DELETE FROM settings WHERE key IN ('goal_context', 'base_warm', 'base_max', 'agent_for.context')")
+    conn.execute("DELETE FROM settings WHERE key='notify_status'")  # the push per session state is gone (#6021)
 
 
 LOCK_TRIES = 3  # a write waits busy_timeout (10s) this many times for the lock of the queue
@@ -3097,10 +3092,6 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("notify_channels is a comma list of channel names, for example: mac,ntfy (empty sends nothing)")
     elif key == "tailnet_logins" and not all(re.match(r"^[^\s,]{1,200}$", x) for x in _channels(value)):
         raise RiverError("tailnet_logins is a comma list of Tailscale logins, for example: you@example.com,you@github")
-    elif key == "notify_status" and value != "off" and not (
-            _channels(value) and set(_channels(value)) <= set(SESSION_STATUSES)):
-        raise RiverError("notify_status is off or a comma list of " + ", ".join(SESSION_STATUSES)
-                         + ", for example: needs_you,done")
     sc = _scope(conn, project, item, agent, kind)
     if key == "notifications" and sc != "global":
         raise RiverError("notifications is one switch for all notices: maxpm notify on|off (no --project, --item, "
@@ -14586,21 +14577,6 @@ def session_pin(conn, agent, actor=None, on=True):
             conn.execute("DELETE FROM session_pins WHERE person=? AND agent=?", (actor, agent))
     return {"agent": agent, "person": actor, "pinned": on,
             "pinned_by": agent_status(conn, agent)["pinned_by"]}
-
-
-# The four states of a session in the status inbox (#5852), in the order of the list.
-SESSION_STATUSES = ("needs_you", "done", "working", "idle")
-
-
-def session_seen(conn, agent, actor=None):
-    """A person has the session's chat open on the page (#5852): a turn that ended before now is seen, so the session
-    moves from done to idle in the status inbox. The time is one second ahead: the transcript times have fractions,
-    and a turn end in the same second as the look is seen too."""
-    _agent(conn, agent)
-    t = iso(now() + timedelta(seconds=1))
-    with tx(conn):
-        conn.execute("UPDATE agents SET seen_at=? WHERE name=?", (t, agent))
-    return {"agent": agent, "seen_at": t}
 
 
 def _rel_path(path, root, cwd=None):
