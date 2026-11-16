@@ -350,7 +350,9 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
 ```
 
 - Say exactly what to decide or do and where the material is, so the user can
-  act without asking you.
+  act without asking you. Start the title with what the person does (Decide,
+  Look, Approve, Read; anything else is Do): the person filters by it
+  (`--type` sets another).
 - Link it: `--blocks <id>` when your item waits on it, `--found-during <id>` otherwise.
 - Do not wait at your prompt for the answer. Commit what is finished, say in
   `--context` what is left, release (`--release`), and run `maxpm go` again:

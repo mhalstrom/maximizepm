@@ -149,6 +149,9 @@ DEFAULT_SETTINGS = {
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
     # confirms it; a project where nobody chose has ask_first.
     "result_look": "ask_first",
+    # The type of a person item (#5998): auto (from the first word of its title, action_type) or one of
+    # ACTION_TYPES. maxpm add|edit --type sets it for one item; --project for the person items of a project.
+    "action_type": "auto",
     # When a person reviews the changes of a project's sessions (#5855, mark 2026-11-14, layer 2 of the plan: review
     # is the bottleneck): off (the default: the Changes view and its comments only), push (a session's push or PR
     # merge waits until a person approves its HEAD in the Changes view), or release (a cut release waits until a
@@ -2847,6 +2850,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("setup_done is on or off")
     elif key == "auto_continue" and value not in ("tree", "on", "off"):
         raise RiverError("auto_continue is tree, on, or off")
+    elif key == "action_type" and value not in ("auto",) + ACTION_TYPES:
+        raise RiverError("action_type is auto (from the first word of the title) or one of " + ", ".join(ACTION_TYPES))
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
     elif key == "workspace" and value not in ("shared", "worktree", "setup"):
@@ -13638,7 +13643,52 @@ def forward_note(conn, q):
     return r["body"] if r else None
 
 
-def needs_you(conn, human=None, include_closed=False, limit=100, sync=True):
+# The type of what a person does with an action item or a question (#5998, mark 2026-11-15: one queue with tags to
+# filter by, in place of five queues). Computed, with no column: from the first word of the title or the question
+# (874 person items so far start with such a word: Look 184, Decide 180, Approve 50, Release 38, Read 30, ...).
+# An item's setting action_type overrides it; a question with another type starts with that word (typed_body).
+ACTION_TYPES = ("decide", "look", "approve", "do", "read")
+_ACTION_WORDS = {"decide": "decide pick choose which should", "look": "look review check try test compare watch",
+                 "approve": "approve allow delete release push publish retire remove merge", "do": "do",
+                 "read": "read"}
+_ACTION_OF = {w: t for t, ws in _ACTION_WORDS.items() for w in ws.split()}
+
+
+def check_action_type(t):
+    if t is not None and t not in ACTION_TYPES:
+        raise RiverError("the type is one of " + ", ".join(ACTION_TYPES))
+    return t
+
+
+def action_type(text, default="do"):
+    """The type that the first word of a title or a message gives, else default (a question: decide)."""
+    m = re.match(r"\W*([A-Za-z]+)", text or "")
+    return _ACTION_OF.get(m.group(1).lower(), default) if m else default
+
+
+def typed_body(body, atype, kind="question"):
+    """The text of a message to a person with the type atype: unchanged when its first word gives that type,
+    else with the type's word in front ("Look: ..."), so the type stays readable and needs no field."""
+    check_action_type(atype)
+    if not atype or action_type(body, "decide" if kind == "question" else "read") == atype:
+        return body
+    return f"{atype.capitalize()}: {body}"
+
+
+def _action_types(conn):
+    """{scope: type} of the setting action_type, read once for a list."""
+    return {r[0]: r[1] for r in conn.execute("SELECT scope, value FROM settings WHERE key='action_type'")
+            if r[1] in ACTION_TYPES}
+
+
+def item_action_type(conn, item_id, title, project=None, sets=None):
+    """The type of a person item: its setting action_type (item, then project, then global), else its title's."""
+    sets = _action_types(conn) if sets is None else sets
+    return (sets.get(f"item:{item_id}") or (project and sets.get(f"project:{project}")) or sets.get("global")
+            or action_type(title))
+
+
+def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atype=None):
     """Needs-you events for one person (theirs and the ones for anyone), most important first.
 
     Open events come before closed ones. Among open events, questions and alerts come
@@ -13660,6 +13710,13 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True):
         sql += " AND (n.human IS NULL OR n.human=?)"
         args.append(human)
     rows = [dict(r) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
+    sets = _action_types(conn)
+    for r in rows:  # its type (#5998); atype keeps one type
+        r["type"] = (item_action_type(conn, r["item_id"], r["item_title"], r["project"], sets) if r["kind"] == "item"
+                     else action_type(r["body"], "decide" if r["message_kind"] == "question" else "read"))
+    if atype:
+        check_action_type(atype)
+        rows = [r for r in rows if r["type"] == atype]
     ann = annotate(conn, closed=include_closed)  # open rows name open items, or a closed one now and then
     for r in rows:
         a = ann.get(r["item_id"]) if r["kind"] == "item" else None

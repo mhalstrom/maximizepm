@@ -13331,6 +13331,52 @@ class RunLog(Base):
         self.assertEqual(self.rows(), [])
 
 
+class ActionType(Base):
+    """A person's action items and questions carry a type to filter by (#5998)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "bob")
+
+    def types(self, **kw):
+        return {(r["kind"][0], r["item_id"] or r["message_id"]): r["type"] for r in core.needs_you(self.c, **kw)}
+
+    def test_action_type_from_the_first_word(self):
+        look = self.add("a", "Look at the card mockup", doer="human")
+        dec = self.add("a", "Pick the push service", doer="human")
+        rel = self.add("a", "Release 1.4 to production", doer="human")
+        do = self.add("a", "Sign the Apple developer agreement", doer="human")
+        q = core.send(self.c, "question", "Which name do you like?", to="mark", actor="bob")
+        q2 = core.send(self.c, "question", "Look at the page: push?", to="mark", actor="bob")
+        got = self.types()
+        self.assertEqual([got["i", x] for x in (look, dec, rel, do)], ["look", "decide", "approve", "do"])
+        self.assertEqual((got["m", q["id"]], got["m", q2["id"]]), ("decide", "look"))
+        self.assertEqual(set(self.types(atype="look")), {("i", look), ("m", q2["id"])})
+
+    def test_action_type_set_by_the_sender_and_changed_later(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--json", "-q", "--as", "bob", "add", "a", "Sign in to the store", "--doer", "human", "--type", "read"])
+        iid = json.loads(out.getvalue())["id"]
+        self.assertEqual(self.types()["i", iid], "read")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["--as", "bob", "edit", str(iid), "--type", "approve"])
+        self.assertEqual(self.types()["i", iid], "approve")
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["--as", "bob", "edit", str(iid), "--type", "auto"])
+        self.assertEqual(self.types()["i", iid], "do")
+        self.assertEqual(core.typed_body("the new header", "look"), "Look: the new header")
+        self.assertEqual(core.typed_body("Look at the header", "look"), "Look at the header")
+        self.assertEqual(core.typed_body("why?", None), "why?")
+        with self.assertRaises(core.RiverError):
+            core.needs_you(self.c, atype="watch")
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "action_type", "watch", item=iid)
+
+
 class DesignDoc(Base):
     """#5989: an expert plans in a design document with one outline; each task named in its Plan links back to its
     part, and each change of the Plan is a plan version that keeps the old one."""

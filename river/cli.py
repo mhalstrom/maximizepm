@@ -1703,6 +1703,7 @@ def build_parser(only=None):
                    "needed when the title or context names a later day (now: it can start now)")
     x.add_argument("--notes", default="")
     x.add_argument("--doer", default="any", choices=core.DOERS, help="who can do it (default any)")
+    x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="a person item: "+"what the person does with it (default: from the first word of the title)")
     x.add_argument("--context", default="", help="what a new agent must know to start: why, where, decisions made")
     x.add_argument("--touches", nargs="*", default=[], help="files or directories it changes")
     x.add_argument("--check", default="", help="command that shows it works (tests, a build); for a fix, the "
@@ -1771,6 +1772,7 @@ def build_parser(only=None):
     x.add_argument("--changed", help="what changed, one plain line for a person (no ids, no file names, no flags); "
                    "\"\" removes it")
     x.add_argument("--doer", choices=core.DOERS); x.add_argument("--project")
+    x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES + ("auto",), help="a person item: "+"what the person does with it (default: from the first word of the title)")
     x.add_argument("--context"); x.add_argument("--touches", nargs="*", help="replaces the list; give none to clear it")
     x.add_argument("--check")
     _model_args(x, edit=True)
@@ -1804,6 +1806,7 @@ def build_parser(only=None):
     x.add_argument("--for", dest="person", help="the person (default: you if you are a person, else the first registered person)")
     x = sub.add_parser("needs-you", help="what waits on a person, most important first: questions and alerts, then ready human items by priority")
     x.add_argument("--human", help="only this person's (and those for anyone)"); x.add_argument("--all", action="store_true", help="closed ones too")
+    x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="only this type")
     x = sub.add_parser("status", help="overview: every project's counts, recent completions, who is working, open slots")
     x.add_argument("--recent", type=int, default=10, help="how many recent completions (default 10)")
     x = sub.add_parser("usage", help="token cost of each done item, from its Claude Code sessions' transcripts, "
@@ -2106,6 +2109,8 @@ def build_parser(only=None):
         x.add_argument("--goal", help="send it to the owner of this goal")
         x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
         x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
+        x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does "
+                       "with it (default: from its first word; a question: decide)")
         if kind == "ask":
             x.add_argument("--file", help="ask every agent whose held items touch this file")
     x = sub.add_parser("decline", help="hand a pushed item back, or with --message say no to an offer or alert")
@@ -2139,6 +2144,8 @@ def build_parser(only=None):
     x.add_argument("--goal", help="send it to the owner of this goal")
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
+    x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does with it "
+                   "(default: from its first word; a question: decide)")
     x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
     x.add_argument("--in-chat", action="store_true", help="you asked it, and the person answered in your own chat: "
                    "record their words as the answer and close the question")
@@ -4258,8 +4265,14 @@ def dispatch(conn, a, actor):
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True)
+        if a.atype and res.get("id"):
+            core.config_set(conn, "action_type", a.atype, item=res["id"], actor=actor)
         return res
     if c == "edit":
+        if a.atype == "auto":
+            core.config_unset(conn, "action_type", item=a.id, actor=actor)
+        elif a.atype:
+            core.config_set(conn, "action_type", a.atype, item=a.id, actor=actor)
         if a.unreserve:
             core.cancel_push(conn, a.id, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
@@ -4302,7 +4315,7 @@ def dispatch(conn, a, actor):
     if c == "health":
         return core.health(conn, a.since, a.until, a.project, a.by)
     if c == "needs-you":
-        return core.needs_you(conn, a.human, a.all)
+        return core.needs_you(conn, a.human, a.all, atype=a.atype)
     if c == "prompt":
         person = a.person or (actor if actor and conn.execute(
             "SELECT 1 FROM agents WHERE name=? AND kind='human'", (actor,)).fetchone() else None)
@@ -4471,6 +4484,7 @@ def dispatch(conn, a, actor):
             raise RiverError("put the text in quotes: maxpm " + c + " [<agent>] \"...\"")
         to, text = (a.words[0], a.words[1]) if len(a.words) == 2 else (None, a.words[0])
         kind = {"ask": "question", "alert": "alert", "note": "note"}[c]
+        text = core.typed_body(text, getattr(a, "atype", None), kind)
         return core.message(conn, kind, text, to, a.holder_of, a.item, getattr(a, "file", None), os.getcwd(), actor,
                             a.goal, a.level, a.blocked)
     if c == "decline":
@@ -4494,7 +4508,7 @@ def dispatch(conn, a, actor):
     if c == "blockers":
         return core.blockers(conn, a.id)
     if c == "send":
-        return core.send(conn, a.kind, a.text, a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
+        return core.send(conn, a.kind, core.typed_body(a.text, a.atype, a.kind), a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
                          a.item, a.reply, actor, a.level, a.blocked)
     if c == "answer":
         return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
@@ -7420,7 +7434,7 @@ def render(a, res):
                 if e["unblocks_count"]:
                     pri += f", unblocks {e['unblocks_count']}"
                 pri = f"[{pri}] "
-            print(f"[{e['id']}] {pri}for {who}: {e['summary']}  ({state})")
+            print(f"[{e['id']}] {e['type']}  {pri}for {who}: {e['summary']}  ({state})")
             for line in _earlier_lines(e.get("earlier"), "      "):
                 print(line)
             for n in e["notifications"]:
