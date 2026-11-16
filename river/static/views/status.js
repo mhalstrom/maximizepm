@@ -35,10 +35,13 @@ export function countLine(list) {
 }
 
 // The Sessions row of the session list (#5886: the heading over the tabs): the counts and the browsers that run, and a
-// ! badge while a session needs you. It opens the Status view.
-export function statusRowHtml(list, on, browsers = 0) {
+// ! badge while a session needs you. It opens the Status view. read: the page has read the sessions once. Before
+// that the list is empty, and "No session runs" was false: a page that loaded hidden (a background tab, a browser
+// that an agent drives) reads them only when it shows, and kept saying it while five sessions ran (#5999).
+export const READING = "Reading the sessions…";
+export function statusRowHtml(list, on, browsers = 0, read = true) {
   const n = byStatus(list).needs_you.length;
-  const line = countLine(list) + (browsers ? ` · ${browsers} browser${browsers === 1 ? "" : "s"}` : "");
+  const line = (read ? countLine(list) : READING) + (browsers ? ` · ${browsers} browser${browsers === 1 ? "" : "s"}` : "");
   return `<div class="srow srow-status${n ? " needs" : ""}${on ? " on" : ""}" data-status="1">
     <div class="srow-main" tabindex="0" role="button" title="All sessions by state" aria-label="Sessions: all sessions by state">
       <div class="srow-h"><b class="srow-t">Sessions</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} session(s) need you">! ${n}</span>` : ""}</div>
@@ -68,9 +71,10 @@ export function rowActions(s, name) {
   return out.join("");
 }
 
-// The four groups. push: the value of notify_status ("off", or a comma list of states).
-export function statusHtml(list, push) {
+// The four groups. push: the value of notify_status ("off", or a comma list of states). read: as statusRowHtml.
+export function statusHtml(list, push, read = true) {
   const g = byStatus(list), on = new Set(String(push || "off").split(",").map(x => x.trim()));
+  if (!read) return empty(READING);
   if (!list.length) return empty("No session runs now. Start one with Start an agent.");
   return GROUPS.map(([k, name, , tip]) => `<section class="st-group" data-group="${k}">
       <h3 class="st-gh"><span title="${esc(tip)}">${esc(name)}</span> ${chip("c-p", String(g[k].length))}<span class="spacer"></span>${

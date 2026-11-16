@@ -484,8 +484,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const all = showingAll(), seg = `<span class="sess-show" role="group" aria-label="Which sessions">${
       button("Active", { cls: "sess-seg", pressed: !all, data: { "sess-show": "active" }, title: "Running sessions" })}${
       button("All", { cls: "sess-seg", pressed: all, data: { "sess-show": "all" }, title: "Also the ended ones" })}</span>`;
-    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0) + seg);
-    if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
+    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0, listRead) + seg);
+    if (pane === "status") putHtml($("#statusList"), statusHtml(list, push, listRead));
     document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
   }
 
