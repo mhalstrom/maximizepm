@@ -4944,6 +4944,37 @@ class Models(Base):
         for n in ("s1", "s2"):
             core.register(self.c, n)
 
+    def test_only_a_person_sets_a_task_above_default_max_model(self):
+        # #5961 (policy p19): Opus at most for queue work; Fable only when the person marks a task, and for experts.
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "default_max_model", "opus")
+        for models in ({"model": "fable"}, {"max_model": "fable"}, {"min_model": "fable"}):
+            with self.assertRaisesRegex(RiverError, r"above default_max_model \(opus\); only a person"):
+                core.item_add(self.c, "a", "x", actor="s1", models=models)
+        i = core.item_add(self.c, "a", "x", actor="s1", models={"model": "sonnet", "max_model": "opus, sol"})["id"]
+        with self.assertRaisesRegex(RiverError, "only a person"):
+            core.item_edit(self.c, i, models={"model": "claude-fable-5-2"}, actor="s1")
+        core.item_edit(self.c, i, models={"max_model": "fable"}, actor="mark")  # the person marks it
+        core.item_edit(self.c, i, models={"effort": "high"}, actor="s1")  # the person's limit stays
+        self.assertEqual(core.item_show(self.c, i)["max_model"], "fable")
+        e = core.item_add(self.c, "a", "a talk", actor="s1", tier="expert", models={"model": "fable"})
+        self.assertEqual(e["model"], "fable")
+        core.config_unset(self.c, "default_max_model")
+        core.item_add(self.c, "a", "y", actor="s1", models={"model": "fable"})  # no cap: no rule
+
+    def test_a_launch_refuses_a_model_older_than_model_min_version(self):
+        x = core.item_add(self.c, "a", "x")["id"]
+        self.assertIsNone(core.model_too_old(self.c, "claude-haiku-4-5"))  # no floor by default
+        core.config_set(self.c, "model_min_version", "5.5")
+        for old in ("claude-haiku-4-5", "claude-sonnet-4-20250514", "claude-3-5-sonnet", "claude-opus-5-1"):
+            self.assertIn("older than model_min_version 5.5", core.model_too_old(self.c, old), old)
+        for ok in ("opus", "claude-opus-5-5", "claude-fable-6-0[1m]", "gpt-6-astra", "sonnet"):
+            self.assertIsNone(core.model_too_old(self.c, ok), ok)
+        with self.assertRaisesRegex(RiverError, "older than model_min_version"):
+            core.launch_target(self.c, item=x, agent="Claude Code", model="claude-haiku-4-5", actor="mark")
+        with self.assertRaisesRegex(RiverError, "a version such as 5.5"):
+            core.config_set(self.c, "model_min_version", "new")
+
     def test_add_and_edit_store_the_fields_and_validate_them(self):
         i = core.item_add(self.c, "a", "x", models={"model": "Opus", "effort": "high", "min_model": "opus, sol"})
         self.assertEqual((i["model"], i["effort"], i["min_model"], i["model_from"]), ("opus", "high", "opus, sol", "item"))

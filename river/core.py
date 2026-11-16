@@ -620,6 +620,10 @@ DEFAULT_SETTINGS = {
     "default_effort": "",
     "default_min_model": "",
     "default_max_model": "",
+    # Only a person sets a task above default_max_model (an agent's add or edit is refused; an expert-tier task keeps
+    # its own model, #5961). model_min_version: launch refuses a model whose id names an older version (5.5 refuses
+    # claude-haiku-4-5 and claude-3-5-sonnet; a ladder name such as opus has no version and passes). Empty: no floor.
+    "model_min_version": "",
     # The agent type an item needs, when it names none (maxpm add --agent): any registered agent adapter
     # (claude-code, codex, or a module in river/agents or <queue folder>/agents). agent_rules picks one from the
     # item first: "codex: *.css, *.svg, image, logo" gives Codex the items that touch a .css or .svg file or have
@@ -2841,6 +2845,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         _check_model_name(value)
     elif key in ("default_min_model", "default_max_model") and value:
         _limit_list(parse_ladder(setting(conn, "model_ladder")), value, key)
+    elif key == "model_min_version" and value and not re.match(r"^\d+(\.\d+)?$", value.strip()):
+        raise RiverError("model_min_version is a version such as 5.5 (empty: no floor)")
     elif key == "release_approval" and value not in RELEASE_APPROVALS:
         raise RiverError("release_approval is review (a release goes out when its review passes) or person (a "
                          "person's yes for each release)")
@@ -3133,6 +3139,26 @@ def _check_limits(ladder, lo, hi):
             fb, pb = _family(ladder, b)
             if fa == fb and pa > pb:
                 raise RiverError(f"min model {a} is stronger than max model {b} ({fa}: {', '.join(ladder[fa])})")
+
+
+_MODEL_VERSION = (re.compile(r"(?:haiku|sonnet|opus|fable)-(\d+)(?:[-.](\d{1,2}))?(?!\d)"),  # claude-haiku-4-5
+                  re.compile(r"claude-(\d+)(?:[-.](\d{1,2}))?-(?:haiku|sonnet|opus)"))  # claude-3-5-sonnet
+
+
+def model_too_old(conn, model, project_id=None):
+    """Why a launch refuses this model (its id names a version below model_min_version, #5961), or None."""
+    floor = (setting(conn, "model_min_version", project_id=project_id) or "").strip()
+    if not floor or not model:
+        return None
+    m = next((x for x in (rx.search(model.lower()) for rx in _MODEL_VERSION) if x), None)
+    if not m:
+        return None
+    have = (int(m.group(1)), int(m.group(2) or 0))
+    want = tuple(int(x) for x in (floor.split(".") + ["0"])[:2])
+    if have >= want:
+        return None
+    return (f"refused: {model} is version {have[0]}.{have[1]}, older than model_min_version {floor}; launch a "
+            f"newer model (a ladder name such as opus runs the current one)")
 
 
 def model_check(ladder, model, lo, hi, family=None):
@@ -9416,7 +9442,8 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         for g in names:
             _tag(conn, iid, g, actor)
         if models:
-            _set_models(conn, conn.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone(), models, actor)
+            _set_models(conn, conn.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone(), models, actor,
+                        tier=tier)
         if due:
             t = parse_due(due, setting(conn, "timezone"))
             conn.execute("UPDATE items SET due=? WHERE id=?", (t, iid))
@@ -9469,8 +9496,32 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     return a
 
 
-def _set_models(conn, it, models, actor):
-    """Set an item's model, effort, min_model, max_model from a dict; "" or "none" clears one (the default applies)."""
+def _over_cap(conn, it, ladder, new, actor, tier):
+    """#5961 (policy p19): only a person puts a task above the default_max_model of its scopes (the item's kind, its
+    project, global): an agent's add or edit that names a stronger model, min model or max model of the same family
+    is refused. An expert-tier task keeps its own model (expert talks). Returns why, or None."""
+    if not actor or tier == "expert" or _is_person(conn, actor):
+        return None  # no actor: MaximizePM's own adds, or a person's terminal with no MAXPM_AGENT
+    pid = it["project_id"]
+    cap = _levels(setting(conn, "default_max_model", project_id=pid, kind=it["kind"]))
+    if not cap:
+        return None
+    for f in ("model", "min_model", "max_model"):
+        if new[f] == it[f]:
+            continue  # unchanged: what a person set stays
+        for m in _levels(new[f]):
+            fam, pos = _family(ladder, m)
+            top = next((_family(ladder, c)[1] for c in cap if _family(ladder, c)[0] == fam), None)
+            if fam and top is not None and pos > top:
+                return (f"refused: {m} is above default_max_model ({', '.join(cap)}); only a person sets a task above "
+                        f"it (maxpm edit {it['id']} --{f.replace('_', '-')} {m} by the person, or the page). An expert "
+                        f"talk keeps its own model: --tier expert")
+    return None
+
+
+def _set_models(conn, it, models, actor, tier=None):
+    """Set an item's model, effort, min_model, max_model from a dict; "" or "none" clears one (the default applies).
+    tier: the task's tier after this change (an expert task may name a model above default_max_model, _over_cap)."""
     ladder = parse_ladder(setting(conn, "model_ladder"))
     new = {f: it[f] for f in MODEL_FIELDS}
     for f, v in models.items():
@@ -9490,6 +9541,9 @@ def _set_models(conn, it, models, actor):
         else:
             new[f] = _limit_list(ladder, v, f.replace("_", " "))
     _check_limits(ladder, new["min_model"], new["max_model"])
+    why = _over_cap(conn, it, ladder, new, actor, tier if tier is not None else it["tier"])
+    if why:
+        raise RiverError(why)
     if new["agent"]:
         # Codex runs OpenAI models and Claude Code runs Claude models: the item's own model and limits must fit.
         fam = platform_spec(new["agent"])["family"]
@@ -9613,7 +9667,7 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
             conn.execute("UPDATE items SET tier=? WHERE id=?", (tier or None, it["id"]))
             _event(conn, it["id"], actor, f"tier {tier or 'normal'}")
         if models:
-            _set_models(conn, it, models, actor)
+            _set_models(conn, it, models, actor, tier=tier if tier is not None else it["tier"])
         for g in goals or ():
             _tag(conn, it["id"], g, actor)
         for g in untag or ():
@@ -19909,6 +19963,10 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         # items with default_model opus and each pane ran Sonnet, the CLI's own default), of the agent's family, so
         # the session declares it (MAXPM_MODEL) and its limits hold. With neither, the agent's own default runs.
         model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None)
+    for m in {model, model_id(conn, plat, model, p["id"])} - {None, ""}:  # the name and the id the CLI gets (#5961)
+        old = model_too_old(conn, m, p["id"])
+        if old:
+            raise RiverError(f"#{top['id']}: {old}")
     name = session_title(top["goals"], top["id"], top["title"])
     cmd = None
     if effort is None:
