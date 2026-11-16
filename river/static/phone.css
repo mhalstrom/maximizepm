@@ -131,7 +131,9 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   .strip button { flex-direction: column; align-items: flex-start; gap: 0; padding: 6px 8px; line-height: 1.25; text-align: left; min-width: 0; overflow-wrap: anywhere; }
   .strip button b { font-size: 17px; }
   .strip .agentStart, .strip > select { grid-column: 1 / -1; }
-  .nyl { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 8px 4px; }
+  .nyl { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 8px 4px; }
+  .nyl > .t, .nyl > .chips, .nyl > .nyx { grid-column: 1; }
+  .nyl > .row-open { grid-column: 2; grid-row: 1 / span 2; align-self: center; }  /* the Open mark beside the line (#6016) */
   .nyl .t { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
   .nyl .chips { justify-content: flex-start; }
   .nyl .chips > .btn:first-child { margin-left: var(--btn-inset); }  /* OK all under its line (#5314) */

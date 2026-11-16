@@ -20,7 +20,7 @@
 #inbox .ib-pair input { flex: 1; min-width: 0; }
 #inbox .ny-meta { white-space: nowrap; display: inline-flex; gap: var(--sp-3); align-items: baseline; }
 .thread { margin: var(--sp-2) 0 0 var(--sp-5); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--line); font-size: var(--fs-m); }
-.nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
+.nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
 .nyl:first-child { border-top: none; }
 /* The filter above Needs you (#6007): All and each type, then the project menu. */
 .ny-filter { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-bottom: var(--sp-2); }

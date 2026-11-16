@@ -10,6 +10,7 @@ import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
 import { openCard, openItemCard } from "../components/waitDialog.js";
+import { OPEN_MARK } from "../components/rowOpen.js";
 import { fromEvent, typeChip } from "../components/askCard.js";
 import { openSignin } from "./signinAsk.js";
 
@@ -98,8 +99,8 @@ export function renderNeedsYou() {
     const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";
     const br = !isItem && e.message_kind === "alert" ? browserOf(e.body) : "";
     const fill = br ? `<div class="ny-sf" data-session="${esc(br)}">${secretFillHtml(null)}</div>` : "";
-    return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
-        <span class="chips">${typeChip(e.type)}${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
+    return `<div class="nyl clickrow" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
+        <span class="chips">${typeChip(e.type)}${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span>${OPEN_MARK}</div>
       ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}${fill}<div class="actions">${buttons}</div></div>` : ""}`;
   }).join("") + (total > NY.length ? `<div class="muted t-s ny-more">The ${NY.length} most important of ${total}. The rest come here as you finish these; <code>maxpm needs-you</code> lists them all.</div>` : "");
   // Files and local pages in the details open in the side panel of the session that sent them (#4689).

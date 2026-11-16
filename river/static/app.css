@@ -146,9 +146,16 @@ main > section > .panel:first-child { border-top: 0; padding-top: 0; }
 .panel h2 > label { font-size: var(--fs-m); font-weight: 400; color: var(--muted); }
 /* A checkbox and a radio take the page's accent in both themes, not the browser's blue (#5313). */
 input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
-.row { display: grid; grid-template-columns: var(--w-id) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.row { display: grid; grid-template-columns: var(--w-id) minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
 .row:first-child { border-top: none; }
 .row:hover { background: var(--bg); }
+/* One look for every row that a click opens (#6016, components/rowOpen.js): a pointer, a hover background, the title in
+   the link color, and the Open mark at its right end. */
+.clickrow, .tbl-click .tabulator-row { cursor: pointer; }
+.clickrow:hover, .tbl-click .tabulator-row:hover { background: var(--bg); }
+.clickrow .title, .nyl.clickrow > .t, .tbl-click .tabulator-cell[tabulator-field="title"] { color: var(--accent); }
+.row-open { color: var(--accent); font-size: var(--fs-l); line-height: 1; padding: 0 var(--sp-1); }
+.tbl-click .tabulator-row .tabulator-cell.row-open-cell { padding: var(--sp-1) var(--sp-2) var(--sp-1) 0; text-overflow: clip; overflow: visible; }
 @media (max-width: 600px) { .row { grid-template-columns: var(--w-id) minmax(0, 1fr); } .row .chips { grid-column: 2; justify-content: flex-start; } }
 .row .id { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .row .t { overflow: hidden; }

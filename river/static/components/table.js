@@ -2,6 +2,7 @@
 // from columns and rows. Every column sorts on a header click and filters in the header;
 // the sort and the filters are remembered per table in this browser.
 import { store } from "../lib.js";
+import { openColumn } from "./rowOpen.js";
 
 // Above this many changed rows, set() replaces the data in one step.
 const BULK = 50;
@@ -66,7 +67,7 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
     // Without a fixed or largest height the table grows with its rows: draw them all (no virtual scrolling). With
     // one, it scrolls inside itself and draws only the rows in sight: the inbox drew all its 562 rows (#5556).
     renderVertical: height || options.maxHeight ? "virtual" : "basic", ...options,
-    columns: columns.map(column),
+    columns: [...columns.map(column), ...(onRow ? [openColumn] : [])],  // a row that opens shows it (#6016)
     initialSort: keep.sort || sort,
     initialHeaderFilter: keep.filter || [],
   });
@@ -90,6 +91,7 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
     if (now) { stale = false; width = el.offsetWidth; }
     shown = now;
   }).observe(el);
+  if (onRow) el.classList.add("tbl-click");
   if (onRow) t.on("rowClick", (e, row) => { if (!e.target.closest("a, button, input, select, textarea, .link")) onRow(row.getData()); });
 
   let last = null, loaded = false, seen = new Map();

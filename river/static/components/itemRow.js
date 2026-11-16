@@ -2,6 +2,7 @@
 import { esc, shortTitle } from "../lib.js";
 import { S } from "../page.js";
 import { goalChips, prioChip, dueChip, doerChip, replanChip, statusChip, modelChip, agentChip, tierChip } from "./chip.js";
+import { OPEN_MARK } from "./rowOpen.js";
 
 // Ready first, then more important, then what unblocks more, then the project's own order.
 export function itemOrder(a, b) {
@@ -12,10 +13,10 @@ export function itemOrder(a, b) {
 // hover: why is the hover of the row instead of a line (the Board's Next up, #5083: less text on the page).
 export function itemRow(it, why, { hover = false } = {}) {
   const tip = hover && why ? `${it.title}\n${why}` : it.title;
-  return `<div class="row" data-id="${it.id}"${it.status === "open" ? ' draggable="true"' : ""}${hover && why ? ` title="${esc(why)}"` : ""}>
+  return `<div class="row clickrow" data-id="${it.id}"${it.status === "open" ? ' draggable="true"' : ""}${hover && why ? ` title="${esc(why)}"` : ""}>
     <div class="id">#${it.id}</div>
     <div class="t"><div class="title" title="${esc(tip)}">${esc(shortTitle(it))}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${why && !hover ? `<div class="why">${esc(why)}</div>` : ""}</div>
-    <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div></div>`;
+    <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div>${OPEN_MARK}</div>`;
 }
 
 // Items as table rows (components/table.js): one flat row per item, with plain values to sort and
