@@ -9,6 +9,7 @@ limit (LOW_WATER: so the data of the next day does not start it again at once). 
 minimum age (a space_*_after setting): nothing younger goes, even over the limit.
 
 The database, in this order:
+  0. the run log: one row for each maxpm command (#5969);
   1. ops records: the runs of the operations checks (not the newest run of a check, not a run that a detection
      names), their state history, and detections of closed or no fault items;
   2. notices that were read, and the send records of closed needs-you rows;
@@ -268,13 +269,22 @@ def _sessions(conn, cutoff, n):
         "ORDER BY last_seen LIMIT ?", (cutoff, n))]
     for name in names:
         conn.execute("DELETE FROM session_pins WHERE agent=?", (name,))  # its cascade, with the key checks off
+        # A short copy (#5969): the name stays traceable, and the space of the full row (shells, settings) goes.
+        core._keep_gone(conn, name, core.COMMAND, "space", keys=core.GONE_SHORT)
         conn.execute("DELETE FROM agents WHERE name=?", (name,))
         conn.execute("DELETE FROM settings WHERE scope=?", (f"agent:{name}",))
-    return len(names), len(names) * 600
+    return len(names), len(names) * 400
+
+
+def _runs(conn, cutoff, n):
+    rows = conn.execute("SELECT id, length(words)+COALESCE(length(cwd),0)+COALESCE(length(refused),0) FROM runs "
+                        "WHERE at<? ORDER BY id LIMIT ?", (cutoff, n)).fetchall()
+    return _gone(conn, "runs", rows)
 
 
 # The order of the database part, each with the setting of its minimum age.
-STAGES = (("ops records", "space_ops_after", _ops),
+STAGES = (("command runs", "space_runs_after", _runs),
+          ("ops records", "space_ops_after", _ops),
           ("read notices", "space_notices_after", _notices),
           ("events of closed items", "space_events_after", _events),
           ("canvas versions", "space_canvas_after", _canvases),

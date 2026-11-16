@@ -527,7 +527,8 @@ DEFAULT_SETTINGS = {
     # ops: runs of the operations checks and their history; notices: read notices and the send records of closed
     # needs-you rows; events: the history of items closed this long ago (the decisions, answers, checks and the
     # close stay); canvas: versions between the first and the newest; sessions: agents not seen this long that
-    # hold nothing, sent prompts, hook runs; files: uploads and older backups.
+    # hold nothing, sent prompts, hook runs; files: uploads and older backups; runs: the run log (maxpm runs).
+    "space_runs_after": "30d",
     "space_ops_after": "14d",
     "space_notices_after": "30d",
     "space_events_after": "90d",
@@ -856,8 +857,42 @@ CREATE TABLE IF NOT EXISTS events (
   item_id  INTEGER REFERENCES items(id),
   at       TEXT NOT NULL,
   actor    TEXT NOT NULL,
-  change   TEXT NOT NULL
+  change   TEXT NOT NULL,
+  session  TEXT            -- the agent CLI session of the command that wrote it (RUN_SESSION, #5969); NULL: serve or a person
 );
+
+-- The run log (#5969): one row for each maxpm command, in any process (cli.run: the command's own process, a runner
+-- of maxpm serve, MCP). The hooks that run on every tool call (maxpm activity, report --hook) write none.
+-- Its reader: maxpm runs (the rows, and --counts: runs, failures, retries and time per command).
+CREATE TABLE IF NOT EXISTS runs (
+  id       INTEGER PRIMARY KEY,
+  at       TEXT NOT NULL,  -- when the command started
+  session  TEXT,           -- the agent CLI session (run_session); NULL outside an agent
+  actor    TEXT,           -- the name it ran as (--as, MAXPM_AGENT), as given
+  pid      INTEGER,        -- the process that ran maxpm (its shell)
+  cwd      TEXT,
+  cmd      TEXT NOT NULL,  -- the command and its subcommand ('goal own'), or the first word when it did not parse
+  words    TEXT NOT NULL,  -- the words after maxpm, JSON, with secrets and tokens masked (mask_words)
+  exit     INTEGER,
+  ms       INTEGER,
+  refused  TEXT            -- why it failed: the refusal, the usage error, or the exception
+);
+CREATE INDEX IF NOT EXISTS runs_at ON runs(at);
+CREATE INDEX IF NOT EXISTS runs_session ON runs(session);
+CREATE INDEX IF NOT EXISTS runs_actor ON runs(actor, at);
+
+-- Agents that are gone from the agents table (#5969): maxpm unregister, and the space cleanup of ended sessions,
+-- copy the row here first, so a name in the history can still be traced. Its reader: maxpm runs --agent <name>.
+CREATE TABLE IF NOT EXISTS gone_agents (
+  id        INTEGER PRIMARY KEY,
+  name      TEXT NOT NULL,
+  gone_at   TEXT NOT NULL,
+  gone_by   TEXT,
+  why       TEXT NOT NULL,  -- unregistered, or space (the cleanup of ended sessions)
+  sessions  TEXT,           -- its agent CLI sessions (agent_sessions), JSON
+  row       TEXT NOT NULL   -- the agents row, JSON
+);
+CREATE INDEX IF NOT EXISTS gone_agents_name ON gone_agents(name);
 
 CREATE TABLE IF NOT EXISTS agents (
   name           TEXT PRIMARY KEY,
@@ -938,7 +973,8 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered_at  TEXT,  -- the first time it was delivered
   delivered_via TEXT,  -- how: watch, wait, native, read (it was read before any delivery)
   shown_at      TEXT,  -- a blocked message to a manager: the last time a watch showed it (manage_rewake)
-  answered_at   TEXT   -- a blocked message: when the receiver answered it or acted on its item
+  answered_at   TEXT,  -- a blocked message: when the receiver answered it or acted on its item
+  session       TEXT   -- the agent CLI session of the command that sent it (RUN_SESSION, #5969)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -2027,6 +2063,10 @@ def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
+    # The session of the command that wrote a history entry or sent a message (#5969).
+    for t in ("events", "messages"):
+        if "session" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}:
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN session TEXT")
     if "ready" not in {r["name"] for r in conn.execute("PRAGMA table_info(close_checks)")}:
         conn.execute("ALTER TABLE close_checks ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
     if "result" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
@@ -2413,8 +2453,195 @@ def _event(conn, item_id, actor, change):
     via = EVENT_VIA.get()
     if via and actor and not actor.endswith(f"@{via}"):
         actor = f"{actor}@{via}"  # a command that came through the relay (mcp.Server.via): the history says so
-    conn.execute("INSERT INTO events(item_id, at, actor, change) VALUES (?,?,?,?)",
-                 (item_id, iso(now()), actor or "?", change))
+    conn.execute("INSERT INTO events(item_id, at, actor, change, session) VALUES (?,?,?,?,?)",
+                 (item_id, iso(now()), actor or "?", change, RUN_SESSION.get()))
+
+
+# ---------------------------------------------------------------- run log
+
+# The agent CLI session of the command that runs now (#5969). cli.run sets it (run_session), and _event and _send
+# record it on each history entry and message. None in maxpm serve's own passes and in page actions.
+RUN_SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_run_session", default=None)
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # agents.SAFE_ID, without the import
+
+
+def run_session(env=None):
+    """The id of the agent CLI session that this command runs in: the id that an agent adapter reads from the
+    environment (session_from_env: Claude Code's CLAUDE_CODE_SESSION_ID, Hermes, Gemini), else Codex's thread
+    (CODEX_THREAD_ID); or None. A command over the local /mcp of maxpm serve has serve's environment, not the chat's:
+    None. The session tokens of maxpm serve (#5972) take the first place here when they come."""
+    if HTTP_CHAT.get():
+        return None
+    env = os.environ if env is None else env
+    try:
+        sid = session_from_env(env)
+    except Exception:  # noqa: BLE001 - an adapter that fails to load costs only the trace
+        sid = None
+    if sid:
+        return sid
+    t = str(env.get("CODEX_THREAD_ID") or "").strip()
+    return t if _THREAD_ID_RE.match(t) else None
+
+
+MASKED = "***"
+# A flag whose value is a secret: --token, --password, --code, --api-key, ... (also in the form --flag=value).
+_SECRET_FLAG = re.compile(r"^--?[\w-]*(?:token|password|passwd|secret|code|cookie|api-?key|totp)[\w-]*$", re.I)
+# A field of the project's browser whose text is a secret (maxpm browser fill <field> <text>).
+_SECRET_FIELD = re.compile(r"password|passcode|passwd|token|secret|api.?key|one.?time|\bcode\b|\bpin\b", re.I)
+# Text that holds a secret: the known key forms, a JWT, 'token=...' and 'Bearer ...' (the value only).
+_SECRET_TEXT = re.compile(
+    r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}|\bxox[abposr]-[\w-]{10,}"
+    r"|\bAKIA[0-9A-Z]{16}\b|\bglpat-[\w-]{20,}|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}")
+_SECRET_KV = re.compile(r"(?i)\b((?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*|bearer\s+)([^\s,;'\"]+)")
+# A long random string: 32 characters or more with upper and lower case letters and digits. A commit id or a
+# session id (hex, lower case) stays.
+_RANDOM = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
+RUN_WORD_MAX = 1000  # characters of one word that the run log keeps
+
+
+def _mask_text(w):
+    w = _SECRET_TEXT.sub(MASKED, w)
+    w = _SECRET_KV.sub(lambda m: m.group(1) + MASKED, w)
+    return _RANDOM.sub(lambda m: MASKED if (re.search(r"[a-z]", m.group()) and re.search(r"[A-Z]", m.group())
+                                            and re.search(r"\d", m.group())) else m.group(), w)
+
+
+def mask_words(words):
+    """The words of a command for the run log: the value of a secret flag, of a secret setting (config set) and of a
+    secret browser field (browser fill, browser type) is MASKED, and so is each key or token in any text. A long
+    word is cut at RUN_WORD_MAX characters."""
+    words = [str(w) for w in words]
+    out, hide = [], False
+    for w in words:
+        if hide and not w.startswith("-"):
+            out.append(MASKED)
+            hide = False
+            continue
+        hide = False
+        flag, eq, val = w.partition("=")
+        if w.startswith("-") and eq and _SECRET_FLAG.match(flag):
+            out.append(f"{flag}={MASKED}")
+            continue
+        if w.startswith("-") and not eq and _SECRET_FLAG.match(w):
+            hide = True
+        out.append(_mask_text(w))
+    pos = [i for i, w in enumerate(words) if not w.startswith("-")]
+    for a, b in zip(pos, pos[1:]):
+        if (words[a], words[b]) == ("config", "set") and len(pos) > pos.index(b) + 2:
+            key, value = pos[pos.index(b) + 1], pos[pos.index(b) + 2]
+            if words[key] in SECRET_SETTINGS or re.search(r"token|password|secret|key", words[key], re.I):
+                out[value] = MASKED
+        if (words[a], words[b]) in (("browser", "fill"), ("browser", "type")):
+            rest = [i for i in pos if i > b]
+            if len(rest) >= 2 and _SECRET_FIELD.search(words[rest[0]]):
+                for i in rest[1:]:
+                    out[i] = MASKED
+    return [w if len(w) <= RUN_WORD_MAX else w[:RUN_WORD_MAX] + "…" for w in out]
+
+
+def log_run(words, at, ms, code, cmd, refused=None, actor=None, session=None):
+    """Write one row of the run log (#5969). It never fails or holds up the command: a queue that is locked for more
+    than a second, that does not exist, or that has no runs table yet (an older schema) gets no row."""
+    p = db_path()
+    try:
+        res = RESIDENT.get("conn")
+        own = not (res is not None and str(p.expanduser().resolve()) == RESIDENT.get("path"))
+        if own:
+            c = sqlite3.connect(f"file:{p}?mode=rw", uri=True, timeout=1.0, isolation_level=None)
+        else:
+            c = res
+            if c.in_transaction:
+                return
+            c.execute("PRAGMA busy_timeout=1000")
+        try:
+            c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, refused) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (at, session, actor, CALLER_PPID or os.getppid(), _cwd(), cmd or "",
+                       json.dumps(mask_words(words)), code, ms,
+                       _mask_text(refused)[:2000] if refused else None))
+        finally:
+            if own:
+                c.close()
+            else:
+                c.execute("PRAGMA busy_timeout=10000")
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def _cwd():
+    try:
+        return os.getcwd()
+    except OSError:  # the folder was removed under the command
+        return None
+
+
+def runs(conn, session=None, agent=None, since=None, failed=False, limit=30, counts=False, command=None):
+    """The run log (maxpm runs): the newest rows, with filters; or, with counts, each command's runs, failures,
+    retries (the same command again by the same session within RETRY_WINDOW after a failure) and time. With agent,
+    also the agent's rows in gone_agents (unregistered or cleaned up), so a name in the history can be traced."""
+    where, args = [], []
+    if since:
+        where.append("at>=?")
+        args.append(iso(now() - parse_duration(since)))
+    if session:
+        where.append("session LIKE ?")
+        args.append(session.replace("%", "") + "%")
+    if agent:
+        where.append("actor=?")
+        args.append(agent)
+    if command:
+        where.append("(cmd=? OR cmd LIKE ?)")
+        args += [command, command + " %"]
+    if failed:
+        where.append("exit<>0")
+    sql = " WHERE " + " AND ".join(where) if where else ""
+    gone = [dict(r, sessions=json.loads(r["sessions"] or "[]"), row=json.loads(r["row"]))
+            for r in conn.execute("SELECT * FROM gone_agents WHERE name=? ORDER BY id", (agent,))] if agent else []
+    if not counts:
+        rows = [dict(r, words=json.loads(r["words"])) for r in conn.execute(
+            f"SELECT * FROM runs{sql} ORDER BY id DESC LIMIT ?", (*args, limit))]
+        return {"runs": rows, "gone": gone}
+    by, last = {}, {}
+    for r in conn.execute(f"SELECT at, session, actor, pid, cmd, exit, ms FROM runs{sql} ORDER BY id", args):
+        c = by.setdefault(r["cmd"], {"cmd": r["cmd"], "runs": 0, "failed": 0, "retries": 0, "ms": []})
+        c["runs"] += 1
+        c["failed"] += r["exit"] not in (0, None)
+        who = (r["session"] or r["actor"] or r["pid"], r["cmd"])
+        t = parse_iso(r["at"])
+        prev = last.get(who)
+        if prev and prev[1] and t - prev[0] <= RETRY_WINDOW:
+            c["retries"] += 1
+        last[who] = (t, r["exit"] not in (0, None))
+        if r["ms"] is not None:
+            c["ms"].append(r["ms"])
+    out = []
+    for c in sorted(by.values(), key=lambda c: -c["runs"]):
+        ms = sorted(c.pop("ms"))
+        c["median_ms"] = ms[len(ms) // 2] if ms else None
+        c["max_ms"] = ms[-1] if ms else None
+        out.append(c)
+    return {"counts": out, "since": since, "gone": gone,
+            "total": {k: sum(c[k] for c in out) for k in ("runs", "failed", "retries")}}
+
+
+RETRY_WINDOW = timedelta(minutes=2)
+
+
+GONE_SHORT = ("kind", "role", "note", "session", "session_ref", "model", "agent_type", "platform", "native_address",
+              "host", "registered_at", "last_seen")  # the columns that the space cleanup keeps of an agent
+
+
+def _keep_gone(conn, name, by, why, keys=None):
+    """Inside a tx, before the agents row of name is deleted: copy it (or only its columns in keys) to gone_agents
+    (#5969)."""
+    r = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+    if not r:
+        return
+    sessions = [s["session_id"] for s in conn.execute(
+        "SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen", (name,))]
+    conn.execute("INSERT INTO gone_agents(name, gone_at, gone_by, why, sessions, row) VALUES (?,?,?,?,?,?)",
+                 (name, iso(now()), by, why, json.dumps(sessions),
+                  json.dumps({k: r[k] for k in (keys or r.keys()) if r[k] is not None})))
 
 
 # ---------------------------------------------------------------- settings
@@ -13443,6 +13670,7 @@ def unregister(conn, name, actor=None):
         _drop_queue(conn, name, "stopped")
         _free_reservations(conn, name, f"{name} ended")
         _release_goals(conn, name, f"{name} ended")
+        _keep_gone(conn, name, actor or name, "unregistered")  # the name stays traceable (#5969)
         conn.execute("DELETE FROM agents WHERE name=?", (name,))
         conn.execute("DELETE FROM settings WHERE scope=?", (f"agent:{name}",))
         _event(conn, None, actor or name, f"agent {name} unregistered")
@@ -16044,8 +16272,9 @@ def _send(conn, kind, sender, body, to=None, item_id=None, reply_to=None, level=
     DEFAULT_LEVEL. blocked: one of BLOCKED_SIGNS when the message's item stands still until the answer."""
     t = iso(now())
     cur = conn.execute(
-        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at,level,blocked) "
-        "VALUES (?,?,?,?,?,0,?,?,?,?)", (kind, sender, to, item_id, reply_to, body, t, level, blocked))
+        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at,level,blocked,session) "
+        "VALUES (?,?,?,?,?,0,?,?,?,?,?)", (kind, sender, to, item_id, reply_to, body, t, level, blocked,
+                                           RUN_SESSION.get()))
     mid = cur.lastrowid
     thread = _message(conn, reply_to)["thread_id"] if reply_to else mid
     conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (thread, mid))

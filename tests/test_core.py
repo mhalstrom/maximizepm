@@ -13166,3 +13166,145 @@ class NativeWindows(unittest.TestCase):
             self.assertIn("WSL 2", err.getvalue())
             remote.assert_not_called()
             run.assert_not_called()
+
+
+class RunLog(Base):
+    """#5969: one row in runs for each maxpm command, the session on each history entry and message, and the row of an
+    agent kept in gone_agents after unregister."""
+
+    SID = "0b2c3d4e-1111-2222-3333-444455556666"
+
+    def cli(self, *words, env=None):
+        from river import cli
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": self.SID, "CODEX_THREAD_ID": "", **(env or {})}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.run(list(words))
+            except core.RiverError:
+                code = 2
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def rows(self):
+        return [dict(r, words=json.loads(r["words"])) for r in self.c.execute("SELECT * FROM runs ORDER BY id")]
+
+    def test_run_log_writes_one_row_per_command_with_its_session(self):
+        core.project_add(self.c, "a")
+        self.cli("register", "w")
+        self.cli("--as", "w", "add", "a", "Write the page")
+        r = self.rows()[-1]
+        self.assertEqual((r["cmd"], r["actor"], r["session"], r["exit"], r["refused"]), ("add", "w", self.SID, 0, None))
+        self.assertEqual(r["words"], ["--as", "w", "add", "a", "Write the page"])
+        self.assertEqual(r["cwd"], os.getcwd())
+        self.assertIsNotNone(r["ms"])
+        self.assertIsNotNone(r["pid"])
+        # The history entry and the message of the command carry its session; serve's own writes carry none.
+        ev = self.c.execute("SELECT session FROM events WHERE change LIKE 'added%' ORDER BY id DESC").fetchone()
+        self.assertEqual(ev["session"], self.SID)
+        self.cli("--as", "w", "note", "w", "hello")
+        self.assertEqual(self.c.execute("SELECT session FROM messages").fetchone()["session"], self.SID)
+        core.register(self.c, "x")
+        self.assertIsNone(self.c.execute("SELECT session FROM events ORDER BY id DESC").fetchone()["session"])
+        # A subcommand is part of the command; a Codex thread is the session when no other id is set.
+        self.cli("goal", "list", env={"CLAUDE_CODE_SESSION_ID": "", "CODEX_THREAD_ID": "019a-thread"})
+        r = self.rows()[-1]
+        self.assertEqual((r["cmd"], r["session"]), ("goal list", "019a-thread"))
+
+    def test_run_log_records_refusals_and_usage_errors(self):
+        self.assertEqual(self.cli("--as", "w", "done", "999")[0], 2)
+        r = self.rows()[-1]
+        self.assertEqual((r["cmd"], r["exit"]), ("done", 2))
+        self.assertIn("no item 999", r["refused"])
+        self.assertEqual(self.cli("lsit")[0], 2)
+        r = self.rows()[-1]
+        self.assertEqual((r["cmd"], r["exit"]), ("lsit", 2))
+        self.assertIn("invalid choice: 'lsit'", r["refused"])
+        self.assertNotIn("choose from", r["refused"])
+        # The hooks that run on every tool call write no row.
+        n = len(self.rows())
+        self.cli("report", "--call", "x")
+        self.assertEqual(len(self.rows()), n)
+
+    def test_run_log_masks_secrets(self):
+        m = core.mask_words
+        self.assertEqual(m(["config", "set", "ntfy_token", "abc123"]), ["config", "set", "ntfy_token", "***"])
+        self.assertEqual(m(["config", "set", "away_after", "2h"]), ["config", "set", "away_after", "2h"])
+        self.assertEqual(m(["agent-login", "claude", "--code", "XY-12"]), ["agent-login", "claude", "--code", "***"])
+        self.assertEqual(m(["host", "signin", "h", "claude", "--code=XY-12"])[-1], "--code=***")
+        self.assertEqual(m(["secret", "signin", "g", "--keep-password", "--project", "a"])[-2:], ["--project", "a"])
+        self.assertEqual(m(["browser", "fill", "Password", "hunter2"])[-1], "***")
+        self.assertEqual(m(["browser", "fill", "Month", "2026-10"])[-1], "2026-10")
+        self.assertEqual(m(["note", "use token=hunter2 and Bearer abc.def"])[-1], "use token=*** and Bearer ***")
+        self.assertEqual(m(["note", "key ghp_abcdefghijklmnopqrstuvwxyz1234 here"])[-1], "key *** here")
+        self.assertEqual(m(["note", "sk-ant-api03-abcdefghijklmnopqrstu"])[-1], "***")
+        self.assertEqual(m(["x", "Ab3" * 12])[-1], "***")  # a long random string
+        sha, sid = "8bd063a" * 5 + "12345", self.SID  # a commit id and a session id stay
+        self.assertEqual(m(["done", "1", "--output", f"commit {sha}", sid])[-2:], [f"commit {sha}", sid])
+        self.assertEqual(len(m(["x" * 5000])[0]), core.RUN_WORD_MAX + 1)
+        self.cli("config", "set", "ntfy_token", "tk_live_SECRET99")
+        self.assertNotIn("SECRET99", json.dumps(self.rows()[-1]["words"]))
+
+    def test_run_log_unregister_keeps_the_agent(self):
+        self.cli("register", "w")
+        self.c.execute("INSERT OR IGNORE INTO agent_sessions(agent, session_id, first_seen) VALUES ('w', ?, ?)",
+                       (self.SID, core.iso(core.now())))
+        core.set_session(self.c, "w", "#12 page", "b5e2e0")
+        self.cli("--as", "w", "unregister", "w")
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='w'").fetchone())
+        g = self.c.execute("SELECT * FROM gone_agents WHERE name='w'").fetchone()
+        self.assertEqual((g["why"], g["gone_by"]), ("unregistered", "w"))
+        self.assertEqual(json.loads(g["sessions"]), [self.SID])
+        self.assertEqual(json.loads(g["row"])["session_ref"], "b5e2e0")
+        code, out = self.cli("runs", "--agent", "w")
+        self.assertIn("w: unregistered", out)
+        self.assertIn(self.SID, out)
+        self.assertIn("maxpm --as w unregister w", out)
+        # A name registered again starts a new row; the old one stays in gone_agents.
+        self.cli("register", "w")
+        self.assertTrue(self.c.execute("SELECT 1 FROM agents WHERE name='w'").fetchone())
+        self.assertEqual(len(core.runs(self.c, agent="w")["gone"]), 1)
+
+    def test_run_log_counts_failures_and_retries(self):
+        self.cli("--as", "w", "done", "999")
+        self.cli("--as", "w", "done", "998")
+        self.cli("--as", "w", "list")
+        res = core.runs(self.c, since="1h", counts=True)
+        done = next(c for c in res["counts"] if c["cmd"] == "done")
+        self.assertEqual((done["runs"], done["failed"], done["retries"]), (2, 2, 1))
+        self.assertEqual(res["total"]["runs"], 3)
+        code, out = self.cli("runs", "--counts")
+        self.assertIn("3 run(s) since 7d: 2 failed, 1 retried", out)
+        self.assertEqual(len(core.runs(self.c, failed=True)["runs"]), 2)
+        self.assertEqual(len(core.runs(self.c, command="done", limit=1)["runs"]), 1)
+        self.assertEqual(len(core.runs(self.c, session=self.SID[:8])["runs"]), 4)
+
+    def test_run_log_space_cleanup_removes_old_runs_and_keeps_gone_agents(self):
+        from river import space
+        old = core.iso(core.now() - timedelta(days=60))
+        self.c.execute("INSERT INTO runs(at, cmd, words) VALUES (?, 'list', '[]')", (old,))
+        core.register(self.c, "w")
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='w'", (old,))
+        cutoff = core.iso(core.now() - timedelta(days=30))
+        with core.tx(self.c):
+            self.assertEqual(space._runs(self.c, cutoff, 10)[0], 1)
+            self.assertEqual(space._sessions(self.c, cutoff, 10)[0], 1)
+        g = self.c.execute("SELECT why, row FROM gone_agents WHERE name='w'").fetchone()
+        self.assertEqual(g["why"], "space")
+        self.assertEqual(set(json.loads(g["row"])) - set(core.GONE_SHORT), set())
+
+    def test_run_log_skips_a_locked_or_missing_queue(self):
+        with mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "none", "q.db")}):
+            core.log_run(["list"], core.iso(core.now()), 1, 0, "list")  # no error, no file
+        self.assertFalse(os.path.exists(os.path.join(self.dir.name, "none")))
+        other = sqlite3.connect(self.path, isolation_level=None)
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            t = time.monotonic()
+            core.log_run(["list"], core.iso(core.now()), 1, 0, "list")
+            self.assertLess(time.monotonic() - t, timing.limit(1.5))  # busy_timeout 1s, not the 10s of commands
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        self.assertEqual(self.rows(), [])

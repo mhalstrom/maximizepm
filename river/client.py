@@ -60,7 +60,7 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "synced", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config", "change",
-          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "browser"}
+          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser"}
 # Words that keep a command in its own process: it waits, it reads stdin, or it reads or writes a file it names.
 FILE_WORDS = ("--wait", "--watch", "--from", "--file", "--put", "--out", "--summary-file")
 # maxpm browser (#5665): a screenshot writes a PNG file, and batch reads stdin; they run in their own process. Its

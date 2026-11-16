@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -540,6 +542,36 @@ def _usage_line(u):
     return (f"{u['sessions']} session(s) ({u['started']}), {u['turns']} turns: {_k(u['eq'])} eq in "
             f"(read {_k(u['cache_read'])}, write {_k(u['write_1h'] + u['write_5m'])}), {_k(u['output'])} out, "
             f"peak context {_k(u['peak_context'])}")
+
+
+def render_runs(res):
+    """maxpm runs: the gone records of the agent, then the rows (newest first) or the counts per command."""
+    def local(t, fmt="%Y-%m-%d %H:%M"):
+        return core.parse_iso(t).astimezone().strftime(fmt)
+
+    for g in res["gone"]:
+        r = g["row"]
+        print(f"{g['name']}: {g['why']} {local(g['gone_at'])} by {g['gone_by'] or '?'}; "
+              f"{r.get('kind', '?')}" + (f", role {r['role']}" if r.get("role") else "")
+              + (f", registered {local(r['registered_at'])}" if r.get("registered_at") else "")
+              + (f", sessions {', '.join(g['sessions'])}" if g["sessions"] else ""))
+    if "counts" in res:
+        t = res["total"]
+        print(f"{t['runs']} run(s) since {res['since'] or 'the start'}: {t['failed']} failed, {t['retries']} retried")
+        if res["counts"]:
+            print(f"{'command':<24} {'runs':>6} {'failed':>6} {'retries':>7} {'median':>7} {'max':>8}")
+        for c in res["counts"]:
+            print(f"{c['cmd'][:24]:<24} {c['runs']:>6} {c['failed']:>6} {c['retries']:>7} "
+                  f"{(str(c['median_ms']) + 'ms') if c['median_ms'] is not None else '':>7} "
+                  f"{(str(c['max_ms']) + 'ms') if c['max_ms'] is not None else '':>8}")
+        return
+    if not res["runs"]:
+        print("(no runs)")
+    for r in res["runs"]:
+        words = " ".join(w if w and " " not in w else json.dumps(w) for w in r["words"])
+        print(f"{local(r['at'], '%m-%d %H:%M:%S')} {r['ms'] if r['ms'] is not None else '?':>6}ms exit {r['exit']} "
+              f"{r['actor'] or '-'} [{(r['session'] or '-')[:8]}] maxpm {words[:160]}"
+              + (f"\n    refused: {r['refused'][:200]}" if r["refused"] else ""))
 
 
 def render_usage(res, limit=20):
@@ -1795,6 +1827,15 @@ def build_parser(only=None):
     x.add_argument("--measure", type=int, metavar="ID", help="read this item's usage from the transcripts again first")
     x.add_argument("--archive", action="store_true", help="the archived items too (slower)")
     x.add_argument("--limit", "-n", type=int, default=20, help="how many items to list (default 20)")
+    x = sub.add_parser("runs", help="the run log: one row for each maxpm command (its session, words, exit status, "
+                       "time); --counts: runs, failures and retries per command")
+    x.add_argument("--session", help="one agent CLI session (its id or the first characters)")
+    x.add_argument("--agent", help="one name; also says when it was unregistered")
+    x.add_argument("--command", help="one command: done, or 'goal own'")
+    x.add_argument("--since", help="how far back: 1h, 7d (default: all rows; 7d with --counts)")
+    x.add_argument("--failed", action="store_true", help="only the runs that failed")
+    x.add_argument("--counts", action="store_true", help="per command: runs, failures, retries, median and max time")
+    x.add_argument("-n", "--limit", type=int, default=30, help="how many rows (default 30)")
     x = sub.add_parser("health", help="does MaximizePM work: person minutes per done item, items done per day, the "
                        "rework rate, the person's waits, session idle time and cost, against the time before")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; 30d; all)")
@@ -2476,7 +2517,61 @@ def run(argv=None):
         # The call record of #5911 was reverted (#5809), but sessions that started while it ran keep the hook in
         # their settings: answer it with exit 0 and no output, so that their tool calls are not refused.
         return 0
-    args = parse_args(argv)
+    # The run log (#5969): every other command writes one row, also when it is refused or does not parse.
+    rec = {"at": core.iso(core.now()), "code": 0, "refused": None, "cmd": _command_word(words), "actor": None}
+    start = time.monotonic()
+    session = core.run_session()
+    tok = core.RUN_SESSION.set(session)
+    try:
+        rec["code"] = _run_words(words, rec)
+        return rec["code"]
+    except RiverError as e:
+        rec.update(code=2, refused=str(e))
+        raise
+    except SystemExit as e:
+        rec["code"] = e.code if isinstance(e.code, int) else 0 if e.code is None else 1
+        raise
+    except KeyboardInterrupt:
+        rec.update(code=130, refused="interrupted")
+        raise
+    except Exception as e:
+        rec.update(code=1, refused=f"{type(e).__name__}: {e}")
+        raise
+    finally:
+        core.RUN_SESSION.reset(tok)
+        core.log_run(words, rec["at"], int((time.monotonic() - start) * 1000), rec["code"], rec["cmd"],
+                     rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session)
+
+
+class _Tee:
+    """Writes to a stream and keeps a copy (the usage error of the parser, for the run log)."""
+
+    def __init__(self, stream):
+        self.stream, self.copy = stream, io.StringIO()
+
+    def write(self, s):
+        self.copy.write(s)
+        return self.stream.write(s)
+
+    def flush(self):
+        self.stream.flush()
+
+
+def _run_words(words, rec):
+    tee = _Tee(sys.stderr)
+    try:
+        with contextlib.redirect_stderr(tee):
+            args = parse_args(words)
+    except SystemExit as e:
+        if e.code:
+            lines = [ln for ln in tee.copy.getvalue().splitlines() if ln.strip()]
+            rec["refused"] = (lines[-1].split(" (choose from ")[0] if lines else "usage error")
+        raise
+    rec["actor"] = getattr(args, "actor", None)
+    if args.cmd:
+        subs = [getattr(args, k) for k in sorted(vars(args)) if k.endswith("cmd") and k != "cmd"
+                and isinstance(getattr(args, k), str)]
+        rec["cmd"] = " ".join([args.cmd, *subs[:1]])
     if args.cmd is None:
         print(QUICKSTART)
         return 0
@@ -4156,6 +4251,9 @@ def dispatch(conn, a, actor):
         return space.with_archive(conn, lambda: dispatch(conn, a, actor))
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
+    if c == "runs":
+        return core.runs(conn, a.session, a.agent, a.since or ("7d" if a.counts else None), a.failed, a.limit,
+                         a.counts, a.command)
     if c == "health":
         return core.health(conn, a.since, a.until, a.project, a.by)
     if c == "change":
@@ -6867,6 +6965,8 @@ def render(a, res):
         return render_wait(res)
     if c == "usage":
         return render_usage(res, a.limit)
+    if c == "runs":
+        return render_runs(res)
     if c == "health":
         return render_health(res)
     if c == "change":
