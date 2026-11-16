@@ -42,8 +42,12 @@ def _test_connect(path=None):
 
 core.connect = _test_connect
 
+# Nor a session's token (core.TOKEN_ENV): a session that maxpm serve started has one, and every command of a test then
+# refused it as a token that the test's queue did not make (#6020). Nor MAXPM_LOCAL (commands skip serve) or
+# MAXPM_RELAY_URL (another relay) of the shell that runs the tests.
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS",
-              "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL"):
+              "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL",
+              core.TOKEN_ENV, "MAXPM_LOCAL", "MAXPM_RELAY_URL"):
     os.environ.pop(_name, None)
 # Nor the agent session that runs the tests: a command records the session's id and web link from these, and that
 # write made a read command (maxpm show) sync the needs-you rows in a Claude Code session with Remote Control only,
