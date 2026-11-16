@@ -14836,6 +14836,18 @@ class Replaced(Base):
             cli.render_runs(core.replaced_uses(self.c))
         self.assertIn("Replaced commands, last 7d", out.getvalue())
 
+    def test_unused_commands_move_and_goal_edit_are_gone_and_the_page_keeps_its_actions(self):
+        """#5991 (mark 2026-11-15): commands that sessions no longer use go. The page's arrows and goal buttons
+        keep their actions."""
+        from river import cli, server
+        for words in (["move", "1", "--before", "2"], ["goal", "edit", "g", "--shared"]):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cli.parse_args(words)
+        self.assertNotIn("move", core.REPLACED)
+        self.assertNotIn("goal edit", core.REPLACED)
+        self.assertIn("move", server.OPS)
+        self.assertIn("goal_edit", server.OPS)
+
 
 class Proof(Base):
     """#5988 (mark 2026-11-15: proof on each result, so the person trusts it without a check): done records the

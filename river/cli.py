@@ -1499,12 +1499,8 @@ def build_parser(only=None):
     x = gls.add_parser("list", help="open goals in order (--all: complete ones too)")
     x.add_argument("--project"); x.add_argument("--all", action="store_true")
     x = gls.add_parser("show", help="a goal, its owner, and its items"); x.add_argument("name")
-    x = gls.add_parser("edit"); x.add_argument("name"); x.add_argument("--outcome"); x.add_argument("--done-when", dest="done_when")
-    x.add_argument("--rename")
-    x.add_argument("--shared", dest="shared", action="store_true", default=None,
-                   help="no owner, ever: maxpm go gives the goal to no agent, nobody can own it, and its items stay "
-                   "open to every agent (several agents work on it at the same time). A person or a manager sets it")
-    x.add_argument("--owned", dest="shared", action="store_false", help="undo --shared: one agent can own the goal again")
+    # goal edit is gone (#5991, mark 2026-11-15: unused commands go; 2 uses, the last 2026-10-20): the goal's Edit and
+    # Share buttons in the Projects view do it (page action goal_edit).
     x = gls.add_parser("own", help="own a goal: you create and take the items that reach it; its agent items "
                        "are reserved for you"); x.add_argument("name")
     x.add_argument("--lease", help="how long the claim lasts without a maxpm command, and your leases on its "
@@ -2313,9 +2309,7 @@ def build_parser(only=None):
     x = sub.add_parser("activate", help="take an item out of the backlog: open again, offered when ready")
     x.add_argument("id", type=int); x.add_argument("--note", help="why now")
     x = sub.add_parser("prio", help="set item priority"); x.add_argument("id", type=int); x.add_argument("priority", type=int)
-    x = sub.add_parser("move", help="manual order inside a project")
-    x.add_argument("id", type=int); g = x.add_mutually_exclusive_group(required=True)
-    g.add_argument("--before", type=int); g.add_argument("--after", type=int)
+    # move is gone (#5991; 3 uses, the last 2026-10-24): the page's up and down arrows keep the manual order (op move).
     x = sub.add_parser("dep", help="make an item wait on others, or mark items that must not run together")
     x.add_argument("id", type=int); x.add_argument("--on", type=int, nargs="+", required=True)
     x.add_argument("--kind", default="blocks", choices=core.DEP_KINDS,
@@ -4379,8 +4373,6 @@ def dispatch(conn, a, actor):
             return core.goal_list(conn, a.project, a.all)
         if g == "show":
             return core.goal_show(conn, a.name)
-        if g == "edit":
-            return core.goal_edit(conn, a.name, a.outcome, a.done_when, a.rename, actor, a.shared)
         if g == "own":
             return core.goal_own(conn, a.name, actor, a.lease)
         if g == "give":
@@ -4800,8 +4792,6 @@ def dispatch(conn, a, actor):
         return core.activate(conn, a.id, actor, a.note)
     if c == "prio":
         return core.item_prio(conn, a.id, a.priority, actor)
-    if c == "move":
-        return core.item_move(conn, a.id, a.before, a.after, actor)
     if c == "dep":
         return core.dep_add(conn, a.id, a.on, actor, a.kind, a.mode)
     if c == "keep":

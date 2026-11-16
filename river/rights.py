@@ -25,7 +25,7 @@ COMMANDS = {
     "canvas": {"*": ANY},
     "realquicksite": {"status": ANY, "connect": ONLY_PERSON, "disconnect": ONLY_PERSON},
     "secret": {"*": ANY},  # each credential has its own levels and grants (river/vault.py)
-    "goal": {"add": ANY, "list": ANY, "show": ANY, "edit": LEAD, "own": ANY, "give": ANY, "release": ANY,
+    "goal": {"add": ANY, "list": ANY, "show": ANY, "own": ANY, "give": ANY, "release": ANY,
              "base": ANY, "handoff": ANY, "done": ANY},
     "schedule": {"*": ANY},
     "ops": {"*": ANY, "setup": LEAD, "profile": LEAD},
@@ -46,7 +46,7 @@ COMMANDS = {
     # add: a session adds the rule that the user states in its chat (the worker guide, section Policies)
     "policy": {"list": ANY, "show": ANY, "add": ANY, "edit": LEAD, "retire": LEAD},
     "release": ANY, "drop": ANY, "takeover": ANY, "reopen": ANY, "backlog": ANY, "activate": LEAD, "prio": ANY,
-    "move": ANY, "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
+    "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
     "give": ANY, "split": ANY, "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
     "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "release-changes": ONLY_PERSON, "inbox": ANY, "thread": ANY,
     "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "heartbeat": ANY,

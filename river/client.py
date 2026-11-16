@@ -56,7 +56,7 @@ except Exception:  # noqa: BLE001 - no C parts here: the Python modules do the s
 # runs in its own process, as before.
 REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blockers", "search", "heartbeat", "now",
           "note", "edit", "add", "done", "release", "claim", "go", "send", "alert", "ask", "answer", "forward",
-          "withdraw", "accept", "decline", "offer", "give", "split", "keep", "undep", "dep", "drop", "prio", "move",
+          "withdraw", "accept", "decline", "offer", "give", "split", "keep", "undep", "dep", "drop", "prio",
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config",

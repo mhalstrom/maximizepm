@@ -2813,13 +2813,12 @@ REPLACED = {
     "claim": _SCOPED, "next": _SCOPED, "keep": _SCOPED, "push": "maxpm scope widen <agent> tasks:<id>",
     "accept": _SCOPED, "decline": _SCOPED, "offer": "a message to the manager, who widens a scope",
     "give": "maxpm scope (the manager moves the task)", "split": "maxpm add ... --blocks <id>",
-    "move": "nothing (no use since 2026-11-09)", "plan": "nothing (an old alias)",
+    "plan": "nothing (an old alias)",
     "queue add": "maxpm scope widen|set", "queue list": "maxpm scope show", "queue move": "maxpm scope set",
     "queue remove": "maxpm scope narrow",
     "goal own": "maxpm scope set <agent> goal:<name>", "goal release": "maxpm scope narrow|end",
     "goal give": "maxpm scope set <agent> goal:<name>", "goal take": "maxpm scope set <agent> goal:<name>",
-    "goal edit": "nothing (no use since 2026-11-09)",
-}
+}  # move and goal edit are gone (#5991)
 
 
 def replaced_key(cmd, words):

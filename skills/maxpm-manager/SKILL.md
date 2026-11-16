@@ -222,10 +222,10 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm target give <target> --to <agent>` (an active agent in one of the target's projects).
 - **A goal that several agents must work on at the same time**: an owner
   reserves the goal's agent items, so one agent does them in sequence. When
-  the user wants its items open to every agent, make the goal shared:
-  `maxpm goal edit <name> --shared`. The owner goes (and is told), `maxpm go`
-  never gives the goal to an agent again, and nothing is reserved.
-  `maxpm goal edit <name> --owned` undoes it.
+  the user wants its items open to every agent, the user makes the goal
+  shared with its Share button in the Projects view. The owner goes (and is
+  told), `maxpm go` never gives the goal to an agent again, and nothing is
+  reserved. The same button undoes it.
 - **A question held for you** (a session asked the user with `maxpm ask` or
   `maxpm send question`; while you are the active manager it comes to you
   first, and your watch wakes at once): the user does not see it yet. Decide
@@ -404,7 +404,7 @@ later item's briefing. Ready items sort by:
    is P0.
 2. Project rank.
 3. How many open items it unblocks.
-4. Manual order (`maxpm move`).
+4. Manual order (the up and down arrows on the page).
 5. Age.
 
 So set a high priority only on the outcome you care about (for example, "submit
@@ -517,7 +517,6 @@ maxpm dep <id> --on <id> --kind feeds      # waits, then reads their output in i
 maxpm dep <id> --on <id> --kind conflicts  # no order, never in progress together
 maxpm undep <id> --on <id> ...
 maxpm prio <id> <0-4>               # 0 is most important
-maxpm move <id> --before|--after <id>   # manual order inside a project
 maxpm edit <id> [--title] [--notes] [--doer] [--project] [--context] [--touches ...] [--check] [--due <date>|none]
           [--model|--effort|--min-model|--max-model|--agent <value>|none]
 maxpm blocked <id> --reason "..." [--until "mon 07:00 America/New_York"] / maxpm unblock <id>
