@@ -14782,3 +14782,37 @@ class Replaced(Base):
         with contextlib.redirect_stdout(out):
             cli.render_runs(core.replaced_uses(self.c))
         self.assertIn("Replaced commands, last 7d", out.getvalue())
+
+
+class FullQuestion(Base):
+    """#5987 (mark 2026-11-15: a later mention without the text made him search or ask): every text that names an
+    open question or a person's item shows it whole."""
+
+    def test_full_question_text_in_each_later_mention(self):
+        from river import cli
+        core.project_add(self.c, "web", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        core.manage(self.c, self.dir.name, "boss")
+        long = ("Should the checkout page keep the old coupon field while the new discount engine runs in shadow "
+                "mode for two weeks, or remove it now and accept that about 3% of orders lose their coupon? " * 2).strip()
+        x = core.item_add(self.c, "web", "Build the checkout")["id"]
+        core.claim(self.c, x, "w1")
+        q = core.send(self.c, "question", long, to="mark", item=x, actor="w1")["id"]
+        held = [m for m in core.inbox(self.c, "boss", mark_read=False) if m["reply_to"] == q]
+        self.assertIn(core.full_text(long), held[0]["body"])  # the manager sees it first, whole
+        lines = "\n".join(cli._findings_lines(core.manager_findings(self.c), "maxpm"))
+        self.assertIn(core.full_text(long), lines)
+        core.forward(self.c, q, "mark should pick", "boss")
+        core.sync_needs_you(self.c)
+        row = self.c.execute("SELECT summary FROM needs_you WHERE message_id=?", (q,)).fetchone()
+        self.assertIn(core.full_text(long), row["summary"])
+        # A person's item: its context comes along.
+        core.config_set(self.c, "question_hold", "0s")  # the person gets it at once, not the manager first
+        h = core.item_add(self.c, "web", "Decide the coupon field", doer="human", actor="w1",
+                          context="Two options in docs/coupon.md; answer A or B")["id"]
+        core.sync_needs_you(self.c)
+        row = self.c.execute("SELECT summary FROM needs_you WHERE item_id=? AND kind='item'", (h,)).fetchone()
+        self.assertIn("Two options in docs/coupon.md; answer A or B", row["summary"])
+        self.assertEqual(core.person_item_text(self.c, h),
+                         f"#{h} Decide the coupon field\n  Two options in docs/coupon.md; answer A or B")

@@ -5079,7 +5079,7 @@ def _findings_lines(f, r):
     for x in f["targets"]:
         out.append(f"  TARGET {x['target']}: owner {x['owner']} is {x['state']}.  {r} target give {x['target']} --to <agent>")
     for x in f["questions"]:
-        out.append(f"  QUESTION #{x['id']} from {x['from_agent']} to {x['to_agent']}: {_cut(x['body'], 70)}"
+        out.append(f"  QUESTION #{x['id']} from {x['from_agent']} to {x['to_agent']}: {core.full_text(x['body'])}"
                    + (f"\n    waits for you, not {x['to_agent']}: maxpm answer {x['id']} \"...\", or maxpm forward {x['id']}"
                       if x.get("held_for") else ""))
     for x in f.get("unneeded", []):
@@ -5559,7 +5559,7 @@ def render_go(b):
         out += policy_lines(b.get("policies") or [])
     if b.get("asked_open"):
         out.append("OPEN QUESTIONS YOU ASKED: " + core.asked_line(me, b["asked_open"]) + ".")
-        out += [f"  #{q['id']} to {q['to_agent']}: {' '.join(q['body'].split())[:160]}" for q in b["asked_open"]] + [""]
+        out += [f"  #{q['id']} to {q['to_agent']}: {core.full_text(q['body'])}" for q in b["asked_open"]] + [""]
     if b.get("focus_note"):
         out += [b["focus_note"], ""]
     if b.get("workspace"):

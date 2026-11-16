@@ -9527,7 +9527,7 @@ def tell_manager_waits(conn, waiting):
             q = _message(conn, qid)
             end = _wait_end(conn, agent, q)
             _send(conn, "alert", "maxpm", f"{agent} waits at its prompt for {q['to_agent']}'s answer to question #{qid} "
-                  f"(#{q['item_id']}): {q['body'][:200]}. {q['to_agent']} answers in its terminal, or: maxpm answer "
+                  f"(#{q['item_id']}): {full_text(q['body'])}. {q['to_agent']} answers in its terminal, or: maxpm answer "
                   f"{qid} \"...\". " + (f"maxpm serve ends it {end} after the question (question_wait_end); the "
                                         f"answer then starts a fresh session for #{q['item_id']}"
                                         if end else "maxpm keeps its lease and its target and starts no other "
@@ -14095,9 +14095,23 @@ def _human_wait_ended(conn, r, human):
     _send(conn, "notice", "maxpm", f"you waited {wait} (human_wait_max) for a person on {names}, so #{r['id']} "
           f"{r['title']} is open again and still waits on it. Take other work now: maxpm go. When the person "
           f"finishes, #{r['id']} is ready for whoever runs go.", to=r["assignee"], item_id=r["id"])
+    whole = "\n".join(person_item_text(conn, h) for h in human)  # the whole step, not its number (#5987)
     for h in (x["name"] for x in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name").fetchall()):
-        _send(conn, "alert", "maxpm", f"#{r['id']} {r['title']} waits on you: {names}. {r['assignee']} waited "
-              f"{wait} and took other work; the item continues when you finish.", to=h, item_id=human[0])
+        _send(conn, "alert", "maxpm", f"#{r['id']} {r['title']} waits on you. {r['assignee']} waited {wait} and took "
+              f"other work; the item continues when you finish:\n{whole}", to=h, item_id=human[0])
+
+
+def full_text(text):
+    """A question's or an alert's whole text on one line (#5987, mark 2026-11-15: a later mention without the text
+    made him search or ask): never cut."""
+    return " ".join((text or "").split())
+
+
+def person_item_text(conn, item_id):
+    """A person's item as a later mention shows it (#5987): its number, title and context (what to decide or do,
+    and where the material is)."""
+    it = _item(conn, item_id)
+    return f"#{it['id']} {it['title']}" + (f"\n  {full_text(it['context'])}" if it["context"] else "")
 
 
 def _due_warnings(conn, t):
@@ -14124,7 +14138,7 @@ def _due_warnings(conn, t):
 def _question_nudges(conn):
     """A question unanswered after question_nudge_after whose receiver is away or gone: tell the asker
     once, so it can ask someone else (design 7.4). The receiver's own count says how long it waits."""
-    for r in conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.item_id, m.created_at, a.last_seen "
+    for r in conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.item_id, m.created_at, m.body, a.last_seen "
                           "FROM messages m JOIN agents a ON a.name=m.to_agent WHERE m.kind='question' "
                           "AND m.state='open' AND m.nudged_at IS NULL").fetchall():
         wait = parse_duration(setting(conn, "question_nudge_after", agent=r["to_agent"]))
@@ -14135,7 +14149,7 @@ def _question_nudges(conn):
             continue
         conn.execute("UPDATE messages SET nudged_at=? WHERE id=?", (iso(now()), r["id"]))
         _send(conn, "notice", "maxpm", f"{r['to_agent']} is {state} (last seen {r['last_seen'][:16].replace('T', ' ')} UTC) "
-              f"and has not answered your question #{r['id']}. Ask someone else"
+              f"and has not answered your question #{r['id']} ({full_text(r['body'])}). Ask someone else"
               + (f": maxpm ask --holder-of {r['item_id']} \"...\", or maxpm who" if r["item_id"] else ": maxpm who"),
               to=r["from_agent"], item_id=r["item_id"], reply_to=r["id"])
     # Other messages (alerts, notes, offers) that a gone agent never read: tell the sender once. The state of each
@@ -14547,15 +14561,17 @@ def sync_needs_you(conn):
     have_msgs = {r[0] for r in conn.execute("SELECT message_id FROM needs_you WHERE kind='message' AND closed_at IS NULL")}
     for iid in sorted(set(want_items) - have_items):
         a = want_items[iid]
-        _open_event(conn, "item", f"#{iid} {a['title']} ({a['project']}) is ready for a person", item_id=iid)
+        # The whole step (#5987): the person acts from the notice, without a search for what #id was.
+        ctx = conn.execute("SELECT context FROM items WHERE id=?", (iid,)).fetchone()["context"]
+        _open_event(conn, "item", f"#{iid} {a['title']} ({a['project']}) is ready for a person"
+                    + (f": {full_text(ctx)}" if ctx else ""), item_id=iid)
     for mid in sorted(set(want_msgs) - have_msgs):
         m = want_msgs[mid]
-        # A prompt alert names the window, the question, and the keys (server.watch_prompts): all of it, or the
-        # person still cannot act on it from the notification (#2713).
-        cut = 600 if m["body"].startswith(PROMPT_NOTE) else 120
+        # The whole text (#5987; a prompt alert names the window, the question and the keys, #2713): the person
+        # acts on it from the notification.
         fwd = forward_note(conn, m) if m["kind"] == "question" else None
-        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:cut]}"
-                    + (f" (the manager: {fwd[:200]})" if fwd else ""),
+        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {full_text(m['body'])}"
+                    + (f" (the manager: {full_text(fwd)})" if fwd else ""),
                     item_id=m["item_id"], message_id=mid, human=m["to_agent"])
 
 
@@ -17604,13 +17620,13 @@ def _hold_question(conn, mid):
     conn.execute("UPDATE messages SET held_for=?, held_until=? WHERE id=?",
                  (boss, iso(now() + parse_duration(hold)), mid))
     if q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
-        body = (f"{q['from_agent']} alerts {person} (alert #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
+        body = (f"{q['from_agent']} alerts {person} (alert #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Do what it asks when {person} is not needed, "
                 f"then close it: maxpm forward {mid} --drop --note \"<what you did>\". Else send it on to {person}: "
                 f"maxpm forward {mid} [--note \"<what you add>\"]. With neither within {hold} (question_hold), "
                 f"{person} gets it.")
     else:
-        body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
+        body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
                 f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
                 f"With neither within {hold} (question_hold), {person} gets it.")
