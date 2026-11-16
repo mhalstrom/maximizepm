@@ -273,7 +273,10 @@ def run_remote(words, env=None, cwd=None):
         if _command(words[_at(words) + 1:]) in BROWSER_LOCAL:
             return None
         files = tuple(w for w in FILE_WORDS if w != "--wait")
-    if cmd not in REMOTE:
+    poll = _pollable(cmd, words)
+    if poll:
+        files = tuple(w for w in FILE_WORDS if w not in ("--wait", "--watch"))
+    elif cmd not in REMOTE:
         return None
     found = reads(words)
     if found is None:
@@ -298,10 +301,11 @@ def run_remote(words, env=None, cwd=None):
     extra = _inline(words, found) if found else {}
     if extra is None:
         return None
-    body = _dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(), "pid": os.getpid(),
-                   "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False,
-                   **extra}).encode()
-    status, answer = _post(port, body, token, timeout=None)
+    req = {"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(), "pid": os.getpid(),
+           "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False, **extra}
+    if poll:
+        return _poll_loop(port, token, req)
+    status, answer = _post(port, _dumps(req).encode(), token, timeout=None)
     if status is None or 400 <= status < 500 or status == 503:
         # No connection, a proxy or serve that refused it (403, an older serve: 404), older code or another queue
         # (409), every runner busy (503): serve did not run it, so it runs here.
@@ -309,6 +313,59 @@ def run_remote(words, env=None, cwd=None):
             import io
             sys.stdin = io.StringIO(extra["stdin"])
         return None
+    return _answer(status, answer)
+
+
+POLL_AGAIN = 75  # core.POLL_AGAIN: a poll that found nothing yet
+POLL_SLEEP = 3.0  # seconds between two polls, as the loops of the waits in core
+POLL_LOST = 120.0  # seconds that serve may not answer during a wait (a restart) before the wait runs here
+
+
+def _pollable(cmd, words):
+    """A wait that serve runs one poll at a time (#6008): maxpm wait, inbox --wait, manage --watch."""
+    return cmd == "wait" or (cmd == "inbox" and "--wait" in words) or (cmd == "manage" and "--watch" in words)
+
+
+def _poll_loop(port, token, req, sleep=None, clock=None):
+    """Run a wait as polls in serve: each poll is a short command in a runner; this process sleeps between them and
+    keeps the wait's state. The exit status of the last poll, or None when serve took no poll (it runs here)."""
+    import time
+    sleep, clock = sleep or time.sleep, clock or time.monotonic
+    req = dict(req, poll={"id": _poll_id(), "state": {}})
+    first, lost = True, None
+    while True:
+        status, answer = _post(port, _dumps(req).encode(), token, timeout=None)
+        if status is None or 400 <= status < 500 or status in (503, 599):
+            # serve does not run it now: a restart (no connection, older code), every runner busy, a lost answer.
+            if first and status != 599:
+                return None
+            lost = lost if lost is not None else clock()
+            if clock() - lost > POLL_LOST:
+                sys.stderr.write("maxpm: maxpm serve stopped answering during this wait; it goes on here\n")
+                return None
+            sleep(POLL_SLEEP)
+            continue
+        lost = None
+        try:
+            res = _loads(answer)
+        except ValueError:
+            res = None
+        if status == 200 and isinstance(res, dict) and res.get("code") == POLL_AGAIN and not res.get("out"):
+            first = False
+            if isinstance(res.get("poll"), dict):
+                req["poll"]["state"] = res["poll"]
+            sleep(POLL_SLEEP)
+            continue
+        return _answer(status, answer)
+
+
+def _poll_id():
+    """An id for one wait (its token in agents.wait_token): a newer wait of the session ends this one."""
+    return "".join(f"{b:02x}" for b in os.urandom(4))
+
+
+def _answer(status, answer):
+    """Print the answer of serve and return its exit status."""
     try:
         res = _loads(answer)
     except ValueError:

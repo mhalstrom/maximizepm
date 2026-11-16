@@ -2746,8 +2746,9 @@ def run(argv=None):
         core.RUN_SESSION.reset(tok)
         rec["actor"] = core.TOKEN_AGENT.get() or rec["actor"]
         core.TOKEN_AGENT.reset(agent_tok)
-        core.log_run(words, rec["at"], int((time.monotonic() - start) * 1000), rec["code"], rec["cmd"],
-                     rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session)
+        if not (core.POLL and rec["code"] == core.POLL_AGAIN):  # a poll that found nothing: no row (#6008)
+            core.log_run(words, rec["at"], int((time.monotonic() - start) * 1000), rec["code"], rec["cmd"],
+                         rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session)
 
 
 class _Tee:
@@ -3011,7 +3012,7 @@ def _run(args, conn):
             args.level = None
     # #5975: a process that cannot write the queue skips the bookkeeping writes of a command (serve does them), and
     # a write of the command itself ends in core.READONLY_REFUSAL.
-    if args.cmd not in ("go", "plan"):
+    if args.cmd not in ("go", "plan") and not (core.POLL and core.POLL.get("state")):  # a later poll: the wait's own
         with core.unless_readonly():
             core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
@@ -3032,6 +3033,8 @@ def _run(args, conn):
         if core.is_readonly(e):
             raise RiverError(core.READONLY_REFUSAL) from None
         raise
+    if core.POLL and res is core.POLL_AGAIN_RESULT:  # #6008: nothing yet; the caller polls again, nothing printed
+        return core.POLL_AGAIN
     # The events of this command (a release cut, a review, a deploy): their hooks run now.
     hooks = []
     with core.unless_readonly():

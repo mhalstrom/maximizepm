@@ -53,14 +53,13 @@ class ServeWrites(unittest.TestCase):
         self.assertEqual(sent[0]["files"], [{"at": 2, "prefix": "", "name": "page.md", "text": "# Plan\n",
                                              "source": page}])
         self.assertEqual((sent[1]["files"], sent[1]["stdin"]), ([], "from stdin"))
-        # Stays here: a file it cannot read, a page with a local picture, a canvas it writes to a file, a wait.
+        # Stays here: a file it cannot read, a page with a local picture, a canvas it writes to a file, stdin as a title.
         pic = os.path.join(self.dir.name, "pic.md")
         with open(pic, "w", encoding="utf-8") as f:
             f.write("![chart](chart.png) and ![web](https://x.test/a.png)\n")
         with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
             for words in (["canvas", "put", "nofile.html", "--name", "n"], ["canvas", "save", "plan", "p.md"],
-                          ["canvas", "put", pic, "--name", "n"],
-                          ["inbox", "--wait"], ["add", "x", "-"]):
+                          ["canvas", "put", pic, "--name", "n"], ["add", "x", "-"]):
                 self.assertIsNone(client.run_remote(words, self.env), words)
         # serve does not answer: the command here reads the text that the client read from stdin.
         with mock.patch.object(client, "_post", return_value=(None, None)), \
@@ -112,6 +111,98 @@ class ServeWrites(unittest.TestCase):
         with self.assertRaisesRegex(core.RiverError, "only maxpm serve writes the queue"):
             run("add", "web", "Fix the header")
         self.assertEqual(serve.execute("SELECT count(*) FROM items").fetchone()[0], 1)
+
+
+class ServeWritesPolls(unittest.TestCase):
+    """#6008: a wait runs as polls in serve; the caller sleeps between them and keeps the wait's state."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.db = os.path.join(self.dir.name, "q.db")
+        self.c = core.connect(self.db)
+        self.addCleanup(self.c.close)
+        core.project_add(self.c, "web", path=self.dir.name)
+        core.register(self.c, "w")
+        self.addCleanup(setattr, core, "POLL", None)
+
+    def test_serve_writes_a_wait_as_polls_keeps_its_token_and_its_clock(self):
+        core.POLL = {"id": "abcd1234", "state": {}}
+        self.assertIs(core.wait(self.c, self.dir.name, "w"), core.POLL_AGAIN_RESULT)
+        state = dict(core.POLL["state"])
+        a = core._agent(self.c, "w")
+        self.assertEqual((a["wait_token"], a["role"], state["started"]), ("abcd1234", "waiting", a["wait_at"]))
+        core.POLL = {"id": "abcd1234", "state": state}
+        self.assertIs(core.wait(self.c, self.dir.name, "w"), core.POLL_AGAIN_RESULT)
+        self.assertEqual(core._agent(self.c, "w")["wait_at"], state["started"])  # a poll does not start it again
+        x = core.item_add(self.c, "web", "Build the cart")["id"]
+        res = core.wait(self.c, self.dir.name, "w")
+        self.assertEqual((res["result"], res["why"]), ("work", f"#{x} is ready: Build the cart"))
+        # A newer wait of the session (another id) ends this one quietly.
+        core.drop(self.c, x, "not needed", "w")
+        core.POLL = {"id": "ffff0000", "state": {}}
+        core.wait(self.c, self.dir.name, "w")
+        core.POLL = {"id": "abcd1234", "state": state}
+        self.assertEqual(core.wait(self.c, self.dir.name, "w")["result"], "left")
+        # The wait's step counts from its first poll.
+        core.POLL = {"id": "ffff0000", "state": {"started": core.iso(core.now() - core.timedelta(hours=1)),
+                                                 "scope_at": None}}
+        self.assertEqual(core.wait(self.c, self.dir.name, "w")["result"], "again")
+
+    def test_serve_writes_an_inbox_wait_as_polls(self):
+        core.POLL = {"id": "i1", "state": {}}
+        self.assertIs(core.inbox_wait(self.c, "w"), core.POLL_AGAIN_RESULT)
+        self.assertIn("since", core.POLL["state"])
+        core.send(self.c, "note", "hello", to="w", actor="w2")
+        res = core.inbox_wait(self.c, "w")
+        self.assertEqual((res["result"], [m["body"] for m in res["messages"]]), ("messages", ["hello"]))
+        core.POLL = {"id": "i1", "state": {"since": core.iso(core.now() - core.timedelta(hours=1))}}
+        self.assertEqual(core.inbox_wait(self.c, "w")["result"], "timeout")
+
+    def test_serve_writes_the_client_polls_and_sleeps_between(self):
+        answers = [(200, b'{"code": 75, "out": "", "err": "", "poll": {"started": "t0"}}'), (503, b""),
+                   (200, b'{"code": 75, "out": "", "err": "", "poll": {"started": "t0", "seen": {}}}'),
+                   (200, b'{"code": 0, "out": "WORK: #3 is ready. Run now: maxpm --as w go\\n", "err": ""}')]
+        sent, naps = [], []
+
+        def post(port, body, token, timeout):
+            sent.append(json.loads(body)["poll"])
+            return answers[len(sent) - 1]
+        out = io.StringIO()
+        with mock.patch.object(client, "_post", post), contextlib.redirect_stdout(out):
+            code = client._poll_loop(1, "t", {"argv": ["wait"]}, sleep=naps.append)
+        self.assertEqual((code, out.getvalue()), (0, "WORK: #3 is ready. Run now: maxpm --as w go\n"))
+        self.assertEqual([p["state"] for p in sent], [{}, {"started": "t0"}, {"started": "t0"},
+                                                      {"started": "t0", "seen": {}}])
+        self.assertEqual(len({p["id"] for p in sent}), 1)
+        self.assertEqual(naps, [client.POLL_SLEEP] * 3)
+        # serve does not answer the first poll: the wait runs here; it stops answering later: it waits, then here.
+        with mock.patch.object(client, "_post", return_value=(None, None)):
+            self.assertIsNone(client._poll_loop(1, "t", {"argv": ["wait"]}, sleep=naps.append))
+        clock = iter(range(0, 1000, 60))
+        answers[1:] = [(None, None)] * 10
+        sent.clear()
+        with mock.patch.object(client, "_post", post), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(client._poll_loop(1, "t", {"argv": ["wait"]}, sleep=lambda s: None,
+                                                clock=lambda: next(clock)))
+        self.assertIn("stopped answering during this wait", err.getvalue())
+        self.assertTrue(client._pollable("wait", ["wait"]) and client._pollable("inbox", ["inbox", "--wait"]))
+        self.assertFalse(client._pollable("inbox", ["inbox"]))
+
+    def test_serve_writes_a_runner_answers_a_poll_with_its_state(self):
+        proc = subprocess.Popen([sys.executable, "-m", "river.runner", self.db], cwd=ROOT, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(lambda: (proc.stdin.close(), proc.wait(timeout=10), proc.stdout.close()))
+        req = {"argv": ["--as", "w", "wait"], "cwd": self.dir.name, "stamp": client.code_stamp(),
+               "ppid": os.getppid(), "env": {"MAXPM_DB": self.db, "PATH": os.environ.get("PATH", "")},
+               "poll": {"id": "abcd1234", "state": {}}}
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+        ans = json.loads(proc.stdout.readline())
+        self.assertEqual((ans["code"], ans["out"]), (core.POLL_AGAIN, ""), ans)
+        self.assertIn("started", ans["poll"])
+        n = self.c.execute("SELECT count(*) FROM runs WHERE cmd='wait'").fetchone()[0]
+        self.assertEqual(n, 0)  # a poll that found nothing writes no row of the run log
 
 
 if __name__ == "__main__":

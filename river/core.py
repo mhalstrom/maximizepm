@@ -2010,6 +2010,19 @@ CALLER_PPID = None
 CALLER_TOKEN = None
 # #5975: in a runner, the runner's copy of a file that the caller read -> the caller's own path (what a command records).
 CALLER_FILES = {}
+# #6008: one poll of a wait (maxpm wait, inbox --wait, manage --watch) that the caller repeats: client.run_remote
+# sends a poll to serve, sleeps between polls, and keeps the state of the wait; so a waiting session holds no runner.
+# {"id": the wait's id, "state": {...}} while a runner runs such a poll; None otherwise.
+POLL = None
+POLL_AGAIN = 75  # the exit status of a poll that found nothing yet: the caller polls again
+POLL_AGAIN_RESULT = {"result": "poll"}
+
+
+def _poll_state():
+    """The state that a wait keeps between its polls (a new dict outside a poll)."""
+    if not POLL:
+        return {}
+    return POLL.setdefault("state", {})
 
 
 class _ResidentConnection(sqlite3.Connection):
@@ -17486,8 +17499,10 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
     if active_manager(conn) == actor:  # a second watcher woke the manager twice for each message (#1312)
         raise RiverError(f"{actor} is the active manager, and maxpm manage --watch is its only watcher: it returns "
                          f"for messages too. Run maxpm --as {actor} manage --watch instead of inbox --wait")
-    deadline = now() + parse_duration(timeout or INBOX_WAIT)
-    raised = False
+    state = _poll_state()  # #6008: a wait that the caller repeats, one poll at a time
+    state.setdefault("since", iso(now()))
+    deadline = parse_iso(state["since"]) + parse_duration(timeout or INBOX_WAIT)
+    raised = bool(state.get("raised"))
     while True:
         if not raised:
             # A sender that now waits for messages stands still until the manager answers (#1608). A locked
@@ -17516,6 +17531,9 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
                         "still_open": len(rows) - len(new)}
         if now() >= deadline:
             return {"result": "timeout", "agent": actor, "messages": [], "waited": timeout or INBOX_WAIT}
+        if POLL:
+            state["raised"] = raised
+            return POLL_AGAIN_RESULT
         sleep(poll)
 
 
@@ -22026,27 +22044,31 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     st = stopped()
     if st:
         return st
-    with tx(conn):
-        held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
-                            (actor,)).fetchall()
-        if held:
-            raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; finish or release it "
-                             f"before you wait: maxpm --as {actor} go")
-        conn.execute("UPDATE agents SET waiting_since=COALESCE(waiting_since, ?), role='waiting', waiting_in=?, "
-                     "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
-                                             f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
-                                             actor))
-        # The newest wait of an agent is its wait: one that runs in the background (Claude Code) is still there
-        # when the agent, after a talk with a person, starts another one (#4948).
-        token = secrets.token_hex(4)
-        conn.execute("UPDATE agents SET wait_token=?, wait_at=? WHERE name=?", (token, iso(now()), actor))
-    since = parse_iso(_agent(conn, actor)["waiting_since"])
+    state = _poll_state()  # #6008: a wait that the caller repeats, one poll at a time
+    token = POLL["id"] if POLL else secrets.token_hex(4)
+    if not state.get("started"):
+        with tx(conn):
+            held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
+                                (actor,)).fetchall()
+            if held:
+                raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; finish or release "
+                                 f"it before you wait: maxpm --as {actor} go")
+            conn.execute("UPDATE agents SET waiting_since=COALESCE(waiting_since, ?), role='waiting', waiting_in=?, "
+                         "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
+                                                 f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
+                                                 actor))
+            # The newest wait of an agent is its wait: one that runs in the background (Claude Code) is still there
+            # when the agent, after a talk with a person, starts another one (#4948).
+            conn.execute("UPDATE agents SET wait_token=?, wait_at=? WHERE name=?", (token, iso(now()), actor))
+        state.update(started=_agent(conn, actor)["wait_at"], scope_at=_agent(conn, actor)["scope_at"])
+    since = parse_iso(_agent(conn, actor)["waiting_since"] or iso(now()))
     limit = parse_duration(setting(conn, "wait_max", agent=actor))
     step = parse_duration(step or setting(conn, "wait_step", agent=actor))
-    deadline = min(now() + step, since + limit)
-    seen = {}  # the ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205)
-    started = _agent(conn, actor)["wait_at"]
-    scope_at = _agent(conn, actor)["scope_at"]  # a new scope from the manager ends the wait (#5979)
+    deadline = min(parse_iso(state["started"]) + step, since + limit)
+    # The ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205).
+    seen = {int(k): (parse_iso(v[0]), v[1]) for k, v in state.get("seen", {}).items()}
+    started = state["started"]
+    scope_at = state["scope_at"]  # a new scope from the manager ends the wait (#5979)
     ad = _adapters().find(session_type(conn, actor) or "")
     foreground = not (ad and ad.launch.get("background"))
 
@@ -22090,6 +22112,9 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         if now() >= deadline:
             break
         poll_activity(conn, actor)  # a waiting session is active: it takes work within seconds
+        if POLL:
+            state["seen"] = {str(k): (iso(v[0]), v[1]) for k, v in seen.items()}
+            return POLL_AGAIN_RESULT
         sleep(poll)
     # A person's prompt during the wait moved waiting_since (activity_event): the clock counts from the talk.
     since = parse_iso(_agent(conn, actor)["waiting_since"] or iso(now()))
@@ -23134,15 +23159,19 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         base = set(json.loads(conn.execute("SELECT manage_seen FROM agents WHERE name=?", (actor,)).fetchone()[0] or "[]"))
     except (TypeError, ValueError):
         base = set()
-    deadline = now() + parse_duration(step or setting(conn, "manage_every", agent=actor))
+    state = _poll_state()  # #6008: a watch that the caller repeats, one poll at a time
+    state.setdefault("since", iso(now()))
+    deadline = parse_iso(state["since"]) + parse_duration(step or setting(conn, "manage_every", agent=actor))
     settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
     waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=actor)),
              "low": parse_duration(setting(conn, "manage_wait_low", agent=actor))}
     rewake = parse_duration(setting(conn, "manage_rewake", agent=actor))
     limit = parse_duration(setting(conn, "manage_unanswered", agent=actor))
-    settled = None  # when the first new finding that is not low has waited manage_settle
-    low_due = None  # when the first new low finding has waited manage_wait_low
+    # When the first new finding that is not low has waited manage_settle; when the first new low finding has waited
+    # manage_wait_low.
+    settled = parse_iso(state["settled"]) if state.get("settled") else None
+    low_due = parse_iso(state["low_due"]) if state.get("low_due") else None
     while True:
         try:
             escalate_by_state(conn)  # a sender that stopped working makes its message wake the watch now (#5976)
@@ -23184,6 +23213,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
                     old = [m for m in unanswered(conn, actor) if m["id"] not in {n["id"] for n in shown}]
                     _mark_delivered(conn, [m["id"] for m in old], "watch")  # shown again: the next re-wake waits
             except RiverLocked:  # nothing is marked delivered: the next poll returns with the messages
+                if POLL:
+                    state.update(settled=settled and iso(settled), low_due=low_due and iso(low_due))
+                    return POLL_AGAIN_RESULT
                 sleep(poll)
                 continue
             mail = bool(shown)
@@ -23204,6 +23236,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
                     "still_open": len(rows) - len(new) - sum(1 for m in old if m["id"] in {r["id"] for r in rows}),
                     "unread": unread(conn, actor)["unread"], "native": native}
         poll_activity(conn, actor, watch=True)
+        if POLL:
+            state.update(settled=settled and iso(settled), low_due=low_due and iso(low_due))
+            return POLL_AGAIN_RESULT
         sleep(poll)
 
 

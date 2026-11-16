@@ -27,10 +27,10 @@ class Client(unittest.TestCase):
     def test_commands_that_stay_in_their_own_process(self):
         self.serve_file()
         with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
-            for words in (["serve"], ["wait"], ["review", "pass", "3"], ["canvas", "put", "f.html"],
+            # A file the caller cannot read stays here; a wait goes to serve as polls (#6008, tests/test_serve_writes).
+            for words in (["serve"], ["review", "pass", "3"], ["canvas", "put", "f.html"],
                           ["goal", "handoff", "g", "--file", "notes.md"], ["add", "--from", "plan.md"],
-                          ["inbox", "--wait"], ["manage", "--watch"], ["add", "x", "-"], ["artifacts", "show", "2"],
-                          ["--version"], [], ["-h"]):
+                          ["add", "x", "-"], ["artifacts", "show", "2"], ["--version"], [], ["-h"]):
                 self.assertIsNone(client.run_remote(words, self.env), words)
             self.assertIsNone(client.run_remote(["show", "3"], {**self.env, "MAXPM_LOCAL": "1"}))
 
@@ -46,8 +46,6 @@ class Client(unittest.TestCase):
             with mock.patch.object(client, "_post", return_value=(200, b'{"code": 0}')) as post:
                 self.assertEqual(client.run_remote(words, self.env), 0, words)
             post.assert_called_once()
-        with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
-            self.assertIsNone(client.run_remote(["inbox", "--wait"], self.env))  # --wait stays local elsewhere
 
     def test_no_serve_file_runs_here(self):
         with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):

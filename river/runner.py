@@ -111,6 +111,8 @@ def run_one(cli, core, conn, req, env):
         if isinstance(f.get("at"), int) and 0 <= f["at"] < len(argv):
             argv[f["at"]] = (f.get("prefix") or "") + path
         core.CALLER_FILES[path] = f.get("source") or path  # what the command records as its source
+    # #6008: one poll of a wait; its state goes back to the caller with the answer.
+    core.POLL = dict(req["poll"]) if isinstance(req.get("poll"), dict) else None
     saved_stdin = sys.stdin
     if isinstance(req.get("stdin"), str):
         sys.stdin = io.StringIO(req["stdin"])
@@ -145,6 +147,7 @@ def run_one(cli, core, conn, req, env):
         core.CALLER_CHAIN = None
         sys.stdin = saved_stdin
         core.CALLER_FILES.clear()
+        poll, core.POLL = core.POLL, None
         if tmp:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
@@ -160,7 +163,10 @@ def run_one(cli, core, conn, req, env):
         f.seek(0)
         extra.append(f.read().decode(errors="replace"))
         f.close()
-    return {"code": int(code or 0), "out": out.getvalue() + extra[0], "err": err.getvalue() + extra[1]}
+    ans = {"code": int(code or 0), "out": out.getvalue() + extra[0], "err": err.getvalue() + extra[1]}
+    if poll is not None:
+        ans["poll"] = poll.get("state") or {}
+    return ans
 
 
 def main():
