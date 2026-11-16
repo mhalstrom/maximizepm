@@ -685,7 +685,8 @@ class LaunchAgent(unittest.TestCase):
         r = server.auto_release(self.c, runner=sent.append)
         self.assertEqual((r["alerted"], r["started"], sent), ({dep: "ops"}, {}, []))
         self.assertEqual(server.auto_release(self.c, runner=sent.append)["alerted"], {})  # one alert
-        self.assertIn("you have messages", core.wait(self.c, self.dir.name, "ops", sleep=lambda s: None, step="1s")["why"])
+        # wait names the deploy that go gives next (#5971: before, it saw only the alert's message).
+        self.assertIn(f"#{dep} is ready", core.wait(self.c, self.dir.name, "ops", sleep=lambda s: None, step="1s")["why"])
         b = core.go(self.c, self.dir.name, "ops")
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep))
         # The next release: the owner holds nothing and ran no command for a while: idle at its prompt.

@@ -14118,9 +14118,13 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: {actor} already holds {held} {what} ({key} {limit}). "
                          f"Finish one (maxpm done <id>), release one (maxpm release <id>), "
                          f"or raise the limit (maxpm config set {key} <n> --agent {actor})")
-    # An item pushed to this session (Dispatch, maxpm push): a person chose the session, so its agent type
-    # does not matter; model limits still do.
-    why = _model_refusal(conn, it0, actor, any_type=it0["reserved_for"] == actor)
+    # An item pushed to this session (Dispatch, maxpm push), in its own queue, or of a goal it owns: a person or the
+    # manager chose the session, so its agent type does not matter; model limits still do. The same rule as
+    # work_refusal (WorkView.chosen), so next and wait never offer an item that this refuses (#5971).
+    chosen = it0["reserved_for"] == actor or bool(q and q["agent"] == actor) or bool(conn.execute(
+        "SELECT 1 FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.status='open' "
+        "AND g.owner=? AND g.owner_expires_at >= ?", (item_id, actor, iso(now()))).fetchone())
+    why = _model_refusal(conn, it0, actor, any_type=chosen)
     if why:
         raise RiverError(f"refused: #{item_id} {why}. Take other work (maxpm go), or a session with an allowed "
                          f"model or agent type takes it; the manager can change them: maxpm edit {item_id} "
@@ -14179,6 +14183,141 @@ def _refuse_model_to(conn, it, to, verb):
                          f"change the limit: maxpm edit {it['id']} --min-model|--max-model <model>")
 
 
+# ---------------------------------------------------------------- one rule for a session's work (#5971)
+#
+# go, wait, next, claim, the agent queue and waiting_agent_for decided 'is this work for this session' each in its
+# own way, and six defects came from their disagreement (wait said WORK, go said IDLE: #4318, #5089, #5796, ...).
+# work_refusal is the one rule for one item; session_work orders what passes it. Each path asks them; the steps
+# that only go has (a role, a free goal or target, a focus) ask work_refusal for each item they take.
+
+class WorkView:
+    """What the rule needs to know about one session, read once: its kind, model and agent type, the targets it owns,
+    its queue, the raw reservations, the items whose answer starts a fresh session, the items whose old session still
+    works, and its tree. model: a session that does not exist yet (launch) or a model given by hand."""
+
+    def __init__(self, conn, actor, model=None, tree=None, chat=False, agent_type=None):
+        self.conn, self.actor, self.tree, self.chat = conn, actor, tree, chat
+        r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+        self.kind = r["kind"] if r else ("ai" if actor else None)
+        self.model = model or agent_model(conn, actor)
+        self.stype = agent_type or (session_type(conn, actor) if actor else None)
+        self.family = session_family(conn, actor, self.stype) if actor else None
+        self.ladder = parse_ladder(setting(conn, "model_ladder")) if self.model else None
+        owned = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))} if actor else set()
+        self.targets = owned - hooked_targets(conn) if self.kind == "ai" else owned
+        self.raw = {r["id"]: r["reserved_for"] for r in conn.execute(
+            "SELECT id, reserved_for FROM items WHERE status='open' AND reserved_for IS NOT NULL")}
+        self.queued = {r["item_id"]: r["agent"] for r in conn.execute(
+            "SELECT item_id, agent FROM queue_entries WHERE item_id IS NOT NULL")}
+        self.qpos = {r["item_id"]: n for n, r in enumerate(conn.execute(
+            "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (actor,)))}
+        self.fresh = {r["id"] for r in conn.execute("SELECT id FROM items WHERE fresh_start > ?",
+                                                    (iso(now() - FRESH_GRACE),))}
+        self.still = still_worked(conn) if actor else {}
+        self.ops_first = operational_session(conn, actor) if actor else None
+
+    def chosen(self, a):
+        """The item is this session's by a choice: pushed or given to it, in its own queue, or of a goal it owns."""
+        return bool(self.actor) and a["reserved_for"] == self.actor
+
+
+def work_refusal(conn, a, view):
+    """Why the session of `view` may not take the annotated item `a` now, or None: (reason, shown). shown says that
+    next lists the item under 'skipped' (a limit of this session; the other reasons are the item's own state). The
+    claim itself (claim, _claim_row) refuses the same items with its own words; a test proves they agree (#5971)."""
+    actor = view.actor
+    if not ready_for(a, actor):
+        return ("not ready", False)
+    if a["backlog"]:
+        return ("in the backlog", False)
+    if a["project_archived"]:
+        return ("its project is archived", False)
+    if view.kind and a["doer"] not in ("any", view.kind):
+        return ("for a person" if a["doer"] == "human" else "for an agent", False)
+    raw = view.raw.get(a["id"])
+    if actor and a.get("tier") in OWN_SESSION_TIERS and view.kind == "ai" and raw != actor:
+        return (f"a {a['tier']}-tier task: a session started for it takes it", False)
+    if raw and raw != actor:
+        return (f"reserved for {raw}", False)
+    if actor and a["reserved_for"] not in (None, actor):  # another agent's queue, or a goal another agent owns
+        return (f"reserved for {a['reserved_for']}", False)
+    if view.tree is not None and a["id"] not in view.tree and not view.chosen(a):
+        return ("not in this session's tree", False)
+    if a["kind"] == "deploy" and actor and a["target"] not in view.targets:
+        return (f"deploys to target {a['target']}, which this session does not own", False)
+    if view.kind == "ai" and a["kind"] == "deploy":
+        why = deploy_hook_refusal(conn, a, actor)
+        if why:
+            return (why, False)
+    if view.kind == "ai":
+        why = approval_refusal(conn, a)
+        if why:
+            return (why, True)
+    if a["id"] in view.fresh and not view.chosen(a):
+        return ("an answer came for it: a fresh session takes it", False)
+    if actor and view.still.get(a["id"], actor) != actor:
+        return (f"{view.still[a['id']]} still works on it in its session", True)
+    if actor and a["kind"] in FRESH_KINDS and reviewer_refusal(conn, a, actor):
+        return ("you worked on the release it reviews" if author_refusal(conn, a, actor)
+                else f"{'a review' if a['kind'] == 'review' else 'an operational task'} starts in a new session; "
+                     f"this one held a task", True)
+    if view.ops_first and a["kind"] != "operational" and not view.chosen(a):  # a person may still push one to it
+        return (f"this session started for operational task #{view.ops_first} on its own model; other work starts "
+                f"in a new session", True)
+    if view.model or view.stype:
+        ok, why = agent_type_check(None if view.chosen(a) else view.stype, a["agent"])
+        if ok and view.model:
+            ok, why = model_check(view.ladder, view.model, a["min_model"], a["max_model"], view.family)
+        if not ok:
+            return (why, True)
+        a["model_note"] = why
+    if view.chat and needs_folder(a):
+        return (FOLDER_WHY, True)
+    return None
+
+
+def session_work(conn, view, pool, skipped=None):
+    """The items of pool (annotated) that the session of view may take, in the order it takes them: its own queue
+    first (any project, in queue order), then the items pushed to it, then the graph order of pool. skipped (a list)
+    receives the items it may not take for a limit of its own, with the reason."""
+    ann = None
+    have = {a["id"] for a in pool}
+    if view.qpos:  # its queue reaches past the area it asked for
+        ann = annotate(conn, closed=False)
+        pool = [ann[i] for i in view.qpos if i in ann and i not in have] + list(pool)
+    out = []
+    for a in pool:
+        why = work_refusal(conn, a, view)
+        if why is None:
+            out.append(a)
+        elif why[1] and skipped is not None and a["id"] not in {x["id"] for x in skipped}:
+            skipped.append({"id": a["id"], "title": a["title"], "why": why[0]})
+    return sorted(out, key=lambda a: (a["id"] not in view.qpos, view.qpos.get(a["id"], 0),
+                                      not (a["reserved_for"] == view.actor and a["reserved_until"])))
+
+
+def _reviews_for(conn, ann, view, names, any_project=False):
+    """The release reviews that the session of view may take, in graph order: those that cover items of these
+    projects (the items they wait on), or any review with any_project (the reviewer role)."""
+    return sorted((a for a in ann.values() if a["kind"] == "review"
+                   and (any_project or any(b in ann and ann[b]["project"] in names for b in a["waits_on"]))
+                   and work_refusal(conn, a, view) is None), key=lambda a: a["sort_key"])
+
+
+def _goal_items_for(conn, ann, view, goal):
+    """The ready items of a goal (not its deploy items or reviews) that the session of view may take, in graph
+    order: what go gives a goal owner first."""
+    return sorted((a for a in ann.values() if goal in a["goals"] and a["kind"] not in ("deploy", "review")
+                   and work_refusal(conn, a, view) is None), key=lambda a: a["sort_key"])
+
+
+def _deploys_for(conn, ann, view):
+    """The deploy items of the targets that the session of view owns (not those with a deploy hook), in graph order,
+    that it may take."""
+    return sorted((a for a in ann.values() if a["kind"] == "deploy" and work_refusal(conn, a, view) is None),
+                  key=lambda a: a["sort_key"])
+
+
 def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=1, near=None, mine=False,
               model=None, skipped=None, folderless=False, only=None):
     """Show, or claim, the first ready item from the area the agent chose.
@@ -14186,83 +14325,16 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
     model: the session's model (default: the one the agent recorded). Items whose min/max limits exclude it
     are left out; `skipped`, a list, receives them with the reason. folderless (a chat app session): items
     that need a folder are left out too (needs_folder)."""
-    model = model or agent_model(conn, actor)
-    ladder = parse_ladder(setting(conn, "model_ladder")) if model else None
-    stype = session_type(conn, actor)
-    family = session_family(conn, actor, stype)
-    doer_for = None
-    if actor:
-        r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone()
-        doer_for = r["kind"] if r else None
+    view = None if claim else WorkView(conn, actor, model=model, tree=only, chat=folderless)  # a claim reads it after its sweep
+    r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    doer_for = r["kind"] if r else None
     if mine and not actor:
         raise RiverError("--mine needs an agent name: set MAXPM_AGENT or pass --as <name>")
     who_mine = actor if mine else None
 
-    def fits(pool):
-        if not (model or stype):
-            return pool
-        out = []
-        for a in pool:
-            ok, why = agent_type_check(None if actor and a["reserved_for"] == actor else stype, a["agent"])
-            if ok and model:
-                ok, why = model_check(ladder, model, a["min_model"], a["max_model"], family)
-            if ok:
-                a["model_note"] = why
-                out.append(a)
-            elif skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                skipped.append({"id": a["id"], "title": a["title"], "why": why})
-        return out
-
     def takeable(pool):
-        if only is not None:  # auto_continue tree: the session's own tree (session_tree, #4994)
-            pool = [a for a in pool if a["id"] in only]
-        if not actor:
-            return fits(pool)
-        owned = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))}
-        # An item an answer just came for goes to a fresh session (maxpm serve starts it within a pass or two),
-        # not to a session that waits; with no maxpm serve, the next go takes it after FRESH_GRACE.
-        fresh = {r["id"] for r in conn.execute("SELECT id FROM items WHERE fresh_start > ?",
-                                               (iso(now() - FRESH_GRACE),))}
-        if _is_ai(conn, actor):
-            owned -= hooked_targets(conn)  # maxpm serve runs the release of a target with a deploy hook
-        pool = [a for a in pool if (a["kind"] != "deploy" or a["target"] in owned)
-                and a["reserved_for"] in (None, actor) and (a["id"] not in fresh or a["reserved_for"] == actor)]
-        # An item whose lease ran out while its agent's session still works on it: no second agent takes it.
-        still = still_worked(conn)
-        for a in [a for a in pool if still.get(a["id"], actor) != actor]:
-            if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                skipped.append({"id": a["id"], "title": a["title"], "why": f"{still[a['id']]} still works on it in its session"})
-        pool = [a for a in pool if still.get(a["id"], actor) == actor]
-        for a in [a for a in pool if a["kind"] in FRESH_KINDS and reviewer_refusal(conn, a, actor)]:
-            if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                skipped.append({"id": a["id"], "title": a["title"],
-                                "why": "you worked on the release it reviews" if author_refusal(conn, a, actor)
-                                else f"{'a review' if a['kind'] == 'review' else 'an operational task'} starts in "
-                                     f"a new session; this one held a task"})
-            pool.remove(a)
-        ops_first = operational_session(conn, actor)
-        if ops_first:  # a session started for an operational task takes no other work (#5546)
-            for a in [a for a in pool if a["kind"] != "operational"]:
-                if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                    skipped.append({"id": a["id"], "title": a["title"],
-                                    "why": f"this session started for operational task #{ops_first} on its own model; "
-                                           f"other work starts in a new session"})
-                pool.remove(a)
-        # The agent's own queue comes first, in its order and from any project; then items pushed to it.
-        # The sort is stable, so graph order holds inside each group.
-        qpos = {r["item_id"]: n for n, r in enumerate(conn.execute(
-            "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (actor,)))}
-        have = {a["id"] for a in pool}
-        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not reviewer_refusal(conn, a, actor)
-                and not (ops_first and a["kind"] != "operational")] + pool
-        pool = fits(pool)
-        if folderless:
-            for a in [a for a in pool if needs_folder(a)]:
-                if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                    skipped.append({"id": a["id"], "title": a["title"], "why": FOLDER_WHY})
-            pool = [a for a in pool if not needs_folder(a)]
-        return sorted(pool, key=lambda a: (a["id"] not in qpos, qpos.get(a["id"], 0),
-                                           not (a["reserved_for"] == actor and a["reserved_until"])))
+        # The one rule (work_refusal), in the one order (session_work): the same as wait, claim and launch (#5971).
+        return session_work(conn, view, pool, skipped)
 
     if not claim:
         return [{k: v for k, v in a.items() if k != 'sort_key'}
@@ -14270,6 +14342,7 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
     _prime_release_commits(conn)
     with tx(conn, claims=True):
         _sweep(conn)
+        view = WorkView(conn, actor, model=model, tree=only, chat=folderless)  # after the sweep: its leases and holds
         pool = takeable(ready_list(conn, project, unblocks, doer_for, near=near, mine=who_mine, actor=actor))
         if not pool:
             return []
@@ -15033,18 +15106,14 @@ def review_fail(conn, item_id, fixes, note=None, project=None, actor=None, ask=F
 def _review_claim(conn, actor, names, any_project=False, brief=None):
     """Claim a ready release review that covers items of these projects (or any, with any_project)."""
     ann = annotate(conn, closed=False)  # a ready review is open; the done items it waits on come when asked (#5522)
-    ready = []
-    for a in ann.values():
-        if a["kind"] != "review" or not a["ready"] or a["reserved_for"] not in (None, actor):
-            continue
-        why = reviewer_refusal(conn, a, actor)  # an author, or a used session: serve starts another reviewer
-        if why:
-            if brief is not None:
+    if brief is not None:
+        for a in ann.values():
+            why = (a["kind"] == "review" and a["ready"] and a["reserved_for"] in (None, actor)
+                   and reviewer_refusal(conn, a, actor))  # an author, or a used session: serve starts another reviewer
+            if why:
                 brief.setdefault("review_refused", why)
-            continue
-        if any_project or any(ann[b]["project"] in names for b in a["waits_on"]):
-            ready.append(a)
-    for a in sorted(ready, key=lambda a: a["sort_key"]):
+                break
+    for a in _reviews_for(conn, ann, WorkView(conn, actor), names, any_project):
         try:
             return claim(conn, a["id"], actor)
         except RiverError as e:
@@ -19421,6 +19490,7 @@ def waiting_agent_for(conn, project, item_id=None, model=None):
             return bool(have) and (ladder_short(ladder, have) or have) == want
         return bool(have) or it is None or not it["min_model"]
     authors = release_authors(conn, it["id"]) if it is not None and it["kind"] == "review" else set()
+    ann = annotate(conn, closed=False) if it is not None else {}
     for r in conn.execute("SELECT name, waiting_in FROM agents WHERE role='waiting' AND kind='ai' "
                           "ORDER BY waiting_since").fetchall():
         a = agent_status(conn, r["name"])
@@ -19428,7 +19498,10 @@ def waiting_agent_for(conn, project, item_id=None, model=None):
             if (r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"]))
                     and model_fits(r["name"])
                     and (it is None or it["kind"] not in FRESH_KINDS or used_session(conn, r["name"], it["id"]) is None)
-                    and (it is None or _in_tree(it["id"], tree_mode(conn, r["name"])))):
+                    and (it is None or _in_tree(it["id"], tree_mode(conn, r["name"])))
+                    # the one rule of go and claim (#5971): the session takes the item when it gets it
+                    and (it is None or it["id"] not in ann or work_refusal(conn, ann[it["id"]],
+                                                                           WorkView(conn, r["name"])) is None)):
                 return r["name"]
     return None
 
@@ -20847,10 +20920,13 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         return brief
 
     if role in (None, "worker") and not focus:
-        # The agent's own queue before the project queue: the first ready item in it.
+        # The agent's own queue before the project queue: the first ready item in it that the one rule lets it take.
+        view = WorkView(conn, actor, chat=chat)
         for a in _queue_ready(conn, actor):
-            if chat and needs_folder(a):
-                skipped.append({"id": a["id"], "title": a["title"], "why": FOLDER_WHY})
+            why = work_refusal(conn, a, view)
+            if why:
+                if why[1]:
+                    skipped.append({"id": a["id"], "title": a["title"], "why": why[0]})
                 continue
             try:
                 item = claim(conn, a["id"], actor)
@@ -20926,9 +21002,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             brief["focus_note"] = (f"The page opened this session to unblock #{f['id']}, but nothing that blocks it "
                                    f"is ready for an agent now (maxpm blockers {f['id']}).")
     if role in (None, "worker"):
-        ann = annotate(conn, closed=False)
-        pushed = sorted((a for a in ann.values() if a["reserved_for"] == actor and a["reserved_until"] and ready_for(a, actor)),
-                        key=lambda a: a["sort_key"])
+        ann, view = annotate(conn, closed=False), WorkView(conn, actor)
+        pushed = sorted((a for a in ann.values() if a["reserved_for"] == actor and a["reserved_until"]
+                         and work_refusal(conn, a, view) is None), key=lambda a: a["sort_key"])
         for a in pushed:
             try:
                 item = claim(conn, a["id"], actor)
@@ -21001,9 +21077,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                 break
         if g is not None:
             gb = brief["goal"] = _goal_brief(conn, g["name"], actor)
-            ann = annotate(conn, closed=False)
-            tagged = sorted((a for a in ann.values() if g["name"] in a["goals"] and ready_for(a, actor) and a["doer"] != "human"
-                             and a["kind"] not in ("deploy", "review") and a["reserved_for"] in (None, actor)), key=lambda a: a["sort_key"])
+            tagged = _goal_items_for(conn, annotate(conn, closed=False), WorkView(conn, actor), g["name"])
             for a in tagged:  # (1) the next ready item of the goal
                 try:
                     item = claim(conn, a["id"], actor)
@@ -21114,14 +21188,9 @@ def _deploy_claim(conn, actor, names, take_free=False, brief=None, skip_released
             except RiverError as e:
                 if brief is not None:
                     brief["claim_refused"] = str(e)
-    owned = [r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=? ORDER BY name", (actor,))]
-    if not owned:
+    if not conn.execute("SELECT 1 FROM targets WHERE owner=?", (actor,)).fetchone():
         return None
-    ann = annotate(conn)
-    hooked = hooked_targets(conn) if _is_ai(conn, actor) else set()
-    ready = sorted((a for a in ann.values() if a["kind"] == "deploy" and a["target"] in owned and a["ready"]
-                    and a["target"] not in hooked), key=lambda a: a["sort_key"])
-    for a in ready:
+    for a in _deploys_for(conn, annotate(conn, closed=False), WorkView(conn, actor)):
         try:
             return claim(conn, a["id"], actor)
         except RiverError as e:
@@ -21225,20 +21294,22 @@ def _work_for(conn, actor, names, role=None, seen=None):
     it, so that session takes it, and the others do not each wake for it and get IDLE from go (#5205)."""
     note = conn.execute("SELECT kind, body FROM queue_entries WHERE agent=? AND kind<>'item' AND delivered_at IS NULL "
                         "ORDER BY kind<>'stop', pos LIMIT 1", (actor,)).fetchone()
+    view = WorkView(conn, actor)  # the one rule of go, next and claim (#5971)
     if role:
         if note:
             return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
         ann = annotate(conn, closed=False)
         if role == "deployer":
-            targets = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))} | {
-                r["name"] for r in conn.execute(
-                    f"SELECT t.name FROM targets t JOIN projects p ON p.target=t.name WHERE t.owner IS NULL "
-                    f"AND p.name IN ({','.join('?' * len(names))})", names) if not released_by(conn, r["name"], actor)}
+            # A deployer also takes a free target of its projects that it did not release (_deploy_claim).
+            view.targets |= {r["name"] for r in conn.execute(
+                f"SELECT t.name FROM targets t JOIN projects p ON p.target=t.name WHERE t.owner IS NULL "
+                f"AND p.name IN ({','.join('?' * len(names))})", names)
+                if not released_by(conn, r["name"], actor)} - hooked_targets(conn)
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"])
-                        if a["kind"] == "deploy" and a["target"] in targets - hooked_targets(conn) and a["ready"]), None)
+                        if a["kind"] == "deploy" and work_refusal(conn, a, view) is None), None)
         else:
-            got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"]) if a["kind"] == "review"
-                        and a["ready"] and a["reserved_for"] in (None, actor) and not reviewer_refusal(conn, a, actor)), None)
+            got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"])
+                        if a["kind"] == "review" and work_refusal(conn, a, view) is None), None)
         if got:
             return f"#{got['id']} is ready: {got['title']}"
         u = unread(conn, actor)
@@ -21249,17 +21320,32 @@ def _work_for(conn, actor, names, role=None, seen=None):
                                             "AND status='open'", (actor,))]
     if pushed:
         ann = annotate(conn, closed=False)
-        got = next((i for i in pushed if i in ann and ready_for(ann[i], actor)), None)
+        got = next((a["id"] for a in sorted((ann[i] for i in pushed if i in ann), key=lambda a: a["sort_key"])
+                    if work_refusal(conn, a, view) is None), None)
         if got:
             return f"#{got} was pushed to you"
     if note:
         return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
-    q = _queue_ready(conn, actor)
+    q = [a for a in _queue_ready(conn, actor) if work_refusal(conn, a, view) is None]
     if q:
         return f"#{q[0]['id']} in your queue is ready: {q[0]['title']}"
+    # What go takes before the area (#5971): a deploy of a target it owns, a review of the release of these projects,
+    # and the items of the goal it owns (any project).
+    ann = annotate(conn, closed=False)
+    g = _owned_goal(conn, actor, names)
+    got = (_deploys_for(conn, ann, view) or _reviews_for(conn, ann, view, names)
+           or (_goal_items_for(conn, ann, view, g["name"]) if g else []))
+    if got:
+        return f"#{got[0]['id']} is ready: {got[0]['title']}"
+    tree = tree_mode(conn, actor)
     try:
         nxt = next_item(conn, ",".join(names) if names else None, None, False, actor, 1 if seen is None else 5,
-                        only=tree_mode(conn, actor))
+                        only=tree)
+        # go's unblocker step: nothing ready in the area, but something that clears the way for it.
+        for n in ([] if nxt else names):
+            nxt = next_item(conn, None, n, False, actor, 1 if seen is None else 5, only=tree)
+            if nxt:
+                break
     except RiverError:
         nxt = []
     for a in nxt:

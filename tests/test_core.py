@@ -13409,3 +13409,71 @@ class DesignDoc(Base):
                          ["canvas", "design", "phone", "--title=T", "--project=app"])
         self.assertEqual(mcp.canvas_argv({"action": "plan", "name": "phone", "version": 1}),
                          ["canvas", "plan", "phone", "--version=1"])
+
+
+class SameAnswer(Base):
+    """#5971: one rule (work_refusal) decides a session's work, so wait, next, go and claim give one answer. Each test
+    is a case where they disagreed before: wait said WORK and go said IDLE (a loop), or go took what wait never woke
+    for."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w")
+        core.register(self.c, "mark", human=True)
+
+    def answers(self, actor="w"):
+        """(the item wait names, next's first item, the item go claims): wait and next look, go takes."""
+        why = core._work_for(self.c, actor, ["a"]) or ""
+        m = re.search(r"#(\d+)", why)
+        w = int(m.group(1)) if m else None
+        nxt = core.next_item(self.c, "a", actor=actor)
+        b = core.go(self.c, self.dir.name, actor)
+        return w, (nxt[0]["id"] if nxt else None), (b["item"]["id"] if b.get("item") else None)
+
+    def test_same_answer_for_an_expert_task_in_the_queue(self):
+        x = core.item_add(self.c, "a", "talk it through", tier="expert")["id"]
+        core.queue_add(self.c, "w", x, actor="mark")
+        self.assertEqual(self.answers(), (None, None, None))  # wait said '#x in your queue is ready'; go said IDLE
+        with self.assertRaisesRegex(RiverError, "expert-tier"):
+            core.claim(self.c, x, "w")
+
+    def test_same_answer_for_a_goal_item_of_another_agent_type(self):
+        self.c.execute("UPDATE agents SET agent_type='claude-code', typed_at=? WHERE name='w'", (core.iso(core.now()),))
+        core.goal_add(self.c, "a", "g", "the outcome", "it works")
+        x = core.item_add(self.c, "a", "for codex", goals=["g"], models={"agent": "codex"})["id"]
+        core.goal_own(self.c, "g", "w")
+        # The owner holds the goal's items: next and wait offered it, claim refused it for the agent type (#5089).
+        self.assertEqual(self.answers(), (x, x, x))
+
+    def test_same_answer_for_a_model_limit(self):
+        core.set_agent_model(self.c, "w", "sonnet")
+        x = core.item_add(self.c, "a", "hard part", models={"min_model": "opus"})["id"]
+        skipped = []
+        self.assertEqual(core.next_item(self.c, "a", actor="w", skipped=skipped), [])
+        self.assertEqual([s["id"] for s in skipped], [x])
+        with self.assertRaises(RiverError):
+            core.claim(self.c, x, "w")
+        y = core.item_add(self.c, "a", "easy part", priority=3)["id"]
+        self.assertEqual(self.answers(), (y, y, y))
+
+    def test_same_answer_for_a_queue_item_of_an_archived_project_and_a_push_order(self):
+        core.project_add(self.c, "old", path=self.dir.name)
+        q = core.item_add(self.c, "old", "left over")["id"]
+        core.queue_add(self.c, "w", q, actor="mark")
+        core.project_archive(self.c, "old", "mark")
+        low = core.item_add(self.c, "a", "low", priority=4)["id"]
+        high = core.item_add(self.c, "a", "high", priority=0)["id"]
+        for i in (low, high):
+            core.push(self.c, i, "w", "take it", "mark")
+        # wait named the first push by id order; go takes the most important one.
+        self.assertEqual(self.answers(), (high, high, high))
+
+    def test_same_answer_for_a_session_that_held_an_operational_task(self):
+        ops = core.item_add(self.c, "a", "read the logs", kind="operational")["id"]
+        core.claim(self.c, ops, "w")
+        core.done(self.c, ops, "read", "w")
+        x = core.item_add(self.c, "a", "build the fix")["id"]
+        self.assertEqual(self.answers(), (None, None, None))  # it starts in a new session on its own model (#5546)
+        core.push(self.c, x, "w", "you know the logs", "mark")  # a person may still push one to it
+        self.assertEqual(self.answers(), (x, x, x))
