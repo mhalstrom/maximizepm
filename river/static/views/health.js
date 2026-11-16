@@ -1,7 +1,6 @@
 // The Health view of Plan (#5356, decision 2 of the canvas does-maxpm-work): GET api/health, the numbers of maxpm
 // health. Tiles with the headline (person minutes per done item, a proxy) and the measures beside it, each with the
-// value of the time before; a small bar graph per measure by day (UTC), the change log as dashed lines; the goal
-// comparison as a table. One series per graph: one color, no legend; each day's bar has its value as a hover.
+// value of the time before; a small bar graph per measure by day (UTC); the goal comparison as a table. One series per graph: one color, no legend; each day's bar has its value as a hover.
 import { $, esc } from "../lib.js";
 import { scope, planShown } from "../page.js";
 
@@ -16,7 +15,7 @@ function tile(label, val, before, main) {
 }
 
 // One bar per day; the hit area of a day is its whole column, so a short bar is easy to hover.
-function graph(title, days, field, fmt, changes) {
+function graph(title, days, field, fmt) {
   const W = 100 * days.length, H = 100;
   const vals = days.map(d => d[field]);
   const max = Math.max(0, ...vals.filter(v => v != null));
@@ -27,14 +26,9 @@ function graph(title, days, field, fmt, changes) {
     return `<g><rect class="h-hit" x="${i * 100}" y="0" width="100" height="${H}"><title>${esc(tip)}</title></rect>`
       + (h ? `<rect class="h-bar" x="${i * 100 + 12}" y="${H - h}" width="76" height="${h}" rx="6"><title>${esc(tip)}</title></rect>` : "") + `</g>`;
   }).join("");
-  const t0 = Date.parse(days[0].day + "T00:00:00Z");
-  const marks = changes.map(c => {
-    const x = (Date.parse(c.at) - t0) / 864e5 * 100;
-    return x >= 0 && x <= W ? `<line class="h-change" x1="${x}" x2="${x}" y1="0" y2="${H}"><title>${esc(c.at.slice(0, 10) + " " + c.name)}</title></line>` : "";
-  }).join("");
   return `<div class="h-graph"><h3 title="${esc(title)}">${esc(title)}</h3>`
     + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)} by day, highest ${esc(fmt(max))}">`
-    + `${bars}<line class="h-base" x1="0" x2="${W}" y1="${H}" y2="${H}"/>${marks}</svg>`
+    + `${bars}<line class="h-base" x1="0" x2="${W}" y1="${H}" y2="${H}"/></svg>`
     + `<div class="h-axis"><span>${esc(days[0].day.slice(5))}</span><span>max ${esc(fmt(max))}${last == null ? "" : esc(" · last " + fmt(last))}</span><span>${esc(days[days.length - 1].day.slice(5))}</span></div></div>`;
 }
 
@@ -73,20 +67,13 @@ export async function renderHealth(force) {
   $("#healthNote").textContent = `Person minutes are a proxy: ${H.person_minutes} minutes for each needs-you row (setting health_person_minutes). `
     + `Rework: ${n.reopens} reopens, ${n.lost_claims} lost claims, ${n.review_fixes} review fix items in ${n.done} done items. `
     + `Cost: ${n.cost_measured} of ${n.done} items measured.`;
-  const ch = H.changes || [];
   $("#healthGraphs").innerHTML = [
-    graph("Person min per item", H.days, "person_minutes_per_item", v => num(v, 2), ch),
-    graph("Items done", H.days, "done", v => num(v, 0), ch),
-    graph("Rework rate", H.days, "rework_rate", v => pc(v), ch),
-    graph("Waiting for work", H.days, "idle", v => pc(v, 0), ch),
-    graph("Median cost (eq)", H.days, "median_eq", kt, ch),
+    graph("Person min per item", H.days, "person_minutes_per_item", v => num(v, 2)),
+    graph("Items done", H.days, "done", v => num(v, 0)),
+    graph("Rework rate", H.days, "rework_rate", v => pc(v)),
+    graph("Waiting for work", H.days, "idle", v => pc(v, 0)),
+    graph("Median cost (eq)", H.days, "median_eq", kt),
   ].join("");
-  $("#healthChangesBox").classList.toggle("hidden", !ch.length);
-  $("#healthChanges").innerHTML = ch.map(c => {
-    const x = c.before || {}, y = c.after || {};
-    return `<div class="h-change-row"><b>${esc(c.at.slice(0, 10))} ${esc(c.name)}</b>: person min/item ${num(x.person_minutes_per_item, 2)} → ${num(y.person_minutes_per_item, 2)}, `
-      + `done/day ${num(x.per_day)} → ${num(y.per_day)}, rework ${pc(x.rework_rate)} → ${pc(y.rework_rate)}</div>`;
-  }).join("") + (ch.length ? `<div class="muted t-s">Weak proof: other things change at the same time. A person or the manager adds a change: maxpm change add "&lt;name&gt;" --at &lt;date&gt;</div>` : "");
   $("#healthGoal").innerHTML = goalTable(H.by_goal);
 }
 $("#healthSince").addEventListener("change", () => renderHealth(true));

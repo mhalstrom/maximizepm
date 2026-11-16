@@ -59,7 +59,7 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "withdraw", "accept", "decline", "offer", "give", "split", "keep", "undep", "dep", "drop", "prio", "move",
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "synced", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
-          "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config", "change",
+          "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config",
           "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser"}
 # Words that keep a command in its own process: it waits, it reads stdin, or it reads or writes a file it names.
 FILE_WORDS = ("--wait", "--watch", "--from", "--file", "--put", "--out", "--summary-file")

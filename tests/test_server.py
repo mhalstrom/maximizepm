@@ -5715,21 +5715,18 @@ class HealthApi(unittest.TestCase):
         h.do_GET()
         return out["code"], out["body"]
 
-    def test_the_view_gets_the_days_the_goal_split_and_the_changes(self):
+    def test_the_view_gets_the_days_and_the_goal_split(self):
         core.project_add(self.c, "shop")
         x = core.item_add(self.c, "shop", "work")["id"]
         core.register(self.c, "w")
-        core.register(self.c, "mark", human=True)
         core.claim(self.c, x, "w")
         core.done(self.c, x, actor="w")
-        core.change_add(self.c, "manager first", at=core.now() - core.timedelta(days=1), actor="mark")
         code, body = self.get("/api/health?since=7d")
         self.assertEqual(code, 200)
         self.assertEqual(len(body["days"]), 8)  # a part of a day at each end
         self.assertEqual(sum(d["done"] for d in body["days"]), 1)
         self.assertEqual(body["now"]["done"], 1)
         self.assertIn("by_goal", body)
-        self.assertEqual([c["name"] for c in body["changes"]], ["manager first"])
         code, body = self.get("/api/health?since=7d&project=shop")
         self.assertEqual((code, body["project"]), (200, "shop"))
         code, body = self.get("/api/health?since=7d&project=nope")
