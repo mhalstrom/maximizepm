@@ -840,7 +840,7 @@ def _footer(conn, actor):
                     f"each answered one: maxpm --as {actor} answer <id> --self \"...\", or a moot one: withdraw <id> "
                     f"--note \"...\"")
     gap = core.watch_gap(conn, actor)
-    if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898)
+    if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898); a stopped one ends (#6057)
         bits.append(f"no watch runs for {core._short(gap)}: start maxpm --as {actor} manage --watch in the "
                     f"background before you end your turn")
     if bits:
@@ -5197,8 +5197,11 @@ def render_manage(b):
     r = f"maxpm --as {me}"
     if "result" in b:  # --watch
         if b["result"] == "stop":
-            print("STOP REQUESTED" + (f": {b['stop']['stop_reason']}" if b["stop"].get("stop_reason") else "")
-                  + f". Tell the user what you did, then run {r} go to end the session.")
+            # #6057: the loop starts the watch again after every other exit; after this one it must not.
+            print("STOP REQUESTED" + (f" by {b['stop']['stop_by']}" if b["stop"].get("stop_by") else "")
+                  + (f": {b['stop']['stop_reason']}" if b["stop"].get("stop_reason") else "")
+                  + f". Do not start manage --watch again. Run {r} go once: it ends the session and releases "
+                  "your targets and goals. Then tell the user what you did, and end your turn.")
             return
         msgs = b["messages"]
         if b.get("blocked_only"):
@@ -5298,7 +5301,8 @@ def render_manage(b):
              + (f", or until manage_wake_count {b.get('wake_count', '5')} messages and findings wait"
                 if str(b.get("wake_count", "5")) not in ("0", "") else "")
              + "; in quiet time (no session works, the person away) the beat is manage_quiet_every. Start it again "
-               "each time. It is your only watcher: MaximizePM refuses a second wait for your messages."),
+               "each time, except after STOP REQUESTED: then run go once, which ends the session, and start no "
+               "watch (#6057). It is your only watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [
             "Messages: MaximizePM delivers a blocked one and a person's into this session itself (native_message); "
             "what reached this session does not wake the watch. The watch brings each other message after its wait, "

@@ -63,8 +63,9 @@ const taskList = (s) => (s.holds || []).map(h => `#${h.id} ${esc(h.title)}`).joi
 // The text and buttons of the dialog for one session (a card of GET /api/sessions).
 export function endHtml(s) {
   const name = esc(s.name), held = (s.holds || []).length;
-  // #5960: a worker that holds a task or a goal stops only with the person's reason.
-  const needs = s.role !== "expert" && (held || (s.goals || []).length || s.goal);
+  // #5960: a worker that holds a task, a goal or a deploy target stops only with the person's reason. #6057: the
+  // manager owns a target; without the field marked needed, End sent no reason, the server refused, and it ran on.
+  const needs = s.role !== "expert" && (held || (s.goals || []).length || s.goal || (s.owns || []).length);
   const reason = `<div class="form"><label>Why (${needs ? "needed: it holds work" : "optional"}; ${s.role === "expert" ? "the history keeps it" : "the session sees it"})<input data-end-reason${needs ? " required" : ""} placeholder="the plan changed"></label></div>`;
   const now = s.can_kill ? `<div class="end-now hidden"><b>End ${name} now?</b> ${s.pid ? `Its process (PID ${esc(s.pid)})` : "The program in its tmux pane"} ends at once. Use this only
       when the session does not answer. Work that it did not commit stays in its folder, and nothing commits it. MaximizePM releases its

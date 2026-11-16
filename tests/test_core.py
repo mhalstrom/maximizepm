@@ -7218,6 +7218,32 @@ class Manager(Base):
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
         self.assertEqual(w["result"], "stop")
 
+    def test_an_ended_manager_starts_no_watch_again_and_go_ends_it(self):
+        # #6057: the person ended the manager on the page; it owned a deploy target, so the stop needed a reason, the
+        # page sent none, the server refused, and the manager started its watch again. With the stop recorded, the
+        # watch says STOP and not to start it again, nothing reminds it of a watch, and go ends it.
+        from river import cli
+        core.manage(self.c, self.dir.name, "boss")
+        core.target_add(self.c, "site", actor="mark")
+        core.target_own(self.c, "site", "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        with self.assertRaises(core.RiverError):  # a stop of a session that owns a target needs a reason (#5960)
+            core.stop_agent(self.c, "boss", "end", actor="mark")
+        core.stop_agent(self.c, "boss", "stopped from the page by mark", actor="mark")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_manage(core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait")))
+        self.assertIn("STOP REQUESTED by mark: stopped from the page by mark. Do not start manage --watch again. "
+                      "Run maxpm --as boss go once", out.getvalue())
+        with core.tx(self.c):  # its last watch poll is long ago: no reminder and no late alert for a stopped manager
+            self.c.execute("UPDATE agents SET watch_seen=? WHERE name='boss'",
+                           (core.iso(core.now() - core.timedelta(hours=1)),))
+        self.assertIsNone(core.watch_gap(self.c, "boss"))
+        b = core.go(self.c, self.dir.name, "boss")
+        self.assertEqual(b["role"], "stopped")
+        self.assertTrue(b["ended"])
+        self.assertIsNone(core.target_show(self.c, "site")["owner"])
+
     def test_the_watch_names_new_messages_on_its_first_and_last_line(self):
         # #5685: a watch that began with CHANGED had its messages above the last 10 lines, and the manager,
         # who read only the end, missed a blocked alert for 18 minutes.

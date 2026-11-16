@@ -24518,9 +24518,9 @@ def watch_gap(conn, name):
     """For how long the manager `name` runs no watch (maxpm manage --watch): a timedelta, or None while a
     watch runs (its last poll is younger than WATCH_BEAT), for a manager that never ran one (a manager in a
     chat has none), and for an agent that is no manager."""
-    r = conn.execute("SELECT watch_seen FROM agents WHERE name=? AND role='manager'", (name,)).fetchone()
-    if not r or not r["watch_seen"]:
-        return None
+    r = conn.execute("SELECT watch_seen, stop_at FROM agents WHERE name=? AND role='manager'", (name,)).fetchone()
+    if not r or not r["watch_seen"] or r["stop_at"]:
+        return None  # a manager asked to stop runs no watch on purpose: nothing tells it to start one (#6057)
     gap = now() - parse_iso(r["watch_seen"])
     return gap if gap > WATCH_BEAT else None
 

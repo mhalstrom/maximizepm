@@ -1957,7 +1957,10 @@ try {
   const ex = m.endHtml({ name: "fab", role: "expert", state: "expert", holds: [{ id: 7, title: "the pricing talk" }] });
   const none = m.endHtml({ name: "w", role: "worker", state: "idle", holds: [], can_kill: false });
   const plain = m.endHtml({ name: "p", role: "plain", state: "idle", holds: [], can_kill: false });
-  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none, plain, sizes,
+  // #6057: a manager that owns only a deploy target, or a worker that owns only a goal, needs the reason too.
+  const mgr = m.endHtml({ name: "mg", role: "manager", state: "idle", holds: [], owns: [{ name: "site" }], can_kill: false });
+  const owner = m.endHtml({ name: "o", role: "worker", state: "idle", holds: [], goals: ["g1"], can_kill: false });
+  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none, plain, mgr, owner, sizes,
          op: m.endOp({ name: "fab", role: "expert" }, { how: "expert", reason: "", done: true }) });
 } catch (e) { post({ error: String(e.stack || e) }); }
 """
@@ -1982,6 +1985,9 @@ try {
         self.assertIn("ends a few minutes after its turn ends", r["plain"])
         self.assertNotIn("commits its finished work", r["plain"])
         self.assertIn('data-end-go="stop"', r["plain"])
+        self.assertIn("data-end-reason required", r["mgr"])
+        self.assertIn("data-end-reason required", r["owner"])
+        self.assertNotIn("data-end-reason required", r["none"])
         self.assertEqual(r["op"], ["expert_end", {"name": "fab", "done": True}])
 
 

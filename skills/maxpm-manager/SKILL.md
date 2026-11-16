@@ -70,7 +70,10 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    watch before you end your turn. After 5 minutes with no watch and a
    message that is due, `maxpm serve` alerts each person.
 
-Stop when the user tells you to, and tell the user what you did.
+Stop when the user tells you to, and tell the user what you did. When the
+watch prints STOP REQUESTED (the person ended you on the page, or ran
+`maxpm stop`), start no watch again: run `maxpm --as <you> go` once, which
+ends the session, and tell the user.
 
 ## What to do for each finding
 

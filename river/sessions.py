@@ -791,6 +791,10 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
     lines, and what waits for a person in it (prompts: server.pane_prompts)."""
     agents = running(conn, terminals)
     waiting = core.waits_on_person(conn, [a["name"] for a in agents])
+    # The goals each session owns, in one read: End asks for the person's reason when a session owns a goal (#6057).
+    goals = {}
+    for g in conn.execute("SELECT owner, name FROM goals WHERE status='open' AND owner IS NOT NULL ORDER BY rank, id"):
+        goals.setdefault(g["owner"], []).append(g["name"])
     # One session can run commands under several names (a manager that acted --as a worker): one card for it, in
     # the name the queue saw last, unless another name holds the work.
     agents.sort(key=lambda a: (bool(a["holds"] or a.get("owns")), a.get("last_seen") or ""), reverse=True)
@@ -838,7 +842,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 # Its project and goals too, so the head's links to Plan need no other answer (#5124).
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"], **_place(conn, h["id"])}
                           for h in a["holds"]],
-                "owns": a.get("owns") or [], "state": key, "state_label": label,
+                "owns": a.get("owns") or [], "goals": goals.get(a["name"], []), "state": key, "state_label": label,
                 # The shell commands that run in it now (#5830): [{pid, started, label}], None when not known.
                 "shells": a.get("shells"),
                 # End (#5041): who asked it to stop and why, and End now for a process on this computer.
