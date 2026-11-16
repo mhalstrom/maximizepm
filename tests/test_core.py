@@ -935,37 +935,54 @@ class Targets(Base):
         core.project_target(self.c, "api", None)
         self.assertEqual([p["name"] for p in core.target_show(self.c, "web")["projects"]], ["site"])
 
-    def test_a_push_on_yes_target_has_no_ship_hook_or_deployer_and_a_lead_sets_risk_and_mode(self):
-        """#5968 (policies p114, p155): a target's mode (deploy, or push-on-yes: the session with the person's yes
-        pushes and closes with done) and risk class (production by default, or low). Only a person or the manager
-        sets them; a push-on-yes target refuses ship, a hook and a deployer, with the next step."""
+    def test_a_push_target_has_no_ship_hook_or_deployer_and_a_lead_sets_risk_and_mode(self):
+        """#5968, #6043: a target's mode (deploy, or push: the session that made the change pushes to main when its
+        tests pass and closes with done; a person's yes only with release_approval person) and risk class
+        (production by default, or low). Only a person or the manager sets them; a push target refuses ship, a hook
+        and a deployer, with the next step. The old name push-on-yes means push."""
         core.target_add(self.c, "site-com")
         core.project_add(self.c, "site", target="site-com")
         core.register(self.c, "w")
         core.register(self.c, "mark", human=True)
         t = core.target_show(self.c, "site-com")
         self.assertEqual((t["mode"], t["risk"]), ("deploy", "production"))
-        for call in (lambda: core.target_mode(self.c, "site-com", "push-on-yes", "w"),
+        for call in (lambda: core.target_mode(self.c, "site-com", "push", "w"),
                      lambda: core.target_risk(self.c, "site-com", "low", "w")):
             with self.assertRaisesRegex(RiverError, "only a person or the manager"):
                 call()
-        with self.assertRaisesRegex(RiverError, "deploy or push-on-yes"):
-            core.target_mode(self.c, "site-com", "push", "mark")
+        with self.assertRaisesRegex(RiverError, "deploy or push"):
+            core.target_mode(self.c, "site-com", "yes", "mark")
         # A hook first: the mode refuses until it is gone.
         core.target_hook(self.c, "site-com", "deployed", "echo hi", actor="mark")
         with self.assertRaisesRegex(RiverError, r"has hooks \(deployed\).*--clear"):
-            core.target_mode(self.c, "site-com", "push-on-yes", "mark")
+            core.target_mode(self.c, "site-com", "push", "mark")
         core.target_hook(self.c, "site-com", "deployed", clear=True, actor="mark")
         t = core.target_mode(self.c, "site-com", "push-on-yes", "mark")
-        self.assertEqual((t["mode"], t["deployer"]), ("push-on-yes", "off"))
-        self.assertIn("push-on-yes", core.target_mode_text(t))
+        self.assertEqual((t["mode"], t["deployer"]), ("push", "off"), "the old name sets push")
+        text = core.target_mode_text(t)
+        self.assertIn("push: the session that made the change pushes to main when its tests pass", text)
+        self.assertNotIn("holds the person's yes", text)
         it = self.add("site", "New footer")
-        with self.assertRaisesRegex(RiverError, rf"push-on-yes.*push to main yourself and close with maxpm done #{it}"):
+        with self.assertRaisesRegex(RiverError, rf"mode push.*push to main yourself and close with maxpm done {it}"):
             core.ship(self.c, it, "w")
-        with self.assertRaisesRegex(RiverError, "push-on-yes.*no hooks"):
+        with self.assertRaisesRegex(RiverError, "mode push.*no hooks"):
             core.target_hook(self.c, "site-com", "deployed", "echo hi", actor="mark")
-        with self.assertRaisesRegex(RiverError, "push-on-yes.*no deployer"):
+        with self.assertRaisesRegex(RiverError, "mode push.*no deployer"):
             core.target_deployer(self.c, "site-com", "launch", "mark")
+        # The go briefing says how the change goes out, and that no yes is needed without release_approval person.
+        from river import cli
+        b = {"release_mode": {"target": "site-com", "mode": "push", "approval": ""}}
+        line = " ".join(cli._release_rule(b, {"id": it}, "maxpm --as w"))
+        self.assertIn(f"push to main yourself and close with maxpm --as w done {it} (no --ship)", line)
+        self.assertIn("no person's yes is needed", line)
+        b["release_mode"]["approval"] = "person"
+        self.assertIn("release_approval person", " ".join(cli._release_rule(b, {"id": it}, "maxpm")))
+        self.assertEqual(cli._release_rule({"release_mode": None}, {"id": it}, "maxpm"), [])
+        # A queue with the old name: connect renames it.
+        with core.tx(self.c):
+            self.c.execute("UPDATE targets SET mode='push-on-yes' WHERE name='site-com'")
+            self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # the migrations run once per code version
+        self.assertEqual(core.target_show(core.connect(self.path), "site-com")["mode"], "push")
         # Back to deploy: ship works again; the risk class shows in the line.
         core.target_mode(self.c, "site-com", "deploy", "mark")
         core.ship(self.c, it, "w")

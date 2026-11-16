@@ -691,7 +691,7 @@ CREATE TABLE IF NOT EXISTS targets (
   watch_times       TEXT NOT NULL DEFAULT '',  -- times after a release that its watch checks run: '1m 10m 1h 24h' (#5508)
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
   risk              TEXT NOT NULL DEFAULT 'production',  -- low | production (maxpm target risk, #5968)
-  mode              TEXT NOT NULL DEFAULT 'deploy',  -- deploy | push-on-yes (maxpm target mode, #5968)
+  mode              TEXT NOT NULL DEFAULT 'deploy',  -- deploy | push (maxpm target mode, #5968, #6043)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -2486,6 +2486,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN risk TEXT NOT NULL DEFAULT 'production'")
     if "mode" not in tcols:
         conn.execute("ALTER TABLE targets ADD COLUMN mode TEXT NOT NULL DEFAULT 'deploy'")
+    # #6043 (mark 2026-11-16): the mode push-on-yes is push; a person's yes only where release_approval person asks.
+    conn.execute("UPDATE targets SET mode='push' WHERE mode='push-on-yes'")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -4525,8 +4527,8 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
                 why = may_set_hook(conn, actor) or _fault_refusal(conn, actor, "change a hook")
                 if why:
                     raise RiverError(why)
-                if t["mode"] == "push-on-yes" and command is not None:  # #5968, policy p114
-                    raise RiverError(f"target {name} releases by a push with the person's yes (mode push-on-yes): it "
+                if t["mode"] == "push" and command is not None:  # #5968, #6043
+                    raise RiverError(f"target {name} releases by a push (mode push: the session that made the change pushes to main when its tests pass): it "
                                      f"has no hooks; to give it hooks: maxpm target mode {name} deploy")
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
             if clear:
@@ -9016,7 +9018,7 @@ DEPLOYER_MODES = ("launch", "standing", "off")
 
 # #5968 (policies p114, p155): how a target releases, and who decides a release.
 TARGET_RISKS = ("low", "production")
-TARGET_MODES = ("deploy", "push-on-yes")
+TARGET_MODES = ("deploy", "push")
 
 
 def _lead_refusal(conn, actor, what):
@@ -9044,21 +9046,23 @@ def target_risk(conn, name, risk, actor=None):
 
 
 def target_mode(conn, name, mode, actor=None):
-    """maxpm target mode: deploy (ship requests collect on a deploy item) or push-on-yes (p114: the session that
-    holds the person's yes pushes to main itself and closes with maxpm done; no ship, no deploy item, no hook, no
-    deployer). Refused while the target has hooks or an open deploy item: remove or finish them first."""
+    """maxpm target mode: deploy (ship requests collect on a deploy item) or push (#6043: the session that made the change pushes to main when its tests pass
+    and closes with maxpm done; no ship, no deploy item, no hook, no deployer; a person's yes only when the target
+    says release_approval person). Refused while the target has hooks or an open deploy item: remove or finish them
+    first. The old name push-on-yes means push."""
+    mode = "push" if mode == "push-on-yes" else mode
     if mode not in TARGET_MODES:
-        raise RiverError("the release mode is deploy or push-on-yes")
+        raise RiverError("the release mode is deploy or push")
     why = _lead_refusal(conn, actor, "sets how a target releases")
     if why:
         raise RiverError(why)
     with tx(conn):
         t = _target(conn, name)
         name = t["name"]
-        if mode == "push-on-yes":
+        if mode == "push":
             hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))]
             if hooks:
-                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push-on-yes target has none: "
+                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push target has none: "
                                  f"maxpm target hook {name} <event> --clear")
             dep = conn.execute(f"SELECT id FROM items WHERE kind='deploy' AND target=? AND status IN {OPEN_STATES} "
                                "ORDER BY id LIMIT 1", (name,)).fetchone()
@@ -9073,8 +9077,8 @@ def target_mode(conn, name, mode, actor=None):
 
 def target_mode_text(t):
     """One line for maxpm target show: how the target releases and who decides."""
-    how = ("push-on-yes: the session that holds the person's yes pushes to main itself and closes with maxpm done "
-           "(no --ship, no deploy item, no hook)" if t.get("mode") == "push-on-yes"
+    how = ("push: the session that made the change pushes to main when its tests pass and closes with maxpm done (no --ship, no deploy item, "
+           "no hook); a person's yes only when release_approval person" if t.get("mode") == "push"
            else "deploy: maxpm done --ship collects the change on the next deploy item")
     who = ("risk low: the target owner or the manager releases it, with no question to a person"
            if t.get("risk") == "low" else
@@ -9088,8 +9092,8 @@ def target_deployer(conn, name, mode, actor=None):
     with tx(conn):
         t = _target(conn, name)
         name = t["name"]
-        if t["mode"] == "push-on-yes" and mode != "off":
-            raise RiverError(f"target {name} releases by a push with the person's yes (mode push-on-yes): it has no "
+        if t["mode"] == "push" and mode != "off":
+            raise RiverError(f"target {name} releases by a push (mode push: the session that made the change pushes to main when its tests pass): it has no "
                              f"deployer; to give it one: maxpm target mode {name} deploy")
         conn.execute("UPDATE targets SET deployer=? WHERE name=?", (mode, name))
         _event(conn, None, actor, f"target {name} deployer {mode}")
@@ -15893,10 +15897,9 @@ def _ship_check(conn, it):
         raise RiverError(f"project {proj['name']} has no deploy target; set one: "
                          f"maxpm project target {proj['name']} <target>  (maxpm target list)")
     mode = conn.execute("SELECT mode FROM targets WHERE name=?", (proj["target"],)).fetchone()
-    if mode and mode["mode"] == "push-on-yes":  # #5968, policy p114
-        raise RiverError(f"target {proj['target']} releases by a push with the person's yes (mode push-on-yes): no "
-                         f"ship and no deploy item. With the yes, push to main yourself and close with maxpm done "
-                         f"#{it['id']}, with no --ship")
+    if mode and mode["mode"] == "push":  # #5968, #6043
+        raise RiverError(f"target {proj['target']} releases by a push (mode push): no ship and no deploy item. When "
+                         f"the tests pass, push to main yourself and close with maxpm done {it['id']}, with no --ship")
     return proj["target"]
 
 
@@ -22190,6 +22193,11 @@ def _go_brief(conn, cwd, actor=None, project=None, role=None, session=None, focu
     if it:
         # The rule of the item's project for a look at the finished result: ask first, or push and then ask.
         brief["result_look"] = setting(conn, "result_look", item_id=it["id"])
+        # How the change goes out (#6043): a push target releases by the session's own push, with no --ship.
+        tg = conn.execute("SELECT t.name, t.mode FROM projects p JOIN targets t ON t.name=p.target WHERE p.id=?",
+                          (it["project_id"],)).fetchone()
+        brief["release_mode"] = ({"target": tg["name"], "mode": tg["mode"],
+                                  "approval": release_approval(conn, tg["name"])["approval"]} if tg else None)
         # The handoff of each open goal of the item: the goal's context, for a session that starts on it.
         # A sub-goal's context is its parent's handoff, then its own.
         gb = brief.get("goal") or {}  # the owner's briefing shows its goal's handoffs already

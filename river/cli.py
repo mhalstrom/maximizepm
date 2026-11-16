@@ -1816,9 +1816,10 @@ def build_parser(only=None):
                        "or production (the default: a release sooner than its cadence needs a person or the manager)")
     x.add_argument("name"); x.add_argument("risk", nargs="?", choices=["low", "production"], help="none shows it")
     x = tgs.add_parser("mode", help="how the target releases (#5968): deploy (the default: ship requests collect on a "
-                       "deploy item) or push-on-yes (the session that holds the person's yes pushes to main itself and "
-                       "closes with maxpm done: no ship, no deploy item, no hook, no deployer)")
-    x.add_argument("name"); x.add_argument("mode", nargs="?", choices=["deploy", "push-on-yes"], help="none shows it")
+                       "deploy item) or push (the session that made the change pushes to main when its tests pass and "
+                       "closes with maxpm done: no ship, no deploy item, no hook, no deployer; a person's yes only "
+                       "when the target says release_approval person)")
+    x.add_argument("name"); x.add_argument("mode", nargs="?", choices=["deploy", "push"], help="none shows it")
     x = tgs.add_parser("report", help="the review report of a release: the summary and numbers, the groups (risks "
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
                        "Plan > Releases")
@@ -5309,6 +5310,17 @@ def look_setup_lines(name, look):
              f"maxpm config set result_look ask_first|push_first --project {name}")]
 
 
+def _release_rule(b, it, r):
+    """The briefing line for a target that releases by a push (#6043): the session pushes when the tests pass."""
+    m = b.get("release_mode")
+    if not m or m["mode"] != "push":
+        return []
+    yes = ("the target asks for a person's yes first (release_approval person): ask, and push after the yes"
+           if m["approval"] == "person" else "no person's yes is needed for the release")
+    return [f"  - Release: target {m['target']} releases by a push: when the tests pass, push to main yourself and "
+            f"close with {r} done {it['id']} (no --ship); {yes}."]
+
+
 def _look_rule(b, it, r, short=False):
     """The briefing lines for a look at the finished result. The item's project decides (setting result_look, #1668):
     push first and check the result (the worker, or an agent check item), or ask first and wait for the yes. Under
@@ -5811,6 +5823,7 @@ def render_go(b):
                 f"commit, {r} release {it['id']} --note \"<what is left>\" and go:",
                 f"    no session waits at its prompt for a yes; the answer starts a fresh session (question_wait_end).",
                 *_look_rule(b, it, r),
+                *_release_rule(b, it, r),
                 f"  - You need the user (a decision, an approval, an account or payment step): put it in the queue, not only in chat:",
                 f"    {r} add \"<what to decide or do>\" --doer human --context \"<exactly what, where the material is>\" --blocks {it['id']} --release",
                 *([f"    Commit what is finished, and say in the item's --context what is left. Then run go again: take other work, or",
@@ -7741,8 +7754,8 @@ def render(a, res):
             mode = f"not used: the deploy hook releases, whatever the mode ({res['deployer']}) (#5066)"
         else:
             mode = modes[res["deployer"]]
-        if res.get("mode") == "push-on-yes":
-            mode = "none: a push-on-yes target has no deployer"
+        if res.get("mode") == "push":
+            mode = "none: a push target has no deployer"
         print(f"  deployer: {mode}; change it: maxpm target deployer {res['name']} launch|standing|off")
         print("  " + core.target_mode_text(res))  # #5968
         for line in _release_lines(res["release"]):
