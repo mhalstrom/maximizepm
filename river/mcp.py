@@ -69,11 +69,13 @@ TOOLS = [
                     "answer (a decision of a doc, answered in place), kit (the starter page of the canvas kit: a "
                     "visual HTML page with a task graph, cards, side by side, bars, a timeline, a mockup, pictures "
                     "with notes, and decision cards; fill it and put it), publish (show it off this computer: a "
-                    "private realquicksite page; the user shares it there).",
+                    "private realquicksite page; the user shares it there), design (a new design document with the "
+                    "outline brief, discovery, decisions, plan, risks), plan (the versions of a design document's "
+                    "plan and the state of its tasks).",
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": ["put", "list", "show", "comments", "reply",
                                                 "resolve", "open", "save", "section", "answer", "kit",
-                                                "publish"]},
+                                                "publish", "design", "plan"]},
          "heading": {"type": "string", "description": "section: the heading of the section to replace or add (a doc)"},
          "pending": {"type": "string", "description": "section: what the section will say; the page shows it as being "
                                                       "written"},
@@ -223,7 +225,7 @@ def canvas_argv(a):
     """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
     act = a.get("action")
     acts = ("put", "list", "show", "comments", "reply", "resolve", "open", "save",
-            "section", "answer", "kit", "publish")
+            "section", "answer", "kit", "publish", "design", "plan")
     if act not in acts:
         raise RiverError(f"canvas action is one of {', '.join(acts)}")
     words = ["canvas", act]
@@ -263,7 +265,7 @@ def canvas_argv(a):
     opts = {"put": ("kind", "title", "note", "item", "project"), "list": ("project", "item"),
             "show": ("version", "project"), "comments": ("project",), "resolve": ("note",),
             "section": ("note", "project"), "answer": ("project",), "open": ("project", "session"), "save": ("version", "project"),
-            "publish": ("version", "project")}
+            "publish": ("version", "project"), "design": ("title", "item", "project"), "plan": ("version", "project")}
     for k in opts.get(act, ()):
         if act == "save" and k == "path":
             continue

@@ -16191,6 +16191,7 @@ def item_show(conn, item_id, ann=None):
     a["usage"] = item_usage(conn, iid)
     if a["doer"] == "human":
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
+    a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a
 
 
@@ -17602,6 +17603,119 @@ def canvas_answer(conn, ref, decision, answer, actor=None, project=None):
                          actor, {"path": f"decision:{n}", "text": f"Decision {n} of {d['of']}: {d['name']}"},
                          send_now=True)
     return dict(com, decision=n, name=d["name"])
+
+
+# Design documents (#5989): an expert plans in one Markdown canvas with one outline, and each task that it writes is
+# named in the plan as #<id>. The link from a task to its part of the plan and the plan's versions are read from the
+# canvas's versions, so they need no table of their own: a task belongs to the deepest heading under Plan whose text
+# names it, and a plan version is a canvas version whose Plan section changed. Every older version stays.
+DESIGN_OUTLINE = (
+    ("Brief", "the problem, the outcome, what is in and out of scope, the limits, and done when"),
+    ("Discovery", "the research, the prototypes and the options, with pictures"),
+    ("Decisions", "one decision in the decision form for each choice (maxpm guide decisions)"),
+    ("Plan", "one heading or line for each task that names it as #<id>, with what it waits on, when it is "
+             "accepted, and its expected cost"),
+    ("Risks", "the risks and the open questions"),
+)
+_PLAN_HEADING = re.compile(r"^(?:\d+[.)]?\s*)?plan\b", re.I)
+_TASK_REF = re.compile(r"(?<![\w&/])#(\d+)\b")
+
+
+def design_doc(conn, name, actor=None, title=None, item=None, project=None):
+    """A new design document: a Markdown canvas with the outline (DESIGN_OUTLINE), each section pending, for the
+    session to fill with maxpm canvas section."""
+    name = (name or "").strip().lower()
+    try:
+        c = _canvas_row(conn, name, project)
+    except RiverError:
+        c = None
+    if c is not None:
+        raise RiverError(f"canvas {c['name']} exists already: fill its sections with maxpm canvas section {c['name']} "
+                         f"<heading> <file>")
+    body = f"# {title or name}\n\n" + "\n\n".join(f"## {h}\n\nwriting: {w}" for h, w in DESIGN_OUTLINE) + "\n"
+    res = canvas_put(conn, name, body, actor, "md", title, item, project, "design document: the outline")
+    return dict(res, sections=[h for h, _ in DESIGN_OUTLINE])
+
+
+def _plan_part(text):
+    """The Plan section of a Markdown text, as (its text, {task id: the deepest heading inside Plan that names it}),
+    or (None, {}) when it has no Plan section or the section is still pending."""
+    secs = md_sections(text or "")
+    plan = next((s for s in secs if _PLAN_HEADING.match(s["title"])), None)
+    if plan is None:
+        return None, {}
+    lines = (text or "").split("\n")[plan["start"]:plan["end"]]
+    body = "\n".join(lines[1:]).strip()
+    if not body or re.fullmatch(r"writing:.*", body, re.S):
+        return None, {}
+    refs, where, fence = {}, plan["title"], None
+    for line in lines[1:]:
+        m = re.match(r"^\s*(```|~~~)", line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+            continue
+        h = None if fence else _MD_HEADING.match(line)
+        if h:
+            where = h.group(2).strip()
+            continue
+        for x in _TASK_REF.findall(line):
+            refs.setdefault(int(x), where)
+    return body, refs
+
+
+def plan_versions(conn, ref, project=None):
+    """The versions of a design document's plan: each canvas version whose Plan section differs from the one
+    before, with the tasks it names, the tasks added and removed against the plan version before, and the state of
+    each task now."""
+    c = _canvas_row(conn, ref, project)
+    if c["kind"] != "md":
+        raise RiverError(f"canvas {c['name']} is {c['kind']}: a plan is the Plan section of a Markdown canvas "
+                         f"(maxpm canvas design <name>)")
+    out, last = [], None
+    for v in conn.execute("SELECT version, body, author, note, created_at FROM canvas_versions WHERE canvas_id=? "
+                          "ORDER BY version", (c["id"],)):
+        body, refs = _plan_part(v["body"])
+        if body is None or body == (last or {}).get("text"):
+            continue
+        before = set((last or {}).get("refs") or {})
+        out.append({"plan_version": len(out) + 1, "version": v["version"], "at": v["created_at"],
+                    "author": v["author"], "note": v["note"], "text": body, "refs": refs,
+                    "added": sorted(set(refs) - before), "removed": sorted(before - set(refs))})
+        last = out[-1]
+    ids = sorted({i for p in out for i in p["refs"]} | {i for p in out for i in p["removed"]})
+    state = {}
+    if ids:
+        q = ",".join("?" * len(ids))
+        state = {r["id"]: {"title": r["title"], "status": r["status"]}
+                 for r in conn.execute(f"SELECT id, title, status FROM items WHERE id IN ({q})", ids)}
+    for p in out:
+        p["tasks"] = [{"id": i, "part": p["refs"][i], **state.get(i, {"title": None, "status": "unknown"})}
+                      for i in p["refs"]]
+    for p in out:
+        del p["refs"]
+    return {"canvas": c["name"], "title": c["title"], "project": _project_name(conn, c["project_id"]),
+            "plans": out}
+
+
+def plan_links(conn, item_id):
+    """The design documents whose plan names an item now (#5989): [{canvas, title, part, plan_version, plans}]. The
+    part is the deepest heading inside Plan that names it; the plan version is the first one that named it."""
+    iid = int(item_id)
+    rows = conn.execute(
+        "SELECT c.id, c.name FROM canvases c JOIN canvas_versions v ON v.canvas_id=c.id "
+        "WHERE c.kind='md' AND c.deleted_at IS NULL AND v.body LIKE ? "
+        "AND v.version=(SELECT MAX(version) FROM canvas_versions WHERE canvas_id=c.id)", (f"%#{iid}%",)).fetchall()
+    out = []
+    for r in rows:
+        if iid not in _plan_part(_canvas_latest(conn, r["id"])["body"])[1]:
+            continue
+        p = plan_versions(conn, r["id"])
+        plans = p["plans"]
+        first = next(x for x in plans if any(t["id"] == iid for t in x["tasks"]))
+        part = next(t["part"] for t in plans[-1]["tasks"] if t["id"] == iid)
+        out.append({"canvas": r["name"], "title": p["title"], "part": part, "plan_version": first["plan_version"],
+                    "plans": len(plans)})
+    return out
 
 
 def canvas_save(conn, ref, path, version=None, project=None, force=False):
@@ -20560,6 +20674,7 @@ def _go_brief(conn, cwd, actor=None, project=None, role=None, session=None, focu
         # The item's canvases (#4769): the pages a session made for it, and the comments that wait for a change.
         brief["canvases"] = [{"name": x["name"], "version": x["version"], "open_comments": x["open_comments"]}
                              for x in canvas_heads(conn) if x["item_id"] == it["id"]]
+        brief["plan"] = plan_links(conn, it["id"])  # the part of a design document that planned it (#5989)
         # The pages that the person marked up for the item or the session, with notes still open (#5655).
         from . import annotate
         brief["annotations"] = annotate.brief(conn, brief.get("agent"), it["id"])

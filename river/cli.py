@@ -442,6 +442,9 @@ def _print_show(a):
         print(f"  found during: #{a['found_during']}")
     if a.get("found_here"):
         print("  found while doing this:", ", ".join(f"#{d['id']} {d['title']} ({d['status']})" for d in a["found_here"]))
+    for p in a.get("plan") or []:  # #5989
+        print(f"  from plan: {p['canvas']}, part '{p['part']}' (in plan version {p['plan_version']} of {p['plans']}): "
+              f"maxpm canvas plan {p['canvas']}")
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
     if a.get("artifacts"):
@@ -1177,6 +1180,15 @@ def build_parser(only=None):
     x.add_argument("file", nargs="?", help="the section's text: a file, or - for stdin (or use --text)")
     x.add_argument("--text"); x.add_argument("--pending", help="what the section will say; the page shows it as being written")
     x.add_argument("--note"); x.add_argument("--project")
+    x = cvs.add_parser("design", help="a new design document (#5989): a doc with the outline brief, discovery, "
+                       "decisions, plan, risks, each part pending; fill each with maxpm canvas section")
+    x.add_argument("name"); x.add_argument("--title")
+    x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
+    x.add_argument("--project", help="default: the item's project, or this folder's")
+    x = cvs.add_parser("plan", help="the plan of a design document: each version of its Plan section, the tasks it "
+                       "names (#<id>) and their state, and what each version added and removed")
+    x.add_argument("name"); x.add_argument("--version", type=int, help="print the text of this plan version")
+    x.add_argument("--project")
     x = cvs.add_parser("answer", help="answer a decision of a doc (Decision <n> of <m>: ...) in place; it goes to the "
                        "session that writes the doc")
     x.add_argument("name"); x.add_argument("decision", type=int); x.add_argument("text"); x.add_argument("--project")
@@ -5176,6 +5188,9 @@ def render_go(b):
                 f"  - Work that you find: {r} add \"<title>\" (--found-during <id> when it comes from an item). "
                 f"Work that should start now: ask the manager to launch it: {r} ask manager \"<what>\".",
                 "  - Show a long answer as a canvas: maxpm canvas put <file> --name <name>.",
+                f"  - Plan in one design document: {r} canvas design <name> puts the outline (brief, discovery, "
+                f"decisions, plan, risks); fill each part with {r} canvas section. In Plan, name each task as #<id>, so "
+                f"that its item links back to its part; a changed plan is a new plan version ({r} canvas plan <name>).",
                 f"  - Messages to you come into this session; read them with {r} inbox, and answer them.",
                 "  - Stand at your prompt after each answer."]
         for h in b.get("holds") or ():
@@ -5324,6 +5339,9 @@ def render_go(b):
         for an in b.get("annotations") or []:  # #5655
             out.append(f"  marked-up page a{an['id']} ({_cut(an['url'], 60)}): {an['open']} of {an['notes']} note(s) "
                        f"open: {r} browser annotation {an['id']}")
+        for p in b.get("plan") or []:  # #5989
+            out.append(f"  from plan: {p['canvas']}, part '{p['part']}' (plan version {p['plan_version']} of "
+                       f"{p['plans']}); read that part first: {r} canvas show {p['canvas']} --text")
         for cv in b.get("canvases") or []:  # #4769
             out.append(f"  canvas {cv['name']} v{cv['version']}: "
                        + (f"{cv['open_comments']} open comment(s) wait for a change: {r} canvas comments {cv['name']} --open"
@@ -6020,6 +6038,17 @@ def _canvas_dispatch(conn, a, actor):
             except (OSError, UnicodeDecodeError) as e:
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         return core.canvas_section(conn, a.name, a.heading, body, actor, a.project, a.note, a.pending)
+    if v == "design":
+        project = a.project
+        if not project and a.item is None and not core._held_item(conn, actor):
+            names = core.projects_for_dir(conn, os.getcwd())
+            project = names[0] if len(names) == 1 else None
+        return core.design_doc(conn, a.name, actor, a.title, a.item, project)
+    if v == "plan":
+        res = core.plan_versions(conn, a.name, a.project)
+        if a.version is not None and not any(p["plan_version"] == a.version for p in res["plans"]):
+            raise RiverError(f"the plan of {res['canvas']} has {len(res['plans'])} version(s); no version {a.version}")
+        return dict(res, show_version=a.version)
     if v == "answer":
         return core.canvas_answer(conn, a.name, a.decision, a.text, actor, a.project)
     if v == "save":
@@ -6348,6 +6377,35 @@ def render_canvas(a, res):
         print(("unchanged: " if res.get("unchanged") else "") + _canvas_line(res))
         if not res.get("unchanged"):
             print(f"  section '{res['section']}' {'added' if res['added'] else 'replaced'}: version {res['version']}")
+        return
+    if v == "design":
+        print(_canvas_line(res))
+        print(f"  design document with the parts {', '.join(res['sections'])}, each pending. Fill each one: maxpm "
+              f"canvas section {res['name']} <part> <file>. In Plan, name each task as #<id>: maxpm show <id> then "
+              f"links it to its part, and maxpm canvas plan {res['name']} shows the plan's versions.")
+        return
+    if v == "plan":
+        plans = res["plans"]
+        if not plans:
+            print(f"{res['canvas']}: no plan yet (its Plan section is missing or pending): maxpm canvas section "
+                  f"{res['canvas']} Plan <file>")
+            return
+        if res.get("show_version"):
+            p = next(x for x in plans if x["plan_version"] == res["show_version"])
+            print(f"{res['canvas']} plan version {p['plan_version']} (canvas version {p['version']}):")
+            print(p["text"])
+            return
+        print(f"{res['canvas']}: {len(plans)} plan version(s)")
+        for p in plans:
+            change = [f"+#{i}" for i in p["added"]] + [f"-#{i}" for i in p["removed"]]
+            print(f"  plan v{p['plan_version']} = canvas v{p['version']}, {core.show_time(p['at'])} by "
+                  f"{p['author'] or 'nobody'}: {len(p['tasks'])} task(s)"
+                  + (f"; {' '.join(change)}" if change and p["plan_version"] > 1 else "")
+                  + (f" ({p['note']})" if p["note"] else ""))
+        print(f"  tasks of plan v{plans[-1]['plan_version']}:")
+        for t in plans[-1]["tasks"]:
+            print(f"    #{t['id']} ({t['status']}) {t['title'] or '(no such item)'}  [{t['part']}]")
+        print(f"  the text of a version: maxpm canvas plan {res['canvas']} --version <n>")
         return
     if v == "answer":
         print(f"answered decision {res['decision']} ({res['name']}) as c{res['id']}; it went to the session that "

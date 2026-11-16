@@ -13343,3 +13343,78 @@ class RunLog(Base):
             other.execute("ROLLBACK")
             other.close()
         self.assertEqual(self.rows(), [])
+
+
+class DesignDoc(Base):
+    """#5989: an expert plans in a design document with one outline; each task named in its Plan links back to its
+    part, and each change of the Plan is a plan version that keeps the old one."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "app")
+        self.a, self.b, self.d = (self.add("app", t) for t in ("The app shell", "Pairing", "A prototype"))
+
+    def plan(self, text, note=None):
+        return core.canvas_section(self.c, "phone", "Plan", text, "ex", "app", note)
+
+    def test_design_doc_puts_the_outline_with_each_part_pending(self):
+        r = core.design_doc(self.c, "Phone", "ex", "Phone app: design", project="app")
+        self.assertEqual(r["sections"], ["Brief", "Discovery", "Decisions", "Plan", "Risks"])
+        body = core.canvas_show(self.c, "phone")["shown"]["body"]
+        self.assertTrue(body.startswith("# Phone app: design\n"))
+        self.assertEqual([s["title"] for s in core.md_sections(body)][1:], r["sections"])
+        self.assertEqual(body.count("writing: "), 5, "each part shows as being written")
+        self.assertEqual(core.plan_versions(self.c, "phone")["plans"], [], "a pending Plan is no plan version")
+        with self.assertRaises(RiverError) as e:
+            core.design_doc(self.c, "phone", "ex", project="app")
+        self.assertIn("maxpm canvas section phone", str(e.exception))
+
+    def test_design_doc_tasks_link_back_and_plan_versions_keep_the_old_plan(self):
+        core.design_doc(self.c, "phone", "ex", project="app")
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell. See https://x.test/#{self.d} and &#{self.d};\n\n"
+                  f"### 4.2 Pairing\n\n- #{self.b} pairing in serve, after #{self.a}", "plan v1")
+        links = core.plan_links(self.c, self.a)
+        self.assertEqual([(x["canvas"], x["part"], x["plan_version"], x["plans"]) for x in links],
+                         [("phone", "4.1 Shell", 1, 1)], "the first heading that names it is its part")
+        self.assertEqual(core.plan_links(self.c, self.d), [], "a #<id> in an address or an entity is no task")
+        self.assertEqual(core.item_show(self.c, self.b)["plan"][0]["part"], "4.2 Pairing")
+        # A change outside Plan makes no plan version.
+        core.canvas_section(self.c, "phone", "Brief", "The app shows the page.", "ex", "app")
+        self.assertEqual(len(core.plan_versions(self.c, "phone")["plans"]), 1)
+        # A new Plan: the prototype comes first, pairing goes.
+        self.plan(f"### 4.1 Prototype\n\n#{self.d} first\n\n### 4.2 Shell\n\n#{self.a} the app shell", "plan v2")
+        p = core.plan_versions(self.c, "phone")["plans"]
+        self.assertEqual([(x["plan_version"], x["version"]) for x in p], [(1, 2), (2, 4)])
+        self.assertEqual((p[1]["added"], p[1]["removed"]), ([self.d], [self.b]))
+        self.assertIn(f"#{self.b} pairing", p[0]["text"], "the old plan stays readable")
+        self.assertEqual([(t["id"], t["part"], t["status"]) for t in p[1]["tasks"]],
+                         [(self.d, "4.1 Prototype", "open"), (self.a, "4.2 Shell", "open")])
+        self.assertEqual(core.plan_links(self.c, self.b), [], "a task that the newest plan dropped links nowhere")
+        x = core.plan_links(self.c, self.a)[0]
+        self.assertEqual((x["part"], x["plan_version"], x["plans"]), ("4.2 Shell", 1, 2))
+
+    def test_design_doc_commands_and_mcp(self):
+        from river import cli, mcp
+        env = {"MAXPM_DB": self.path}
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.dict(os.environ, env):
+                cli.run(["--as", "ex", *words])
+            return out.getvalue()
+
+        self.assertIn("Brief, Discovery, Decisions, Plan, Risks", run("canvas", "design", "phone", "--project", "app"))
+        self.assertIn("no plan yet", run("canvas", "plan", "phone"))
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell")
+        self.plan(f"### 4.1 Shell\n\n#{self.a} the app shell\n\n### 4.2 Pairing\n\n#{self.b} pairing")
+        out = run("canvas", "plan", "phone")
+        self.assertIn("2 plan version(s)", out)
+        self.assertIn(f"+#{self.b}", out)
+        self.assertIn(f"#{self.b} (open) Pairing  [4.2 Pairing]", out)
+        self.assertNotIn("Pairing", run("canvas", "plan", "phone", "--version", "1"))
+        self.assertIn("from plan: phone, part '4.2 Pairing' (in plan version 2 of 2)", run("show", str(self.b)))
+        self.assertEqual(mcp.canvas_argv({"action": "design", "name": "phone", "title": "T", "project": "app"}),
+                         ["canvas", "design", "phone", "--title=T", "--project=app"])
+        self.assertEqual(mcp.canvas_argv({"action": "plan", "name": "phone", "version": 1}),
+                         ["canvas", "plan", "phone", "--version=1"])

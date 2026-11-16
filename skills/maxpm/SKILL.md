@@ -553,6 +553,10 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
   with `--context` (why, where, what is decided), `--touches`, `--check`, and
   each "needs first" as a link (`maxpm dep`); a high priority only on the
   outcome. The rules and commands: `maxpm guide manager`, section Writing tasks.
+- Plan in one design document: `maxpm canvas design <name>` puts the outline
+  (brief, discovery, decisions, plan, risks). In Plan, name each task as
+  `#<id>`: `maxpm show <id>` links it back, and `maxpm canvas plan <name>`
+  keeps each plan version.
 - Keep your notes current: your topic, what you learned, the decisions of your
   talks, what is open, and the files and canvases that matter:
   `maxpm --as <you> expert notes <you> --put <file>`. Write them after each
