@@ -273,7 +273,6 @@ maxpm backlog 12 --note "after the launch"       # kept with its links, but nobo
 maxpm goal add shop checkout --outcome "customers can pay" --done-when "a test order succeeds"
 maxpm add "Payment form" --goal checkout         # tag an item with a goal (repeatable)
 maxpm goal own checkout                          # own it: its agent items are reserved for you (goal_lease 4h)
-maxpm goal edit checkout --shared                # a person or the manager: no owner, several agents work on its items at the same time (--owned undoes it)
 maxpm goal add shop refunds --parent checkout    # a sub-goal: one level, same project; its sessions read the parent's handoff first
 maxpm goal handoff checkout --file handoff.md    # the owner's notes for the next session: a new version each time (--versions)
 maxpm goal done checkout --result "live since 2026-10-02"
@@ -308,7 +307,7 @@ agent chooses, ready items sort by:
    open item that waits on it.
 2. Project rank (`maxpm project rank <name> <n>`).
 3. How many open items it unblocks.
-4. Manual order (`maxpm move`).
+4. Manual order (the up and down arrows on the page).
 5. Age.
 
 ### Settings
@@ -595,7 +594,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   then what blocks them, then asks whether the goal is done; it gives an
   agent a free goal only when the best ready work serves it, and
   `maxpm go --role owner` takes the next free goal. A shared goal
-  (`maxpm goal edit <name> --shared`) has no owner: `maxpm go` gives it to no
+  (its Share button in the Projects view) has no owner: `maxpm go` gives it to no
   agent, and its items stay open to every agent, so several agents work on it
   at the same time. Plan > Goals shows each goal with its owner and progress,
   and the left bar of Plan scopes every view to one goal.
