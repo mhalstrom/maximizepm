@@ -10512,17 +10512,29 @@ def _keys_conflict(a, b, max_lines):
     return n is None or n <= max_lines
 
 
+def _same_task_try(a, b):
+    """Two tries of one task (#6035): the same project, and the same title before '(try k of N)' with the same N. Each
+    try works in its own worktree and the person keeps only one, so only one branch merges: they never conflict."""
+    ma, mb = _TRY.search(a["title"] or ""), _TRY.search(b["title"] or "")
+    return bool(ma and mb and a["project_id"] == b["project_id"] and ma.group(2) == mb.group(2)
+                and a["title"][:ma.start()].rstrip() == b["title"][:mb.start()].rstrip())
+
+
 def _sync_conflicts(conn, item_id, actor):
-    """Keep automatic conflict links equal to the open items whose touches overlap this item's."""
+    """Keep automatic conflict links equal to the open items whose touches overlap this item's. The tries of one task
+    get no link with each other (#6035). Two other tasks keep their link in worktree mode too: both branches merge
+    into main, and a small file that both change gives a rebase conflict (a large one does not, #5579)."""
     it = _item(conn, item_id)
     root = lambda pid: conn.execute("SELECT path FROM projects WHERE id=?", (pid,)).fetchone()["path"]
     mine = _touch_keys(it["touches"], it["project_id"], root(it["project_id"]))
     want = set()
     if it["status"] in OPEN_STATES and mine:
         limit = int(setting(conn, "conflict_max_lines", project_id=it["project_id"]))
-        for r in conn.execute(f"SELECT i.id, i.touches, i.project_id, p.path FROM items i JOIN projects p "
+        for r in conn.execute(f"SELECT i.id, i.title, i.touches, i.project_id, p.path FROM items i JOIN projects p "
                               f"ON p.id=i.project_id WHERE i.id<>? AND i.status IN {OPEN_STATES} AND i.touches<>''",
                               (it["id"],)):
+            if _same_task_try(it, r):
+                continue
             theirs = _touch_keys(r["touches"], r["project_id"], r["path"])
             if any(_keys_conflict(x, y, limit) for x in mine for y in theirs):
                 want.add(r["id"])

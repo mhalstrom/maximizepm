@@ -13942,6 +13942,30 @@ class Tries(Base):
         with self.assertRaisesRegex(RiverError, "2 to 5"):
             core.tries_add(self.c, "a", "One try", 1, "mark")
 
+    def test_the_tries_of_one_task_do_not_conflict_with_each_other(self):
+        """#6035: add --tries with --touches linked the tries as conflicts, so the second try was never ready and the
+        session started for it sat idle. Each try has its own worktree and only the picked one merges: no link between
+        them. Another task that touches the same file still conflicts with each try, and so do the tries of another
+        task."""
+        r = core.tries_add(self.c, "a", "Redo the releases list", 2, "mark", touches="web/releases.css")
+        other = core.item_add(self.c, "a", "Fix the releases list", touches="web/releases.css")["id"]
+        r2 = core.tries_add(self.c, "a", "Redo the releases list again", 2, "mark", touches="web/releases.css")
+        links = {tuple(sorted(x)) for x in self.c.execute("SELECT item_id, blocked_by FROM deps WHERE kind='conflicts'")}
+        t1, t2 = r["tries"]
+        u1, u2 = r2["tries"]
+        self.assertNotIn(tuple(sorted((t1, t2))), links)
+        self.assertNotIn(tuple(sorted((u1, u2))), links)
+        for t in (t1, t2):
+            self.assertIn(tuple(sorted((t, other))), links)
+            self.assertIn(tuple(sorted((t, u1))), links)
+        for w in ("w1", "w2"):
+            core.register(self.c, w)
+        core.claim(self.c, t1, "w1")
+        core.claim(self.c, t2, "w2")  # refused while the tries conflicted
+        core.item_edit(self.c, t1, touches="web/releases.css web/list.css", actor="mark")  # a sync again adds none
+        self.assertFalse(self.c.execute("SELECT 1 FROM deps WHERE kind='conflicts' AND item_id IN (?,?) AND "
+                                        "blocked_by IN (?,?)", (t1, t2, t1, t2)).fetchone())
+
     def test_a_try_starts_in_a_new_session(self):
         core.register(self.c, "w")
         other = self.add("a", "something else")
