@@ -9,6 +9,7 @@ import { button } from "../components/button.js";
 import { S, goalSel, inGoal, scope, planShown } from "../page.js";
 import { openAdd } from "./plan.js";
 import { nav } from "../page.js";
+import { openItemCard } from "../components/waitDialog.js";
 
 // A project's notes show their first sentence (#5082: only what a person acts on). The rest was a hover only, which
 // a phone cannot show (#5401): when the notes are longer, "more" shows them in full in place, and "less" folds them.
@@ -91,7 +92,10 @@ function buildTables() {
     if (!box.contains(ph) || projTables.has(name)) continue;
     const table = makeTable(ph, { key: "proj:" + name, sort: [{ column: "order", dir: "asc" }],
       columns: itemTableColumns((it) => ["done", "dropped"].includes(it.status) ? it.output : it.notes),
-      placeholder: "No open items.", onRow: (r) => nav.openDrawer(r.id) });
+      // An open person task opens its card (#6002, mark 2026-11-15: the page-map choice); the card's Open the item
+      // opens the drawer. Every other row opens the drawer.
+      placeholder: "No open items.", onRow: (r) => r.it && r.it.doer === "human" && !["done", "dropped"].includes(r.it.status)
+        ? openItemCard(r.id) : nav.openDrawer(r.id) });
     projTables.set(name, { el: ph, table });
     table.set(projRows(name));
     n++;

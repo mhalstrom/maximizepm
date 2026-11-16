@@ -13904,7 +13904,8 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     of maxpm serve sync them already; its own sync held the write lock 2-11 s on a busy machine (#5396)."""
     if sync:
         sync_needs_you_now(conn)
-    sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body "
+    sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body, "
+           "m.level message_level, m.blocked message_blocked "  # the card's level (#6002)
            "FROM needs_you n LEFT JOIN items i ON i.id=n.item_id LEFT JOIN projects p ON p.id=i.project_id "
            "LEFT JOIN messages m ON m.id=n.message_id WHERE 1=1")
     args = []
@@ -16524,6 +16525,7 @@ def item_show(conn, item_id, ann=None):
     a["usage"] = item_usage(conn, iid)
     if a["doer"] == "human":
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
+        a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a
 

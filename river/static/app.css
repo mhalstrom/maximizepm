@@ -62,6 +62,7 @@
   --shadow-pop: 0 4px 16px rgba(0,0,0,.18);  /* a bar that floats over the page (a canvas a session opened) */
   --w-dlg-s: 520px; --w-dlg-m: 620px;  /* a small and a middle dialog (--dlg-w) */
   --w-dlg-l: 1000px;   /* a large view over the chat: a task in the work of its session (#5572) */
+  --w-card-side: 280px; /* the right column of a card: comments, history, Discuss (#6002) */
   /* The Sessions tab (#5044) */
   --w-sess-min: 280px; --w-sess-max: 360px;  /* the column of the session list */
   --w-panel: 480px;    /* the side panel at its first width, and a bar over it */
@@ -281,6 +282,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .goal .go { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .goal .ga { margin-top: 3px; display: flex; gap: 8px; }
 .c-goal { color: var(--accent); }
+/* The type of what a person does with a card (#5998, #6002). */
+.c-type-decide { color: var(--accent); font-weight: 600; }
+.c-type-look { color: var(--human); font-weight: 600; }
+.c-type-approve { color: var(--prog); font-weight: 600; }
+.c-type-do { color: var(--ready); font-weight: 600; }
+.c-type-read { color: var(--muted); font-weight: 600; }
 /* Start an agent (components/agentStart.js): the agent picker next to its button(s), everywhere. */
 .agentStart { display: inline-flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
 .agentStart select.agentPick { font-size: 12px; font-weight: 400; text-transform: none; letter-spacing: normal; max-width: 12em; }

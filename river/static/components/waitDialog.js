@@ -4,14 +4,18 @@
 // for the answer, which goes into the chat and closes the question (#4614). Dismiss closes the dialog and shows
 // the chat.
 // Server: the op prompt_answer (with the page's token: typeAction) and the op answer.
-import { $, esc, act, toast, typeAction } from "../lib.js";
+// #6002: it is also the one card dialog. A question block is the card (askCard.js); a person item gets the same card;
+// a line of Needs you or a person task in Plan > Items opens the dialog with that one card (openCard).
+import { $, esc, act, toast, typeAction, actor, getJson } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
-import { earlierHtml } from "./card.js";
+import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText } from "./askCard.js";
+import { S, nav } from "../page.js";
 
 const dlg = makeDialog($("#waitDlg"));
 let agent = null, pane = false, onSent = null;
+const cards = new Map();  // "kind:id" -> the card, for its side column and Discuss
 
 function promptBlock(w, n) {
   if (w.elsewhere) {
@@ -25,7 +29,7 @@ function promptBlock(w, n) {
   const free = !w.fixed;
   const opts = w.options.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${own && i === w.tell ? "other" : i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
   return `<form class="wblock" data-kind="prompt" data-sig="${esc(w.sig)}"${own ? ` data-tell="${w.tell}"` : ""}>
-    <div class="wkind">Prompt in its terminal</div>
+    <div class="wkind">${typeChip("approve")} Prompt in its terminal</div>
     <div class="wq">${esc(w.question || w.tool || "The terminal waits for an answer")}</div>
     ${w.command ? `<div class="wcmd">${esc(w.command)}</div>` : ""}
     ${w.why ? `<div class="muted t-s">${esc(w.why)}</div>` : ""}
@@ -52,14 +56,19 @@ function keyButtons(w) {
 // A question: the answer goes into the session's chat (its pane) as the person's turn, and closes the question in
 // the queue with the same text (#4614). With no pane, only the queue gets it.
 function questionBlock(w) {
-  return `<form class="wblock" data-kind="question" data-id="${w.id}">
-    <div class="wkind">Question to ${esc(w.to)}${w.item_id ? ` · <span class="link" data-open="${w.item_id}">#${w.item_id}</span>` : ""}</div>
-    <div class="wq">${esc(w.body)}</div>
-    ${w.note ? `<div class="muted">The manager: ${esc(w.note)}</div>` : ""}
-    ${earlierHtml(w.earlier)}
-    <textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>
-    <button class="btn primary wgo" type="submit">${pane ? "Send to the chat" : "Answer"}</button>
-  </form>`;
+  const c = fromWaiting(w, agent);
+  cards.set(`question:${c.id}`, c);
+  return cardHtml(c, { pane });
+}
+
+// The comments and history of each card in the list, read after it shows.
+function fillSides() {
+  $("#waitList").querySelectorAll("[data-side]").forEach(async (box) => {
+    const c = cards.get(box.dataset.side);
+    if (!c) return;
+    try { box.innerHTML = sideHtml(await loadSide(c)); }
+    catch (e) { box.innerHTML = sideHtml({ comments: [], history: [] }); }
+  });
 }
 
 // opts.onSent(text): the chat shows the person's turn at once.
@@ -73,10 +82,36 @@ export function openWaiting(s, opts = {}) {
   const note = !pane && s.waiting.some(w => w.kind === "question")
     ? `<div class="muted t-s wnote">This session runs in no tmux pane here, so an answer goes to the queue only; the session reads it with maxpm inbox.</div>`
     : "";
+  cards.clear();
   $("#waitList").innerHTML = note + s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("");
   // Files and local pages in the question, the command and the terminal's text open in the side panel (#4689).
   $("#waitList").dataset.agent = s.name;
   $("#waitList").querySelectorAll(".wq, .wcmd, .wlines pre").forEach(x => linkArtifacts(x, s.name, { inPre: true }));
+  shown();
+}
+
+// One card, from a line of Needs you or a person task in Plan > Items (askCard.js fromEvent, fromItem). A question's
+// answer goes to the queue; the session reads it as it does today.
+export function openCard(c) {
+  agent = c.kind === "question" ? c.from : null; pane = false; onSent = null;
+  $("#waitTitle").textContent = c.kind === "item" ? "Waits for you" : `Waits for you: ${c.from === "maxpm" ? "MaximizePM" : c.from}`;
+  cards.clear();
+  cards.set(`${c.kind}:${c.id}`, c);
+  $("#waitList").innerHTML = cardHtml(c);
+  $("#waitList").dataset.agent = c.from || "";
+  $("#waitList").querySelectorAll(".wq, .acard-d").forEach(x => linkArtifacts(x, c.from || null, { inPre: true }));
+  shown();
+}
+
+// A person item by its id (Plan > Items): its card, from GET api/item/<id>.
+export async function openItemCard(id) {
+  try { openCard(fromItem(await getJson(`api/item/${id}`))); }
+  catch (e) { toast(e.message, true); }
+}
+
+function shown() {
+  $("#waitDlg").classList.toggle("has-cards", cards.size > 0);
+  fillSides();
   dlg.open();
   const first = $("#waitList").querySelector("input:checked, textarea");
   if (first) first.focus();
@@ -108,6 +143,11 @@ $("#waitList").addEventListener("submit", async (e) => {
       }
       await act("answer", { msg: +form.dataset.id, body });
       toast(typed ? "Sent to the chat, and the question is answered" : "Answered in the queue");
+    } else if (form.dataset.kind === "item") {  // a person item: done, with what the person decided or did
+      if (!actor()) { toast("Choose your name in 'You are' first", true); return; }
+      const out = form.querySelector(".wanswer").value.trim();
+      await act("done", { id: +form.dataset.id, output: out || undefined });
+      toast(`#${form.dataset.id} is done`);
     } else {
       const pick = form.querySelector("input[type=radio]:checked");
       if (!pick) { toast("Pick an option", true); return; }
@@ -124,8 +164,26 @@ $("#waitList").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
   finally { btn.disabled = false; }
 });
-$("#waitList").addEventListener("click", (e) => {
+$("#waitList").addEventListener("click", async (e) => {
   if (e.target.closest("[data-open]")) dlg.close();
+  const opt = e.target.closest("[data-opt]");  // an option of the decision form: it is the answer
+  if (opt) {
+    const form = opt.closest("form");
+    form.querySelector(".wanswer").value = opt.dataset.opt;
+    form.requestSubmit(form.querySelector(".wgo"));
+    return;
+  }
+  if (e.target.closest("[data-discuss]")) {  // the card goes into the manager's chat, and its chat opens
+    const form = e.target.closest("form"), c = form && cards.get(`${form.dataset.kind}:${form.dataset.id}`);
+    const mgr = ((S && S.agents) || []).find(a => a.role === "manager" && !["gone", "stopped"].includes(a.state));
+    if (!c || !mgr) { toast("No manager runs now", true); return; }
+    try {
+      await act("send", { kind: "note", body: discussText(c), to: mgr.name, item: c.item_id || undefined });
+      dlg.close();
+      nav.openSession(mgr.name);
+    } catch (err) { /* act showed the error */ }
+    return;
+  }
   const t = e.target.closest("[data-term]");  // a prompt with no choices the page can read (#5220)
   if (t) { dlg.close(); openTerminal(t.dataset.term); }
 });

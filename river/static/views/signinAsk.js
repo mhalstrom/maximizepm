@@ -13,6 +13,13 @@ const dlg = makeDialog(host, { draft: false, onClose: () => { if (shown) later.a
 const later = new Set();  // requests that the person closed without an answer, on this page load
 let shown = null, reading = false;
 
+// Its line in Needs you (#6002): the person closed the modal before, and opens it again from the list.
+export async function openSignin(id) {
+  later.delete(id);
+  if (shown === id) return;
+  await signinAsks([id]);
+}
+
 // Each refresh: the first sign-in request at the person that this page has not shown or closed opens the modal.
 export async function signinAsks(ids) {
   const next = (ids || []).find(id => !later.has(id));

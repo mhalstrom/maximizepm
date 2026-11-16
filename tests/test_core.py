@@ -13531,6 +13531,21 @@ class ActionType(Base):
         self.assertEqual((got["m", q["id"]], got["m", q2["id"]]), ("decide", "look"))
         self.assertEqual(set(self.types(atype="look")), {("i", look), ("m", q2["id"])})
 
+    def test_action_type_and_level_reach_the_card(self):
+        # #6002: the card's head shows the type and the level; Needs you, a person item and a session's waiting
+        # question carry them.
+        iid = self.add("a", "Approve the release", doer="human")
+        q = core.send(self.c, "question", "Look at the page", to="mark", actor="bob", level="low", blocked=True)
+        rows = {(r["kind"], r["item_id"] or r["message_id"]): r for r in core.needs_you(self.c)}
+        self.assertEqual((rows["message", q["id"]]["message_level"], bool(rows["message", q["id"]]["message_blocked"])),
+                         ("low", True))
+        self.assertEqual(core.item_show(self.c, iid)["type"], "approve")
+        from river import sessions
+        waiting = sessions.waiting_for(self.c, dict(core.agent_status(self.c, "bob"), name="bob"), None, False)
+        w = [x for x in waiting if x["kind"] == "question"][0]
+        self.assertEqual((w["type"], w["level"], w["from"]), ("look", "low", "bob"))
+        self.assertTrue(w["blocked"])
+
     def test_action_type_set_by_the_sender_and_changed_later(self):
         from river import cli
         out = io.StringIO()

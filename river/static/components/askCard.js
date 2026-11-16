@@ -1,0 +1,107 @@
+// The card (#6002, mark 2026-11-16: 'cards are for when the agents are asking for decisions to be made ... the action
+// items are basically questions for the user so can be the same model'). One block for a question to a person and for
+// a person item, in the dialog Waits for you (waitDialog.js), as card-queue-mockup v15 shows: the type tag (#5998) and
+// the level in its head, the question, the options as buttons when the text has the decision form (its "Your answer:"
+// line, maxpm guide decisions), the answer box, the earlier decisions (#5955); and on its right the comments (the
+// messages on it), its history, and Discuss with the manager. Votes and Share come with #6006.
+import { esc, ago, clip, getJson } from "../lib.js";
+import { chip, prioNumChip, projectChip } from "./chip.js";
+import { button } from "./button.js";
+import { earlierHtml } from "./card.js";
+import { answerOptions } from "./canvasDoc.js";
+
+export const TYPES = ["decide", "look", "approve", "do", "read"];
+export const typeChip = (t) => t ? chip("c-type-" + t, t[0].toUpperCase() + t.slice(1), "What you do with it") : "";
+
+// One card from a Needs you event (api/needs-you), a session's waiting question (sessions.py waiting) or an item
+// (api/item/<id>): { kind: "question"|"item", id, item_id, title, detail, type, level, blocked, priority, project,
+// from, at, note, earlier }.
+export function fromEvent(e) {
+  return e.kind === "item"
+    ? { kind: "item", id: e.item_id, item_id: e.item_id, title: e.item_title || "", detail: e.item_context || e.item_notes || "",
+        type: e.type, priority: e.priority, project: e.project, at: e.opened_at, earlier: e.earlier || [] }
+    : { kind: "question", id: e.message_id, item_id: e.item_id, title: e.body || "", type: e.type, level: e.message_level,
+        blocked: e.message_blocked, project: e.project, from: e.from_agent, at: e.opened_at, earlier: e.earlier || [] };
+}
+export function fromWaiting(w, session) {
+  return { kind: "question", id: w.id, item_id: w.item_id, title: w.body || "", type: w.type || "decide", level: w.level,
+    blocked: w.blocked, from: w.from || session, at: w.asked_at, note: w.note, earlier: w.earlier || [] };
+}
+export function fromItem(it) {
+  return { kind: "item", id: it.id, item_id: it.id, title: it.title || "", detail: it.context || it.notes || "",
+    type: it.type, priority: it.effective_priority != null ? it.effective_priority : it.priority, project: it.project,
+    at: it.created_at, earlier: it.earlier || [] };
+}
+
+// The level in the head: an item's priority; a question's level (low, or high when nobody said low), and that its
+// session stands still until the answer.
+function levelChips(c) {
+  if (c.kind === "item") return c.priority != null ? prioNumChip(c.priority) : "";
+  return (c.level === "low" ? chip("c-p", "Low") : chip("c-p0", "High"))
+    + (c.blocked ? chip("c-blocked", "its session waits", "Its session waits for the answer") : "");
+}
+
+// The options of the decision form, as buttons: a click puts the option in the answer box and sends it.
+export function optionsHtml(c) {
+  const opts = answerOptions(c.title + "\n" + (c.detail || ""));
+  return opts.length ? `<div class="acard-opts">${opts.map(o => button(esc(o), { cls: "acard-opt", data: { opt: o },
+    title: `Answer: ${o}` })).join("")}</div>` : "";
+}
+
+// The card's form. opts.pane: the asking session has a tmux pane here, so an answer also goes into its chat.
+export function cardHtml(c, { pane = false } = {}) {
+  const who = c.kind === "item" ? `#${c.id}` : `question #${c.id}${c.from ? ` from ${esc(c.from === "maxpm" ? "MaximizePM" : c.from)}` : ""}`;
+  const head = `<div class="acard-h">${typeChip(c.type)}${levelChips(c)}${c.project ? projectChip(c.project) : ""}
+    <span class="muted t-s">${who}</span><span class="spacer"></span>${c.at ? `<span class="muted t-s">${esc(ago(c.at))}</span>` : ""}</div>`;
+  const item = c.kind === "item";
+  const box = item
+    ? `<textarea class="wanswer" placeholder="What you decided or did (saved on the item)" aria-label="What you decided or did"></textarea>`
+    : `<textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>`;
+  const acts = (c.item_id ? button("Open the item", { data: { open: c.item_id } }) : "")
+    + button(item ? "Done" : pane ? "Send to the chat" : "Answer", { kind: "primary", cls: "wgo", type: "submit" });
+  return `<form class="wblock acard" data-kind="${item ? "item" : "question"}" data-id="${c.id}">
+    <div class="acard-main">${head}
+      <div class="wq">${esc(c.title)}</div>
+      ${c.detail ? `<div class="acard-d">${esc(clip(c.detail, 1200))}</div>` : ""}
+      ${c.note ? `<div class="muted">The manager: ${esc(c.note)}</div>` : ""}
+      ${optionsHtml(c)}
+      ${earlierHtml(c.earlier)}
+      ${box}
+      <div class="acard-acts">${acts}</div></div>
+    <aside class="acard-s" data-side="${c.kind}:${c.id}">${sideHtml(null)}</aside>
+  </form>`;
+}
+
+// The right column: the comments (messages on the item or in the question's thread), the history, and Discuss.
+// rows: null while it loads.
+export function sideHtml(rows) {
+  const comments = rows == null ? `<div class="muted t-s">Reading…</div>`
+    : rows.comments.length ? rows.comments.map(m => `<div class="acard-cm"><b>${esc(m.from_agent === "maxpm" ? "MaximizePM" : m.from_agent)}</b>
+        <span class="muted t-s">${esc(m.kind)} · ${esc(ago(m.created_at))}</span><div class="t-s">${esc(clip(m.body, 400))}</div></div>`).join("")
+    : `<div class="muted t-s">No comments yet.</div>`;
+  const history = rows == null ? "" : rows.history.length
+    ? `<ul class="acard-hist">${rows.history.map(h => `<li><span class="muted">${esc(ago(h.at))}</span> ${esc(clip(h.change, 160))}</li>`).join("")}</ul>`
+    : `<div class="muted t-s">Nothing yet.</div>`;
+  return `<h4>Comments</h4>${comments}<h4>History</h4>${history}
+    <div class="acard-disc">${button("Discuss with the manager", { data: { discuss: 1 },
+      title: "Send it to the manager's chat" })}</div>`;
+}
+
+// The comments and the history of a card, from the server. A question: its thread; an item: its messages and events.
+export async function loadSide(c) {
+  if (c.kind === "question") {
+    const t = await getJson(`api/thread/${c.id}`);
+    const all = t.messages || [];
+    return { comments: all.filter(m => m.id !== c.id),
+      history: all.filter(m => m.id === c.id).map(m => ({ at: m.created_at, change: `asked by ${m.from_agent}`
+        + (m.delivered_at ? `; shown ${ago(m.delivered_at)}` : "") + (m.read_at ? `; read ${ago(m.read_at)}` : "") })) };
+  }
+  const j = await getJson(`api/item/${c.id}`);  // item_show: its events newest first
+  return { comments: j.messages || [], history: (j.events || []).slice(0, 8) };
+}
+
+// The text that Discuss with the manager sends: the card whole, so the manager reads it in its chat.
+export function discussText(c) {
+  return `The person wants to talk about ${c.kind === "item" ? `item #${c.id}` : `question #${c.id}` + (c.from ? ` from ${c.from}` : "")}`
+    + `${c.type ? ` (${c.type})` : ""}: ${clip(c.title, 600)}`;
+}

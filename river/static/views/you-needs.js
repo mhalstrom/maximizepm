@@ -9,6 +9,12 @@ import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
+import { openCard } from "../components/waitDialog.js";
+import { fromEvent, typeChip } from "../components/askCard.js";
+import { openSignin } from "./signinAsk.js";
+
+// The sign-in request that an alert names: "... (request r12) ..." (vault.request).
+export const signinRequest = (body) => { const m = /\(request r(\d+)\)/.exec(body || ""); return m ? +m[1] : 0; };
 
 // #5866: an alert that links a session's Browser at a sign-in step (signin.py: a stopped fill, an expired sign-in, a
 // 2-step code) gets the masked field: the person fills the password or code from here, on a phone too.
@@ -68,7 +74,7 @@ export function renderNeedsYou() {
     const br = !isItem && e.message_kind === "alert" ? browserOf(e.body) : "";
     const fill = br ? `<div class="ny-sf" data-session="${esc(br)}">${secretFillHtml(null)}</div>` : "";
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
-        <span class="chips">${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
+        <span class="chips">${typeChip(e.type)}${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
       ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}${fill}<div class="actions">${buttons}</div></div>` : ""}`;
   }).join("") + (total > NY.length ? `<div class="muted t-s ny-more">The ${NY.length} most important of ${total}. The rest come here as you finish these; <code>maxpm needs-you</code> lists them all.</div>` : "");
   // Files and local pages in the details open in the side panel of the session that sent them (#4689).
@@ -115,7 +121,15 @@ async function needsYouAction(t) {
 
 // A click on this panel's controls; true when it was one (the frame then stops).
 export function onClick(t) {
-  const nyt = t.closest("[data-nyt]"); if (nyt && !t.closest("button")) return run(async () => { const id = +nyt.dataset.nyt; nyOpen.has(id) ? nyOpen.delete(id) : nyOpen.add(id); return renderNeedsYou(); });
+  const nyt = t.closest("[data-nyt]"); if (nyt && !t.closest("button") && !t.closest(".nyx")) return run(async () => {
+    const id = +nyt.dataset.nyt, e = NY.find(x => x.id === id);
+    // #6002: a question or a person item opens its card; a sign-in request opens its permission dialog; another
+    // alert opens in the list, as before.
+    if (e && (e.kind === "item" || e.message_kind === "question")) return openCard(fromEvent(e));
+    const req = e && e.message_kind === "alert" && signinRequest(e.body);
+    if (req && (S.signin_asks || []).includes(req)) return openSignin(req);
+    nyOpen.has(id) ? nyOpen.delete(id) : nyOpen.add(id); return renderNeedsYou();
+  });
   if (t.dataset.ny) return run(() => needsYouAction(t));
   if (t.dataset.copyPrompt) return run(() => copyPrompt(`api/item/${t.dataset.copyPrompt}/prompt`));
   if (t.id === "copyAll") return run(() => copyPrompt("api/prompt-all"));

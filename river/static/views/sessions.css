@@ -243,6 +243,22 @@ button.srow-it { cursor: pointer; }
 .wblock .wgo { align-self: flex-end; }
 /* A menu's own keys (#5244): one send button for each, at the right. */
 .wkeys { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
+/* The card (#6002): the question or the person item on the left, its comments, history and Discuss on the right; on
+   a phone the right column goes under it (phone.css). The dialog is wide while it holds a card. */
+#waitDlg.has-cards { --dlg-w: var(--w-dlg-l); }
+.wblock.acard { display: grid; grid-template-columns: minmax(0, 1fr) var(--w-card-side); gap: var(--sp-6); align-items: start; }
+.acard-main { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.acard-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-3); }
+.acard-d { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-s); color: var(--muted); }
+.acard-opts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.acard-opts .acard-opt { border: var(--hair) solid var(--line); }
+.acard-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
+.acard-s { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); min-width: 0; font-size: var(--fs-s); }
+.acard-s h4 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--muted); margin: var(--sp-3) 0 var(--sp-2); }
+.acard-s h4:first-child { margin-top: 0; }
+.acard-cm { margin-bottom: var(--sp-3); overflow-wrap: anywhere; }
+.acard-hist { margin: 0; padding-left: var(--sp-5); }
+.acard-disc { margin-top: var(--sp-5); }
 /* Images for a session (#4610): thumbnails in the message box, and in the person's turn. The files of the message box
    sit in a tray over the pill, as wide as the pill, with the radius and the color of a chat bubble (#5304). */
 .sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); margin-left: calc(var(--h-cmp) + var(--sp-3));
