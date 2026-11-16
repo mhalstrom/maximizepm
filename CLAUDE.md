@@ -33,5 +33,6 @@ run the code in that folder. One conflict marker there stops maxpm for every ses
   When `--ff-only` refuses, `main` moved: rebase again in your worktree and test again.
   Never resolve a conflict in the main tree.
 - Release: commit in your worktree, then `merge --ff-only` into the local `main`. Do not
-  push, and do not use `--ship`: the manager pushes after mark's yes. Then run
-  `maxpm done <id>` and `maxpm alert <manager> "<branch> is on main" --item <id> --blocked`.
+  push. Then run `maxpm done <id> --ship`: the task joins the next release of the target
+  maximizepm-github. A release is a push of `main` and a version tag to GitHub, at most once
+  a week unless mark asks (mark 2026-11-15, policy p114); the manager does it.
