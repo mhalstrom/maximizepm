@@ -343,6 +343,13 @@ def _related_lines(rows, indent="  "):
     return out
 
 
+def _earlier_lines(rows, indent="  "):
+    """The earlier decisions of a person item or a question (#5955, policy g2), or no lines."""
+    if not rows:
+        return []
+    return [f"{indent}{core.EARLIER_HINT}"] + [f"{indent}  {x}" for x in core.earlier_text(rows, 160)]
+
+
 def render_search(res, limit):
     q = res["query"]
     if res["items"]:
@@ -441,6 +448,8 @@ def _print_show(a):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    for line in _earlier_lines(a.get("earlier")):
+        print(line)
     if a.get("related"):
         print("  related (work like it, not linked; maxpm show <id>):")
         print("\n".join(_related_lines(a["related"])))
@@ -528,6 +537,8 @@ def _print_brief(a, n=240):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    for line in _earlier_lines(a.get("earlier")):
+        print(line)
     if a.get("related"):
         print("  related: " + ", ".join(f"#{m['id']} {_cut(m['title'], 40)} ({_match_state(m)})" for m in a["related"]))
     print(f"  all of it: maxpm show {a['id']}")
@@ -7460,6 +7471,8 @@ def render(a, res):
                     pri += f", unblocks {e['unblocks_count']}"
                 pri = f"[{pri}] "
             print(f"[{e['id']}] {pri}for {who}: {e['summary']}  ({state})")
+            for line in _earlier_lines(e.get("earlier"), "      "):
+                print(line)
             for n in e["notifications"]:
                 print(f"      {n['channel']}: {n['state']}" + (f" after {n['attempts']} tries: {n['last_error']}" if n["last_error"] else ""))
         return
@@ -7501,6 +7514,8 @@ def render(a, res):
                 print(f"  {m['gone_note']}")
             if m.get("held_note"):
                 print(f"  {m['held_note']}")
+            for line in _earlier_lines(m.get("earlier")):
+                print(line)
             if m.get("then"):
                 print(f"  Now: {m['then']}")
         return

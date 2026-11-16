@@ -4,6 +4,17 @@ import { chip, ownerChip } from "./chip.js";
 import { bar, pct } from "./bar.js";
 import { button } from "./button.js";
 
+// Earlier decisions on the subject of a person item or a question (#5955, policy g2): what was asked and what was
+// decided, so the person and the manager read them before they answer. rows: item_show / message .earlier.
+export function earlierHtml(rows) {
+  if (!rows || !rows.length) return "";
+  const cut = (s, n) => { s = (s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  return `<div class="sec"><h4>Earlier decisions</h4>${rows.map(d => `<div class="t-s">${d.kind === "item"
+    ? `<span class="link" data-open="${d.id}">#${d.id}</span>` : `<span class="muted">question</span>`}
+    <span class="muted">${esc((d.at || "").slice(0, 10))}</span> ${esc(cut(d.title, 160))}
+    <div class="muted">→ ${esc(cut(d.answer, 240) || "no answer text")}</div></div>`).join("")}</div>`;
+}
+
 // A .ny card: a head line, then the body. cls adds classes (for example "msg read").
 export function nyCard(head, body, cls = "") {
   return `<div class="ny${cls ? " " + cls : ""}">

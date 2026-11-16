@@ -725,13 +725,16 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
         out.append({"kind": "prompt", "elsewhere": True, "question": f"A permission prompt for {call}" if call
                     else "A permission prompt", "options": []})
     limit = core.parse_duration(core.setting(conn, "question_popup_max", agent=a["name"]))
-    for r in _open_questions(conn, a["name"]):
+    qs = _open_questions(conn, a["name"])
+    early = core.earlier_for(conn, "message", [r["id"] for r in qs]) if qs else {}  # g2 (#5955)
+    for r in qs:
         if said and (core._ts(r["created_at"]) or said) <= said:
             continue
         # An old question does not open the dialog by itself (#5001); the person still reaches it from the card.
         old = bool(limit.total_seconds()) and core.now() - core.parse_iso(r["created_at"]) > limit
         out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"],
-                    "asked_at": r["created_at"], "old": old, "note": core.forward_note(conn, r)})
+                    "asked_at": r["created_at"], "old": old, "note": core.forward_note(conn, r),
+                    "earlier": early.get(r["id"], [])})
     return out
 
 

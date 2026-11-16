@@ -3,6 +3,7 @@ import { esc, ago, left, clip, shortTitle } from "../lib.js";
 import { chip, statusChip, prioChip, doerChip, modelChip, agentChip, tierChip } from "./chip.js";
 import { input, textarea, select, field, two, renderKeepingEdits } from "./form.js";
 import { agentStart } from "./agentStart.js";
+import { earlierHtml } from "./card.js";
 
 // The drawer element. show() redraws it and keeps what the person typed (see renderKeepingEdits);
 // a different key (another item) or fresh starts clean. While a field in it has focus, show() waits.
@@ -122,6 +123,7 @@ export function itemDrawerHtml(it, { S, me }) {
         field("Order in project", `<span class="actions"><button class="btn" data-do="up">Up</button><button class="btn" data-do="down">Down</button></span>`))}
     </div></div>
     ${it.output ? `<div class="sec"><h4>Output</h4><div>${esc(it.output)}</div></div>` : ""}
+    ${earlierHtml(it.earlier)}
     <div class="sec"><h4>Waits on</h4>
       ${it.waits_on_detail.map(w => `<div><span class="link" data-open="${w.id}" title="${esc(w.title)}">#${w.id} ${esc(shortTitle(w))}</span> <span class="muted">(${w.status})</span> <span class="link" data-undep="${w.id}">remove</span></div>`).join("") || '<div class="muted">nothing</div>'}
       <div class="actions" style="margin-top:6px"><input id="dDep" placeholder="ids, e.g. 4, 9" style="width:140px"><button class="btn" data-do="dep">Add</button></div>

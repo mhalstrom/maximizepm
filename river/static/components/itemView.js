@@ -5,6 +5,7 @@
 import { esc, ago, left } from "../lib.js";
 import { statusChip, prioChip, doerChip, modelChip, agentChip, tierChip } from "./chip.js";
 import { msgLine } from "./drawer.js";
+import { earlierHtml } from "./card.js";
 
 const links = (list) => list.map(w => `<div><span class="link" data-open="${w.id}">#${w.id} ${esc(w.title)}</span> <span class="muted">(${esc(w.status)})</span></div>`).join("")
   || '<div class="muted">nothing</div>';
@@ -19,7 +20,7 @@ export function itemViewHtml(it) {
     <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="meta">Held by <b>${esc(holder)}</b>${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>` : ""}
     <div class="meta">${esc(it.reason || "")}</div>
-    ${text("Notes", it.notes)}${text("Context", it.context)}${text("Output", it.output)}
+    ${text("Notes", it.notes)}${text("Context", it.context)}${text("Output", it.output)}${earlierHtml(it.earlier)}
     ${(it.touches || []).length ? text("Touches", it.touches.join(", ")) : ""}${text("Check", it.check)}
     ${it.blocked_reason ? text("Outside blocker", it.blocked_text) : ""}
     <div class="sec"><h4>Waits on</h4>${links(it.waits_on_detail || [])}</div>

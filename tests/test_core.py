@@ -6249,6 +6249,70 @@ class Kill(Base):
         self.assertEqual(core.agent_status(self.c, "ag")["state"], "gone")  # at once, not after gone_after
 
 
+class EarlierDecision(Base):
+    """#5955 (policy g2 in code): a new person item or question to a person carries the done person items and the
+    answered questions on the same subject; the manager, which sees it first, reads them in its alert."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        self.x = self.add("a", "x")
+        core.claim(self.c, self.x, "w1")
+        # Earlier: a person item that mark did, and a question that the manager answered for him.
+        old = core.item_add(self.c, "a", "File the Washington excise tax return for Quarter 3", doer="human",
+                            actor="w1", found_during=self.x)["id"]
+        core.done(self.c, old, "Filed on the state site, confirmation 7781", actor="mark")
+        self.old = old
+        self.q = core.message(self.c, "question", "Delete the two old OVH servers and their volumes? yes or no",
+                              to="mark", item=self.x, actor="w1")[0]["id"]
+        core.answer(self.c, self.q, "Yes, delete them; mark said so on Sunday", actor="mark")
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def test_a_person_item_gets_its_earlier_decisions(self):
+        i = core.item_add(self.c, "a", "File the Washington excise tax return for Quarter 4", doer="human",
+                          actor="w1", found_during=self.x)["id"]
+        got = core.item_show(self.c, i)["earlier"]
+        self.assertEqual([(d["kind"], d["id"]) for d in got], [("item", self.old)])
+        self.assertIn("confirmation 7781", got[0]["answer"])
+        # The manager sees it first, with the decision in its alert.
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        alert = self.c.execute("SELECT body FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
+                               (i,)).fetchone()["body"]
+        self.assertIn(core.EARLIER_HINT, alert)
+        self.assertIn(f"#{self.old}", alert)
+        core.forward(self.c, item=i, actor="boss")
+        row = next(n for n in core.needs_you(self.c, "mark") if n["item_id"] == i)
+        self.assertEqual([d["id"] for d in row["earlier"]], [self.old])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.c.execute("PRAGMA database_list").fetchone()[2]}):
+            from river import cli
+            cli.run(["show", str(i)])
+        self.assertIn("Earlier decisions on this subject", out.getvalue())
+
+    def test_a_question_gets_its_earlier_decisions_and_the_manager_reads_them(self):
+        m = core.message(self.c, "question", "May I delete the old OVH servers now?", to="mark", item=self.x,
+                         actor="w1")[0]
+        self.assertEqual([(d["kind"], d["id"]) for d in m["earlier"]], [("question", self.q)])
+        self.assertIn("Yes, delete them", m["earlier"][0]["answer"])
+        alert = self.c.execute("SELECT body FROM messages WHERE kind='alert' AND reply_to=?", (m["id"],)).fetchone()
+        self.assertIn("Yes, delete them", alert["body"])
+
+    def test_no_earlier_decision_for_another_subject_or_an_agent_item(self):
+        i = core.item_add(self.c, "a", "Choose the color of the logo", doer="human", actor="w1",
+                          found_during=self.x)["id"]
+        self.assertEqual(core.item_show(self.c, i)["earlier"], [])
+        j = core.item_add(self.c, "a", "File the Washington excise tax return for Quarter 4", actor="w1",
+                          new="an agent step")["id"]
+        self.assertNotIn("earlier", core.item_show(self.c, j))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM earlier_decisions WHERE ref_id IN (?,?) AND kind='item'",
+                                        (i, j)).fetchone()[0], 0)
+
+
 class PersonHold(Base):
     """#5311: the rest of #5307. An alert to a person and a person item (doer human) go to the active manager first,
     as a question does; the manager does it, closes it, or forwards it; question_hold ends the wait."""

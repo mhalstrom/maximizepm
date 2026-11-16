@@ -990,6 +990,19 @@ CREATE TABLE IF NOT EXISTS needs_you (
   close_reason  TEXT
 );
 
+-- Earlier decisions (#5955, global policy g2): for a new person item (kind item) or a question to a person (kind
+-- message), the done person items and answered questions on the same subject, found once at the add or the send
+-- (earlier_find), so each read of a card is one indexed query. Readers: item_show, message_show, needs_you,
+-- sessions.waiting_for, and the manager's alert of a held question or person item.
+CREATE TABLE IF NOT EXISTS earlier_decisions (
+  kind        TEXT NOT NULL CHECK (kind IN ('item','message')),
+  ref_id      INTEGER NOT NULL,
+  match_kind  TEXT NOT NULL CHECK (match_kind IN ('item','question')),
+  match_id    INTEGER NOT NULL,
+  score       REAL NOT NULL,
+  PRIMARY KEY (kind, ref_id, match_kind, match_id)
+);
+
 -- The close check (#3286): an open item that the close of closed_id may have made unnecessary, and why.
 -- decided_at is set when the closer (or a manager) keeps it; closing the item itself decides it too.
 CREATE TABLE IF NOT EXISTS close_checks (
@@ -9354,6 +9367,7 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     why = _ops_fix_refusal(conn, actor, doer, found_during, blocks)
     if why:
         raise RiverError(why)
+    earlier = earlier_find(conn, title, context) if doer == "human" else []  # g2 (#5955): read before the write lock
     with tx(conn):
         if found_during is not None:
             _item(conn, found_during)
@@ -9368,6 +9382,8 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         _event(conn, iid, actor, f"added to {p['name']} at P{priority}")
         if short:
             conn.execute("UPDATE items SET short=? WHERE id=?", (short, iid))
+        if earlier:
+            _earlier_store(conn, "item", iid, earlier)
         if start_at:
             conn.execute("UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, blocked_at=? "
                          "WHERE id=?", (START_REASON, start_at, actor, iso(now()), iid))
@@ -10933,6 +10949,99 @@ def related(conn, item_id, n=3):
         conn, "i.project_id=? AND i.kind='work'", (it["project_id"],), full=False, keys=False) if d["id"] not in skip),
         key=lambda x: -x[0])
     return [_match(d, s) for s, d in scored[:n] if s >= RELATED_MIN]
+
+
+# Earlier decisions (#5955, global policy g2). Measured on the live queue (2026-11-15, the 25 newest person items
+# against 509 done person items and 154 answered questions to a person): a score from 0.45 named the same step (a
+# tax return for the next quarter 0.61, the same deletion of old servers 0.56, a name for the same repo 0.52);
+# scores of 0.2 to 0.4 shared only a vendor or a place.
+EARLIER_MIN = 0.45
+EARLIER_DAYS = 90     # decisions older than this are not looked up
+EARLIER_LIMIT = 3
+EARLIER_RARE = 4      # the rarest words of the new text that a match must hold one of (a SQL filter before the score)
+
+
+def earlier_find(conn, title, text="", skip_item=None, skip_message=None):
+    """Done person items and answered questions to a person of the last EARLIER_DAYS, in every project, on the same
+    subject as a new person item or question (title and text): [(match_kind, id, score)], best first. One of the
+    EARLIER_RARE rarest words must occur in a match (a LIKE on the stem), so the score reads a few rows, not all."""
+    idf = _idf(conn)
+    t = _words(title)
+    key = t + t + sorted(set(_words(text)))
+    if not key:
+        return []
+    q = _vector(key, idf)
+    rare = sorted(set(key), key=lambda w: (-idf(w), w))[:EARLIER_RARE]
+    pats = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for w in rare]
+    since = iso(now() - timedelta(days=EARLIER_DAYS))
+    found = []
+    have = " OR ".join(["(LOWER(title) || ' ' || LOWER(COALESCE(context,''))) LIKE ? ESCAPE '\\'"] * len(pats))
+    for r in conn.execute(f"SELECT id, title, context FROM items WHERE doer='human' AND status='done' AND kind='work' "
+                          f"AND closed_at>=? AND id<>? AND ({have})", [since, skip_item or 0, *pats]):
+        w = _words(r["title"])
+        found.append(("item", r["id"], _cosine(q, _vector(w + w + sorted(set(_words(r["context"]))), idf))))
+    have = " OR ".join(["LOWER(q.body) LIKE ? ESCAPE '\\'"] * len(pats))
+    for r in conn.execute(f"SELECT q.id, q.body FROM messages q WHERE q.kind='question' AND q.created_at>=? AND q.id<>? "
+                          f"AND q.to_agent IN (SELECT name FROM agents WHERE kind='human') AND EXISTS (SELECT 1 FROM "
+                          f"messages a WHERE a.reply_to=q.id AND a.kind='answer') AND ({have})",
+                          [since, skip_message or 0, *pats]):
+        w = _words(r["body"])
+        found.append(("question", r["id"], _cosine(q, _vector(w + w, idf))))
+    found = sorted((x for x in found if x[2] >= EARLIER_MIN), key=lambda x: -x[2])
+    return [(k, i, round(min(s, 1.0), 2)) for k, i, s in found[:EARLIER_LIMIT]]
+
+
+def _earlier_store(conn, kind, ref_id, found):
+    """Inside a tx: the matches of earlier_find for a new person item (kind item) or question (kind message)."""
+    conn.executemany("INSERT OR REPLACE INTO earlier_decisions(kind, ref_id, match_kind, match_id, score) "
+                     "VALUES (?,?,?,?,?)", [(kind, ref_id, k, i, s) for k, i, s in found])
+
+
+def earlier_for(conn, kind, ref_ids):
+    """{ref_id: [{kind, id, title, answer, by, at, project, score}]} of the stored earlier decisions: the title of a
+    done person item and its output, or a question and its last answer."""
+    ids = [int(x) for x in ref_ids if x is not None]
+    if not ids:
+        return {}
+    out = {}
+    for r in conn.execute(
+            f"SELECT e.ref_id, e.match_kind, e.match_id, e.score, i.title, i.output, i.assignee, i.closed_at, "
+            f"p.name project, q.body qbody, a.body abody, a.from_agent aby, a.created_at aat "
+            f"FROM earlier_decisions e LEFT JOIN items i ON e.match_kind='item' AND i.id=e.match_id "
+            f"LEFT JOIN projects p ON p.id=i.project_id "
+            f"LEFT JOIN messages q ON e.match_kind='question' AND q.id=e.match_id "
+            f"LEFT JOIN messages a ON a.id=(SELECT MAX(id) FROM messages WHERE reply_to=q.id AND kind='answer') "
+            f"WHERE e.kind=? AND e.ref_id IN ({','.join('?' * len(ids))}) ORDER BY e.ref_id, e.score DESC",
+            [kind, *ids]):
+        if r["match_kind"] == "item" and r["title"] is not None:
+            d = {"kind": "item", "id": r["match_id"], "title": r["title"], "answer": r["output"] or "",
+                 "by": r["assignee"], "at": r["closed_at"], "project": r["project"], "score": r["score"]}
+        elif r["match_kind"] == "question" and r["qbody"] is not None:
+            d = {"kind": "question", "id": r["match_id"], "title": r["qbody"], "answer": r["abody"] or "",
+                 "by": r["aby"], "at": r["aat"], "project": None, "score": r["score"]}
+        else:
+            continue  # the match is archived or gone
+        out.setdefault(r["ref_id"], []).append(d)
+    return out
+
+
+def earlier_text(rows, width=240):
+    """The earlier decisions as lines for a person or the manager: what was asked, and what was decided."""
+    def cut(s):
+        s = " ".join((s or "").split())
+        return s if len(s) <= width else s[:width - 3] + "..."
+    return [(f"#{d['id']}" if d["kind"] == "item" else f"question m{d['id']}") + f" ({(d['at'] or '')[:10]}): "
+            f"{cut(d['title'])} -> {cut(d['answer']) or '(no answer text)'}" for d in rows]
+
+
+EARLIER_HINT = ("Earlier decisions on this subject (policy g2): when one covers this ask, close it and quote that "
+                "decision; else ask only what it leaves open, and name it.")
+
+
+def _earlier_note(conn, kind, ref_id):
+    """The earlier decisions of a held question or person item, as the end of the manager's alert ('' for none)."""
+    rows = earlier_for(conn, kind, [ref_id]).get(ref_id)
+    return f"\n{EARLIER_HINT}\n" + "\n".join(f"  {x}" for x in earlier_text(rows)) if rows else ""
 
 
 def duplicates(conn, project=None):
@@ -13584,7 +13693,10 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True):
             r["_key"] = (2, -r["id"])  # an item the queue no longer knows
     rows.sort(key=lambda r: r["_key"])
     rows = rows[:limit]
+    early = {"item": earlier_for(conn, "item", [r["item_id"] for r in rows if r["kind"] == "item"]),
+             "message": earlier_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
     for r in rows:
+        r["earlier"] = early[r["kind"]].get(r["item_id"] if r["kind"] == "item" else r["message_id"], [])
         del r["_key"]
         r["notifications"] = [dict(x) for x in conn.execute(
             "SELECT channel, state, attempts, last_error, sent_at FROM notifications WHERE event_id=? ORDER BY channel",
@@ -16210,6 +16322,8 @@ def item_show(conn, item_id, ann=None):
         "SELECT id FROM items WHERE found_during=? ORDER BY id", (iid,))]
     a["message_count"] = conn.execute("SELECT COUNT(*) FROM messages WHERE item_id=?", (iid,)).fetchone()[0]
     a["usage"] = item_usage(conn, iid)
+    if a["doer"] == "human":
+        a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
     return a
 
 
@@ -16379,6 +16493,10 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                                          and _item_stands(conn, actor, item) else None)
         mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
                     level=level if level != DEFAULT_LEVEL else None, blocked=sign)
+        if kind == "question" and _is_person(conn, to) and not _is_person(conn, actor):
+            # g2 (#5955): the decisions the person made on the same subject go with the question, so the manager
+            # (which sees it first) and the person read them before they answer.
+            _earlier_store(conn, "message", mid, earlier_find(conn, body, skip_message=mid))
         held = _hold_question(conn, mid) if kind in ("question", "alert") else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
@@ -16459,6 +16577,7 @@ def _hold_question(conn, mid):
                 f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
                 f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
                 f"With neither within {hold} (question_hold), {person} gets it.")
+    body += _earlier_note(conn, "message", mid)
     alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
     if q["item_id"] is not None:
         _event(conn, q["item_id"], "maxpm", f"{q['kind']} #{mid} to {person} held for the manager {boss} ({hold})")
@@ -16593,6 +16712,7 @@ def _hold_items(conn, ann):
                 f"first; the person does not see it yet. Do it when the person is not needed: maxpm done {a['id']} "
                 f"--note \"<what you did>\" (or drop). Else send it on: maxpm forward --item {a['id']} "
                 f"[--note \"<what you add>\"]. With neither within {hold} (question_hold), the person gets it.")
+        body += _earlier_note(conn, "item", a["id"])
         _send(conn, "alert", "maxpm", body, to=boss, item_id=a["id"], blocked="sender")
         _event(conn, a["id"], "maxpm", f"held for the manager {boss} ({hold}): it does the item or forwards it")
 
@@ -16924,7 +17044,10 @@ def message_show(conn, msg_id):
                      "WHERE m.id=?", (int(msg_id),)).fetchone()
     if not r:
         raise RiverError(f"no message {msg_id}")
-    return _msg_dict(r)
+    m = _msg_dict(r)
+    if m["kind"] == "question":
+        m["earlier"] = earlier_for(conn, "message", [m["id"]]).get(m["id"], [])
+    return m
 
 
 def thread(conn, msg_id, actor=None):
