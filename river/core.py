@@ -9745,7 +9745,9 @@ def target_show(conn, name):
 def targets_view(conn, ann=None):
     """Each target with its owner, projects, open deploy items (with what they ship), and last finished deploy."""
     ann = ann if ann is not None else annotate(conn)
-    ships = lambda a: [{"id": b, "title": ann[b]["title"], "status": ann[b]["status"], "project": ann[b]["project"]}
+    # short and goals: the page lists a release's tasks as rows grouped by goal, then project, like its report (#6033).
+    ships = lambda a: [{"id": b, "title": ann[b]["title"], "short": ann[b].get("short"), "status": ann[b]["status"],
+                        "project": ann[b]["project"], "goals": ann[b].get("goals") or []}
                        for b in a["waits_on"] if b in ann and ann[b]["kind"] != "review"]
     review = lambda a: next(({"id": b, "status": ann[b]["status"], "assignee": ann[b]["assignee"]}
                              for b in a["waits_on"] if b in ann and ann[b]["kind"] == "review"

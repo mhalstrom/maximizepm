@@ -11,12 +11,13 @@ export function itemOrder(a, b) {
 
 // One item: id, title, an optional line under it (why), and its chips. Open items can be dragged onto an agent.
 // hover: why is the hover of the row instead of a line (the Board's Next up, #5083: less text on the page).
-export function itemRow(it, why, { hover = false } = {}) {
+// chips: HTML in place of the item's own chips, for a row of an item with few fields (a task of a release, #6033).
+export function itemRow(it, why, { hover = false, chips = null } = {}) {
   const tip = hover && why ? `${it.title}\n${why}` : it.title;
   return `<div class="row clickrow" data-id="${it.id}"${it.status === "open" ? ' draggable="true"' : ""}${hover && why ? ` title="${esc(why)}"` : ""}>
     <div class="id">#${it.id}</div>
     <div class="t"><div class="title" title="${esc(tip)}">${esc(shortTitle(it))}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${why && !hover ? `<div class="why">${esc(why)}</div>` : ""}</div>
-    <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div>${OPEN_MARK}</div>`;
+    <div class="chips">${chips != null ? chips : `${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}`}</div>${OPEN_MARK}</div>`;
 }
 
 // Items as table rows (components/table.js): one flat row per item, with plain values to sort and

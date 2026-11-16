@@ -1,4 +1,29 @@
-/* The Targets tab. Its cards are the shared .ny cards of app.css; rules of this tab only go here. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+/* The Releases view of Plan; rules of this view only go here. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+
+/* One card for each target (#6033): the head, the rules line, each open release (its state, Open report, its tasks as
+   item rows in groups), the buttons, and the folds (hooks, past deploys). */
+#targets { display: flex; flex-direction: column; gap: var(--sp-6); }
+.rel { border: var(--hair) solid var(--line); border-radius: var(--r-l); padding: var(--sp-5) var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.rel-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-3); }
+.rel-h h3 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
+.rel-rel { display: flex; flex-direction: column; gap: var(--sp-3); border-top: var(--hair) solid var(--line); padding-top: var(--sp-4); }
+.rel-state { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-5); flex-wrap: wrap; }
+.rel-line { min-width: 0; overflow-wrap: anywhere; }
+.rel-tasks { display: flex; flex-direction: column; }
+.rel-g { display: flex; align-items: baseline; gap: var(--sp-3); padding: var(--sp-3) 0 var(--sp-1); }
+.rel-g:first-child { padding-top: 0; }
+.rel-more, .rel-acts { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.rel-fold { display: flex; flex-direction: column; gap: var(--sp-1); }
+.rel-past { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-1) 0; }
+#relNowDlg { --dlg-w: var(--w-dlg-s); }
+@media (max-width: 759px) {
+  .rel { padding: var(--sp-4); }
+  .rel-state .btn { width: 100%; min-height: var(--tap); }
+  /* A task row keeps its Open mark beside the title; most tasks are done and have no chips. */
+  .rel-tasks .row { grid-template-columns: var(--w-id) minmax(0, 1fr) auto; }
+  .rel-tasks .row .row-open { grid-column: 3; grid-row: 1; }
+  .rel-tasks .row .chips:empty { display: none; }
+}
 
 /* The review report of a release (#6003, components/reportDialog.js): left the summary, numbers and groups (risks
    first, in red); right the picked task with its Task and Code tabs. A phone shows one level at a time. */
