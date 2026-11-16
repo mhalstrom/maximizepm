@@ -60,11 +60,15 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config",
-          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser", "canvas"}
+          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser", "canvas",
+          "scope", "pause", "resume"}
+# #6009: commands of which only some subcommands go to serve. review pass runs the review command in the caller and
+# sends its result (cli: op review_record); expert start and fresh open a terminal through serve already.
+REMOTE_SUBS = {"review": {"fail"}, "expert": {None, "list", "adopt", "request", "end", "notes"}}
 # #5975 (only serve writes the queue): a file that a command reads is read here, in the caller's own sandbox, and
 # serve's runner gets its text in a file of its own; serve, outside every sandbox, never opens a path that a caller
 # names. '-' (stdin) is read here too. Options per (command, subcommand) and positions per (command, subcommand).
-READ_OPTS = {("add", None): ("--from",), ("goal", "handoff"): ("--file",)}
+READ_OPTS = {("add", None): ("--from",), ("goal", "handoff"): ("--file",), ("expert", "notes"): ("--put",)}
 READ_POS = {("canvas", "put"): 0, ("canvas", "section"): 2}
 READ_MAX = 8 << 20  # a larger file runs in the caller's process
 CANVAS_LOCAL = {"save"}  # it writes a file
@@ -276,7 +280,7 @@ def run_remote(words, env=None, cwd=None):
     poll = _pollable(cmd, words)
     if poll:
         files = tuple(w for w in FILE_WORDS if w not in ("--wait", "--watch"))
-    elif cmd not in REMOTE:
+    elif cmd not in REMOTE and not _remote_sub(cmd, words):
         return None
     found = reads(words)
     if found is None:
@@ -319,6 +323,15 @@ def run_remote(words, env=None, cwd=None):
 POLL_AGAIN = 75  # core.POLL_AGAIN: a poll that found nothing yet
 POLL_SLEEP = 3.0  # seconds between two polls, as the loops of the waits in core
 POLL_LOST = 120.0  # seconds that serve may not answer during a wait (a restart) before the wait runs here
+
+
+def _remote_sub(cmd, words):
+    """A subcommand that serve runs (REMOTE_SUBS), or maxpm report --state (not the hooks' report --hook/--wake)."""
+    if cmd == "report":
+        return any(w == "--state" or w.startswith("--state=") for w in words) and not any(
+            w in ("--hook", "--wake", "--call") for w in words)
+    subs = REMOTE_SUBS.get(cmd)
+    return subs is not None and _sub(words, _at(words)) in subs
 
 
 def _pollable(cmd, words):

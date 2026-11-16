@@ -113,6 +113,77 @@ class ServeWrites(unittest.TestCase):
         self.assertEqual(serve.execute("SELECT count(*) FROM items").fetchone()[0], 1)
 
 
+class ServeWritesCommands(unittest.TestCase):
+    """#6009: the commands that wrote in their own process go to serve; review pass runs its command here and sends
+    the record."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.db = os.path.join(self.dir.name, "q.db")
+        self.env = {"MAXPM_DB": self.db, "PATH": os.environ.get("PATH", "")}
+
+    def test_serve_writes_which_commands_go_to_serve(self):
+        with open(self.db + "-serve.json", "w", encoding="utf-8") as f:
+            json.dump({"port": 1, "token": "t"}, f)
+        notes = os.path.join(self.dir.name, "notes.md")
+        with open(notes, "w", encoding="utf-8") as f:
+            f.write("what I learned\n")
+        for words in (["--as", "boss", "scope", "set", "w1", "project:web"], ["pause", "--reason", "x"], ["resume"],
+                      ["review", "fail", "3", "fix it"], ["expert", "request", "read it", "--project", "web"],
+                      ["expert"], ["expert", "notes", "fab", "--put", notes], ["report", "--state", "idle"]):
+            with mock.patch.object(client, "_post", return_value=(200, b'{"code": 0}')) as post:
+                self.assertEqual(client.run_remote(words, self.env), 0, words)
+            post.assert_called_once()
+        with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
+            for words in (["review", "pass", "3"], ["report", "--hook", "claude"], ["expert", "start", "fab"],
+                          ["report", "--state", "idle", "--hook", "x"]):
+                self.assertIsNone(client.run_remote(words, self.env), words)
+
+    def test_serve_writes_review_pass_runs_here_and_records_through_serve(self):
+        serve = core.connect(self.db)
+        self.addCleanup(serve.close)
+        core.project_add(serve, "web", path=self.dir.name)
+        for n in ("w1", "w2"):
+            core.register(serve, n)
+        core.target_add(serve, "site", "push")
+        core.project_target(serve, "web", "site")
+        core.config_set(serve, "review", "on")
+        x = core.item_add(serve, "web", "Build the cart")["id"]
+        core.claim(serve, x, "w1")
+        core.done(serve, x, "built", "w1")
+        core.ship(serve, x, "w1")
+        rv = serve.execute("SELECT id FROM items WHERE kind='review'").fetchone()[0]
+        core.claim(serve, rv, "w2")
+        mark = os.path.join(self.dir.name, "ran")
+        serve.execute("UPDATE items SET \"check\"=? WHERE id=?", (f"touch {mark}", rv))
+        files = [p for p in os.listdir(self.dir.name) if p.startswith("q.db")]
+        for p in files:
+            os.chmod(os.path.join(self.dir.name, p), stat.S_IRUSR)
+        self.addCleanup(lambda: [os.chmod(os.path.join(self.dir.name, p), stat.S_IRUSR | stat.S_IWUSR)
+                                 for p in files])
+        asked = []
+
+        def ask(conn, op, args, actor=None, **kw):
+            asked.append((op, args, actor))
+            return {"id": rv, "status": "done"}
+        with mock.patch.object(cli, "ask_server", ask), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.db, "MAXPM_QUIET": "1"}):
+            os.chdir(self.dir.name)
+            self.addCleanup(os.chdir, ROOT)
+            self.assertEqual(cli.run(["--as", "w2", "review", "pass", str(rv), "--output", "checked"]), 0)
+        self.assertTrue(os.path.exists(mark))  # the review command ran here
+        self.assertEqual([(op, a["id"], a["ran"], a["output"], who) for op, a, who in asked],
+                         [("review_record", rv, f"touch {mark}", "checked", "w2")])
+        # serve records it.
+        for p in files:
+            os.chmod(os.path.join(self.dir.name, p), stat.S_IRUSR | stat.S_IWUSR)
+        from river import server
+        res = server.OPS["review_record"](serve, asked[0][1], "w2")
+        self.assertEqual(res["status"], "done")
+
+
 class ServeWritesPolls(unittest.TestCase):
     """#6008: a wait runs as polls in serve; the caller sleeps between them and keeps the wait's state."""
 

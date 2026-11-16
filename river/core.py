@@ -15579,7 +15579,7 @@ def _review_pin(conn, review_id, rev=None):
             "cut_rev": dep["cut_rev"]}
 
 
-def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, rev=None):
+def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, rev=None, record=None):
     """Accept a release review.
 
     The item's review command must exit 0 (in cwd). In a release with a git folder, the
@@ -15592,7 +15592,7 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, r
     limit = parse_duration(setting(conn, "review_timeout", item_id=it["id"])).total_seconds()
 
     def renew():
-        with tx(conn):
+        with unless_readonly(), tx(conn):  # a session that cannot write keeps its lease by its token (#5979)
             _touch_agent(conn, actor or it["assignee"])
 
     # The commands get the commit the release ships (#5500): a gate must test that one, not whatever origin/main is
@@ -15633,8 +15633,24 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, r
                 f"ships, so nothing is recorded. Bring the folder to {want[:12]} and pass again, or ask the target owner "
                 f"or the manager to move the pin: maxpm target cut {pin['target']} --rev {(head or '')[:12]}")
         reviewed = want or head
+    # #6009: the checks above run in the caller (its folder, its programs); the record is a write, which a session
+    # that cannot write the queue sends to maxpm serve (record: cli's op review_record).
+    if record is not None:
+        return record(ran, reviewed)
+    return review_record(conn, item_id, output, actor, ran, reviewed, rev)
+
+
+def review_record(conn, item_id, output=None, actor=None, ran=None, reviewed=None, rev=None):
+    """The writes of review pass after its checks ran (#6009): pin the release at the reviewed commit when it has no
+    pin, and close the review. The pin is read again here: it may have moved while the review command ran."""
+    it = _review_item(conn, item_id, actor)
+    pin = _review_pin(conn, it["id"], (rev or "").strip() or None)
+    want = (pin["named"] or pin["pin"]) if pin else None
+    if reviewed and want and reviewed != want:
+        raise RiverError(f"refused: the release moved to {want[:12]} while the review checked {reviewed[:12]}; nothing "
+                         f"is recorded. Pass again: maxpm review pass {item_id}")
     with tx(conn):
-        if reviewed and not pin["cut_rev"]:  # a pin that is a word, not a commit here, stays
+        if reviewed and pin and not pin["cut_rev"]:  # a pin that is a word, not a commit here, stays
             conn.execute("UPDATE items SET cut_rev=? WHERE id=?", (reviewed, pin["deploy"]))
             _event(conn, pin["deploy"], actor, f"release pinned at {reviewed[:12]} by review #{it['id']}: the commit "
                                                f"it checked")

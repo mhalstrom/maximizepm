@@ -73,7 +73,8 @@ OPS = {op: ANY for op in (
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "launch_agent", "message_read", "move",
     "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_repair",
     "ops_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
-    "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_send",
+    "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
+    "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock")}
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",

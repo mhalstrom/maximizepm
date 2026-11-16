@@ -3447,6 +3447,17 @@ def _record_lines(res):
     if len(steps) > 10:
         print(f"  ({len(steps) - 10} earlier steps: maxpm browser record step <n>)")
 
+def write_or_serve(conn, op, args, actor, local):
+    """The write of a command that runs in the caller's process (it runs the caller's programs): here, or through
+    maxpm serve (op of server.OPS) when this process cannot write the queue (#6009)."""
+    try:
+        return local()
+    except core.sqlite3.OperationalError as e:
+        if not core.is_readonly(e):
+            raise
+    return ask_server(conn, op, args, actor=actor, timeout=30)
+
+
 def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     """Ask the maxpm serve of this queue to do one page action (server.OPS) and return its result; RiverError
     says why not. The server runs outside any sandbox. A sandbox refuses a direct connection to this computer;
@@ -4621,7 +4632,13 @@ def dispatch(conn, a, actor):
         return core.ship(conn, a.id, actor)
     if c == "review":
         if a.rcmd == "pass":
-            return core.review_pass(conn, a.id, a.output, actor, os.getcwd(), rev=a.rev)
+            # #6009: the review command runs here, in the reviewer's folder and sandbox; the record goes to maxpm
+            # serve when this process cannot write the queue.
+            def record(ran, reviewed):
+                return write_or_serve(conn, "review_record", {"id": a.id, "output": a.output, "ran": ran,
+                                                              "reviewed": reviewed, "rev": a.rev}, actor,
+                                      lambda: core.review_record(conn, a.id, a.output, actor, ran, reviewed, a.rev))
+            return core.review_pass(conn, a.id, a.output, actor, os.getcwd(), rev=a.rev, record=record)
         return core.review_fail(conn, a.id, a.fixes, a.note, a.project, actor, a.ask)
     if c == "policy":
         if a.polcmd == "list":
