@@ -462,6 +462,49 @@ class Go(Base):
         core.project_add(self.c, "web", path=self.web)
         core.project_add(self.c, "api", path=self.api)
 
+    def test_go_prints_the_long_blocks_once_per_session(self):
+        """#5978: the policies, the person's waiting items and a goal handoff come in full at the first go of a
+        session, and as one line while they stay the same; a new session or a change prints them in full again."""
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        x = self.add("web", "page")
+        self.add("web", "Approve the copy", doer="human")
+
+        def go(session):
+            tok = core.RUN_SESSION.set(session)
+            try:
+                b = core.go(self.c, self.web, "w1")
+            finally:
+                core.RUN_SESSION.reset(tok)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_go(b)
+            return b, out.getvalue()
+        b, first = go("s1")
+        self.assertEqual((b["item"]["id"], b["unchanged"]), (x, []))
+        self.assertIn("POLICIES (rules for this session", first)
+        b, again = go("s1")
+        self.assertEqual(sorted(b["unchanged"]), ["human_waiting", "policies"])
+        self.assertIn(f"POLICIES: the same {len(b['policies'])} as in your last briefing", again)
+        self.assertIn("Waiting on the user: the same 1 items as in your last briefing", again)
+        self.assertLess(len(again), len(first) // 2, (len(first), len(again)))
+        self.assertTrue(b["policies"])  # the JSON keeps every block in full
+        core.policy_add(self.c, "Write tests first.", "mark asked", project="web", actor="mark")
+        self.assertEqual(go("s1")[0]["unchanged"], ["human_waiting"])  # a new policy: the policies in full
+        self.assertEqual(go("s2")[0]["unchanged"], [])  # a new session
+        # A goal's handoff: in full once per version.
+        core.goal_add(self.c, "web", "shop", "a shop", "it sells")
+        self.c.execute("INSERT INTO item_goals(item_id, goal_id) SELECT ?, id FROM goals WHERE name='shop'", (x,))
+        core.goal_own(self.c, "shop", "w1")
+        core.goal_handoff(self.c, "shop", "the plan so far", "w1")
+        go("s2")
+        b, out = go("s2")
+        self.assertIn("handoff:shop", b["unchanged"])
+        self.assertIn("HANDOFF v1: the same as in your last briefing", out)
+        core.goal_handoff(self.c, "shop", "the plan, step two", "w1")
+        self.assertNotIn("handoff:shop", go("s2")[0]["unchanged"])
+
     def test_the_push_alert_of_the_item_that_go_gives_is_not_a_message_to_read(self):
         # #1605: the briefing said 'Messages for you: inbox: 1 unread, 1 alert', and the inbox was then empty.
         from river import cli

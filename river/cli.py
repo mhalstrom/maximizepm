@@ -696,10 +696,13 @@ def _render_goal_split(g):
         print(f"  left out (their project has one kind only): {lo['goal']} with a goal, {lo['none']} without")
 
 
-def _handoff_lines(goal, h, due=None, indent="  "):
-    """The handoff of a goal for goal show and the go briefing; and a line when its owner should renew it."""
+def _handoff_lines(goal, h, due=None, indent="  ", same=False):
+    """The handoff of a goal for goal show and the go briefing; and a line when its owner should renew it. same: this
+    session got this version in full before (#5978): one line."""
     out = []
-    if h:
+    if h and same:
+        out.append(f"{indent}HANDOFF v{h['version']}: the same as in your last briefing (maxpm goal handoff {goal})")
+    elif h:
         out.append(f"{indent}HANDOFF v{h['version']} ({h['by_agent'] or '?'}, {h['created_at']}):")
         out += [f"{indent}  {line}" if line else "" for line in (h.get("text") or "").splitlines()]
     else:
@@ -5466,7 +5469,11 @@ def render_go(b):
         d = b["descriptions"].get(n)
         out.append(f"Project {n}: {d}" if d else f"Project {n}.")
     out.append("")
-    out += policy_lines(b.get("policies") or [])
+    same = set(b.get("unchanged") or [])  # #5978: blocks this session got in full before
+    if "policies" in same:
+        out += [f"POLICIES: the same {len(b['policies'])} as in your last briefing (maxpm policy show <id>)", ""]
+    else:
+        out += policy_lines(b.get("policies") or [])
     if b.get("asked_open"):
         out.append("OPEN QUESTIONS YOU ASKED: " + core.asked_line(me, b["asked_open"]) + ".")
         out += [f"  #{q['id']} to {q['to_agent']}: {' '.join(q['body'].split())[:160]}" for q in b["asked_open"]] + [""]
@@ -5564,9 +5571,11 @@ def render_go(b):
         out.append(f"  You own this outcome: add the items it needs ({r} add \"<title>\" tags them with it), take them, "
                    f"and when done-when holds: {r} goal done {gb['name']} --result \"<one line>\"")
         if gb.get("parent_handoff"):  # a sub-goal: the parent's handoff first
-            first, *rest = _handoff_lines(gb["parent_handoff"]["goal"], gb["parent_handoff"])
+            first, *rest = _handoff_lines(gb["parent_handoff"]["goal"], gb["parent_handoff"],
+                                          same=f"handoff:{gb['parent_handoff']['goal']}" in same)
             out += [f"  parent goal {gb['parent_handoff']['goal']}: {first.strip()}"] + rest
-        out += _handoff_lines(gb["name"], gb.get("handoff"), gb.get("handoff_due"))
+        out += _handoff_lines(gb["name"], gb.get("handoff"), gb.get("handoff_due"),
+                              same=f"handoff:{gb['name']}" in same)
         out.append(f"  Keep the handoff current after each item ({r} goal handoff {gb['name']} --file <path>): "
                    f"the next owner starts from it, and goal release and give refuse while it is older than your last item.")
         out.append("")
@@ -5605,7 +5614,7 @@ def render_go(b):
         out += _context_lines(it)
         out += _fault_lines(b.get("fault"), r)
         for h in b.get("handoffs") or []:  # the context of the item's goals, from their owners
-            first, *rest = _handoff_lines(h["goal"], h, h.get("due"))
+            first, *rest = _handoff_lines(h["goal"], h, h.get("due"), same=f"handoff:{h['goal']}" in same)
             out += [f"  goal {h['goal']}: {first.strip()}"] + rest
         for name in b.get("shared_goals") or []:
             out.append(f"  goal {name} is shared: it has no owner, and other agents work on its other items at the "
@@ -5821,7 +5830,11 @@ def render_go(b):
     if msg:
         out.append("")
         out.append(f"Messages for you: {msg}. Read them before you start.")
-    if b.get("human_waiting"):
+    if b.get("human_waiting") and "human_waiting" in same:
+        out.append("")
+        out.append(f"Waiting on the user: the same {len(b['human_waiting'])} items as in your last briefing "
+                   f"({r} needs-you)")
+    elif b.get("human_waiting"):
         out.append("")
         out.append(f"Waiting on the user (tell them; if you can do one or work around it: {r} takeover <id> --note \"how\"):")
         for h in b["human_waiting"]:

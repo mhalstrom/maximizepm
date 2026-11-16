@@ -959,6 +959,7 @@ CREATE TABLE IF NOT EXISTS agents (
   scope_by       TEXT,
   scope_at       TEXT,
   scope_told     TEXT,                       -- the last 'scope empty / waits' line the manager got about it
+  go_seen        TEXT,                       -- JSON: what go printed in full to this session (#5978)
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
 );
@@ -2217,6 +2218,8 @@ def _migrate(conn):
     if "scope" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:
         for c in ("scope", "scope_by", "scope_at", "scope_told"):
             conn.execute(f"ALTER TABLE agents ADD COLUMN {c} TEXT")
+    if "go_seen" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:  # #5978
+        conn.execute("ALTER TABLE agents ADD COLUMN go_seen TEXT")
     # The session of the command that wrote a history entry or sent a message (#5969).
     for t in ("events", "messages"):
         if "session" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}:
@@ -21717,7 +21720,49 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["policies"] = policies_for(conn, names, brief["role"], cwd)
         if it and fault_key(it):
             brief["fault"] = ops_fault_brief(conn, it)  # an investigation (#5432)
+    if brief.get("agent"):
+        brief["unchanged"] = _go_once(conn, brief)
     return brief
+
+
+def _go_once(conn, brief):
+    """The long blocks of the briefing that this session got in full before and that did not change since (#5978):
+    the policies, the person's waiting items, and each goal handoff (by version). Measured: go returned 22.2M
+    characters in 3,970 calls, a third of all maxpm output; 70% of an expert briefing were its policies, printed
+    again at each go. The record (agents.go_seen) belongs to one session: a new session id starts it again. The
+    JSON output keeps every block in full; the text names a block that is the same in one line."""
+    import hashlib
+    agent = brief["agent"]
+    row = conn.execute("SELECT pid, go_seen FROM agents WHERE name=?", (agent,)).fetchone()
+    if not row:
+        return []
+    session = RUN_SESSION.get() or (f"pid:{row['pid']}" if row["pid"] else None)
+    try:
+        seen = json.loads(row["go_seen"] or "{}")
+    except ValueError:
+        seen = {}
+    if not session or seen.get("session") != session:
+        seen = {"session": session}
+    blocks = {"policies": brief.get("policies"), "human_waiting": brief.get("human_waiting")}
+    gb = brief.get("goal") if isinstance(brief.get("goal"), dict) else None
+    for h in ([gb.get("handoff"), gb.get("parent_handoff")] if gb else []) + list(brief.get("handoffs") or []):
+        if h and h.get("goal") and h.get("version"):
+            blocks[f"handoff:{h['goal']}"] = h["version"]
+    if gb and gb.get("handoff") and gb.get("name"):
+        blocks[f"handoff:{gb['name']}"] = gb["handoff"].get("version")
+    same, changed = [], False
+    for key, value in blocks.items():
+        if not value:
+            continue
+        digest = hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
+        if session and seen.get(key) == digest:
+            same.append(key)
+        else:
+            seen[key], changed = digest, True
+    if changed and session:
+        with unless_readonly(), tx(conn):
+            conn.execute("UPDATE agents SET go_seen=? WHERE name=?", (json.dumps(seen), agent))
+    return same
 
 
 def _go_brief(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
