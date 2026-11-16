@@ -474,6 +474,17 @@ button.srow-it { cursor: pointer; }
 .cv-sugg del, .cv-compose del { color: var(--warn); background: var(--warn-bg); }
 .cv-sugg ins { color: var(--ready); background: var(--ready-bg); text-decoration: none; }
 .cv-page { color: var(--human); background: var(--human-bg); font-size: var(--fs-xs); }  /* from the shared page (#6012) */
+/* The outline row of a design document (#6013, components/docOutline.js): each part with its state. */
+.sp-outline:empty { display: none; }
+.sp-outline { flex: none; padding: var(--sp-2) var(--sp-4) 0; }
+.doc-outline { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.doc-part { display: inline-flex; align-items: center; gap: var(--sp-1); border: var(--hair) solid var(--line); border-radius: var(--r-pill);
+  padding: var(--sp-0) var(--sp-3); font-size: var(--fs-s); color: var(--ink); text-decoration: none; }
+.doc-part:hover { border-color: var(--accent); }
+.doc-part .doc-dot { width: var(--sp-2); height: var(--sp-2); border-radius: var(--r-pill); background: var(--ready); }
+.doc-part.writing .doc-dot { background: var(--muted); }
+.doc-part.open .doc-dot { background: var(--human); }
+.doc-part .doc-ps { color: var(--muted); font-size: var(--fs-xs); }
 /* Comment mode on a Markdown canvas: the part under the mouse, and a part that Show finds. */
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: var(--hair-2) solid var(--accent); outline-offset: var(--sp-0); }

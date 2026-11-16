@@ -120,6 +120,15 @@ class CanvasRoutes(Base):
         bad = self.get(f"/api/view-key?target=canvas:999&token={server.PAGE_TOKEN}")
         self.assertEqual(bad["code"], 409)
 
+    def test_full_screen_of_a_markdown_canvas_has_the_outline_column(self):
+        # #6013: a design document shows its parts at the side of Full screen (components/docOutline.js).
+        md = core.canvas_put(self.c, "design", "# D\n\n## Brief\n\nx\n\n## Plan\n\nwriting: steps\n\n## Risks\n\ny",
+                             "ag", kind="md")["id"]
+        url, _ = self.key(f"canvas:{md}")
+        page = self.get(url)["body"].decode()
+        self.assertIn("<aside id=outline></aside><div id=md class=md", page)
+        self.assertIn('import("/components/docOutline.js")', page)
+
     def test_the_state_and_the_artifacts_lists_have_the_canvases_first(self):
         st = core.state(self.c)
         self.assertEqual([(x["id"], x["version"], x["agent"], x["title"]) for x in st["canvases"]],

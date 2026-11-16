@@ -4578,6 +4578,15 @@ async function drawMd() {
   } else { const p = document.createElement("pre"); p.textContent = text; md.replaceChildren(p); }
 }
 await drawMd();
+// The parts of a design document in a column at its side (#6013, components/docOutline.js).
+async function drawOutline() {
+  const box = document.getElementById("outline"); if (!box || !md) return;
+  const { docParts, outlineHtml } = await import("/components/docOutline.js");
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  box.innerHTML = outlineHtml(docParts(md), esc, { column: true });
+  box.hidden = !box.innerHTML;
+}
+await drawOutline();
 """
 
 # A canvas in /view follows its newest version (#4768): it asks for the version every three seconds and loads the
@@ -4597,7 +4606,7 @@ setInterval(async () => {
     const j = await r.json();
     if (j.version === shown) return;
     shown = j.version; ver.textContent = "v" + shown;
-    if (cv) cv.src = cv.src; else { const y = md.scrollTop; await drawMd(); md.scrollTop = y; }
+    if (cv) cv.src = cv.src; else { const y = md.scrollTop; await drawMd(); await drawOutline(); md.scrollTop = y; }
   } catch (e) { /* the next poll asks again */ }
 }, 3000);
 """
@@ -4614,8 +4623,8 @@ def _canvas_view(conn, cid, q, end, key):
         return 404, _view_shell("", "MaximizePM", "", f"<div class=card>{e(str(err))}</div>")
     sig = f"e={int(end)}&k={quote(key)}"
     src, meta = f"/canvas/{cid}/latest?{sig}", f"/canvas/{cid}/meta?{sig}"
-    if c["kind"] == "md":
-        body = f"<div id=md class=md data-src='{e(src)}' data-md=1></div>"
+    if c["kind"] == "md":  # the outline of a design document at its side (#6013)
+        body = f"<div class=doc-wrap><aside id=outline></aside><div id=md class=md data-src='{e(src)}' data-md=1></div></div>"
     else:
         body = f"<iframe id=cv src='{e(src)}' sandbox='allow-scripts' title='{e(c['title'] or c['name'])}'></iframe>"
     came = " · ".join(x for x in (
@@ -4640,6 +4649,12 @@ button,.btn{{font:inherit;font-size:13px;background:var(--panel);color:var(--ink
 iframe{{flex:1;border:0;width:100%;background:#fff}} .fit{{flex:1;overflow:auto;display:flex;align-items:flex-start;justify-content:center}} .fit img{{max-width:100%}}
 .md{{flex:1;overflow:auto;padding:24px;max-width:56rem;margin:0 auto;width:100%;box-sizing:border-box}} .md pre{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto}}
 .card{{margin:40px auto;max-width:32rem;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}}
+.doc-wrap{{flex:1;display:flex;min-height:0}} .doc-wrap .md{{margin:0 auto}}
+#outline{{flex:none;width:220px;overflow:auto;padding:24px 8px 24px 16px;border-right:1px solid var(--line)}}
+.doc-outline.col{{display:flex;flex-direction:column;gap:4px}} .doc-part{{display:flex;flex-direction:column;padding:6px 8px;border-radius:6px;color:var(--ink);text-decoration:none}}
+.doc-part:hover{{background:var(--panel)}} .doc-part .doc-dot{{display:none}} .doc-ps{{color:var(--muted);font-size:12px}}
+.doc-part.writing .doc-ps{{font-style:italic}} .doc-part.open .doc-ps{{color:var(--accent)}}
+@media (max-width:760px){{#outline{{display:none}}}}
 </style></head><body>
 <div class=bar><b title="{e(title)}">{e(name)}</b><span class=m>{came}</span><span class=s></span>
 <button onclick="location.reload()">Reload</button><button id=copy>Copy link</button></div>

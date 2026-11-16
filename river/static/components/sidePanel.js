@@ -19,6 +19,7 @@
 import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targetKey, ownSignIn } from "../lib.js";
 import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
 import { mdBlocks, spliceBlock } from "./mdBlocks.js";
+import { docParts, outlineHtml } from "./docOutline.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
@@ -287,7 +288,15 @@ async function showCanvas(t, box, note) {
       else t.comments.pick(part);
       side.scrollIntoView({ block: "nearest" });
     }, true);
-    box.append(d, side);
+    t.outline = document.createElement("div"); t.outline.className = "sp-outline";
+    t.outline.addEventListener("click", (e) => {  // a part of the outline: its heading in view (#6013)
+      const a = e.target.closest("[data-doc-part]"); if (!a) return;
+      e.preventDefault();
+      const h = t.md && t.md.querySelector("#" + CSS.escape(a.dataset.docPart));
+      if (h) h.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    box.append(t.outline, d, side);
+    drawOutline(t);
     box.scrollTop = (t.scroll && t.scroll.y) || 0;
     box.onscroll = () => { if (on === t.id) t.scroll = { x: 0, y: box.scrollTop }; };
     // The mode stays while the tab is drawn again (#6004); an older version is only read.
@@ -378,6 +387,14 @@ function drawDoc(t, text, meta) {
   return { root, groups };
 }
 
+// The outline row of a design document (#6013): its parts and their state, above the text; drawn again with each
+// version and answer.
+function drawOutline(t) {
+  if (!t.outline || !t.md) return;
+  const html = outlineHtml(docParts(t.md), esc);
+  if (t.outline._html !== html) { t.outline.innerHTML = html; t.outline._html = html; }
+}
+
 // A new version of a drawn doc (#4844): the sections whose text is the same keep their elements (with the words a
 // person types there, an open section edit, and the place on screen); only the others are drawn again.
 function patchDoc(t, box, text, meta) {
@@ -458,8 +475,9 @@ async function updateCanvas(t) {
         const rt = await fetch(`canvas/${id}/latest?${sig}`);
         if (!rt.ok || on !== t.id || !t.md.isConnected) return;
         patchDoc(t, box, await rt.text(), meta);
+        drawOutline(t);
         t.shown = meta.version;
-      } else updateAnswers(t.md, meta);
+      } else { updateAnswers(t.md, meta); drawOutline(t); }
     } else if (changed && t.frame) {
       swapFrame(t, `canvas/${id}/latest?${sig}`);
       t.shown = meta.version;
@@ -503,7 +521,7 @@ async function loadComments(t) {
     const meta = await r.json();
     if (t.bar && t.bar.isConnected) drawBar(t, meta);  // the realquicksite line follows its publish (#5789)
     t.comments.render(meta);
-    if (t.md && t.md.isConnected && !t.pin) updateAnswers(t.md, meta);
+    if (t.md && t.md.isConnected && !t.pin) { updateAnswers(t.md, meta); drawOutline(t); }
     if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
   } catch (e) { /* the next state asks again */ }
 }
