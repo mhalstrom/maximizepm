@@ -48,7 +48,7 @@ COMMANDS = {
     "release": ANY, "drop": ANY, "takeover": ANY, "reopen": ANY, "backlog": ANY, "activate": LEAD, "prio": ANY,
     "move": ANY, "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
     "give": ANY, "split": ANY, "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
-    "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "inbox": ANY, "thread": ANY,
+    "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "release-changes": ONLY_PERSON, "inbox": ANY, "thread": ANY,
     "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "heartbeat": ANY,
     "report": ANY, "capacity": ANY, "host": ONLY_PERSON, "agent-login": ONLY_PERSON, "phone": ONLY_PERSON,
     "config": {"get": ANY, "set": LEAD, "unset": LEAD},
@@ -85,7 +85,7 @@ OPS.update({op: LEAD for op in (
     "resume")})
 OPS.update({op: ONLY_PERSON for op in (
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
-    "relay_disconnect", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",
+    "relay_disconnect", "release_changes", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",
     "session_pin", "session_restart", "session_send", "session_setting", "session_upload",
     "session_upload_drop", "setup_agent_add", "setup_block", "setup_maxpm_cmd", "setup_ntfy", "setup_skills",
     "shell_close", "shell_keys", "shell_open", "start_manager", "tailnet_serve", "takeover_seen", "takeovers_seen",

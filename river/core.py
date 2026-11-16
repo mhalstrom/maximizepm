@@ -8593,6 +8593,13 @@ def release_approval(conn, target):
     return {"approval": "", "project": None}
 
 
+def _target_reviews(conn, target):
+    """True when a release of the target is reviewed first: the setting review is on for its deploy project or for one
+    of its projects (the page says 'gate: review, then your sign-off', #6039)."""
+    rows = conn.execute("SELECT id FROM projects WHERE (name=? OR target=?) AND archived=0", (f"deploy-{target}", target))
+    return any(setting(conn, "review", project_id=r["id"]) == "on" for r in rows.fetchall())
+
+
 def _approvals(conn, dep_id):
     """The person's approval items of a deploy item, newest first."""
     return conn.execute("SELECT i.* FROM items i JOIN deps d ON d.blocked_by=i.id WHERE d.item_id=? AND i.doer='human' "
@@ -8604,10 +8611,72 @@ def approval_refusal(conn, item):
     (release_approval person) and this release has none."""
     if item["kind"] != "deploy" or release_approval(conn, item["target"])["approval"] != "person":
         return None
-    if any(a["status"] == "done" for a in _approvals(conn, item["id"])):
+    # Only a person's done is a yes (#6039, mark 2026-11-16): a session or the manager that closed it gives none.
+    if any(a["status"] == "done" and _is_person(conn, _done_by(conn, a["id"])) for a in _approvals(conn, item["id"])):
         return None
     return (f"target {item['target']} takes a person's yes for each release (release_approval person): maxpm serve "
             f"asks for it when deploy #{item['id']} is ready, and the deploy waits on it")
+
+
+def release_yes_of(conn, item_id):
+    """The release that a person's yes item is for: {deploy, target, review: {id, output, done_by} or None}, or None
+    when the item is no release yes (#6039: its card shows the review report, Approve and Request changes)."""
+    it = conn.execute("SELECT id, title, doer FROM items WHERE id=?", (int(item_id),)).fetchone()
+    if not it or it["doer"] != "human" or not (it["title"] or "").startswith(APPROVE_TITLE + " "):
+        return None
+    dep = conn.execute("SELECT i.* FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy' "
+                       "ORDER BY i.id DESC LIMIT 1", (it["id"],)).fetchone()
+    if not dep:
+        return None
+    rv = conn.execute("SELECT i.id, i.output, i.status FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
+                      "AND i.kind='review' ORDER BY i.id DESC LIMIT 1", (dep["id"],)).fetchone()
+    return {"deploy": dep["id"], "target": dep["target"],
+            "review": {"id": rv["id"], "status": rv["status"], "output": rv["output"],
+                       "done_by": _done_by(conn, rv["id"])} if rv else None}
+
+
+def release_changes(conn, item_id, note, actor=None):
+    """Request changes on a person's release yes (#6039): the person says no to this release. The review opens
+    again and waits on one fix item with the person's words; the yes item is dropped. After the fix the review runs
+    again, and when it passes MaximizePM asks the person for a new yes (release_yes)."""
+    note = (note or "").strip()
+    if not note:
+        raise RiverError(f"say what must change: Request changes on the card, or maxpm release-changes {item_id} "
+                         f"\"<what must change>\"")
+    if not _is_person(conn, actor):
+        raise RiverError(f"refused: #{item_id} is a person's sign-off on a release; only the person asks for changes "
+                         f"on it (on the page, or in their own terminal)")
+    rel = release_yes_of(conn, item_id)
+    if not rel:
+        raise RiverError(f"#{item_id} is no release sign-off (an 'Approve release' item that a deploy waits on)")
+    it = _item(conn, item_id)
+    if it["status"] in CLOSED_STATES:
+        raise RiverError(f"#{item_id} is {it['status']} already")
+    rv = rel["review"]
+    fix_project = conn.execute(
+        "SELECT p.name FROM deps d JOIN items i ON i.id=d.blocked_by JOIN projects p ON p.id=i.project_id "
+        "WHERE d.item_id=? AND i.kind NOT IN ('review','deploy') ORDER BY i.id LIMIT 1", (rel["deploy"],)).fetchone()
+    project = fix_project["name"] if fix_project else conn.execute(
+        "SELECT p.name FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?", (rel["deploy"],)).fetchone()["name"]
+    first = note.splitlines()[0][:120]
+    fix = item_add(conn, project, f"Change before release {rel['target']}: {first}", doer="ai", actor=actor,
+                   priority=_item(conn, rel["deploy"])["priority"], found_during=rv["id"] if rv else None,
+                   context=(f"The person asked for changes on the sign-off of release {rel['target']} (deploy "
+                            f"#{rel['deploy']}" + (f", review #{rv['id']}" if rv else "") + f"): {note}"))
+    with tx(conn):
+        conn.execute("UPDATE items SET kind='fixes' WHERE id=?", (fix["id"],))
+    if rv:
+        if rv["status"] in CLOSED_STATES:
+            reopen(conn, rv["id"], actor)
+        dep_add(conn, rv["id"], [fix["id"]], actor)
+    else:
+        dep_add(conn, rel["deploy"], [fix["id"]], actor)
+    drop(conn, it["id"], actor, note=f"changes asked: #{fix['id']}; a new sign-off follows the next review")
+    with tx(conn):
+        _event(conn, rel["deploy"], actor, f"the person asked for changes before the release: #{fix['id']}")
+        _wake_manager(conn, actor, f"the person asked for changes on release {rel['target']} (deploy "
+                                   f"#{rel['deploy']}): fix #{fix['id']}", rel["deploy"])
+    return {"fix": fix["id"], "review": rv["id"] if rv else None, "deploy": rel["deploy"], "dropped": it["id"]}
 
 
 def release_yes(conn, dep_id, actor="maxpm"):
@@ -8625,17 +8694,23 @@ def release_yes(conn, dep_id, actor="maxpm"):
         reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
         gate = release_approval(conn, dep["target"])
         lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
-        context = (f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your yes: the "
-                   f"project {gate['project']} says release_approval person.\nIt ships:\n{lines}\n"
-                   + (f"Its review passed: #{reviews[-1]['id']}.\n" if reviews else "")
-                   + f"Yes: maxpm done <this id>; the release then goes out (maxpm serve runs its deploy hook, or "
-                   f"the deployer takes deploy #{dep_id}). Not now: leave this item open, and say why on it.")
+        rv = conn.execute("SELECT id, output FROM items WHERE id=?", (reviews[-1]["id"],)).fetchone() if reviews else None
+        context = (f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your sign-off: the "
+                   f"project {gate['project']} says release_approval person.\n"
+                   + (f"Its review #{rv['id']} passed ({_done_by(conn, rv['id']) or 'a reviewer'}): "
+                      f"{(rv['output'] or 'no output')[:400]}\n" if rv else "")
+                   + f"Read its review report: maxpm target report {dep_id}.\nIt ships:\n{lines}\n"
+                   + f"Approve: maxpm done <this id> (only a person); the release then goes out (maxpm serve runs its "
+                   f"deploy hook, or the deployer takes deploy #{dep_id}). Request changes: on its card, or maxpm "
+                   f"release-changes <this id> \"<what must change>\": the review runs again after the fix.")
         top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
         cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
                            "VALUES (?,?,?,?,'human',?,'work',?,?)",
                            (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
                             dep["priority"], top + 1, context, dep["target"], iso(now())))
         yes = cur.lastrowid
+        # An approval (#5957): only a person's done closes it, so neither the manager nor a session signs off (#6039).
+        conn.execute("INSERT OR IGNORE INTO approvals(item_id) VALUES (?)", (yes,))
         _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} (release_approval person)")
         _dep_add(conn, dep_id, yes, actor, alert=False)
         _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release (release_approval person)")
@@ -9137,7 +9212,8 @@ def release_plan(conn, name):
                         "AND (cut_at IS NOT NULL OR (status='done' AND closed_at IS NOT NULL)) "
                         "ORDER BY COALESCE(cut_at, closed_at) DESC, id DESC LIMIT 1", (name,)).fetchone()
     out = {"target": name, "cadence": text, "cadence_reason": t["cadence_reason"],
-           "approval": release_approval(conn, name), "deploy": dep["id"] if dep else None, "start": None, "early": None,
+           "approval": dict(release_approval(conn, name), review=_target_reviews(conn, name)),
+           "deploy": dep["id"] if dep else None, "start": None, "early": None,
            "ships": [], "waits": False, "running": cur["id"] if cur else None,
            "current": {"id": cur["id"], "status": cur["status"], "cut_at": cur["cut_at"] or cur["claimed_at"],
                        "text": show_time(cur["cut_at"] or cur["claimed_at"], zone)} if cur else None,
@@ -17229,6 +17305,7 @@ def item_show(conn, item_id, ann=None):
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
             a["tries"] = [{"k": k, **t} for k, t in sorted(tries_of(conn, iid).items())]
         a["approval"] = approval(conn, iid)  # #5957
+        a["release_yes"] = release_yes_of(conn, iid)  # a sign-off on a release: its card shows the report (#6039)
         a["exhibits"] = exhibits_for(conn, "item", [iid]).get(iid, [])  # #5956
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a

@@ -2364,6 +2364,10 @@ def build_parser(only=None):
     x.add_argument("--item", type=int, help="a held person item (item id) instead of a message")
     x.add_argument("--drop", action="store_true", help="a held alert you dealt with yourself: close it, the person never sees it")
     x.add_argument("--note", help="what you add for the person (what you checked, your recommendation)")
+    x = sub.add_parser("release-changes", help="a person says no to a release on its sign-off: the review runs again "
+                                               "after a fix with these words (#6039)")
+    x.add_argument("id", type=int, help="the 'Approve release' item")
+    x.add_argument("note", help="what must change")
     x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it)")
     x.add_argument("id", type=int)
     x.add_argument("--note", required=True, help="why it is moot")
@@ -4829,6 +4833,8 @@ def dispatch(conn, a, actor):
         return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
     if c == "withdraw":
         return core.withdraw(conn, a.id, a.note, actor)
+    if c == "release-changes":
+        return core.release_changes(conn, a.id, a.note, actor)
     if c == "forward":
         return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop)
     if c == "inbox":
@@ -7946,6 +7952,10 @@ def render(a, res):
         return
     if c == "withdraw":
         print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
+        return
+    if c == "release-changes":
+        print(f"changes asked: fix #{res['fix']}" + (f"; review #{res['review']} runs again after it" if res["review"]
+              else "") + f"; sign-off #{res['dropped']} is dropped, and a new one comes after the review")
         return
     if c == "forward":
         if a.item is not None:

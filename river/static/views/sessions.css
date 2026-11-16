@@ -704,3 +704,6 @@ button.srow-it { cursor: pointer; }
 .sp-add { display: flex; gap: var(--sp-2); margin: var(--sp-3) 0; }
 .sp-add input { flex: 1; min-width: 0; }
 .srow.drop { outline: var(--hair-2) dashed var(--accent); outline-offset: calc(-1 * var(--hair-2)); }
+/* A person's sign-off on a release (#6039, askCard.js releaseHtml): the review it follows and its report. */
+.acard-rel { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--accent);
+  border-radius: var(--r-m); overflow-wrap: anywhere; }

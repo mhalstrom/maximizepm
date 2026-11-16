@@ -202,6 +202,17 @@ $("#waitList").addEventListener("submit", async (e) => {
 });
 $("#waitList").addEventListener("click", async (e) => {
   if (e.target.closest("[data-wnext]")) { qAt++; return showQueued(); }
+  const ch = e.target.closest("[data-wchanges]");
+  if (ch) {  // a release sign-off: the person says no; the review runs again after a fix with these words (#6039)
+    const form = ch.closest("form"), note = form.querySelector(".wanswer").value.trim();
+    if (!note) { toast("Write what must change", true); form.querySelector(".wanswer").focus(); return; }
+    try {
+      const r = await act("release_changes", { item: +form.dataset.id, note });
+      toast(`Changes asked: fix #${r.fix}; the review runs again`);
+      done(form);
+    } catch (err) { /* act showed it */ }
+    return;
+  }
   if (e.target.closest("[data-open]")) dlg.close();
   const opt = e.target.closest("[data-opt]");  // an option of the decision form: it is the answer
   if (opt) {

@@ -5419,6 +5419,8 @@ def op_rights(conn, op, actor, page):
 
 OPS = {
     "canvas_open": canvas_open,
+    # #6039: the person's Request changes on the card of a release sign-off: the review runs again after a fix.
+    "release_changes": lambda c, a, who: core.release_changes(c, int(a["item"]), a.get("note") or "", who),
     # The setup guide's Your phone (#5863): the person's click runs tailscale serve --bg <serve_port>.
     "tailnet_serve": lambda c, a, who: tailnet_serve(c, who),
     # The setup guide's A remote host (#5882): maxpm host setup and the agents' sign-ins there, a person's clicks.

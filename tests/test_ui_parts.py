@@ -239,7 +239,7 @@ class Tooltips(unittest.TestCase):
         "views/graph.html": 1, "views/health.html": 1, "views/health.js": 2, "views/ops.html": 1, "views/ops.js": 3,
         "views/overview.html": 3, "views/overview.js": 3, "views/plan.html": 2, "views/plan.js": 1,
         "views/projects.js": 1, "views/sessions-work.js": 5, "views/sessions.js": 3,
-        "views/targets.js": 6, "views/terminal.html": 1, "views/you-needs.js": 2, "views/you.html": 2, "views/you.js": 4,
+        "views/targets.js": 5, "views/terminal.html": 1, "views/you-needs.js": 2, "views/you.html": 2, "views/you.js": 4,
     }
 
     def test_a_tooltip_has_at_most_4_words(self):

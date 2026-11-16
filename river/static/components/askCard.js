@@ -34,7 +34,8 @@ export function fromWaiting(w, session) {
 export function fromItem(it) {
   return { kind: "item", id: it.id, item_id: it.id, title: it.title || "", detail: it.context || it.notes || "",
     type: it.type, priority: it.effective_priority != null ? it.effective_priority : it.priority, project: it.project,
-    at: it.created_at, earlier: it.earlier || [], tries: it.tries || null, exhibits: it.exhibits || [] };
+    at: it.created_at, earlier: it.earlier || [], tries: it.tries || null, exhibits: it.exhibits || [],
+    release: it.release_yes || null };
 }
 
 // The thing itself (#5956, policy g3): the screenshot of a page the card names, a picture file, or a commit's diff,
@@ -87,21 +88,35 @@ export function optionsHtml(c) {
     title: `Answer: ${o}` })).join("")}</div>` : "";
 }
 
+// A person's sign-off on a release (#6039): the review it follows, and its report. Only the person approves it.
+export function releaseHtml(r) {
+  const rv = r.review;
+  return `<div class="acard-rel">
+    <div><b>Sign-off of release #${r.deploy}</b> of ${esc(r.target || "its target")}: only you can approve it.</div>
+    ${rv ? `<div class="t-s">Its review #${rv.id} ${rv.status === "done" ? "passed" : esc(rv.status.replace("_", " "))}${rv.done_by ? ` (${esc(rv.done_by)})` : ""}${rv.output ? `: ${esc(clip(rv.output, 300))}` : ""}</div>`
+      : `<div class="muted t-s">This release has no review.</div>`}
+    <div>${button("Read the review report", { data: { report: r.deploy } })}</div></div>`;
+}
+
 // The card's form. opts.pane: the asking session has a tmux pane here, so an answer also goes into its chat.
 export function cardHtml(c, { pane = false } = {}) {
   const who = c.kind === "item" ? `#${c.id}` : `question #${c.id}${c.from ? ` from ${esc(c.from === "maxpm" ? "MaximizePM" : c.from)}` : ""}`;
   const head = `<div class="acard-h">${typeChip(c.type)}${levelChips(c)}${c.project ? projectChip(c.project) : ""}
     <span class="muted t-s">${who}</span><span class="spacer"></span>${c.at ? `<span class="muted t-s">${esc(ago(c.at))}</span>` : ""}</div>`;
-  const item = c.kind === "item";
-  const box = item
+  const item = c.kind === "item", rel = item && c.release;
+  const box = rel
+    ? `<textarea class="wanswer" placeholder="What must change (for Request changes), or a note on your yes" aria-label="What must change"></textarea>`
+    : item
     ? `<textarea class="wanswer" placeholder="What you decided or did (saved on the item)" aria-label="What you decided or did"></textarea>`
     : `<textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>`;
   const acts = (c.item_id ? button("Open the item", { data: { open: c.item_id } }) : "")
-    + button(item ? "Done" : pane ? "Send to the chat" : "Answer", { kind: "primary", cls: "wgo", type: "submit" });
+    + (rel ? button("Request changes", { data: { wchanges: 1 }, title: "The review runs again" }) : "")
+    + button(rel ? "Approve" : item ? "Done" : pane ? "Send to the chat" : "Answer", { kind: "primary", cls: "wgo", type: "submit" });
   return `<form class="wblock acard" data-kind="${item ? "item" : "question"}" data-id="${c.id}">
     <div class="acard-main">${head}
       <div class="wq">${esc(c.title)}</div>
       ${c.detail ? `<div class="acard-d">${esc(clip(c.detail, 1200))}</div>` : ""}
+      ${rel ? releaseHtml(rel) : ""}
       ${exhibitsHtml(c)}
       ${c.note ? `<div class="muted">The manager: ${esc(c.note)}</div>` : ""}
       ${c.tries && c.tries.length ? triesHtml(c) : optionsHtml(c)}

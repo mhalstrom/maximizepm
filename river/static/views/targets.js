@@ -13,7 +13,7 @@ import { S, scope } from "../page.js";
 // Each word carries its full text as a hover; only a gate that is not set shows how to set it.
 function releaseLine(t) {
   const r = t.release || {}, a = r.approval || {}, n = esc(t.name), bits = [];
-  bits.push(a.approval === "person" ? `<span title="A person approves each release">gate: person</span>`
+  bits.push(a.approval === "person" ? `<span title="You sign each release">${a.review ? "gate: review, then your sign-off" : "gate: your sign-off"}</span>`
     : a.approval === "review" ? `<span title="Ships when its review passes (set on ${esc(a.project)})">gate: review</span>`
     : `<span style="color:var(--warn)" title="Set it: maxpm config release_approval">gate: not set</span>`);
   if (r.cadence) bits.push(`<span title="${esc(r.cadence_reason || "At most one release in this time")}">every ${esc(r.cadence)}</span>`);

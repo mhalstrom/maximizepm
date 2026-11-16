@@ -8625,7 +8625,8 @@ class ReleaseGate(DeployHook):
         self.assertEqual((it["doer"], it["project"]), ("human", "deploy-web"))
         self.assertTrue(it["title"].startswith("Approve release web: 1 item(s)"))
         self.assertIn("It ships:", it["context"])
-        self.assertIn(f"Its review passed: #{self.review}", it["context"])
+        self.assertIn(f"Its review #{self.review} passed (rev)", it["context"])
+        self.assertIn(f"maxpm target report {self.deploy}", it["context"])
         self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
         self.assertEqual(core.release_yes_pass(self.c), {}, "it asks once")
         self.assertIn(yes, [n["item_id"] for n in core.needs_you(self.c) if n.get("item_id")])
@@ -8634,6 +8635,65 @@ class ReleaseGate(DeployHook):
         self.assertIsNone(core.approval_refusal(self.c, core._item(self.c, self.deploy)))
         r = self.run_deploy()
         self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+
+    def test_only_a_persons_done_signs_off_the_reviewed_release(self):
+        # #6039 (mark 2026-11-16): the sign-off follows the review, names it, goes to the person at once (no manager
+        # hold), and only a person's done counts: the manager and a session are refused, and a done by a session
+        # that got past the check (an old item) is no yes.
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.config_set(self.c, "release_approval", "person", project="site")
+        self.assertEqual(core.release_plan(self.c, "web")["approval"]["review"], True)
+        self.assertEqual(core.release_yes_pass(self.c), {}, "no sign-off before the review passed")
+        self.pass_review("rev")
+        yes = core.release_yes_pass(self.c)[self.deploy]
+        core.sync_needs_you(self.c)
+        self.assertEqual(core.annotate(self.c)[yes]["held_for"], "", "the person gets it at once")
+        rel = core.item_show(self.c, yes)["release_yes"]
+        self.assertEqual((rel["deploy"], rel["target"], rel["review"]["id"], rel["review"]["status"],
+                          rel["review"]["done_by"]), (self.deploy, "web", self.review, "done", "rev"))
+        for who in ("boss", "ops"):
+            with self.assertRaisesRegex(RiverError, "only the person approves it"):
+                core.done(self.c, yes, "yes", who)
+        with core.tx(self.c):  # an old sign-off that a session closed: no yes
+            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(core.now()), yes))
+            core._event(self.c, yes, "ops", "done: yes")
+        self.assertIsNotNone(core.approval_refusal(self.c, core._item(self.c, self.deploy)))
+        with core.tx(self.c):
+            core._event(self.c, yes, "mark", "done: yes")
+        self.assertIsNone(core.approval_refusal(self.c, core._item(self.c, self.deploy)))
+        self.assertIsNone(core.release_yes_of(self.c, self.review), "a review is no sign-off")
+
+    def test_request_changes_runs_the_review_again_then_asks_again(self):
+        core.config_set(self.c, "release_approval", "person", project="site")
+        self.pass_review("rev")
+        yes = core.release_yes_pass(self.c)[self.deploy]
+        with self.assertRaisesRegex(RiverError, "only the person asks for changes"):
+            core.release_changes(self.c, yes, "the button is red", "ops")
+        with self.assertRaisesRegex(RiverError, "say what must change"):
+            core.release_changes(self.c, yes, " ", "mark")
+        r = core.release_changes(self.c, yes, "The pay button must say Pay now\nand be green", "mark")
+        fix = core.item_show(self.c, r["fix"])
+        self.assertEqual((fix["kind"], fix["title"]), ("fixes", "Change before release web: The pay button must say Pay now"))
+        self.assertIn("be green", fix["context"])
+        self.assertEqual((r["review"], core._item(self.c, yes)["status"]), (self.review, "dropped"))
+        self.assertEqual(core._item(self.c, self.review)["status"], "open")
+        self.assertIn(r["fix"], [d[0] for d in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?",
+                                                               (self.review,))])
+        self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
+        core.claim(self.c, r["fix"], "dev")
+        core.done(self.c, r["fix"], "fixed", "dev")
+        core.register(self.c, "rev2")
+        core.claim(self.c, self.review, "rev2")
+        core.review_pass(self.c, self.review, None, "rev2")
+        again = core.release_yes_pass(self.c)
+        self.assertEqual(list(again), [self.deploy])
+        self.assertNotEqual(again[self.deploy], yes)
+
+    def test_the_cli_release_changes_is_for_a_person(self):
+        from river import rights
+        self.assertEqual(rights.callers_of("release-changes"), rights.ONLY_PERSON)
+        self.assertEqual(rights.OPS["release_changes"], rights.ONLY_PERSON)
 
     def test_a_failed_deploy_asks_again(self):
         core.config_set(self.c, "release_approval", "person", project="site")
