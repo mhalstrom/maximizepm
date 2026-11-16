@@ -37,7 +37,7 @@ COMMANDS = {
     "manage": ANY,  # becoming the manager: may_manage (serve made this session the manager, or a person)
     "plan": ANY, "launch": ANY, "workspace": ANY,
     "expert": {"start": LEAD, "request": ANY, "adopt": ANY, "end": LEAD, "list": ANY, "fresh": LEAD, "notes": ANY},
-    "view": ANY, "stop": LEAD, "interrupt": LEAD, "pause": LEAD, "resume": LEAD,
+    "view": ANY, "stop": LEAD, "interrupt": LEAD, "pause": LEAD, "resume": LEAD, "relay": LEAD,
     "approval": ANY,  # the acting session names the person's yes (#5957); the function checks the yes itself
     "scope": {"*": LEAD, "show": ANY},
     "queue": {"add": LEAD, "list": ANY, "remove": ANY, "move": LEAD},
@@ -77,7 +77,7 @@ OPS = {op: ANY for op in (
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock")}
 OPS.update({op: LEAD for op in (
-    "agent_interrupt", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
+    "agent_interrupt", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
     "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",

@@ -3783,6 +3783,29 @@ def _uploaded(agent, fid):
     return str(path)
 
 
+def relay_words(conn, agent, text, person, who=None):
+    """maxpm relay (#5964, policy p148): the manager hands a person's own words to a session as the person's prompt,
+    word for word, through the path of the message box (session_send, held until the session's turn ends), not as a
+    manager note that quotes them. Only the person or the active manager relays; person names whose words they are.
+    The prompt's author is the person; the history says who relayed it."""
+    if who != core.active_manager(conn) and not core._is_person(conn, who):
+        raise RiverError("only the manager or a person relays a person's words: maxpm relay <session> \"<words>\" "
+                         "--from <person>")
+    if not core._is_person(conn, person):
+        raise RiverError(f"{person!r} is no person of this queue: --from names whose words they are (maxpm who)")
+    if not (text or "").strip():
+        raise RiverError("give the person's words: maxpm relay <session> \"<words>\" --from <person>")
+    if text.strip().startswith("/"):
+        raise RiverError("a slash command is no person's words: the person types it, or the manager uses "
+                         "maxpm interrupt")
+    res = session_send(conn, agent, text, person, hold=True)
+    with core.tx(conn):
+        held = core._held_item(conn, agent)
+        core._event(conn, held["id"] if held else None, who,
+                    f"relayed {person}'s words to {agent} as {person}'s prompt: {' '.join(text.split())[:160]}")
+    return {**res, "relayed_by": who, "person": person}
+
+
 def session_send(conn, agent, text, who=None, images=None, files=None, manager=False, hold=False):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
@@ -5382,6 +5405,9 @@ OPS = {
     "session_interrupt": lambda c, a, who: session_interrupt(c, a["agent"], who, a.get("text"), a.get("files")),
     # The Stop hook of a session with held messages (cli.activity_command, #5587): the oldest goes soon.
     "pending_deliver": lambda c, a, who: (_same_queue(a.get("db")), deliver_soon(a["agent"]))[1],
+    # #5964 (policy p148): the person's words, word for word, as the person's prompt into a session
+    "relay": lambda c, a, who: (_same_queue(a.get("db")),
+                                relay_words(c, a["agent"], a.get("text") or "", a.get("person"), who))[1],
     "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
                                           session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],

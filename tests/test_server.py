@@ -3100,6 +3100,38 @@ class LaunchInTmux(unittest.TestCase):
         core.send(self.c, "question", "which header?", to="dev", item=x, actor=name)
         self.assertEqual(core.waits_on_person(self.c), {})
 
+    def test_the_manager_relays_the_persons_words_as_the_persons_prompt(self):
+        """#5964 (policy p148): the manager hands mark's words to a session word for word, through the message box's
+        path, held while the session runs a turn; the prompt's author is mark, and the history names the relay."""
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+        core.register(self.c, "boss")
+        core.register(self.c, "w2")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.tmux.session = True
+        self.tmux._pane(name="w")
+        pane = self.tmux.panes[-1]
+        pane["agent"] = "w"
+        pane["screen"], pane["running"] = "⏺ Reading.\n\n✻ Thinking… (esc to interrupt)\n────\n❯ \n────", "claude"
+        self.addCleanup(setattr, server, "DELIVER_RUNNER", server.DELIVER_RUNNER)
+        server.DELIVER_RUNNER = lambda agent: None
+        pane["keys"].clear()
+        words = "Use the blue header, not the green one; ship it today."
+        with mock.patch.object(core, "active_manager", lambda conn, **kw: "boss"):
+            r = server.OPS["relay"](self.c, {"agent": "w", "text": words, "person": "mark"}, "boss")
+            self.assertEqual((r["person"], r["relayed_by"]), ("mark", "boss"))
+            (held,) = core.pending_list(self.c, "w")
+            self.assertEqual((held["text"], held["by"]), (words, "mark"))  # the person's words, unchanged
+            self.assertEqual(pane["keys"], [])  # held during the turn, as the page's message box does
+            self.assertTrue(any("relayed mark's words to w" in e["change"] for e in core.recent_events(self.c)))
+            for args, who, why in (({"agent": "w", "text": words, "person": "mark"}, "w2", "only the manager"),
+                                   ({"agent": "w", "text": words, "person": "w2"}, "boss", "no person"),
+                                   ({"agent": "w", "text": "/clear", "person": "mark"}, "boss", "slash command")):
+                with self.assertRaisesRegex(RiverError, why):
+                    server.OPS["relay"](self.c, args, who)
+        from river import rights
+        self.assertEqual(rights.callers_of("relay"), rights.LEAD)
+
     def test_a_message_sent_during_a_turn_waits_and_goes_when_the_turn_ends(self):
         """#5587, mark 2026-11-12: 'the send now should not be a lightning bolt, instead it should be a little small
         button under the messages that are waiting'. A message sent while the session runs a turn is held (nothing

@@ -326,6 +326,8 @@ Stop when the user tells you to, and tell the user what you did.
   once nothing is.
 - `maxpm interrupt <agent> [--message "..."]`: ends its running turn now (Esc in its terminal); it keeps
   its session and item. With `--message` the text goes in at once, not after the turn. Not tmux send-keys.
+- `maxpm relay <session> "<words>" --from <person>`: the person's own words for a session (an answer, a
+  direction), word for word, as the person's prompt after its turn; not a note of yours that quotes them.
 - `maxpm config set launch_agents|default_model|default_effort|default_min_model|default_max_model ...`
 - `maxpm launch ... --option remote_control=off` (or `permission_mode=plan`, `sandbox=read-only`): a launch profile option for one session; the settings `claude_*` and `codex_*` hold the defaults
 - `maxpm launch ... --prompt "<text>"`: the new session's own first instruction. The agent gets the
