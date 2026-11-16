@@ -549,7 +549,6 @@ def loop(stop, interval_s=None):
                 server.end_quiet,  # an expert after expert_idle_end, a session with no item after session_idle_end (#5903)
                 server.auto_release,  # a ready review gets a reviewer, a ready deploy its deployer
                 server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
-                server.auto_context,  # goal_context on: a goal with ready work gets a context session (a base)
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
                 server.workspace_sweep,  # the worktree of an ended session goes when its branch is merged (#5856)
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket

@@ -197,11 +197,6 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner, conn)
     except Exception as e:
         _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
-    if t.get("fork_of"):  # it reads the goal's base from the cache, which keeps the base warm
-        core.base_used(conn, t["fork_of"]["session_id"])
-        with core.tx(conn):
-            core._event(conn, t["item"]["id"], actor or "maxpm", f"{name} starts as a fork of the base of goal "
-                        f"{t['fork_of']['goal']} (session {t['fork_of']['session_id'][:8]})")
     if t.get("custom_prompt"):  # what the session was told, for the people who read the item's history
         flat = " ".join(t["custom_prompt"].split())
         with core.tx(conn):
@@ -467,7 +462,7 @@ def _agent_for(conn, model):
 
 
 # The role of a session that a focus starts (agent_for.<role>, #5168). A person's assistant (needs:) has no role yet.
-FOCUS_ROLES = {"deploy": "deployer", "review": "reviewer", "help": "worker", "unblock": "worker", "context": "context"}
+FOCUS_ROLES = {"deploy": "deployer", "review": "reviewer", "help": "worker", "unblock": "worker"}
 
 
 def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, options=None, agent_name=None):
@@ -490,7 +485,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
             named = f"{p['name']}-{secrets.token_hex(2)}"
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
     try:
-        if kind in ("help", "unblock"):  # sessions that change code; deploy, review and context work in the project folder
+        if kind in ("help", "unblock"):  # sessions that change code; deploy and review work in the project folder
             t = _workspace(conn, t, named, p["id"])
         _started(conn, named, t)
         _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner, conn)
@@ -3150,26 +3145,6 @@ def _has_background(conn, agent, news):
                 core._event(conn, r["id"], "maxpm", f"news came for {agent}, which waits for its own background work "
                             f"({what}): maxpm serve leaves the item with it; it reads the news when that work ends")
     return bool(work)
-
-
-def auto_context(conn, runner=None):
-    """One pass of the loop of maxpm serve (goal_context on): a goal with two or more ready agent items and no
-    warm base gets a context session (MAXPM_FOCUS=context:<goal>). It reads the goal's handoff, items and files,
-    records itself as the goal's base (maxpm goal base --ready), and ends; the goal's next workers start as
-    forks of it. Returns the goals it started one for."""
-    started = []
-    for w in core.context_wanted(conn):
-        p = core._project(conn, w["project"])
-        try:
-            label = core.role_agent(conn, "context", p["id"]) or (_agent_for(conn, w["model"])[0] if w["model"] else None)
-            t = _open_focused(conn, p, f"context:{w['goal']}", runner, label, w["model"])
-        except RiverError as e:
-            print(f"maxpm serve: no context session for goal {w['goal']}: {e}", flush=True)
-            continue
-        with core.tx(conn):
-            core._event(conn, None, "maxpm", f"context session started for goal {w['goal']} ({t['session_title']})")
-        started.append(w["goal"])
-    return started
 
 
 def start_fresh(conn, item_id, why, runner=None):

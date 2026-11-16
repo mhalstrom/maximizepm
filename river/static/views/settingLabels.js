@@ -25,11 +25,10 @@ export const LABELS = {
   model_prices: "Model prices", prompt_pattern: "How a waiting prompt looks", prompt_wait: "Wait before a prompt counts",
   stuck_after: "Unchanged screen before an alert",
   "agent_for.worker": "Agent for workers", "agent_for.manager": "Agent for the manager", "agent_for.reviewer": "Agent for reviews",
-  "agent_for.deployer": "Agent for deploys", "agent_for.expert": "Agent for experts", "agent_for.context": "Agent for context sessions",
+  "agent_for.deployer": "Agent for deploys", "agent_for.expert": "Agent for experts",
   // Sessions
   lease_ttl: "How long a claim lasts", hold_ttl: "How long a held item stays held", goal_lease: "How long a goal owner keeps its goal",
-  goal_max_leases: "Goal items one session may hold", goal_context: "Context sessions for goals", base_warm: "How long a context base stays warm",
-  base_max: "Largest context base", max_leases: "Items one session may hold", max_sessions: "Most sessions at once",
+  goal_max_leases: "Goal items one session may hold", max_leases: "Items one session may hold", max_sessions: "Most sessions at once",
   busy_max: "Longest busy time without a command", idle_after: "Idle after", idle_end: "End an idle session after",
   wait_max: "End a waiting session after", wait_step: "One wait lasts", wait_too_long: "Waiting too long after",
   gone_after: "Gone after", away_after: "Away after", owner_ttl: "How long a target owner keeps its target",

@@ -11,7 +11,7 @@ Multi-provider models (OpenCode, Pi, Goose and others): option A. The model of s
 ## Today (map of 2026-11-11, paths in river/)
 
 - Four platform tables with no shared key: `core.LAUNCH_PLATFORMS` (core.py:347), `core.AGENT_FAMILIES` and `PLATFORM_EFFORTS` (core.py:11366), `sessions.PLATFORMS` and `sessions.PROVIDERS` (sessions.py:28, :39), plus the `{"claude": "claude-code", "codex": "codex"}` map copied at core.py:1505, :1526, :10750, :11233.
-- About 30 functions test a platform name: `build_command` (core.py:10674), `_launch_agent_cmd` (:11217), `profile_from_command` (:10739), `resume_command` (:11294), `agent_type_from_env` (:1809), `fork_base` (:8931), `wait_background` (:11573), `start_expert` resume (server.py:352, :419), `move_into_tmux` (server.py:1164), the parsers `_claude`/`_codex` (sessions.py:297, :357), `transcript_chain`, `custom_title`, `_transcript_settings` (sessions.py:1237), `_cache_line`, `_line_hits`, usage measurement (core.py:8580-8760), the hook parser `activity_event` (core.py:8446), `background_work` (:8624), pane wording in `prompt_pattern` (core.py:183) and `_prompt_parts`/`_prompt_found` (server.py:1378-1470), the MCP config writers (cli.py:1382-1504), the instruction file names (cli.py:1944-2046), and the JS name checks in views/sessions.js:42-44, :82, :123.
+- About 30 functions test a platform name: `build_command` (core.py:10674), `_launch_agent_cmd` (:11217), `profile_from_command` (:10739), `resume_command` (:11294), `agent_type_from_env` (:1809), `wait_background` (:11573), `start_expert` resume (server.py:352, :419), `move_into_tmux` (server.py:1164), the parsers `_claude`/`_codex` (sessions.py:297, :357), `transcript_chain`, `custom_title`, `_transcript_settings` (sessions.py:1237), `_cache_line`, `_line_hits`, usage measurement (core.py:8580-8760), the hook parser `activity_event` (core.py:8446), `background_work` (:8624), pane wording in `prompt_pattern` (core.py:183) and `_prompt_parts`/`_prompt_found` (server.py:1378-1470), the MCP config writers (cli.py:1382-1504), the instruction file names (cli.py:1944-2046), and the JS name checks in views/sessions.js:42-44, :82, :123.
 - Effort levels exist in four copies (the `effort_levels` default, `PLATFORM_EFFORTS`, sessions.py:45, Codex's models cache), and the flag forms, the resume regex (core.py:11336) and the live `/effort` command are Claude- or Codex-only.
 - `default_agent`, `agent_rules` and an item's `--agent` accept only `claude-code` or `codex` (`_agent_platform`, core.py:1503). No role has its own agent setting. `fresh_expert` takes the first entry; expert and crash resume work only for Claude Code and Codex.
 - Grok, OpenCode, Gemini and Pi exist only as plain custom commands in `server.KNOWN_AGENTS` (server.py:2822): no agent type, no settings, no chat on the page, no resume.
@@ -56,7 +56,7 @@ Each part below is optional unless marked required; the page shows only what an 
 
 ## Agent choice for each role
 
-A new setting `agent_for.<role>` for the roles worker, manager, reviewer, deployer, expert and context, at the global, project and item scopes, falling back to `default_agent`. `default_agent`, `agent_rules`, an item's `--agent`, and every start path (launch, Dispatch, serve's fresh, operational, review and deployer starts, manager, expert and fresh_expert, auto_context, deploy_now) take any registered adapter. Expert resume and crash resume (adopt_sessions, revive_sessions, session_restart, move_into_tmux) go through the adapter's `resume_command`.
+A new setting `agent_for.<role>` for the roles worker, manager, reviewer, deployer and expert, at the global, project and item scopes, falling back to `default_agent`. `default_agent`, `agent_rules`, an item's `--agent`, and every start path (launch, Dispatch, serve's fresh, operational, review and deployer starts, manager, expert and fresh_expert, deploy_now) take any registered adapter. Expert resume and crash resume (adopt_sessions, revive_sessions, session_restart, move_into_tmux) go through the adapter's `resume_command`.
 
 ## Work, in order
 
@@ -127,7 +127,7 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
 
 - `claude.py` and `codex.py` have their effort, launch, identity and resume parts. `core.build_command`,
   `_launch_agent_cmd`, `profile_from_command`, `resume_command` (and its effort read-back), `agent_type_from_env`,
-  `fork_base`, the `wait_background` of the go briefing, the effort check of a start, and the web link of an agent
+  the `wait_background` of the go briefing, the effort check of a start, and the web link of an agent
   with no session link call the adapter. `core.shell_command(argv)` quotes each word; an `agents.Raw` word (the args
   setting) goes in as it is.
 - What MaximizePM adds to a start goes to `build_command` as the keys of `agents.LAUNCH_KEYS` (the skill in the
@@ -186,7 +186,7 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   `chat_cache_line(raw, st)`, `chat_texts(raw)` (the texts where the Artifacts tab looks for files and links;
   `CHAT["file_tools"]` names the tools whose path is a file the session wrote), and `chat_requests(session_ref)`
   (each model call once with its time and token counts, and whether the session started as a fork:
-  `core.measure_usage` and the size of a goal base). `chat_path` takes `root=` (a log folder that a test gives), and
+  `core.measure_usage`). `chat_path` takes `root=` (a log folder that a test gives), and
   `chat_chain(path, refs=None)` takes the agent's session ids, by which Claude Code finds its resumed files.
 - Claude Code: the parser, the chain, the title, the settings, the cache, the Artifacts texts and the requests
   (`read_transcript`, `FORK_SLACK`) are in `river/agents/claude.py`. Codex: the parser, the settings, the cache, the
@@ -199,8 +199,8 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
 
 ## As built in #5168
 
-- `agent_for.<role>` is a setting for each role of `core.AGENT_ROLES` (worker, manager, reviewer, deployer, expert,
-  context). In each scope, from the most specific (item, kind, project, global), `agent_for.<role>` comes before
+- `agent_for.<role>` is a setting for each role of `core.AGENT_ROLES` (worker, manager, reviewer, deployer, expert).
+  In each scope, from the most specific (item, kind, project, global), `agent_for.<role>` comes before
   `default_agent`: a project's `default_agent` wins over a global `agent_for.<role>`. An item's own `--agent` and
   `agent_rules` come first. The role of an item is `core.item_role`: reviewer for a review, deployer for a deploy
   item, expert for an expert-tier task, else worker.
@@ -210,8 +210,8 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   and Codex: `LAUNCH_PLATFORMS` until #5185; another adapter: its DESCRIBE and SETTINGS, plus a first prompt).
 - `core.launch_entries` is `launch_agents` plus one implicit profile (`<label>=@<id>`) for each agent type that no
   entry runs, so an agent starts with no `launch_agents` entry. The first entry stays the default start.
-- `core.role_agent(conn, role, project_id, item_id)` gives the launch entry of a role. The manager, an expert, a
-  context session and the focused starts (deploy, review, help, unblock) use it; launch, Dispatch, serve's fresh
+- `core.role_agent(conn, role, project_id, item_id)` gives the launch entry of a role. The manager, an expert and
+  the focused starts (deploy, review, help, unblock) use it; launch, Dispatch, serve's fresh
   start and the deployer read the item's effective agent, which includes its role.
 - Expert resume uses the adapter of the agent type the expert ran in (`core.agent_type_of`: its row, else its
   history), through `resume_command`; an adapter with no resume part starts a fresh expert that reads its notes.

@@ -609,17 +609,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   (`maxpm goal add <project> <name> --parent <goal>`, one level, same project)
   splits a large goal: its sessions read the parent's handoff, then its own,
   and the parent is not complete while a sub-goal is open.
-- Goal context sessions (`maxpm config set goal_context on`; off by default):
-  for a goal with two or more ready agent items, `maxpm serve` starts a
-  context session (role CONTEXT). It reads the handoff, the items' notes, and
-  the files they touch, keeps the handoff current, and records itself as the
-  goal's base (`maxpm goal base <goal> --ready`). A Claude Code session that
-  MaximizePM then starts for an item of the goal begins as a fork of that base
-  (`claude --resume <base> --fork-session`), so it reads the goal's context
-  from the prompt cache. It does so only when the base has the same model and
-  folder and a session used it less than `base_warm` (50m) ago.
-  `maxpm add ... --no-goal-context` starts an item fresh.
-- `maxpm go` roles: owner, worker, unblocker, reviewer, deployer, context,
+- `maxpm go` roles: owner, worker, unblocker, reviewer, deployer,
   manager, expert, assistant, idle. After `done`, an agent takes the next item at once
   (`auto_continue`). With no item, it runs `maxpm wait` (a blocking command
   costs no tokens; in Claude Code a background command, so a message that a

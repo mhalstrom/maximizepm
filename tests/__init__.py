@@ -21,7 +21,7 @@ os.environ["MAXPM_DB"] = os.path.join(_queue_dir, "maxpm.db")
 
 from river import core, dictation, server  # noqa: E402
 
-for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS", "MAXPM_FORK_OF",
+for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS",
               "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL"):
     os.environ.pop(_name, None)
 # Nor the agent session that runs the tests: a command records the session's id and web link from these, and that

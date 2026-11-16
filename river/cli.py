@@ -1342,10 +1342,6 @@ def build_parser(only=None):
     x = gls.add_parser("release", help="stop owning a goal"); x.add_argument("name")
     x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
                    help="release it although the handoff is older than your last finished item of the goal")
-    x = gls.add_parser("base", help="a goal's base: the context session its workers start from as forks")
-    x.add_argument("name")
-    x.add_argument("--ready", action="store_true", help="in the context session, at its end: record this session as the base")
-    x.add_argument("--clear", action="store_true", help="drop the base: the next workers start fresh")
     x = gls.add_parser("handoff", help="read a goal's handoff, or store a new version: what the goal is, the decisions "
                        "so far, the files that matter, and what is left"); x.add_argument("name")
     x.add_argument("text", nargs="?", help="the new handoff (or --file)")
@@ -1694,8 +1690,6 @@ def build_parser(only=None):
     x.add_argument("words", nargs="*", metavar="[project] title")
     x.add_argument("--short", help="the short title every page shows: about 6 plain words, no ids, no file names, no "
                    "quotes (the title stays the full text, on the item page and in a hover)")
-    x.add_argument("--no-goal-context", dest="no_goal_context", action="store_true",
-                   help="an item of a goal that needs no goal context: its session starts fresh, not as a fork of the base")
     x.add_argument("--from", dest="plan_file", metavar="FILE",
                    help="add every line of a plan file (an outline) as an item; a line waits on the lines indented under it")
     x.add_argument("--dry-run", action="store_true", help="with --from: show what would be added (refused without --from)")
@@ -1776,9 +1770,6 @@ def build_parser(only=None):
                    "quotes; \"\" removes it")
     x.add_argument("--changed", help="what changed, one plain line for a person (no ids, no file names, no flags); "
                    "\"\" removes it")
-    x.add_argument("--no-goal-context", dest="goal_context", action="store_false", default=None,
-                   help="its session starts fresh, not as a fork of its goal's base")
-    x.add_argument("--goal-context", dest="goal_context", action="store_true", help="undo --no-goal-context")
     x.add_argument("--doer", choices=core.DOERS); x.add_argument("--project")
     x.add_argument("--context"); x.add_argument("--touches", nargs="*", help="replaces the list; give none to clear it")
     x.add_argument("--check")
@@ -4038,9 +4029,6 @@ def dispatch(conn, a, actor):
             return core.goal_give(conn, a.name, a.to, actor, a.no_handoff)
         if g == "release":
             return core.goal_release(conn, a.name, actor, a.no_handoff)
-        if g == "base":
-            return core.goal_base(conn, a.name, actor, a.ready, a.clear, core.claude_session_from_env(),
-                                  os.environ.get("MAXPM_MODEL"), os.getcwd())
         if g == "handoff":
             if a.text is not None and a.file:
                 raise RiverError("give the handoff as text or --file, not both")
@@ -4204,14 +4192,10 @@ def dispatch(conn, a, actor):
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True)
-        if a.no_goal_context:
-            core.item_goal_context(conn, res["id"], False, actor)
         return res
     if c == "edit":
         if a.unreserve:
             core.cancel_push(conn, a.id, actor)
-        if a.goal_context is not None:
-            core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, _models(a),
                               tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
@@ -5090,10 +5074,6 @@ def render_go(b):
         return
     if core.queue_note():
         out.append(core.queue_note() + ". Tell the user if that is not what they meant.")
-    if os.environ.get("MAXPM_FORK_OF") and b["role"] != "context":
-        out.append(f"You started as a fork of the context session of goal {os.environ['MAXPM_FORK_OF']}: what it read is "
-                   f"your context. Its steps (end the session, no maxpm go) were for it, not for you: you are {me}, "
-                   f"and this briefing is yours.")
     if b["new_name"]:
         out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
     out += _tmux_line()
@@ -5221,33 +5201,6 @@ def render_go(b):
                     f"2. Finished: {r} done <id> --output \"<commit>\". Not finished: {r} release <id> --note "
                     "\"<what is done, what is left>\", or hand it on: maxpm give <id> --to <agent>.",
                     f"3. Run {r} go again: it ends the session. Take no new work."]
-        print("\n".join(out).rstrip())
-        return
-    if b["role"] == "context":
-        cx = b["context"]
-        out += [f"YOU ARE THE CONTEXT SESSION OF GOAL {cx['goal']} [{cx['project']}]: {cx['outcome'] or '(no outcome)'}",
-                "  Workers of the goal start as forks of this session: they read what you read now from the cache.",
-                "  You edit no file and claim no item. Read only what the next items need, up to base_max "
-                f"{cx['base_max']} tokens of context.", ""]
-        if cx.get("parent_handoff"):  # a sub-goal: the parent's handoff first
-            first, *rest = _handoff_lines(cx["parent_handoff"]["goal"], cx["parent_handoff"])
-            out += [f"  parent goal {cx['parent_handoff']['goal']}: {first.strip()}"] + rest
-        out += _handoff_lines(cx["goal"], cx["handoff"], indent="  ")
-        out.append("  Its open agent items:")
-        for x in cx["items"]:
-            out.append(f"    #{x['id']} {x['title']} ({'ready' if x['ready'] else 'waits'})")
-            for label in ("notes", "context"):
-                if x[label]:
-                    out.append(f"      {label}: {_cut(' '.join(x[label].split()), 300)}")
-            if x["touches"]:
-                out.append(f"      touches: {', '.join(x['touches'])}")
-        if cx["more"]:
-            out.append(f"    ... {cx['more']} more (maxpm goal show {cx['goal']})")
-        out += ["", "Steps (for you, the context session; a fork of you gets its own briefing from its own maxpm go):",
-                "  1. Read the files the items touch, the parts that matter. Do not change them.",
-                f"  2. If the handoff is missing or old, write it: {r} goal handoff {cx['goal']} --file <path>",
-                f"  3. Then, as your last command: {r} goal base {cx['goal']} --ready",
-                "  4. End the session. Do not run maxpm go or wait again."]
         print("\n".join(out).rstrip())
         return
     it = b.get("item")
@@ -7004,20 +6957,6 @@ def render(a, res):
         return render_secret(a, res)
     if c == "goal" and a.gcmd == "handoff":
         return render_handoff(res, a)
-    if c == "goal" and a.gcmd == "base":
-        b = res["base"]
-        if res["cleared"] or not b:
-            print(f"goal {res['goal']}: no base" + ("" if res["cleared"] else
-                  " (maxpm serve starts a context session for it when goal_context is on)"))
-            return
-        print(f"goal {res['goal']}: base session {b['session_id']} ({b['model'] or 'default model'}, "
-              f"{b['tokens'] or '?'} tokens, {b['forks']} fork(s)), ready {b['ready_at']}, "
-              + (f"warm until {b['warm_until']}" if b["warm"] else "cold: new workers start fresh"))
-        if res.get("warning"):
-            print(f"  {res['warning']}")
-        if res["ready"]:
-            print("  Your work as the context session is done: end this session now.")
-        return
     if c == "goal":
         rows = res if isinstance(res, list) else [res]
         if not rows:

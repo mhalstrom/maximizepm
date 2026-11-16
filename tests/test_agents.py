@@ -388,10 +388,7 @@ class StartPaths(Env):
         self.assertEqual(re.search(cx.effort["read"], "codex -c model_reasoning_effort=low go").group(1), "low")
         self.assertEqual(re.search(cl.effort["read"], "claude --effort max go").group(1), "max")
 
-    def test_only_an_agent_that_forks_gets_a_fork_base_and_only_one_with_background_commands_waits_there(self):
-        item = {"goals": ["g"], "no_goal_context": False}
-        self.assertIsNone(core.fork_base(self.c, item, self.tmp.name, "opus", "codex"))
-        self.assertIsNone(core.fork_base(self.c, item, self.tmp.name, "opus", None))
+    def test_only_an_agent_with_background_commands_waits_there(self):
         self.assertTrue(agents.get("claude").launch["background"])
         self.assertFalse(agents.get("codex").launch.get("background"))
 

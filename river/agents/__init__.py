@@ -218,8 +218,7 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #   chat_usage(lines) -> {"input", "output", "cache_read", "cache_write"} token counts of the lines;
 #   chat_requests(session_ref, root=None) -> (requests, fork) or None when no log of it is on this computer: requests
 #     {request id: (time, {"input", "output", "cache_read", "cache_write", "write_1h", "write_5m"} token counts)},
-#     each model call once, and fork True when the session started as a fork of another (core.measure_usage, the
-#     size of a goal base);
+#     each model call once, and fork True when the session started as a fork of another (core.measure_usage);
 #   chat_settings(lines) -> {setting key: value} as the session runs now;
 #   chat_cache_line(raw, st): fold one log line (bytes) into the prompt cache state st (a dict that starts as
 #     {"last": None, "ttl": None, "model": None}; the reader may keep keys of its own there): st["last"] = {"start",

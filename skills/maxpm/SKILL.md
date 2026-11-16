@@ -695,20 +695,3 @@ becomes code or a setting: add a task for it.
 
 Add `--json` to any command for machine-readable output. Errors name the rule
 and the next command to run.
-
-## Rarely used: context sessions and forked workers
-
-Off by default (`goal_context` off); a person turns it on.
-
-With the setting `goal_context` on, `maxpm serve` starts a context session
-(role CONTEXT) for a goal with two or more ready agent items and no warm base.
-It reads the goal's handoff, the items' notes, and the files they touch, keeps
-the handoff current, runs `maxpm goal base <goal> --ready` as its last command,
-and ends. It edits no file and claims no item. A session that MaximizePM then
-starts for an item of the goal begins as a fork of that base
-(`claude --resume <base> --fork-session`) when the base has the same model and
-folder and a session used it less than `base_warm` (50m) ago: it reads the
-goal's context from the prompt cache. Its go briefing says so. An item that
-needs no goal context starts fresh: `maxpm add ... --no-goal-context` (or
-`maxpm edit <id> --no-goal-context`). `maxpm goal base <goal>` shows the base;
-`--clear` drops it.

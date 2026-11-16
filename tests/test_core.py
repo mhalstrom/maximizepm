@@ -2027,7 +2027,6 @@ class GoalOwners(Base):
         self.assertLess(text.index("Payments use Stripe."), text.index("Refunds go through the same client."))
         self.assertIn("sub-goal of checkout", text)
         self.assertIn("parent goal checkout: HANDOFF v1", text)
-        self.assertEqual(core.context_brief(self.c, "refunds")["parent_handoff"]["text"], "Payments use Stripe.")
         with self.assertRaisesRegex(RiverError, "open sub-goals: refunds"):
             core.goal_done(self.c, "checkout", "done", "t")
 
@@ -7478,6 +7477,31 @@ class AliasesTable(Base):
         self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%item_refs%'").fetchone())
         self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE key='tracker'").fetchone())
         self.assertEqual(core.item_show(self.c, i)["title"], "x")
+
+    def test_an_old_queue_loses_its_goal_bases_table(self):
+        # The context sessions of goals are gone (#5992); connect drops their table and their settings. The items'
+        # old no_goal_context column stays, unread.
+        core.project_add(self.c, "old")
+        core.goal_add(self.c, "old", "g", "an outcome", actor="t")
+        gid = self.c.execute("SELECT id FROM goals WHERE name='g'").fetchone()[0]
+        self.c.execute("CREATE TABLE goal_bases (goal_id INTEGER PRIMARY KEY REFERENCES goals(id), session_id TEXT NOT "
+                       "NULL, model TEXT, path TEXT NOT NULL, tokens INTEGER, by_agent TEXT, ready_at TEXT NOT NULL, "
+                       "used_at TEXT NOT NULL, forks INTEGER NOT NULL DEFAULT 0)")
+        self.c.execute("INSERT INTO goal_bases VALUES (?, 's', NULL, '/x', NULL, NULL, '2026-09-01T00:00:00Z', "
+                       "'2026-09-01T00:00:00Z', 0)", (gid,))
+        self.c.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
+        for key, value in (("goal_context", "on"), ("base_warm", "30m"), ("base_max", "60k"),
+                           ("agent_for.context", "codex")):
+            self.c.execute("INSERT INTO settings (scope, key, value) VALUES ('global', ?, ?)", (key, value))
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
+        self.c.commit()
+        self.c.close()
+        self.c = core.connect(self.path)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%goal_bases%'").fetchone())
+        self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE key IN ('goal_context', 'base_warm', 'base_max', "
+                                         "'agent_for.context')").fetchone())
+        i = core.item_add(self.c, "old", "x", goals=["g"])["id"]
+        self.assertEqual(core.item_show(self.c, i)["goals"], ["g"])
 
 
 class Locked(Base):
