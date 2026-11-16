@@ -4988,6 +4988,45 @@ class Wait(Base):
         self.assertIn("waiting", kinds)
         self.assertIn("1 session(s) have no work", kinds["too_many"])
 
+    def test_a_new_scope_ends_the_wait(self):
+        """#5979: one waiting command returns work, messages, a stop, or a new scope."""
+        core.register(self.c, "mark", human=True)
+        core.wait(self.c, self.dir.name, "w", step="0s", sleep=lambda s: None)
+        calls = []
+
+        def nap(s):  # the manager gives a scope while the session waits
+            calls.append(s)
+            if len(calls) == 1:
+                with core.tx(self.c):
+                    self.c.execute("UPDATE agents SET scope=?, scope_at=? WHERE name='w'",
+                                   ('[{"kind": "project", "value": "b"}]', core.iso(core.now())))
+        res = core.wait(self.c, self.dir.name, "w", step="1h", sleep=nap)
+        self.assertEqual((res["result"], res["why"]), ("scope", "the manager gave you the scope project b"))
+
+    def test_a_session_with_a_live_token_keeps_its_lease_without_a_heartbeat(self):
+        """#5979: serve knows that a session with a token lives (its process runs), so its lease and its goal need no
+        heartbeat; a session with no token, or whose process ended, loses them as before."""
+        x = self.add("a", "a long task")
+        core.claim(self.c, x, "w")
+        core.goal_add(self.c, "a", "g", "the outcome", "it works")
+        core.goal_own(self.c, "g", "w")
+        self.c.execute("UPDATE agents SET pid=?, host=? WHERE name='w'", (os.getpid(), core.this_host()))
+        core.token_new(self.c, "w")
+        late = core.iso(core.now() - core.timedelta(minutes=1))
+        self.c.execute("UPDATE items SET lease_expires_at=? WHERE id=?", (late, x))
+        self.c.execute("UPDATE goals SET owner_expires_at=? WHERE name='g'", (late,))
+        with core.tx(self.c):
+            core._sweep(self.c)
+        self.assertEqual(core.item_show(self.c, x)["status"], "in_progress")
+        self.assertEqual(core.goal_owner(self.c, "g"), "w")
+        # The token is cancelled (the session ended): the lease runs out as before.
+        with core.tx(self.c):
+            core.token_cancel(self.c, "w", "test")
+        self.c.execute("UPDATE items SET lease_expires_at=? WHERE id=?", (late, x))
+        with mock.patch.object(core, "busy_now", lambda *a, **k: set()), core.tx(self.c):
+            core._sweep(self.c)
+        self.assertEqual(core.item_show(self.c, x)["status"], "open")
+
 
 class Models(Base):
     """Recommended model and effort per item, min/max limits, and sessions that declare their model (#319)."""

@@ -102,16 +102,10 @@ your type from your CLI's environment.
    one now, `maxpm edit <id> --short "<about 6 plain words>"`: the pages show it.
    Then, and at each new step, say what you do for your row on the Sessions
    tab: `maxpm now "<about 10 plain words>"` (no ids, file names, or commands).
-3. Do the work. Every `maxpm` command renews your lease. If you work a long
-   time without one, run `maxpm heartbeat` (default lease 30 minutes). MaximizePM
-   also renews it while a command runs in your session (a long test run) or
-   your tmux pane changes, but do not count on that: it needs `maxpm serve`
-   or a process it can see, and it stops `busy_max` (4h) after your last
-   maxpm command. A background command or a subagent that your harness runs
-   for you (Claude Code: `run_in_background`) counts as work for up to
-   `busy_max`: `maxpm serve` keeps your lease and your item while it runs,
-   also when a message comes for you, and you read the message when the
-   harness wakes you. A loop that only renews the lease is not work.
+3. Do the work. A session that `maxpm serve` started (it has a token) keeps its
+   lease while its process runs: no heartbeat. Any other session renews it with
+   each `maxpm` command; after 30 minutes without one, run `maxpm heartbeat`.
+   A loop that only renews the lease is not work.
 4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>" --changed "<the same for a person: plain words>"`.
    The reply lists items that became ready, and MAY BE UNNECESSARY NOW: open items the close may have
    made unnecessary. Decide each one at once: close it (`done|drop <id> --note "<why>"`, a person's item
@@ -628,12 +622,10 @@ the command again only when it still applies.
 
 - `maxpm inbox`: unread messages and questions that wait for your answer.
   Add `--all` for read ones, `--peek` to leave them unread.
-- `maxpm inbox --wait`: blocks until a new message comes, prints it, and
-  exits (after 25 minutes with nothing, it exits too). Printed is delivered;
-  `maxpm inbox`, an answer or a reply marks it read, and the sender sees which. Run it as a background
-  command (Claude Code: `run_in_background`) when you must answer messages
-  while you work, and start it again after each exit. Not needed when MaximizePM
-  delivers messages into your session itself (`native_message`).
+- Between tasks, `maxpm wait` returns for work, a message, a stop or a new
+  scope: you poll nothing. While you work, MaximizePM delivers messages into
+  your session (`native_message`); without that, `maxpm inbox --wait` in the
+  background waits for the next one.
 - `maxpm answer <msg-id> "<text>"`: answer a question. The asker gets it.
 - Shortcuts: `maxpm alert <agent> "<text>" --item <id>` (work they probably need),
   `maxpm ask <agent> "<text>"`, `maxpm note <agent> "<text>"`. Instead of an agent:

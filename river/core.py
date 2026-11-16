@@ -2677,6 +2677,20 @@ def token_cancel(conn, agent, why):
                  (iso(now()), why, agent))
 
 
+def token_alive(conn, names):
+    """The agents among names whose session lives by its token (#5979): a token that is not cancelled, and the
+    agent CLI process that its commands recorded still runs on this host. serve then knows that the session lives, so
+    its leases need no renewal by command (no heartbeat)."""
+    names = [n for n in set(names) if n]
+    if not names:
+        return set()
+    rows = conn.execute(
+        f"SELECT DISTINCT a.name, a.pid, a.host FROM session_tokens t JOIN agents a ON a.name=t.agent "
+        f"WHERE t.cancelled_at IS NULL AND a.stop_at IS NULL AND a.name IN ({','.join('?' * len(names))})",
+        names).fetchall()
+    return {r["name"] for r in rows if r["pid"] and r["host"] == this_host() and pid_alive(r["pid"])}
+
+
 def token_session(conn, token, chain):
     """The session of a token: {'agent', 'role', 'scope', 'checked'}. chain: the processes above the command, from
     the kernel ([(pid, ppid, comm, start)]), or None when the kernel does not tell (a sandbox; then a command that
@@ -13110,10 +13124,16 @@ def _sweep(conn):
     t = iso(now())
     expired = conn.execute(
         "SELECT id, assignee FROM items WHERE status='in_progress' AND lease_expires_at < ?", (t,)).fetchall()
-    busy = busy_now(conn, {r["assignee"] for r in expired}) if expired else set()
+    alive = token_alive(conn, [r["assignee"] for r in expired]) if expired else set()
+    busy = busy_now(conn, {r["assignee"] for r in expired} - alive) if expired else set()
     experts = ({x["name"] for x in conn.execute("SELECT name FROM agents WHERE role IN ('expert', 'assistant', 'plain')")}
                if expired else set())
     for r in expired:
+        if r["assignee"] in alive:
+            # Its session lives by its token (#5979): no heartbeat needed. Its end, stop or kill cancels the token.
+            conn.execute("UPDATE items SET lease_expires_at=? WHERE id=?",
+                         (iso(now() + _lease_for(conn, r["id"], r["assignee"])), r["id"]))
+            continue
         if r["assignee"] in experts:
             # An expert holds its task while the person talks with it, for days (#4959): no lease runs out. The same
             # for an item that an assistant took over with the person's yes (#5110).
@@ -13177,8 +13197,13 @@ def _sweep(conn):
     for r in conn.execute("SELECT DISTINCT a.* FROM agents a JOIN queue_entries q ON q.agent=a.name").fetchall():
         if _live_state(conn, r) == "gone":
             _drop_queue(conn, r["name"], "is gone")
-    for r in conn.execute("SELECT name, owner FROM goals WHERE owner IS NOT NULL AND owner_expires_at < ?",
-                          (t,)).fetchall():
+    goals_out = conn.execute("SELECT * FROM goals WHERE owner IS NOT NULL AND owner_expires_at < ?", (t,)).fetchall()
+    alive = token_alive(conn, [g["owner"] for g in goals_out]) if goals_out else set()
+    for g in goals_out:
+        if g["owner"] in alive:  # its session lives by its token (#5979)
+            conn.execute("UPDATE goals SET owner_expires_at=? WHERE id=?",
+                         (iso(now() + _goal_lease(conn, g, g["owner"])), g["id"]))
+    for r in [g for g in goals_out if g["owner"] not in alive]:
         conn.execute("UPDATE goals SET owner=NULL, owner_expires_at=NULL, owner_lease=NULL WHERE name=?", (r["name"],))
         _event(conn, None, "maxpm", f"goal {r['name']} ownership expired (was {r['owner']})")
         _send(conn, "notice", "maxpm", f"your ownership of goal {r['name']} expired (goal_lease without a maxpm "
@@ -21535,6 +21560,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     deadline = min(now() + step, since + limit)
     seen = {}  # the ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205)
     started = _agent(conn, actor)["wait_at"]
+    scope_at = _agent(conn, actor)["scope_at"]  # a new scope from the manager ends the wait (#5979)
     ad = _adapters().find(session_type(conn, actor) or "")
     foreground = not (ad and ad.launch.get("background"))
 
@@ -21567,6 +21593,11 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
             return {"result": "left", "agent": actor, "why": gone}
         if typed():
             return {"result": "message", "agent": actor, "why": "a person typed to you in your terminal"}
+        a = conn.execute("SELECT scope, scope_at FROM agents WHERE name=?", (actor,)).fetchone()
+        if a and a["scope_at"] != scope_at:
+            parts = json.loads(a["scope"]) if a["scope"] else None
+            return {"result": "scope", "agent": actor,
+                    "why": f"the manager gave you the scope {scope_text(parts)}" if parts else "your scope ended"}
         why = _work_for(conn, actor, names, role, seen)
         if why:
             return {"result": "work", "why": why, "agent": actor}

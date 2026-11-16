@@ -5605,6 +5605,8 @@ def render_wait(res):
                  if res["ended"] else f"You still hold work: run {r} go, and follow it."))
     elif res["result"] == "work":
         print(f"WORK: {res['why']}. Run now: {r} go")
+    elif res["result"] == "scope":  # #5979: the manager gave this session a new scope
+        print(f"SCOPE: {res['why']}. Run now: {r} go")
     elif res["result"] == "again":
         print(f"No work yet. Run again at once: {r} wait   (this session ends by itself in {res['left']} without work)")
     elif res["result"] == "left":
