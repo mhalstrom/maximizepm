@@ -16,6 +16,7 @@ browser eval, text, html, extract and snapshot reply."""
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -283,16 +284,7 @@ def _fail(conn, b, cred, why, person=False):
         if time.time() - told.get(cred["name"], 0) < AGAIN:
             return {"waits": why}
         told[cred["name"]] = time.time()
-    shot = None
-    try:
-        data = (b.page("Page.captureScreenshot", {"format": "png"}, timeout=10) or {}).get("data")
-        if data:
-            folder = vault._queue_file(conn).expanduser().resolve().parent / "signin"
-            folder.mkdir(exist_ok=True)
-            shot = folder / f"{cred['name']}-{time.strftime('%Y%m%d-%H%M%S')}.png"
-            shot.write_bytes(base64.b64decode(data))
-    except Exception:
-        shot = None
+    shot = _screenshot(conn, b, cred["name"])
     if not person:
         vault.signin_failed(conn, cred["name"], why)
     held = core._held_item(conn, b.owner)
@@ -331,6 +323,123 @@ def _fail(conn, b, cred, why, person=False):
             core._send(conn, "alert", "maxpm", body, to=to, item_id=held["id"] if held else None,
                        blocked="item" if held else None)
     return {"failed": why, "screenshot": str(shot) if shot else None, "to": to, "link": link}
+
+
+def _screenshot(conn, b, name):
+    """A PNG of the shown page in the folder signin beside the queue, or None."""
+    try:
+        data = (b.page("Page.captureScreenshot", {"format": "png"}, timeout=10) or {}).get("data")
+        if not data:
+            return None
+        folder = vault._queue_file(conn).expanduser().resolve().parent / "signin"
+        folder.mkdir(exist_ok=True)
+        shot = folder / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        shot.write_bytes(base64.b64decode(data))
+        return shot
+    except Exception:  # noqa: BLE001 - a page that went away: the question goes without a picture
+        return None
+
+
+# ---------------------------------------------------------------- a sign-in that a session drives itself (#5958)
+# Policy g5 in code: a session tries a vendor sign-in or sign-up once. When a page of the flow shows a robot check or
+# a new error after the session's own action, MaximizePM stops the flow: a screenshot, and a blocked question from the
+# session to the manager (with no manager, a person). Until that question is answered or withdrawn, the session's
+# next action on a sign-in or sign-up page of that site is refused. The fill by serve (above) has its own one try.
+
+SIGNUP = re.compile(r"(^|[./_-])(sign-?up|register|registration|join|create-?account|verify|verification|challenge|"
+                    r"captcha|checkpoint)([./_?-]|$)", re.I)
+STOP_MARK = "[sign-in stopped on {site}]"
+# What the page shows that ends one try: a robot check, and the error text of the form.
+SIGNS_JS = r"""(() => {
+  const robot = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
+    + 'iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile, #challenge-form');
+  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].map(e => e.innerText.trim())
+    .filter(Boolean).join(' / ').slice(0, 200);
+  return {robot, said};
+})()"""
+
+
+def auth_site(url):
+    """The site of a sign-in or sign-up page (accounts.google.com: google.com), or None for another page."""
+    from .browser import SIGNIN, site_of
+    u = urlsplit(url or "")
+    host = (u.hostname or "").lower()
+    if u.scheme not in ("http", "https") or not host:
+        return None
+    return site_of(host) if SIGNIN.search(host + u.path) or SIGNUP.search(host + u.path) else None
+
+
+def agent_stop(conn, who, site):
+    """The open question of a stopped sign-in of this session on this site, or None."""
+    r = conn.execute("SELECT id FROM messages WHERE kind='question' AND from_agent=? AND closed_at IS NULL "
+                     "AND state NOT IN ('answered','declined') AND body LIKE ? ORDER BY id DESC LIMIT 1",
+                     (who, STOP_MARK.format(site=site) + "%")).fetchone()
+    return r["id"] if r else None
+
+
+def agent_refusal(conn, who, url):
+    """Why a session's action on this page is refused (its sign-in on the site stopped, g5), or None."""
+    site = auth_site(url)
+    q = agent_stop(conn, who, site) if site and who else None
+    if q is None:
+        return None
+    return (f"refused: your sign-in on {site} failed once, and MaximizePM asked for the next step (question #{q}, "
+            f"policy g5: one try, no retry). Wait for the answer: maxpm --as {who} inbox --wait, or take other work. "
+            f"The person or the manager may withdraw it: maxpm withdraw {q} --note \"<why>\"")
+
+
+def _signs(b):
+    try:
+        s = b.evaluate(SIGNS_JS, 5)
+    except Exception:  # noqa: BLE001 - a page that loads: no signs yet
+        return None
+    return s if isinstance(s, dict) else None
+
+
+def agent_before(b, url):
+    """Before a session's action on a sign-in or sign-up page: what the page said, so agent_after sees new text."""
+    site = auth_site(url)
+    if not site:
+        return None
+    s = _signs(b) or {}
+    return {"site": site, "said": s.get("said") or ""}
+
+
+def agent_after(conn, b, who, url, before=None):
+    """After a session's action: a robot check, or new error text, on a sign-in or sign-up page ends the one try. Returns
+    {"site", "why", "question", "screenshot", "line"} for the reply, or None."""
+    site = auth_site(url) or (before or {}).get("site")
+    if not site or not who:
+        return None
+    s = _signs(b)
+    if not s:
+        return None
+    said = (s.get("said") or "").strip()
+    if s.get("robot"):
+        why = "the page shows a robot check"
+    elif said and said != (before or {}).get("said", "") and auth_site(url):
+        why = f"the page says: {said}"
+    else:
+        return None
+    if agent_stop(conn, who, site) is not None:
+        return None
+    shot = _screenshot(conn, b, f"{who}-{site}")
+    manager = core.active_manager(conn)
+    people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC")]
+    to = manager or (people[0] if people else None)
+    out = {"site": site, "why": why, "question": None, "screenshot": str(shot) if shot else None}
+    if to:
+        held = core._held_item(conn, who)
+        body = (f"{STOP_MARK.format(site=site)} My sign-in on {site} failed at its first try: {why}. Page: {url}."
+                + (f" Screenshot: {shot}." if shot else "") + " Policy g5: I do not try again. What is the next step: "
+                f"another way in, the person's step, or none (I drop this part)?")
+        m = core.send(conn, "question", body, to=to, item=held["id"] if held else None, actor=who, blocked=True)
+        out["question"] = m["id"]
+    out["line"] = (f"STOP: the sign-in on {site} failed ({why}). Policy g5: one try. "
+                   + (f"MaximizePM asked {to} for the next step (question #{out['question']}); your next action on its "
+                      f"sign-in pages is refused until the answer. Take other work or run maxpm --as {who} inbox --wait."
+                      if to else "Ask the person before you try again."))
+    return out
 
 
 WATCH_FOR = 1800.0  # seconds that a stopped sign-in waits for the person's new password in its browser

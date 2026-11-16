@@ -223,6 +223,72 @@ class SignIn(Base):
         self.assertIsNone(vault.Files().get(self.c, "google-mark#totp"))
 
 
+class SignsBrowser(FakeBrowser):
+    """A page that shows a robot check or error text (signin.SIGNS_JS)."""
+
+    def __init__(self, robot=False, said=""):
+        super().__init__([page("https://accounts.example.com/signin")])
+        self.signs = {"robot": robot, "said": said}
+
+    def evaluate(self, expr, timeout=None):
+        if expr == signin.SIGNS_JS:
+            return dict(self.signs)
+        return super().evaluate(expr, timeout)
+
+
+class AgentSigninTriesOnce(Base):
+    """#5958 (policy g5): a sign-in or sign-up that a session drives itself tries once; a failure stops it with a
+    screenshot and a blocked question to the manager, and the session's next try on that site is refused."""
+
+    def test_signin_pages_and_their_site(self):
+        self.assertEqual(signin.auth_site("https://accounts.google.com/v3/signin/identifier"), "google.com")
+        self.assertEqual(signin.auth_site("https://www.notion.so/signup"), "notion.so")
+        self.assertEqual(signin.auth_site("https://app.acme.io/register?plan=free"), "app.acme.io")
+        for url in ("https://example.com/", "https://example.com/author/x", "about:blank", ""):
+            self.assertIsNone(signin.auth_site(url), url)
+
+    def test_a_robot_check_stops_the_signin_and_asks_the_manager_once(self):
+        core.manage(self.c, self.dir.name, "boss")
+        url = "https://accounts.example.com/signin"
+        b = SignsBrowser(robot=True)
+        before = signin.agent_before(b, url)
+        stop = signin.agent_after(self.c, b, "dev", url, before)
+        self.assertEqual(stop["why"], "the page shows a robot check")
+        self.assertEqual(b.shots, 1)
+        q = core.message_show(self.c, stop["question"])
+        self.assertEqual((q["kind"], q["from_agent"], q["to_agent"], q["item_id"]), ("question", "dev", "boss", self.item))
+        self.assertTrue(q["blocked"])
+        self.assertIn("Screenshot:", q["body"])
+        self.assertIn("STOP", stop["line"])
+        # The next try is refused while the question is open; another site and another session are not.
+        self.assertIn(f"question #{q['id']}", signin.agent_refusal(self.c, "dev", url))
+        self.assertIn("policy g5", signin.agent_refusal(self.c, "dev", "https://example.com/login"))
+        self.assertIsNone(signin.agent_refusal(self.c, "dev", "https://example.com/dashboard"))
+        self.assertIsNone(signin.agent_refusal(self.c, "dev", "https://other.org/login"))
+        self.assertIsNone(signin.agent_refusal(self.c, "boss", url))
+        self.assertIsNone(signin.agent_after(self.c, b, "dev", url, before))  # no second question
+        # The manager's answer ends the stop.
+        core.answer(self.c, q["id"], "Use the Google button instead", actor="boss")
+        self.assertIsNone(signin.agent_refusal(self.c, "dev", url))
+
+    def test_new_error_text_stops_the_signin_and_old_text_does_not(self):
+        url = "https://example.com/login"
+        b = SignsBrowser(said="Cookies help us")
+        before = signin.agent_before(b, url)
+        self.assertIsNone(signin.agent_after(self.c, b, "dev", url, before))
+        b.signs["said"] = "That email is not registered"
+        stop = signin.agent_after(self.c, b, "dev", url, before)
+        self.assertEqual(stop["why"], "the page says: That email is not registered")
+        self.assertEqual(core.message_show(self.c, stop["question"])["to_agent"], "mark")  # no manager: the person
+
+    def test_a_signin_that_works_or_another_page_asks_nothing(self):
+        b = SignsBrowser()
+        self.assertIsNone(signin.agent_after(self.c, b, "dev", "https://example.com/login",
+                                             signin.agent_before(b, "https://example.com/login")))
+        self.assertIsNone(signin.agent_after(self.c, SignsBrowser(robot=True), "dev", "https://example.com/news"))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE kind='question'").fetchone()[0], 0)
+
+
 class CookieBrowser(FakeBrowser):
     """A browser with a cookie jar: Storage.getCookies, Storage.setCookies, Network.deleteCookies."""
 

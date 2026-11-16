@@ -108,6 +108,9 @@ CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key",
            "tab", "new_tab", "close_tab", "dialog", "upload", "hover", "scroll", "drag", "size"}
 # a session's first one shows its panel
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload", "hover", "scroll", "drag"}
+# #5958: the actions of a session that try a sign-in or sign-up (policy g5: one try)
+TRIES_ONCE = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload",
+              "upload", "drag"}
 # What a batch may hold (#5663): the actions whose answer is text.
 BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline", "extract"}
 # #5680: the actions that join a session's walk, and the arguments a step keeps
@@ -573,6 +576,22 @@ def _act(conn, a, who):
 
     fb = None  # #5692: the fallback of this action, logged when it succeeds
     sess_of = None if person else who  # a name that the person's pane misses is no case of the log
+    # #5958 (policy g5): a sign-in or sign-up that the session drives itself tries once. A stopped one refuses the
+    # session's next action on that site's sign-in pages until the manager answers; a new failure stops it.
+    tries_once = not person and who and action in TRIES_ONCE and not b.dialog
+    g5 = None
+    if tries_once:
+        from .. import signin
+        target = _page(b)
+        if action == "open":
+            try:
+                target = browser.norm_url(a.get("url") or "")
+            except RiverError:
+                pass
+        why = signin.agent_refusal(conn, who, target)
+        if why:
+            raise RiverError(why)
+        g5 = None if action == "open" else signin.agent_before(b, target)
 
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
         record()
@@ -580,6 +599,12 @@ def _act(conn, a, who):
             _fallback_after(conn, b, who, fb)
         if b.said:
             out["notes"] = b.said
+        if tries_once:
+            from .. import signin
+            stop = signin.agent_after(conn, b, who, out.get("url") or _page(b), g5)
+            if stop:
+                out["signin_stopped"] = stop
+                out["notes"] = list(out.get("notes") or []) + [stop["line"]]
         if not person and (action == "open" or out.get("navigated")):  # #5811: the accounts it may use here
             from .. import signin  # #5826: a granted sign-in of this site, which serve fills itself
             host = (urlsplit(out.get("url") or "").hostname or "").lower()

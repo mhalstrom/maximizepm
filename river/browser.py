@@ -552,13 +552,18 @@ def account_note(conn, project, url, opened=False):
         return (f"accounts agents may use on {host}: {', '.join(mine)} (the person allowed it: pick it in an account "
                 f"chooser; a password, passkey or 2-step code stays the person's)")
     if signin:
-        site = host.removeprefix("www.")
-        first, _, rest = site.partition(".")
-        if rest.count(".") >= 1 and SIGNIN.fullmatch(first):  # accounts.google.com: the site is google.com
-            site = rest
         return (f"a sign-in page on {host}, and no account is listed for it: ask the person once which account agents "
-                f"may use, then maxpm browser accounts add {site} <account>")
+                f"may use, then maxpm browser accounts add {site_of(host)} <account>")
     return None
+
+
+def site_of(host):
+    """The site of a host: no www., and no sign-in part in front (accounts.google.com: google.com)."""
+    site = (host or "").lower().removeprefix("www.")
+    first, _, rest = site.partition(".")
+    if rest.count(".") >= 1 and SIGNIN.fullmatch(first):
+        site = rest
+    return site
 
 
 def account_change(conn, site, account=None, project=None, remove=False, actor=None):
