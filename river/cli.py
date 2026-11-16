@@ -1784,6 +1784,14 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
     x.add_argument("--reason", help="why this cadence fits the project's needs (a service with users: short, so a fix "
                    "is live soon; a public tool repository: off, each push), shown in maxpm target show")
+    x = tgs.add_parser("risk", help="the risk class of the target (#5968): low (a change that passes its tests and the "
+                       "next push undoes: the target owner or the manager releases with no question to the person) "
+                       "or production (the default: a release sooner than its cadence needs a person or the manager)")
+    x.add_argument("name"); x.add_argument("risk", nargs="?", choices=["low", "production"], help="none shows it")
+    x = tgs.add_parser("mode", help="how the target releases (#5968): deploy (the default: ship requests collect on a "
+                       "deploy item) or push-on-yes (the session that holds the person's yes pushes to main itself and "
+                       "closes with maxpm done: no ship, no deploy item, no hook, no deployer)")
+    x.add_argument("name"); x.add_argument("mode", nargs="?", choices=["deploy", "push-on-yes"], help="none shows it")
     x = tgs.add_parser("report", help="the review report of a release: the summary and numbers, the groups (risks "
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
                        "Plan > Releases")
@@ -4450,6 +4458,10 @@ def dispatch(conn, a, actor):
         if a.tcmd == "cadence":
             return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor,
                                                                                                     a.reason)
+        if a.tcmd == "risk":  # #5968
+            return core.target_show(conn, a.name) if a.risk is None else core.target_risk(conn, a.name, a.risk, actor)
+        if a.tcmd == "mode":
+            return core.target_show(conn, a.name) if a.mode is None else core.target_mode(conn, a.name, a.mode, actor)
         if a.tcmd == "hook":
             if not actor and (a.command is not None or a.clear) and core.agent_type_from_env(os.environ):
                 raise RiverError("name yourself: maxpm --as <name> target hook ... (only a person or the manager "
@@ -7680,7 +7692,10 @@ def render(a, res):
             mode = f"not used: the deploy hook releases, whatever the mode ({res['deployer']}) (#5066)"
         else:
             mode = modes[res["deployer"]]
+        if res.get("mode") == "push-on-yes":
+            mode = "none: a push-on-yes target has no deployer"
         print(f"  deployer: {mode}; change it: maxpm target deployer {res['name']} launch|standing|off")
+        print("  " + core.target_mode_text(res))  # #5968
         for line in _release_lines(res["release"]):
             print("  " + line)
         for line in _hook_lines(res["name"], res.get("hooks") or []):

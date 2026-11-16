@@ -690,6 +690,8 @@ CREATE TABLE IF NOT EXISTS targets (
   cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
   watch_times       TEXT NOT NULL DEFAULT '',  -- times after a release that its watch checks run: '1m 10m 1h 24h' (#5508)
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
+  risk              TEXT NOT NULL DEFAULT 'production',  -- low | production (maxpm target risk, #5968)
+  mode              TEXT NOT NULL DEFAULT 'deploy',  -- deploy | push-on-yes (maxpm target mode, #5968)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -2469,6 +2471,11 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN cadence_reason TEXT NOT NULL DEFAULT ''")
     if "watch_times" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN watch_times TEXT NOT NULL DEFAULT ''")
+    tcols = {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}
+    if "risk" not in tcols:  # #5968
+        conn.execute("ALTER TABLE targets ADD COLUMN risk TEXT NOT NULL DEFAULT 'production'")
+    if "mode" not in tcols:
+        conn.execute("ALTER TABLE targets ADD COLUMN mode TEXT NOT NULL DEFAULT 'deploy'")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -4450,6 +4457,9 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
                 why = may_set_hook(conn, actor) or _fault_refusal(conn, actor, "change a hook")
                 if why:
                     raise RiverError(why)
+                if t["mode"] == "push-on-yes" and command is not None:  # #5968, policy p114
+                    raise RiverError(f"target {name} releases by a push with the person's yes (mode push-on-yes): it "
+                                     f"has no hooks; to give it hooks: maxpm target mode {name} deploy")
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
             if clear:
                 if command is not None:
@@ -8861,11 +8871,83 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
 DEPLOYER_MODES = ("launch", "standing", "off")
 
 
+# #5968 (policies p114, p155): how a target releases, and who decides a release.
+TARGET_RISKS = ("low", "production")
+TARGET_MODES = ("deploy", "push-on-yes")
+
+
+def _lead_refusal(conn, actor, what):
+    """Why actor may not do what: only a person or the manager may (None: a person at the terminal, or the page)."""
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    if r is None or r["kind"] == "human" or r["role"] == "manager":
+        return None
+    return f"{actor} is an agent; only a person or the manager {what}. Ask the manager: maxpm ask <manager> \"...\""
+
+
+def target_risk(conn, name, risk, actor=None):
+    """maxpm target risk: low (a change that passes its tests and the next push undoes: the target owner or the
+    manager releases it with no question to a person, p155) or production (the default: a release sooner than
+    its cadence needs a person or the manager)."""
+    if risk not in TARGET_RISKS:
+        raise RiverError("the risk class is low or production")
+    why = _lead_refusal(conn, actor, "sets the risk class of a target")
+    if why:
+        raise RiverError(why)
+    with tx(conn):
+        name = _target(conn, name)["name"]
+        conn.execute("UPDATE targets SET risk=? WHERE name=?", (risk, name))
+        _event(conn, None, actor, f"target {name} risk {risk}")
+    return target_show(conn, name)
+
+
+def target_mode(conn, name, mode, actor=None):
+    """maxpm target mode: deploy (ship requests collect on a deploy item) or push-on-yes (p114: the session that
+    holds the person's yes pushes to main itself and closes with maxpm done; no ship, no deploy item, no hook, no
+    deployer). Refused while the target has hooks or an open deploy item: remove or finish them first."""
+    if mode not in TARGET_MODES:
+        raise RiverError("the release mode is deploy or push-on-yes")
+    why = _lead_refusal(conn, actor, "sets how a target releases")
+    if why:
+        raise RiverError(why)
+    with tx(conn):
+        t = _target(conn, name)
+        name = t["name"]
+        if mode == "push-on-yes":
+            hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))]
+            if hooks:
+                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push-on-yes target has none: "
+                                 f"maxpm target hook {name} <event> --clear")
+            dep = conn.execute(f"SELECT id FROM items WHERE kind='deploy' AND target=? AND status IN {OPEN_STATES} "
+                               "ORDER BY id LIMIT 1", (name,)).fetchone()
+            if dep:
+                raise RiverError(f"target {name} has an open deploy item #{dep['id']}: finish or drop it first")
+            conn.execute("UPDATE targets SET mode=?, deployer='off' WHERE name=?", (mode, name))
+        else:
+            conn.execute("UPDATE targets SET mode=? WHERE name=?", (mode, name))
+        _event(conn, None, actor, f"target {name} release mode {mode}")
+    return target_show(conn, name)
+
+
+def target_mode_text(t):
+    """One line for maxpm target show: how the target releases and who decides."""
+    how = ("push-on-yes: the session that holds the person's yes pushes to main itself and closes with maxpm done "
+           "(no --ship, no deploy item, no hook)" if t.get("mode") == "push-on-yes"
+           else "deploy: maxpm done --ship collects the change on the next deploy item")
+    who = ("risk low: the target owner or the manager releases it, with no question to a person"
+           if t.get("risk") == "low" else
+           "risk production: a release sooner than its cadence needs a person or the manager")
+    return f"releases by {how}; {who}. Change: maxpm target mode|risk {t['name']} <value>"
+
+
 def target_deployer(conn, name, mode, actor=None):
     if mode not in DEPLOYER_MODES:
         raise RiverError("the deployer mode is launch, standing, or off")
     with tx(conn):
-        name = _target(conn, name)["name"]
+        t = _target(conn, name)
+        name = t["name"]
+        if t["mode"] == "push-on-yes" and mode != "off":
+            raise RiverError(f"target {name} releases by a push with the person's yes (mode push-on-yes): it has no "
+                             f"deployer; to give it one: maxpm target mode {name} deploy")
         conn.execute("UPDATE targets SET deployer=? WHERE name=?", (mode, name))
         _event(conn, None, actor, f"target {name} deployer {mode}")
     return target_show(conn, name)
@@ -9195,7 +9277,16 @@ def release_now(conn, target, reason, actor=None):
         if not plan["waits"]:
             raise RiverError(f"{plan['text']}; nothing waits for the cadence. See: maxpm show {plan['start']}")
         who = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
-        if actor and actor != tg["owner"] and not (who and (who["kind"] == "human" or who["role"] == "manager")):
+        lead = who and (who["kind"] == "human" or who["role"] == "manager")
+        if actor and actor == tg["owner"] and not lead and tg["risk"] != "low":
+            # #5968: the owner of a low-risk target decides by itself; a production release needs a lead.
+            boss = active_manager(conn)
+            raise RiverError(
+                f"refused: {name} has risk production, so a release sooner than its cadence is a decision of the "
+                f"manager" + (f" ({boss})" if boss else "") + " or a person, not of the target owner. "
+                + (f"Ask: maxpm alert {boss} \"<why this release cannot wait>\" --item {plan['deploy']}" if boss else
+                   f"Ask a person: maxpm ask <person> \"<why this release cannot wait>\" --item {plan['deploy']}"))
+        if actor and actor != tg["owner"] and not lead:
             boss = active_manager(conn)
             ask = tg["owner"] or boss
             raise RiverError(
@@ -15628,6 +15719,11 @@ def _ship_check(conn, it):
     if not proj["target"]:
         raise RiverError(f"project {proj['name']} has no deploy target; set one: "
                          f"maxpm project target {proj['name']} <target>  (maxpm target list)")
+    mode = conn.execute("SELECT mode FROM targets WHERE name=?", (proj["target"],)).fetchone()
+    if mode and mode["mode"] == "push-on-yes":  # #5968, policy p114
+        raise RiverError(f"target {proj['target']} releases by a push with the person's yes (mode push-on-yes): no "
+                         f"ship and no deploy item. With the yes, push to main yourself and close with maxpm done "
+                         f"#{it['id']}, with no --ship")
     return proj["target"]
 
 

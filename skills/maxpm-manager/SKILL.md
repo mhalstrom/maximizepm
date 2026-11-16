@@ -472,6 +472,8 @@ maxpm ops add <target> <check> <form> ...              # its checks, and its pro
 maxpm ops system show|edit|accept|reject <project>     # its system description; an agent's edit waits for your accept
 maxpm ops noise add|list|rm                            # what is not a problem; you get a note for each agent's rule
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
+maxpm target risk <target> low|production             # low: the owner or you release, no question to the person
+maxpm target mode <target> deploy|push-on-yes         # push-on-yes: the session with the yes pushes; no ship or hook
 maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
 maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed (a person or the manager sets it)
 maxpm target give <target> --to <agent>                # or: maxpm target release <target>

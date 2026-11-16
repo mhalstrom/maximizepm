@@ -935,6 +935,42 @@ class Targets(Base):
         core.project_target(self.c, "api", None)
         self.assertEqual([p["name"] for p in core.target_show(self.c, "web")["projects"]], ["site"])
 
+    def test_a_push_on_yes_target_has_no_ship_hook_or_deployer_and_a_lead_sets_risk_and_mode(self):
+        """#5968 (policies p114, p155): a target's mode (deploy, or push-on-yes: the session with the person's yes
+        pushes and closes with done) and risk class (production by default, or low). Only a person or the manager
+        sets them; a push-on-yes target refuses ship, a hook and a deployer, with the next step."""
+        core.target_add(self.c, "site-com")
+        core.project_add(self.c, "site", target="site-com")
+        core.register(self.c, "w")
+        core.register(self.c, "mark", human=True)
+        t = core.target_show(self.c, "site-com")
+        self.assertEqual((t["mode"], t["risk"]), ("deploy", "production"))
+        for call in (lambda: core.target_mode(self.c, "site-com", "push-on-yes", "w"),
+                     lambda: core.target_risk(self.c, "site-com", "low", "w")):
+            with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                call()
+        with self.assertRaisesRegex(RiverError, "deploy or push-on-yes"):
+            core.target_mode(self.c, "site-com", "push", "mark")
+        # A hook first: the mode refuses until it is gone.
+        core.target_hook(self.c, "site-com", "deployed", "echo hi", actor="mark")
+        with self.assertRaisesRegex(RiverError, r"has hooks \(deployed\).*--clear"):
+            core.target_mode(self.c, "site-com", "push-on-yes", "mark")
+        core.target_hook(self.c, "site-com", "deployed", clear=True, actor="mark")
+        t = core.target_mode(self.c, "site-com", "push-on-yes", "mark")
+        self.assertEqual((t["mode"], t["deployer"]), ("push-on-yes", "off"))
+        self.assertIn("push-on-yes", core.target_mode_text(t))
+        it = self.add("site", "New footer")
+        with self.assertRaisesRegex(RiverError, rf"push-on-yes.*push to main yourself and close with maxpm done #{it}"):
+            core.ship(self.c, it, "w")
+        with self.assertRaisesRegex(RiverError, "push-on-yes.*no hooks"):
+            core.target_hook(self.c, "site-com", "deployed", "echo hi", actor="mark")
+        with self.assertRaisesRegex(RiverError, "push-on-yes.*no deployer"):
+            core.target_deployer(self.c, "site-com", "launch", "mark")
+        # Back to deploy: ship works again; the risk class shows in the line.
+        core.target_mode(self.c, "site-com", "deploy", "mark")
+        core.ship(self.c, it, "w")
+        self.assertIn("risk low", core.target_mode_text(core.target_risk(self.c, "site-com", "low", "mark")))
+
     def test_refusals(self):
         core.project_add(self.c, "a")
         with self.assertRaises(RiverError):
@@ -4162,7 +4198,11 @@ class ReleaseCadence(Base):
         core.done(self.c, dep["id"], "release v2", "ops")
         nxt = self.shipped("later")[1]["release"]
         self.assertEqual((nxt["waits"], nxt["next_at"]), (True, core.iso(self.clock[0] + timedelta(days=1))))
-        # The target owner decides by itself, and so does the manager; no person approves.
+        # The owner of a production target may not (#5968): the manager or a person decides.
+        with self.assertRaisesRegex(RiverError, "web has risk production.*not of the target owner"):
+            core.release_now(self.c, "web", "a fix of a production defect", "ops")
+        # The target owner of a low-risk target decides by itself, and so does the manager; no person approves.
+        core.target_risk(self.c, "web", "low", "mark")
         self.assertEqual(core.release_now(self.c, "web", "a fix of a production defect", "ops")["waits"], False)
         self.assertFalse(any("release now" in m["body"] and "production defect" in m["body"]
                              for m in core.inbox(self.c, "ops")))  # no notice to itself
