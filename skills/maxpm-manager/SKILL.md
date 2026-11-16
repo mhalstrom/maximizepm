@@ -220,6 +220,11 @@ Stop when the user tells you to, and tell the user what you did.
 - **TARGET owner away or gone**: with a ready deploy, `maxpm serve` starts a deployer
   and gives it the target (deployer mode launch or standing). Otherwise
   `maxpm target give <target> --to <agent>` (an active agent in one of the target's projects).
+- **A new goal**: the person approves goals, not tasks. Write its outcome
+  and done-when (`maxpm goal add <project> <name> --outcome "..." --done-when "..."`):
+  MaximizePM adds the person's Approve item with both, and the goal waits for
+  the yes (setting `goal_approval`). Until then no agent owns it and no scope
+  names it; tag its tasks and let them run. A no closes the goal.
 - **A goal that several agents must work on at the same time**: an owner
   reserves the goal's agent items, so one agent does them in sequence. When
   the user wants its items open to every agent, the user makes the goal

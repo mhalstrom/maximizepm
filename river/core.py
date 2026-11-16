@@ -155,6 +155,10 @@ DEFAULT_SETTINGS = {
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
     # confirms it; a project where nobody chose has ask_first.
     "result_look": "ask_first",
+    # #5997 (mark 2026-11-15: intent is for goals, tasks are the mechanics): person: a goal that an agent adds waits
+    # for the person's yes on its outcome and done-when (an Approve item that only a person closes); until then no
+    # agent owns it and no scope names it. Its tasks need no yes. off: an agent's goal opens at once.
+    "goal_approval": "person",
     # The proof of a done result (#5988, mark 2026-11-15: the person trusts a result without a check of his own).
     # require: an agent's done of a work task in a project with a git folder needs a commit (given, or one that
     # names the item), a test (--test with --result) and, when it touches page files, a screenshot (--shot); else
@@ -825,7 +829,10 @@ CREATE TABLE IF NOT EXISTS goals (
   owner             TEXT,
   owner_expires_at  TEXT,
   owner_lease       TEXT,                     -- maxpm goal own --lease; NULL: the goal_lease setting
-  shared            INTEGER NOT NULL DEFAULT 0, -- maxpm goal edit --shared: no agent owns it, nothing is reserved
+  shared            INTEGER NOT NULL DEFAULT 0, -- the page's Share: no agent owns it, nothing is reserved
+  proposal          INTEGER,                  -- #5997: the person's approval item of a goal an agent wrote
+  proposed_by       TEXT,
+  approved_at       TEXT,                     -- the person's yes; a goal with a proposal and no yes waits
   result            TEXT NOT NULL DEFAULT '',
   created_at        TEXT NOT NULL,
   completed_at      TEXT
@@ -2273,8 +2280,13 @@ def _migrate(conn):
     if "runner" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
         conn.execute("ALTER TABLE hook_runs ADD COLUMN runner TEXT")
         conn.execute("ALTER TABLE hook_runs ADD COLUMN pid INTEGER")
-    if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
+    gcols = {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}
+    if "parent_id" not in gcols:
         conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
+    if "proposal" not in gcols:  # #5997: the person's yes on a goal that an agent wrote
+        conn.execute("ALTER TABLE goals ADD COLUMN proposal INTEGER")
+        conn.execute("ALTER TABLE goals ADD COLUMN proposed_by TEXT")
+        conn.execute("ALTER TABLE goals ADD COLUMN approved_at TEXT")
     # Protection levels of secrets (#5825): a secret saved before them is hidden, the default for a new one.
     if "level" not in {r["name"] for r in conn.execute("PRAGMA table_info(secrets)")}:
         conn.execute("ALTER TABLE secrets ADD COLUMN level TEXT NOT NULL DEFAULT 'hidden'")
@@ -3176,6 +3188,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("result_look is ask_first or push_first")
     elif key == "done_proof" and value not in ("require", "ask", "off"):
         raise RiverError("done_proof is require, ask or off")
+    elif key == "goal_approval" and value not in ("person", "off"):
+        raise RiverError("goal_approval is person or off")
     elif key == "workspace" and value not in ("shared", "worktree", "setup"):
         raise RiverError("workspace is shared (the project folder), worktree (a git worktree for each session), or "
                          "setup (a worktree, then the command in workspace_setup)")
@@ -4103,6 +4117,7 @@ def _goal_view(conn, g, ann=None):
     h = _handoff(conn, g["id"])
     d["handoff"] = {k: h[k] for k in ("version", "by_agent", "created_at")} if h else None
     d["parent"] = _goal_name(conn, g["parent_id"]) if g["parent_id"] else None
+    d["waits_yes"] = goal_waits_yes(g)  # #5997
     d["subgoals"] = [r["name"] for r in conn.execute("SELECT name FROM goals WHERE parent_id=? ORDER BY rank, id",
                                                      (g["id"],))]
     due = _handoff_due(conn, g)
@@ -4232,7 +4247,65 @@ def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=Non
                + (f" as a sub-goal of {parent}" if parent else ""))
     if rank is not None:
         goal_rank(conn, name, rank, actor)
+    # #5997 (mark 2026-11-15: 'intent is for goals. tasks are the mechanics of meeting those goals'): a goal that an
+    # agent wrote waits for the person's yes on its outcome and done-when. A sub-goal splits an approved goal: none.
+    if _is_ai(conn, actor) and up is None and setting(conn, "goal_approval", project_id=p["id"]) == "person":
+        _propose_goal(conn, name, actor)
     return goal_show(conn, name)
+
+
+def _propose_goal(conn, name, actor):
+    """The person's Approve item of a new goal (#5997): its outcome and done-when quoted. Only a person closes it
+    (an approval); done opens the goal, drop closes it as not approved."""
+    g = _goal(conn, name)
+    if not g["outcome"].strip() or not g["done_when"].strip():
+        with tx(conn):
+            conn.execute("DELETE FROM goals WHERE id=?", (g["id"],))
+        raise RiverError(f"goal {name} is not added: the person approves a goal by its outcome and its done-when, so "
+                         f"write both: maxpm goal add <project> {name} --outcome \"...\" --done-when \"...\"")
+    it = item_add(conn, _project_name(conn, g["project_id"]), f"Approve the goal {name}: \"{full_text(g['outcome'])}\"",
+                  doer="human", actor=actor, goals=[], short=f"Approve goal {name}"[:60],
+                  context=(f"Outcome: \"{full_text(g['outcome'])}\". Done when: \"{full_text(g['done_when'])}\". "
+                           f"Proposed by {actor}. Your yes (done) opens the goal: an agent can own it, and its tasks "
+                           f"run without a yes from you. A no (drop, with a note) closes it."))
+    with tx(conn):
+        conn.execute("INSERT OR IGNORE INTO approvals(item_id, once, on_day) VALUES (?, 0, NULL)", (it["id"],))
+        conn.execute("UPDATE goals SET proposal=?, proposed_by=? WHERE id=?", (it["id"], actor, g["id"]))
+        _event(conn, it["id"], actor, f"goal {name} waits for the person's yes on its outcome and done-when")
+    return it["id"]
+
+
+def goal_waits_yes(g):
+    """True while a goal waits for the person's yes (#5997)."""
+    return bool(g["proposal"]) and not g["approved_at"] and g["status"] == "open"
+
+
+def _goal_yes_refusal(g, what):
+    if goal_waits_yes(g):
+        raise RiverError(f"goal {g['name']} waits for the person's yes on its outcome and done-when (#{g['proposal']}); "
+                         f"{what} after the yes. Its tasks can run now; tag them: maxpm add \"...\" --goal {g['name']}")
+
+
+def _goal_answer(conn, item_id, yes, actor, note=None):
+    """Inside a tx: the person closed a goal's Approve item (#5997). done: the goal opens; drop: it closes as not
+    approved. The proposer hears it. Returns the goal's name, or None."""
+    g = conn.execute("SELECT * FROM goals WHERE proposal=? AND approved_at IS NULL AND status='open'",
+                     (item_id,)).fetchone()
+    if g is None:
+        return None
+    t = iso(now())
+    if yes:
+        conn.execute("UPDATE goals SET approved_at=? WHERE id=?", (t, g["id"]))
+        text = f"{actor} approved goal {g['name']}: an agent can own it now (maxpm goal own {g['name']})"
+    else:
+        why = " ".join((note or "").split()) or "no reason given"
+        conn.execute("UPDATE goals SET status='complete', completed_at=?, result=?, owner=NULL WHERE id=?",
+                     (t, f"not approved by {actor}: {why}", g["id"]))
+        text = f"{actor} did not approve goal {g['name']}: {why}"
+    _event(conn, item_id, actor, text)
+    if g["proposed_by"] and g["proposed_by"] != actor:
+        _send(conn, "notice", "maxpm", text, to=g["proposed_by"], item_id=item_id)
+    return g["name"]
 
 
 def goal_list(conn, project=None, include_complete=False):
@@ -4340,8 +4413,9 @@ def goal_own(conn, name, actor=None, lease=None):
             raise RiverError(f"goal {name} is complete; a person reopens it on the page first")
         if g["shared"]:
             raise RiverError(f"goal {name} is shared: nobody owns it, and its items are open to every agent. "
-                             f"Take its items with maxpm go. A person or a manager changes that: "
-                             f"maxpm goal edit {name} --owned")
+                             f"Take its items with maxpm go. A person changes that with the goal's Share button in "
+                             f"the Projects view")
+        _goal_yes_refusal(g, "an agent owns it")
         if g["owner"] and g["owner"] != actor:
             raise RiverError(f"goal {name} is owned by {g['owner']}; ask them (maxpm send question --to {g['owner']} ...), "
                              f"or take another: maxpm goal list")
@@ -15320,7 +15394,9 @@ def parse_scope(conn, spec):
     if kind == "project":
         value = _project(conn, value)["name"]
     elif kind == "goal":
-        value = _goal(conn, value)["name"]
+        g = _goal(conn, value)
+        _goal_yes_refusal(g, "a session gets it as its scope")  # #5997
+        value = g["name"]
     elif kind in ("release", "target"):
         value = _target(conn, value)["name"]
     else:
@@ -16004,6 +16080,10 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
             conn.execute("UPDATE items SET proof=? WHERE id=?", (json.dumps(proof), res["id"]))
             _event(conn, res["id"], actor, "proof: " + proof_line(proof))
     res["proof"], res["proof_missing"] = proof, missing
+    with tx(conn):
+        yes = _goal_answer(conn, res["id"], True, actor)  # a person's yes to a goal (#5997)
+    if yes:
+        res["goal_approved"] = yes
     try:  # the cost of the item, from its sessions' transcripts on this computer; never stops a done
         measure_usage(conn, res["id"])
         res["usage"] = item_usage(conn, res["id"])
@@ -16546,7 +16626,12 @@ def cleanup(conn, project=None, git=True, closes=None, actor=None):
 
 
 def drop(conn, item_id, actor=None, note=None):
-    return _close(conn, item_id, "dropped", actor, note=note)
+    res = _close(conn, item_id, "dropped", actor, note=note)
+    with tx(conn):
+        no = _goal_answer(conn, res["id"], False, actor, note)  # a person's no to a goal (#5997)
+    if no:
+        res["goal_not_approved"] = no
+    return res
 
 
 def _is_ai(conn, actor):
@@ -22746,7 +22831,8 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             # agent works as a worker below. After goal done, the owner continues with go --role owner.
             # A shared goal is never taken: its items are normal work for every agent.
             free = conn.execute(f"SELECT g.name FROM goals g JOIN projects p ON p.id=g.project_id WHERE g.status='open' "
-                                f"AND g.owner IS NULL AND g.shared=0 AND p.archived=0 AND p.name IN ({','.join('?' * len(names))}) "
+                                f"AND g.owner IS NULL AND g.shared=0 AND (g.proposal IS NULL OR g.approved_at IS NOT NULL) "
+                                f"AND p.archived=0 AND p.name IN ({','.join('?' * len(names))}) "
                                 f"ORDER BY p.rank, g.rank, g.id", names).fetchall()
             if role is None:
                 try:

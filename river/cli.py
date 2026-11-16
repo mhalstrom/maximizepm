@@ -125,8 +125,9 @@ HINTS = {
 
 def _fmt_goal(g):
     n_open, n_done, n_back = len(g["items_open"]), len(g["items_done"]), len(g.get("items_backlog") or ())
-    state = "complete" if g["status"] == "complete" else (f"owner {g['owner']}" if g["owner"] else
-                                                          "shared: no owner" if g.get("shared") else "no owner")
+    state = "complete" if g["status"] == "complete" else (
+        f"waits for the person's yes: #{g['proposal']}" if g.get("waits_yes") else f"owner {g['owner']}" if g["owner"]
+        else "shared: no owner" if g.get("shared") else "no owner")  # #5997
     return (f"{g['name']} [{g['project']}] ({state}; {n_done} done, {n_open} open"
             + (f", {n_back} in backlog" if n_back else "")
             + (f"; sub-goal of {g['parent']}" if g.get("parent") else "")

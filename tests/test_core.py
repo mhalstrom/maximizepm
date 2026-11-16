@@ -1882,6 +1882,40 @@ class Goals(Base):
         core.register(self.c, "ag")
         core.register(self.c, "bo")
 
+    def test_an_agents_goal_waits_for_the_persons_yes_and_its_tasks_do_not(self):
+        """#5997 (mark 2026-11-15: 'intent is for goals. tasks are the mechanics of meeting those goals')."""
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        with self.assertRaisesRegex(RiverError, "goal pay is not added: the person approves a goal by its outcome"):
+            core.goal_add(self.c, "shop", "pay", actor="ag")
+        self.assertIsNone(self.c.execute("SELECT 1 FROM goals WHERE name='pay'").fetchone())
+        g = core.goal_add(self.c, "shop", "pay", "customers can pay", "a test order succeeds", "ag")
+        self.assertTrue(g["waits_yes"])
+        it = core._item(self.c, g["proposal"])
+        self.assertEqual((it["doer"], it["title"]), ("human", 'Approve the goal pay: "customers can pay"'))
+        self.assertIn('Done when: "a test order succeeds"', it["context"])
+        self.assertIn("waits for the person's yes: #%d" % g["proposal"], cli._fmt_goal(g))
+        # No owner and no scope before the yes; its tasks are added and can run.
+        with self.assertRaisesRegex(RiverError, "goal pay waits for the person's yes on its outcome and done-when"):
+            core.goal_own(self.c, "pay", "bo")
+        with self.assertRaisesRegex(RiverError, "a session gets it as its scope after the yes"):
+            core.scope_set(self.c, "bo", ["goal:pay"], "mark")
+        task = core.item_add(self.c, "shop", "Card form", actor="ag", goals=["pay"])["id"]
+        self.assertEqual(core.claim(self.c, task, "bo")["assignee"], "bo")
+        # Only the person says yes; then an agent owns it, and the proposer hears it.
+        with self.assertRaisesRegex(RiverError, "only the person approves it"):
+            core.done(self.c, g["proposal"], actor="ag")
+        res = core.done(self.c, g["proposal"], actor="mark")
+        self.assertEqual(res["goal_approved"], "pay")
+        self.assertEqual(core.goal_own(self.c, "pay", "bo")["owner"], "bo")
+        self.assertTrue(any("mark approved goal pay" in m["body"] for m in core.inbox(self.c, "ag")))
+        # A no closes the goal as not approved; a person's own goal needs no yes.
+        h = core.goal_add(self.c, "shop", "speed", "pages load in 1s", "p90 under 1s", "ag")
+        core.drop(self.c, h["proposal"], actor="mark", note="not this quarter")
+        g2 = core._goal(self.c, "speed")
+        self.assertEqual((g2["status"], g2["result"]), ("complete", "not approved by mark: not this quarter"))
+        self.assertFalse(core.goal_add(self.c, "shop", "docs", "readers find answers", "a guide", "mark")["waits_yes"])
+
     def test_goal_lifecycle(self):
         core.goal_add(self.c, "shop", "checkout", "customers can pay", "a test order succeeds", "t")
         core.goal_add(self.c, "shop", "speed", "pages load in 1s", actor="t")
