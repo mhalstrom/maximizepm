@@ -154,7 +154,7 @@ function linkText(root, test, rx, make, inPre) {
 }
 function fileLink(path, text, rel) {
   const a = el("span", "link fpath", text);
-  a.dataset.file = path; a.title = "Open in the side panel"; a.tabIndex = 0;
+  a.dataset.file = path; a.title = "Open in side panel"; a.tabIndex = 0;
   if (rel) a.dataset.rel = "1";
   return a;
 }
@@ -164,7 +164,7 @@ export function linkPaths(root, { inPre = false } = {}) {
   linkText(root, /\.\w{2,4}\b/, RPATH, (path, text) => fileLink(path, text, true), inPre);
   linkText(root, /https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/, LURL, (url) => {
     const a = el("span", "link fpath", url);
-    a.dataset.url = url; a.title = "Open in the side panel"; a.tabIndex = 0;
+    a.dataset.url = url; a.title = "Open in side panel"; a.tabIndex = 0;
     return a;
   }, inPre);
 }

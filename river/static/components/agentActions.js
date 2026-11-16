@@ -24,7 +24,7 @@ export function managerHtml(S) {
 export function queueHtml(entries, agent) {
   if (!entries || !entries.length) return "";
   return `<div class="st"><b>queue</b></div>` + entries.map(e => e.item
-    ? `<div class="st">· <span class="link" data-open="${e.item}">#${e.item} ${esc(e.title)}</span> <span class="muted">(${e.ready ? "ready" : esc(e.status === "open" ? "not ready" : e.status.replace("_", " "))})</span> <span class="link" data-qremove="${esc(agent)}" data-ref="${e.item}" title="Take it out of the queue">×</span></div>`
+    ? `<div class="st">· <span class="link" data-open="${e.item}">#${e.item} ${esc(e.title)}</span> <span class="muted">(${e.ready ? "ready" : esc(e.status === "open" ? "not ready" : e.status.replace("_", " "))})</span> <span class="link" data-qremove="${esc(agent)}" data-ref="${e.item}" title="Remove from the queue">×</span></div>`
     : `<div class="st">· ${e.kind === "stop" ? "<b>stop</b>" : "note"}: ${esc(e.body)}${e.native_status ? ` <span class="muted">[${esc(e.native_status)}]</span>` : ""} <span class="link" data-qremove="${esc(agent)}" data-ref="e${e.entry}" title="${e.kind === "stop" ? "Withdraw the stop" : "Remove"}">×</span></div>`).join("");
 }
 
@@ -34,5 +34,5 @@ export function hasSession(S, name) {
   return ((S && S.sessions) || []).includes(name);
 }
 export function sessionButton(S, name) {
-  return hasSession(S, name) ? `<button class="btn" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}">Open session</button>` : "";
+  return hasSession(S, name) ? `<button class="btn" data-session-go="${esc(name)}" title="Open session ${esc(name)}">Open session</button>` : "";
 }

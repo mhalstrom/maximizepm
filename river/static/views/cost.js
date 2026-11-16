@@ -73,7 +73,7 @@ function rowsHtml(d) {
   return `<div class="cost-scroll"><table class="cost-t"><thead><tr><th>${TABLES.find(t => t[0] === table)[1].replace(/s$/, "")}</th>${table === "sessions" ? `<th class="cost-model">Model</th>` : ""}
     <th class="num">Calls</th><th class="num">Tokens</th><th class="num">Cost</th><th class="cost-share">Share</th></tr></thead><tbody>${rows.map(r =>
     `<tr><td class="cost-name">${name(r)}</td>${extra(r)}<td class="num">${r.calls.toLocaleString()}</td><td class="num" title="${tok(r.eq)} input-token equivalents">${tok(r.tokens)}</td>
-      <td class="num"><b>${usd(r.usd)}</b>${r.unpriced ? `<span class="muted t-s" title="${r.unpriced} calls with no price"> +?</span>` : ""}</td>
+      <td class="num"><b>${usd(r.usd)}</b>${r.unpriced ? `<span class="muted t-s" title="${r.unpriced} calls unpriced"> +?</span>` : ""}</td>
       <td class="cost-share">${bar(total ? Math.round(100 * (r.usd || 0) / total) : 0)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
@@ -88,7 +88,7 @@ function draw(box) {
     ${limits(d.limits || [])}
     <section class="cost-sec"><div class="cost-th"><span class="cost-bar" role="group" aria-label="Table">${TABLES.map(([k, l]) =>
       button(l, { cls: "cost-tab", pressed: table === k, data: { "cost-table": k } })).join("")}</span><span class="spacer"></span>
-      <a class="link t-m" href="api/cost?period=${encodeURIComponent(period)}&csv=${table}" download title="This table as a CSV file">CSV</a></div>
+      <a class="link t-m" href="api/cost?period=${encodeURIComponent(period)}&csv=${table}" download title="Download as CSV">CSV</a></div>
       ${rowsHtml(d)}</section>
     <div class="muted t-s cost-note">From the chat logs of the sessions on this computer, priced by model_prices (Settings, Agents). A model call counts for the item its session held then.</div>`;
 }

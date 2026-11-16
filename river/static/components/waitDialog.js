@@ -41,7 +41,7 @@ function promptBlock(w, n) {
     ${w.options.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
       numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
     ${own || !free ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
-    ${free ? `<textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>` : ""}
+    ${free ? `<textarea class="wother" placeholder="What the agent does instead" aria-label="Your other instruction"></textarea>` : ""}
     ${keyButtons(w)}
   </form>`;
 }
@@ -54,7 +54,7 @@ function keyButtons(w) {
   if (!keys.length) return `<button class="btn primary wgo" type="submit">Send answer</button>`;
   const main = keys.findIndex(k => k.key !== "Enter");
   return `<div class="wkeys">${keys.map((k, i) => `<button class="btn${i === main ? " primary" : ""} wgo" type="submit"
-    data-key="${esc(k.key)}" title="Chooses the picked option with the key ${esc(k.key)}">${esc(k.label)} (${esc(k.key)})</button>`).join("")}</div>`;
+    data-key="${esc(k.key)}" title="Send with ${esc(k.key)}">${esc(k.label)} (${esc(k.key)})</button>`).join("")}</div>`;
 }
 
 // A question: the answer goes into the session's chat (its pane) as the person's turn, and closes the question in

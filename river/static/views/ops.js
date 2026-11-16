@@ -35,10 +35,10 @@ const faultLinks = (ids) => ids.map(id => `<span class="link" data-open="${id}">
 
 function checkCard(c) {
   const paused = c.state === "paused";
-  const pause = paused ? button("Resume", { data: { "ops-resume": c.name, scope: scopeOf(c) }, title: "Run it again from now" })
+  const pause = paused ? button("Resume", { data: { "ops-resume": c.name, scope: scopeOf(c) }, title: "Resume from now" })
     : `<select class="ops-until" data-ops-until="${esc(scopeOf(c) + "/" + c.name)}" title="How long to pause">`
       + ["30m", "1h", "2h", "4h", "1d"].map(d => `<option${d === "1h" ? " selected" : ""}>${d}</option>`).join("") + `</select>`
-      + button("Pause", { data: { "ops-pause": c.name, scope: scopeOf(c) }, title: "Pause it for planned work" });
+      + button("Pause", { data: { "ops-pause": c.name, scope: scopeOf(c) }, title: "Pause for planned work" });
   return `<div class="ops-check">
     <div class="ops-head"><b>${esc(c.name)}</b>${stateChip(c)}<span class="muted t-s">${esc(c.scope_kind === "target" ? "target " + c.scope : c.scope)}</span>
       ${c.faults.length ? `<span class="t-s">fault ${faultLinks(c.faults)}</span>` : ""}<span class="spacer"></span>${strip(c)}</div>
@@ -62,7 +62,7 @@ function proposalCard(p) {
     <div class="muted t-s">by ${esc(p.proposed_by || "?")} ${ago(p.proposed_at)}${p.item_id ? ` · <span class="link" data-open="${p.item_id}">#${p.item_id}</span>` : ""}</div>
     <div class="actions"><input id="opsrej-${key}" class="ops-why" placeholder="Why not? (for Reject)">
       ${button("Reject", { data: { "ops-reject": p.name, scope: scopeOf(p), pid: key }, title: "Do not keep it" })}
-      ${button("Accept", { kind: "primary", data: { "ops-accept": p.name, scope: scopeOf(p) }, title: "Keep it as a check" })}</div>
+      ${button("Accept", { kind: "primary", data: { "ops-accept": p.name, scope: scopeOf(p) }, title: "Keep as a check" })}</div>
   </div>`;
 }
 

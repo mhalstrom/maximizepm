@@ -143,7 +143,7 @@ export function cardHtml(c, { pane = false } = {}) {
   const box = rel
     ? `<textarea class="wanswer" placeholder="What must change (for Request changes), or a note on your yes" aria-label="What must change"></textarea>`
     : item
-    ? `<textarea class="wanswer" placeholder="What you decided or did (saved on the item)" aria-label="What you decided or did"></textarea>`
+    ? `<textarea class="wanswer" placeholder="What you decided or did (saved on the item)" aria-label="Your decision or action"></textarea>`
     : `<textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>`;
   const acts = (c.item_id ? button("Open the item", { data: { open: c.item_id } }) : "")
     + (rel ? button("Request changes", { data: { wchanges: 1 }, title: "The review runs again" }) : "")
@@ -179,8 +179,8 @@ export function sideHtml(rows) {
         <span class="muted">${page.access === "link" ? "anyone with the link" : "private"}</span></div>` : "";
   return `<h4>Comments</h4>${comments}<h4>History</h4>${history}${shared ? `<h4>Shared</h4>${shared}` : ""}
     <div class="acard-disc">${button(page && page.url && !page.ended ? "Share again" : "Share", { data: { share: 1 },
-      title: "A private page of this card, for advice" })}${button("Discuss with the manager", { data: { discuss: 1 },
-      title: "Send it to the manager's chat" })}</div>`;
+      title: "Share for advice" })}${button("Discuss with the manager", { data: { discuss: 1 },
+      title: "Send to the manager" })}</div>`;
 }
 
 // The votes and comments that came back from the card's shared page (#6006), in the form of the comments above.

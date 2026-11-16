@@ -9,9 +9,9 @@ export function makePanZoom(el) {
   el.classList.add("pz");
   el.innerHTML = `<div class="pz-stage"></div>
     <div class="pz-tools" role="toolbar" aria-label="Zoom">
-      <button class="btn" data-pz="in" title="Zoom in (or the wheel, or pinch)" aria-label="Zoom in">+</button>
+      <button class="btn" data-pz="in" title="Zoom in" aria-label="Zoom in">+</button>
       <button class="btn" data-pz="out" title="Zoom out" aria-label="Zoom out">−</button>
-      <button class="btn" data-pz="fit" title="Fit the whole graph in the box">Fit</button>
+      <button class="btn" data-pz="fit" title="Fit the graph">Fit</button>
       <button class="btn" data-pz="one" title="Full size">1:1</button>
     </div>`;
   const stage = el.querySelector(".pz-stage");

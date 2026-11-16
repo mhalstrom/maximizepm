@@ -24,11 +24,11 @@ export async function checkPaths(root, agent) {
   for (const s of spans) {
     const x = res[s.dataset.file];
     if (!x) continue;  // no answer: the link stays as it was
-    if (x.ok) { s.dataset.file = x.target; s.title = "Open in the side panel: " + x.target; continue; }
+    if (x.ok) { s.dataset.file = x.target; s.title = "Open in panel: " + x.target; continue; }
     if (s.dataset.rel) { s.replaceWith(document.createTextNode(s.textContent)); continue; }
     s.classList.remove("link"); s.classList.add("fpath-no"); s.removeAttribute("tabindex");
     s.removeAttribute("data-file");
-    s.title = "MaximizePM cannot show this file: " + x.why;
+    s.title = "Not shown: " + x.why;
   }
 }
 

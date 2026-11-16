@@ -69,7 +69,7 @@ export function endHtml(s) {
   const now = s.can_kill ? `<div class="end-now hidden"><b>End ${name} now?</b> ${s.pid ? `Its process (PID ${esc(s.pid)})` : "The program in its tmux pane"} ends at once. Use this only
       when the session does not answer. Work that it did not commit stays in its folder, and nothing commits it. MaximizePM releases its
       task, goals and targets.<div class="actions">${button(`End ${name} now`, { kind: "warn", data: { "end-go": "kill" } })}</div></div>` : "";
-  const nowBtn = s.can_kill ? button("End now…", { title: "Only for a session that does not answer", data: { "end-now-ask": "1" } }) : "";
+  const nowBtn = s.can_kill ? button("End now…", { title: "For a stuck session", data: { "end-now-ask": "1" } }) : "";
   let what, go;
   if (s.state === "stopping") {
     what = `<p>${name} was asked to stop${s.stop_by ? ` by ${esc(s.stop_by)}` : ""}${s.stop_reason ? `: ${esc(s.stop_reason)}` : ""}. ${

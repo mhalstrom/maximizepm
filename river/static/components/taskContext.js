@@ -17,7 +17,7 @@ function make() {
   if (dlg) return;
   root = document.createElement("div");
   root.id = "taskDlg"; root.className = "hidden";
-  root.innerHTML = '<div class="box tc-box" aria-label="A task in the work of its session"></div>';
+  root.innerHTML = '<div class="box tc-box" aria-label="Task in its session"></div>';
   document.body.appendChild(root);
   box = root.firstElementChild;
   dlg = makeDialog(root, { draft: false, onClose: () => { shown = null; } });

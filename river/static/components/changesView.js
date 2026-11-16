@@ -76,7 +76,7 @@ function fileHtml(f, fi, root, ctx, split) {
     }
   }
   const status = { added: "new", deleted: "deleted", renamed: "renamed" }[f.status];
-  const editor = root && f.status !== "deleted" ? `<a class="link chg-editor" href="vscode://file/${esc(encodeURI(root + "/" + f.path))}" title="Open this file in VS Code">Open in editor</a>` : "";
+  const editor = root && f.status !== "deleted" ? `<a class="link chg-editor" href="vscode://file/${esc(encodeURI(root + "/" + f.path))}" title="Open in VS Code">Open in editor</a>` : "";
   return `<section class="chg-file" id="chg-f-${fi}">
     <div class="chg-fhead"><span class="chg-path">${esc(f.path)}</span>${status ? chip("c-p", status) : ""}${f.untracked ? chip("c-p", "not in git") : ""}
       <span class="chg-plus">+${f.add}</span><span class="chg-minus">−${f.del}</span><span class="spacer"></span>${editor}</div>
@@ -130,10 +130,10 @@ function draw(box, src, ctx) {
        ${d.waits ? `<div class="t-m chg-shared">This release waits for your Approve.</div>` : ""}`;
   const n = ctx.comments.length;
   const actions = `<div class="chg-acts">
-    ${n ? button(`Send to agent (${n})`, { kind: "primary", data: { "chg-send": 1 }, title: "One message, with file and line" }) : ""}
-    ${button("Request changes", { data: { "chg-mark": "changes" }, title: "Send the comments; the push stays held" })}
+    ${n ? button(`Send to agent (${n})`, { kind: "primary", data: { "chg-send": 1 }, title: "Send as one message" }) : ""}
+    ${button("Request changes", { data: { "chg-mark": "changes" }, title: "Send comments, hold push" })}
     ${button("Approve", { data: { "chg-mark": "approved" }, title: gate ? "The push or release waits for this" : "Mark these changes approved" })}
-    ${src.session ? button("Reviewed", { data: { "chg-mark": "reviewed" }, title: "Start 'Since my last review' here" }) : ""}
+    ${src.session ? button("Reviewed", { data: { "chg-mark": "reviewed" }, title: "Mark as last review" }) : ""}
     <span class="spacer"></span>
     ${phone() ? "" : `<span class="chg-bar" role="group" aria-label="Layout">${button("Side by side", { cls: "chg-lay", pressed: split, data: { "chg-lay": "split" } })}${button("One column", { cls: "chg-lay", pressed: !split, data: { "chg-lay": "unified" } })}</span>`}
   </div>`;

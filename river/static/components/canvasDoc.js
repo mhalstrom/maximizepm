@@ -140,7 +140,7 @@ export function decorateDoc(root, source, meta, { ref, live, done, current }) {
     const bar = document.createElement("div"); bar.className = "doc-answer";
     bar.innerHTML = (a ? `<div class="doc-answered" data-sig="${esc(answeredHtml(a))}">${answeredHtml(a)}</div>` : "")
       + (live ? (opts.length ? `<div class="cv-acts doc-opts">${opts.map(o => `<button class="btn" type="button" data-doc-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>` : "")
-        + `<div class="cv-acts doc-ans-row"><input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Your answer to decision ${n}">
+        + `<div class="cv-acts doc-ans-row"><input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Answer to decision ${n}">
         <button class="btn primary" type="button" data-doc-answer>${a ? "Answer again" : "Answer"}</button></div>` : "");
     card.append(bar);
     // #4845: one answer per click. While it goes, the card's buttons and box wait and say so; then the answer shows
@@ -184,7 +184,7 @@ export function decorateDoc(root, source, meta, { ref, live, done, current }) {
       e.stopPropagation();
       const text = current ? current() : source, s = find(text, h) || first, lines = String(text).split("\n");
       const ed = document.createElement("div"); ed.className = "cv-edit doc-sec-edit";
-      ed.innerHTML = `<textarea aria-label="The text of the section ${esc(s.title)}"></textarea>
+      ed.innerHTML = `<textarea aria-label="Text of section ${esc(s.title)}"></textarea>
         <div class="cv-acts"><button class="btn primary" type="button">Save the section</button><button class="btn" type="button">Cancel</button>
         <span class="muted">A new version; the session that writes the doc gets a note.</span></div>`;
       ed.querySelector("textarea").value = lines.slice(s.start + 1, s.end).join("\n").trim();

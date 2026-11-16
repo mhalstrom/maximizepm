@@ -9,7 +9,7 @@ import { bar, pct } from "../components/bar.js";
 import { button } from "../components/button.js";
 import { S, scope } from "../page.js";
 
-const sessionLink = (name) => `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}: ${esc((S.session_names || {})[name] || "")}">${esc(name)}</span>`;
+const sessionLink = (name) => `<span class="link" data-session-go="${esc(name)}" title="Open session ${esc(name)}:${esc((S.session_names || {})[name] || "")}">${esc(name)}</span>`;
 const hasSession = (name) => (S.sessions || []).includes(name);
 const who = (name) => hasSession(name) ? sessionLink(name) : esc(name);
 
@@ -35,7 +35,7 @@ function card(g, sub) {
     ${g.result ? `<div class="gc-dw"><span class="muted">Result:</span> ${esc(g.result)}</div>` : ""}
     <div class="gc-meta t-s">${owner} · ${g.items_done.length}/${total} done${g.items_open.length ? ` · ${g.items_open.length} open` : ""}${holders.length ? ` · sessions on it: ${holders.map(who).join(", ")}` : ""}</div>
     ${bar(pct(g.items_done.length, total))}
-    ${h ? `<details class="gc-handoff" data-handoff="${esc(g.name)}"><summary>Handoff v${h.version} · ${esc(h.by_agent || "")} · ${ago(h.created_at)}${g.handoff_due ? ` <span class="warn-t" title="Its owner finished #${g.handoff_due.id} after this handoff">older than the last item</span>` : ""}</summary><div class="gc-ht muted">Reading…</div></details>`
+    ${h ? `<details class="gc-handoff" data-handoff="${esc(g.name)}"><summary>Handoff v${h.version} · ${esc(h.by_agent || "")} · ${ago(h.created_at)}${g.handoff_due ? ` <span class="warn-t" title="Older than #${g.handoff_due.id}">older than the last item</span>` : ""}</summary><div class="gc-ht muted">Reading…</div></details>`
       : `<div class="muted t-s">No handoff yet: the owner writes it with maxpm goal handoff ${esc(g.name)}.</div>`}
     ${sub ? "" : `<div class="gc-subs">${subs.map(x => card(x, true)).join("")}${g.status === "open" ? button("+ sub-goal", { cls: "plain", data: { addgoal: g.project, parent: g.name } }) : ""}</div>`}
   </div>`;

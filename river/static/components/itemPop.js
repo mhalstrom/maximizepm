@@ -29,8 +29,8 @@ function itemOf(el) {
 function render(d) {
   const s = d.session;
   const go = !s ? `<span class="muted">No session${d.goal ? ` · goal ${esc(d.goal)}` : " worked on it"}</span>`
-    : s.running ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="Open the session of ${esc(s.name)} in the Sessions tab">Open session</button>`
-    : s.viewable ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="${esc(s.name)} has ended: chat is read only">Open session (ended)</button>`
+    : s.running ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="Open session ${esc(s.name)}">Open session</button>`
+    : s.viewable ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="Ended: read only">Open session (ended)</button>`
     : `<span class="muted">${esc(s.name)} has ended; its transcript is not on this computer</span>`;
   // Why this session (#4628): it holds the item, owns its goal, works on its goal, or finished it.
   const who = s ? `${esc(s.name)} ${esc(s.why || "")}${s.running ? "" : " (ended)"}` : "";

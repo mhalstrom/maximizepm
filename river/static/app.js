@@ -64,8 +64,7 @@ function renderLoop() {
   b.classList.toggle("hidden", !(l && l.late));
   if (!l || !l.late) return;
   b.textContent = `Automatic work stopped · ${l.age}`;
-  b.title = `maxpm serve stalled for ${l.age}`
-    + (l.error ? `\nLast error: ${l.error}` : "") + "\nClick to start the server again (maxpm serve --restart).";
+  b.title = "Restart maxpm serve" + (l.error ? `\nLast error: ${l.error}` : "");
 }
 
 function renderSelects() {
@@ -515,7 +514,7 @@ function renderReady() {
       <div class="sub">${projectChip(i.project)}${prioNumChip(i.effective_priority ?? i.priority, "priority")}${doerChip(i)}
         ${i.reserved_for ? `<span>reserved for ${esc(i.reserved_for)}${i.reserved_until ? ", " + left(i.reserved_until) + " left" : ""}</span>` : ""}</div></div>
       ${i.reserved_for ? "" : agentStart(S.launch_agents, { label: "Dispatch", attrs: `data-dispatch="${i.id}"`,
-        title: `Give #${i.id} to a session or a new agent` })}
+        title: "Give to a session" })}
     </div>`).join("") || `<div class="muted">Nothing is ready for an agent now.</div>`;
 }
 $("#readyClose").onclick = () => readyDialog.close();
@@ -740,7 +739,7 @@ function renderSetup(st) {
     started ? "An agent has picked up work. Watch it on Sessions; finished items show in Plan > Done."
       : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on Sessions.",
     tasks.length && ready.length ? agentStart(S.launch_agents, { label: "Start an agent", cls: "btn primary", attrs: 'data-launch="1"',
-        title: "Start the agent in a new Terminal window" })
+        title: "Start in a Terminal" })
       : `<span class="muted">Needs an agent and an item first.</span>`));
   }
   // Extras: nice to have, not needed for a first result.
@@ -971,10 +970,10 @@ function renderRelay() {
   b.classList.toggle("primary", !!r.pending || armed);
   if (r.pending) {
     b.textContent = `Relay code ${r.pending.code}`;
-    b.title = "Approve this code on the relay page";
+    b.title = "Approve on relay page";
   } else if (armed) {
     b.textContent = "Disconnect?";
-    b.title = "Disconnect this computer from the relay";
+    b.title = "Disconnect from the relay";
   } else {
     const who = r.account ? ` as ${r.account}` : "";
     // A lapsed relay plan (#4759): ended carries nothing until it is renewed; past_due still works.

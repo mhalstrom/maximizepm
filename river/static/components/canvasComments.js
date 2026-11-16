@@ -80,14 +80,14 @@ export function makeComments(box, { id, ref, reload, show }) {
       ${list.map(c => { const st = stateOf(c);
         return `<div class="cv-c cv-${st}" data-cid="${c.id}">
           <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>${fromPage(c) ? ` <span class="chip cv-page">on the shared page</span>` : ""}
-            ${c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" title="Show this part of the page">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
+            ${c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" title="Show this part">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
           ${c.anchor && c.anchor.suggest != null ? `<div class="cv-sugg"><del>${esc(clip(c.anchor.quote, 400))}</del> <ins>${esc(clip(c.anchor.suggest, 400)) || "(deleted)"}</ins></div>` : ""}
           <div class="cv-b">${esc(c.body)}</div>
           ${(c.replies || []).map(r => `<div class="cv-r"><b>${esc(r.author || "")}</b> <span class="muted">${ago(r.created_at)}</span>: ${esc(r.body)}</div>`).join("")}
           ${c.state === "resolved" ? `<div class="muted cv-r">resolved by ${esc(c.resolved_by || "")}${c.resolve_note ? ": " + esc(c.resolve_note) : ""}</div>` : ""}
           <div class="cv-acts">${c.state === "draft"
             ? `<button class="btn primary" type="button" data-cv-send="${c.id}">Send</button><button class="btn" type="button" data-cv-discard="${c.id}">Discard</button>`
-            : c.state === "resolved" ? "" : `${c.anchor && c.anchor.suggest != null ? `<button class="btn primary" type="button" data-cv-accept="${c.id}" title="Put the new words in a new version">Accept</button><button class="btn" type="button" data-cv-reject="${c.id}">Reject</button>` : ""}<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
+            : c.state === "resolved" ? "" : `${c.anchor && c.anchor.suggest != null ? `<button class="btn primary" type="button" data-cv-accept="${c.id}" title="Use the new words">Accept</button><button class="btn" type="button" data-cv-reject="${c.id}">Reject</button>` : ""}<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
               <button class="btn" type="button" data-cv-reply="${c.id}">Reply</button><button class="btn" type="button" data-cv-resolve="${c.id}">Resolve</button>`}</div>
         </div>`; }).join("") || (k ? "" : `<div class="muted cv-none">No comments yet. Comment picks a part of the page; Comment on the page takes the whole page.</div>`)}`;
     for (const [cid, v] of Object.entries(replies)) {

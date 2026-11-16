@@ -110,7 +110,7 @@ function renderTabs() {
   $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
     + `<span class="sp-tab sp-tab-list${br ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${br}" data-sp-brtab>Browser</button></span>`
-    + `<span class="sp-tab sp-tab-list${ch ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${ch}" data-sp-chtab title="The diff of this session">Changes${count ? ` <span class="sp-count">${count}</span>` : ""}</button></span>`
+    + `<span class="sp-tab sp-tab-list${ch ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${ch}" data-sp-chtab title="This session's diff">Changes${count ? ` <span class="sp-count">${count}</span>` : ""}</button></span>`
     + tabs.filter(t => !fixedTool(t.target)).map(t => { const k = kindOf(t.target);
     const tip = itemOf(t.target) ? t.title || label(t.target) : t.target;  // who opened it last, on the label (#5000)
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(tip)}">`
@@ -334,7 +334,7 @@ function drawBar(t, meta) {
       `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
     <span class="muted cv-st">${t.pin ? `<span class="cv-st-of">version ${t.pin} of ${meta.version} · </span><span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
     ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
-    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Click a part or select text to comment">Comment</button>`}
+    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Comment on a part">Comment</button>`}
     <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
     ${["md", "html"].includes(meta.kind) && !t.pin ? modesHtml(t.mode || "read", meta.kind) : ""}
     ${publishButton()}</span>
@@ -401,7 +401,7 @@ function drawOutline(t) {
   if (!t.outline || !t.md) return;
   const parts = docParts(t.md), plan = parts.some(x => /^plan$/i.test(x.title) && x.state !== "writing");
   const html = outlineHtml(parts, esc) + (plan ? button(t.planOpen ? "Hide the plan versions" : "Plan versions",
-    { cls: "doc-plan-b", data: { "pl-open": 1 }, title: "What each plan version changed" }) : "");
+    { cls: "doc-plan-b", data: { "pl-open": 1 }, title: "Plan version changes" }) : "");
   if (t.outline._html !== html) { t.outline.innerHTML = html; t.outline._html = html; }
   if (t.planOpen) loadPlan(t);
 }
@@ -640,7 +640,7 @@ async function editCanvas(t, box, src) {
     const blocks = mdBlocks(text);
     ed._blocks = blocks;
     if (whole) {
-      ed.innerHTML = `<textarea class="cv-whole" aria-label="The text of the canvas (Markdown)"></textarea>
+      ed.innerHTML = `<textarea class="cv-whole" aria-label="Canvas text (Markdown)"></textarea>
         <div class="cv-acts">${button("Save as a new version", { kind: "primary", data: { "cv-save-whole": 1 } })}${button("Cancel", { data: { "cv-cancel-whole": 1 } })}</div>`;
       ed.querySelector("textarea").value = text;
       ed.querySelector("textarea").focus();
@@ -985,7 +985,7 @@ function sessionQueue(name) {
 // The session's item: the one it holds, else the last one in its list.
 const lastItems = {};
 function addForm() {
-  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add an item" })}</form>`;
+  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="New item title">${button("+ item", { type: "submit", title: "Add an item" })}</form>`;
 }
 function wireAdd(form, name) {
   form.addEventListener("submit", async (e) => {

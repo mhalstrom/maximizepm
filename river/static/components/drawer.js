@@ -73,35 +73,35 @@ function running(S, name) {
   return !!a && a.kind === "ai" && ["active", "away"].includes(a.state);
 }
 function sessionName(S, name) {
-  return running(S, name) ? `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)} in the Sessions tab">${esc(name)}</span>` : esc(name);
+  return running(S, name) ? `<span class="link" data-session-go="${esc(name)}" title="Open session ${esc(name)}">${esc(name)}</span>` : esc(name);
 }
 
 export function itemDrawerHtml(it, { S, me }) {
   const closed = ["done", "dropped"].includes(it.status);
   const holder = ["in_progress", "held"].includes(it.status) && it.assignee;
   return `
-    <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · <span class="link" data-plan-go="items" data-project="${esc(it.project)}" title="The items of ${esc(it.project)} in Plan">${esc(it.project)}</span></span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
+    <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · <span class="link" data-plan-go="items" data-project="${esc(it.project)}" title="${esc(it.project)} items in Plan">${esc(it.project)}</span></span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
     <h3>${esc(it.title)}</h3>
     <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Held by</span> <b>${esc(holder)}</b>
-      ${running(S, holder) ? `<button class="btn" data-session-go="${esc(holder)}" title="Open the session of ${esc(holder)} in the Sessions tab">Open session</button>`
+      ${running(S, holder) ? `<button class="btn" data-session-go="${esc(holder)}" title="Open session ${esc(holder)}">Open session</button>`
         : `<span class="muted" style="font-size:12px">its session does not run now</span>`}</div>` : ""}
     <div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Goals:</span>
-      ${(it.goals || []).map(g => chip("c-goal", `<span class="link" data-plan-go="goals" data-project="${esc(((S.goals || []).find(x => x.name === g) || {}).project || it.project)}" data-goal="${esc(g)}" title="The goal ${esc(g)} in Plan">${esc(g)}</span> <span class="link" data-untag="${esc(g)}" title="remove this goal tag">×</span>`)).join("") || '<span class="muted" style="font-size:12px">none</span>'}
+      ${(it.goals || []).map(g => chip("c-goal", `<span class="link" data-plan-go="goals" data-project="${esc(((S.goals || []).find(x => x.name === g) || {}).project || it.project)}" data-goal="${esc(g)}" title="Goal ${esc(g)} in Plan">${esc(g)}</span> <span class="link" data-untag="${esc(g)}" title="remove this goal tag">×</span>`)).join("") || '<span class="muted" style="font-size:12px">none</span>'}
       ${(S.goals || []).some(g => g.status === "open" && !(it.goals || []).includes(g.name)) ? `<select id="dGoal">${(S.goals || []).filter(g => g.status === "open" && !(it.goals || []).includes(g.name)).sort((a, b) => (b.project === it.project) - (a.project === it.project)).map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.project !== it.project ? " (" + esc(g.project) + ")" : ""}</option>`).join("")}</select><button class="btn" data-do="tag">Add goal</button>` : ""}</div>
     ${(it.plan || []).map(p => `<div class="meta dr-plan">From the plan of <b>${esc(p.title || p.canvas)}</b>, part ${esc(p.part)}, plan version ${p.plan_version} of ${p.plans}</div>`).join("")}
     ${it.backlog ? `<div class="meta" style="margin-top:6px"><b>In the backlog</b> since ${ago(it.backlog_at)}: ${esc(it.backlog_note || "")}. Nobody is offered it until it is activated.</div>` : ""}
     <div class="meta" style="margin-top:6px">${esc(it.reason)}${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>
     <div class="actions">
-      ${it.backlog ? `<button class="btn primary" data-do="activate" title="Take it out of the backlog">Activate</button>` : ""}
+      ${it.backlog ? `<button class="btn primary" data-do="activate" title="Remove from the backlog">Activate</button>` : ""}
       ${it.status === "open" && !it.backlog ? `<button class="btn primary" data-do="claim">Claim</button>` : ""}
       ${["in_progress", "held"].includes(it.status) ? `<button class="btn primary" data-do="done">Done</button><button class="btn" data-do="release">Release</button>` : ""}
       ${it.status === "open" ? `<button class="btn" data-do="done">Mark done</button>` : ""}
-      ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Move it to the backlog">To backlog</button>` : ""}
+      ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Move to the backlog">To backlog</button>` : ""}
       ${!closed ? `<button class="btn" data-do="drop">Drop</button>` : `<button class="btn" data-do="reopen">Reopen</button>`}
       <button class="btn" data-do="save">Save details</button>
       <button class="btn" data-do="changes" title="${it.kind === "deploy" ? "The commits this release ships" : "The commits that name #" + it.id}">Changes</button>
-      ${["deploy", "review"].includes(it.kind) ? `<button class="btn" data-do="report" title="What this release ships, to read first">Report</button>` : ""}
+      ${["deploy", "review"].includes(it.kind) ? `<button class="btn" data-do="report" title="The release report">Report</button>` : ""}
       ${agentButton(it, S)}
     </div>
     <div class="sec"><h4>Details</h4><div class="form">

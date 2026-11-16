@@ -35,9 +35,9 @@ export function capacityHtml(S, cls = "") {
   const hover = [...(c.advice || []).map(a => a.text),
     idle.length ? "Waiting for work: " + idle.map(a => (S.session_names || {})[a.name] || a.name).join(", ") : ""].filter(Boolean).join("\n");
   return `<div class="stats ${cls}"${hover ? ` title="${esc(hover)}"` : ""}>
-      <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions you can still start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
+      <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions left to start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
       <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + esc(idle.map(a => a.name).join(", ")) : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
-      <div class="stat" title="Active agent sessions; ${c.agents_busy} of them busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
+      <div class="stat" title="Active sessions, ${c.agents_busy} busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
       <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
       <div class="stat hum" title="Your action items" data-cap-you="1"><div class="n">${youCount()}</div><div class="l">need you</div></div>
     </div>`;
@@ -59,7 +59,7 @@ export function renderFoot() {
   if (!S) return;
   const E = ended(), done = S.tmux_done || [];
   put($("#sessFoot"), (done.length ? button(`Close ${done.length} finished`, { data: { "sess-tidy": 1 },
-      title: "Close the panes of finished sessions\n"
+      title: "Close finished panes\n"
         + done.map(p => `${p.name}: ${p.why}`).join("\n") }) : ""));
   const box = $("#sessEnded");
   box.classList.toggle("hidden", !showEnded || !E.length);
@@ -68,7 +68,7 @@ export function renderFoot() {
   put(box, E.map(a => {
     const head = (S.session_names || {})[a.name] || a.name;
     return `<div class="srow ended" data-session="${esc(a.name)}" data-state="ended">
-      <div class="srow-main" tabindex="0" role="button" title="${esc(a.name)}: ended ${esc(ago(a.last_seen))}" aria-label="Open the ended session ${esc(head)}">
+      <div class="srow-main" tabindex="0" role="button" title="${esc(a.name)}: ended ${esc(ago(a.last_seen))}" aria-label="Open ended session ${esc(head)}">
         <div class="srow-h"><b class="srow-t">${esc(head)}</b><span class="spacer"></span><span class="dot gone"></span><span class="sago">${ago(a.last_seen)}</span></div>
         <div class="sub">${esc(clip(a.note || "ended", 120))}</div></div></div>`;
   }).join(""));
@@ -90,7 +90,7 @@ export function renderGive(name) {
   if (!ready.length) return put(el, `${chip("c-ready", "waiting" + since)} <span class="muted t-s">no ready item in ${esc(where.join(", ") || "its projects")}</span>`);
   put(el, `${chip("c-ready", "waiting" + since)}
     <select class="give-sel" data-give-item="${esc(a.name)}" aria-label="The item to give">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(shortTitle(i))}</option>`).join("")}</select>
-    ${button("Give work", { data: { give: a.name }, title: "Give the chosen item to this session" })}`);
+    ${button("Give work", { data: { give: a.name }, title: "Give the chosen item" })}`);
 }
 document.addEventListener("change", (e) => { const s = e.target.closest && e.target.closest("#sessGive [data-give-item]"); if (s) giveChoice[s.dataset.giveItem] = s.value; });
 

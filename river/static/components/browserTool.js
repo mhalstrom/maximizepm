@@ -101,11 +101,11 @@ function render(box, project, session) {
         </span></span>
       ${button("Annotate", { cls: "br-annbtn hidden", title: "Mark up the page", pressed: false, data: { br: "annotate" } })}
       ${button("Record steps", { cls: "br-rec hidden", title: "Record my steps", pressed: false, data: { br: "rec" } })}
-      ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
+      ${button("Take control", { cls: "br-take", title: "Take control", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
-      ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
+      ${button("Open as a window", { cls: "br-win", title: "Show as a window", data: { br: "window" } })}
       ${button("Save sign-ins for the project", { cls: "br-save hidden", title: "Save sign-ins", data: { br: "save_signins" } })}
-      ${button("Close", { kind: "warn", title: "Close it; the sign-ins stay", data: { br: "close" } })}
+      ${button("Close", { kind: "warn", title: "Close, keep sign-ins", data: { br: "close" } })}
     </div>
     <div class="br-secret hidden"></div>
     <div class="br-stage" tabindex="-1">

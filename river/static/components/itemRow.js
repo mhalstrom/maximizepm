@@ -41,7 +41,7 @@ export function itemTableRows(items) {
 function sessionCell(it) {
   const name = it.assignee; if (!name) return "";
   const run = ((S && S.sessions) || []).includes(name), label = esc(((S && S.session_names) || {})[name] || name);
-  return run ? `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}">${label}</span>` : `<span class="muted" title="${esc(name)}">${label}</span>`;
+  return run ? `<span class="link" data-session-go="${esc(name)}" title="Open session ${esc(name)}">${label}</span>` : `<span class="muted" title="${esc(name)}">${label}</span>`;
 }
 export function itemTableColumns(why = () => "") {
   return [

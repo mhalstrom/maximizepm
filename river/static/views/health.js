@@ -27,14 +27,14 @@ function graph(title, days, field, fmt) {
       + (h ? `<rect class="h-bar" x="${i * 100 + 12}" y="${H - h}" width="76" height="${h}" rx="6"><title>${esc(tip)}</title></rect>` : "") + `</g>`;
   }).join("");
   return `<div class="h-graph"><h3 title="${esc(title)}">${esc(title)}</h3>`
-    + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)} by day, highest ${esc(fmt(max))}">`
+    + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)} daily, peak ${esc(fmt(max))}">`
     + `${bars}<line class="h-base" x1="0" x2="${W}" y1="${H}" y2="${H}"/></svg>`
     + `<div class="h-axis"><span>${esc(days[0].day.slice(5))}</span><span>max ${esc(fmt(max))}${last == null ? "" : esc(" · last " + fmt(last))}</span><span>${esc(days[days.length - 1].day.slice(5))}</span></div></div>`;
 }
 
 function goalTable(g) {
   if (!g || !g.projects.length) return `<div class="muted">No project has done items with a goal and without one in this time.</div>`;
-  const row = (label, x) => `<tr${x.small ? ` class="h-small" title="Fewer than ${g.min_group} items: too few to read"` : ""}><td>${esc(label)}</td><td>${x.done}</td>`
+  const row = (label, x) => `<tr${x.small ? ` class="h-small" title="Under ${g.min_group} items"` : ""}><td>${esc(label)}</td><td>${x.done}</td>`
     + `<td>${num(x.median_minutes, 0)}</td><td>${pc(x.rework_rate)}</td><td>${num(x.person_load, 0)}</td><td>${kt(x.median_eq)}</td></tr>`;
   const rows = [row("All: goal", g.total.goal), row("All: no goal", g.total.none)];
   for (const p of g.projects) rows.push(`<tr class="h-proj"><td colspan="6">${esc(p.project)}</td></tr>`, row("goal", p.goal), row("no goal", p.none));

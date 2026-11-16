@@ -53,7 +53,7 @@ export function renderPlanSide() {
   $("#planSide").innerHTML = card("", "All projects", per.flatMap(x => x.items), "")
     + per.map(({ p, items }) => card(p.name, p.name, items, items.length ? miniGraph(items) : `<span class="gc-none">No open items</span>`)
       + (p.name === scope.project ? goalList : "")).join("")
-    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "With a folder or without one" })}${archived.length
+    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "Add a project" })}${archived.length
       ? button(`Archived projects (${archived.length})`, { pressed: archivedOpen, data: { "plan-archived": 1 }, attrs: `aria-expanded="${archivedOpen}" aria-controls="planArchived"`,
         title: archivedOpen ? "Hide the archived projects" : "Show the archived projects: Restore brings one back with its items" }) : ""}</div>`
     + (archived.length && archivedOpen ? archivedList(archived) : "");

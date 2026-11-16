@@ -41,7 +41,7 @@ export async function renderLog(force) {
   const win = L.since ? $("#logSince").selectedOptions[0].textContent : null;
   $("#progress").innerHTML = L.progress.map(p => {
     const done = pct(p.done, p.total);
-    return `<div class="prog"><div class="prog-h"><b>${esc(p.project)}</b><span class="muted"${win ? ` title="${p.done_in_window} done in the ${esc(win)}"` : ""}>${win && p.done_in_window ? `+${p.done_in_window} · ` : ""}${p.done}/${p.total}</span></div>
+    return `<div class="prog"><div class="prog-h"><b>${esc(p.project)}</b><span class="muted"${win ? ` title="${p.done_in_window} done in ${esc(win)}"` : ""}>${win && p.done_in_window ? `+${p.done_in_window} · ` : ""}${p.done}/${p.total}</span></div>
       ${bar(done)}</div>`;
   }).join("") || `<div class="muted">No items.</div>`;
 }

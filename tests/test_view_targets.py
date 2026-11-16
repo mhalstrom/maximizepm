@@ -90,7 +90,7 @@ class PageHooks(unittest.TestCase):
         # No hook: the fold says none, its hover says what a hook is, and it offers each event.
         h = html()
         self.assertIn("<summary>Hooks: none</summary>", h)
-        self.assertIn('title="Commands that run on release events"', h)
+        self.assertIn('title="Release event commands"', h)
         for event in core.HOOK_EVENTS:
             self.assertIn(f'data-hook="{event}" data-target="web" title="Add a hook on {event}"', h)
         self.assertNotIn("data-clear", h)

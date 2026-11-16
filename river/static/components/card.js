@@ -33,12 +33,12 @@ export function goalCard(g, { selected, me }) {
     open && me && g.owner !== me && !g.shared ? `<span class="link" data-goal-act="own" data-g="${esc(g.name)}">own</span>` : "",
     open && me && g.owner === me ? `<span class="link" data-goal-act="release" data-g="${esc(g.name)}">release</span>` : "",
     `<span class="link" data-goal-act="edit" data-g="${esc(g.name)}">edit</span>`,
-    open ? (g.shared ? `<span class="link" data-goal-act="unshare" data-g="${esc(g.name)}" title="One agent can own this goal again">unshare</span>`
+    open ? (g.shared ? `<span class="link" data-goal-act="unshare" data-g="${esc(g.name)}" title="Allow one owner">unshare</span>`
       : `<span class="link" data-goal-act="share" data-g="${esc(g.name)}" title="Shared: no owner">share</span>`) : "",
     open ? `<span class="link" data-goal-act="done" data-g="${esc(g.name)}">complete</span>` : `<span class="link" data-goal-act="reopen" data-g="${esc(g.name)}">reopen</span>`,
   ].filter(Boolean).join("");
   return `<div class="goal${selected ? " on" : ""}${open ? "" : " complete"}" data-goal="${esc(g.name)}" title="${esc(tip)}">
-    <div class="gh"><b>${esc(g.name)}</b>${open ? ownerChip(g.owner, g.shared) : chip("c-done", "complete", null, ' style="text-decoration:none"')}${open && g.owner && g.owner_expires_at ? `<span class="muted" style="font-size:12px" title="The owner's claim lasts until then">${left(g.owner_expires_at)} left</span>` : ""}</div>
+    <div class="gh"><b>${esc(g.name)}</b>${open ? ownerChip(g.owner, g.shared) : chip("c-done", "complete", null, ' style="text-decoration:none"')}${open && g.owner && g.owner_expires_at ? `<span class="muted" style="font-size:12px" title="Owner's claim ends then">${left(g.owner_expires_at)} left</span>` : ""}</div>
     ${bar(done)}
     <div class="go">${g.items_done.length}/${total} done${g.items_open.length ? " · " + g.items_open.length + " open" : ""}</div>
     <div class="ga">${acts}</div></div>`;
@@ -49,7 +49,7 @@ export function projCard(p, closed, inner) {
   return `<div class="proj${closed ? " closed" : ""}" id="proj-${esc(p.name)}">
       <div class="proj-h">
         <button class="fold" data-fold="${esc(p.name)}" title="${closed ? "Show" : "Hide"} this project's goals and items" aria-expanded="${!closed}">${closed ? "▸" : "▾"}</button>
-        <span class="rk" title="Project rank: 1 is the most important">${p.rank}</span><b>${esc(p.name)}</b>
+        <span class="rk" title="Project rank, 1 first">${p.rank}</span><b>${esc(p.name)}</b>
         <span class="spacer"></span>
         <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank - 1}" title="more important">↑</button>
         <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank + 1}" title="less important">↓</button>

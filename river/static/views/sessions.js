@@ -117,7 +117,7 @@ function pinRow(s) {
 function headerOpenBtn(s) {
   const setup = (agentOf(s.provider || s.agent_type) || mainAgent() || {}).setup || {};
   if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn ${MI}" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="${esc(setup.open_title || "Open this session's web page")}">${esc(setup.open_link || "Open session")}</a>`;
-  if (s.terminal) return button("Open in terminal", { cls: MI, data: { term: s.name }, title: "Open its tmux pane in the terminal view" });
+  if (s.terminal) return button("Open in terminal", { cls: MI, data: { term: s.name }, title: "Open its tmux pane" });
   const why = setup.no_link || "This session has no web link and runs in no tmux pane here";
   return button(`Open session<span class="muted sess-noopen">${esc(why)}</span>`, { cls: MI, disabled: true, title: why });
 }
@@ -174,7 +174,7 @@ export function shellLines(s) {
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
-  return n ? `<span class="wbadge" title="${n} thing(s) wait for you here">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
+  return n ? `<span class="wbadge" title="${n} wait for you">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
 }
 
 // The pin of a worker row (#5007): a pinned session stays at the top of the worker sessions. The pin is the
@@ -682,7 +682,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     showWaiting(s);
   }
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
-  $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
+  $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message to the session",
     attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line.",
     stopTitle: "Stop its turn" });
   const text = $("#sessText");

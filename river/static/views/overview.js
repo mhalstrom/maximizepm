@@ -53,7 +53,7 @@ export function renderSteps() {
   const c = S.capacity; if (!c) return;
   const layers = capacityBars(c.layers);
   put($("#graphSteps"), `<div class="layers">${layers || '<span class="muted">No open items.</span>'}</div>
-    <div class="legend" title="Open items by step; peak width ${c.peak_width}"><span><span class="sw sw-a"></span>agents</span><span><span class="sw sw-h"></span>people</span></div>`);
+    <div class="legend" title="By step, peak ${c.peak_width}"><span><span class="sw sw-a"></span>agents</span><span><span class="sw sw-h"></span>people</span></div>`);
 }
 
 export function renderBlocked() {
@@ -61,7 +61,7 @@ export function renderBlocked() {
   $("#blockedPanel").classList.toggle("hidden", !B.length);
   $("#plan-overview .ov-grid").classList.toggle("ov-one", !B.length);  // no empty right column (#6005)
   put($("#blockedList"), B.map(i => nyCard(`<b class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(shortTitle(i))}</b> ${projectChip(i.project)}${i.doer === "human" ? doerChip(i) : ""}`, `<div class="ny-c t-s" title="${esc(i.blocked_reason)}">${esc(clip(i.blocked_reason, 90))}</div>
-      <div class="muted t-s"${i.blocked_set_by ? ` title="set by ${esc(i.blocked_set_by)}"` : ""}>${i.blocked_at ? ago(i.blocked_at) : ""}${i.blocked_until ? `${i.blocked_at ? " · " : ""}<span title="${esc(i.blocked_until_text)}; then ready by itself">${left(i.blocked_until)} left</span>` : ""}</div>`)).join(""));
+      <div class="muted t-s"${i.blocked_set_by ? ` title="set by ${esc(i.blocked_set_by)}"` : ""}>${i.blocked_at ? ago(i.blocked_at) : ""}${i.blocked_until ? `${i.blocked_at ? " · " : ""}<span title="${esc(i.blocked_until_text)}, then ready">${left(i.blocked_until)} left</span>` : ""}</div>`)).join(""));
 }
 
 export function renderOverview() { renderNext(); renderWork(); renderBlocked(); renderSteps(); }

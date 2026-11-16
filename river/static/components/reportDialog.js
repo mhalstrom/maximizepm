@@ -102,7 +102,7 @@ export async function openReport(id) {
     el.id = "reportDlg";
     el.className = "hidden";
     el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Release</h2><span class="spacer"></span>
-      ${button("Discuss with the manager", { data: { "rep-discuss": 1 }, title: "Send it to the manager's chat" })}
+      ${button("Discuss with the manager", { data: { "rep-discuss": 1 }, title: "Send to the manager" })}
       ${button("✕", { kind: "icon", label: "Close", data: { "rep-close": 1 } })}</div>
       <div class="rep-grid"><div class="rep-l"></div><div class="rep-r"></div></div></div>`;
     document.body.append(el);
