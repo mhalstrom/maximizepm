@@ -961,7 +961,8 @@ class _Parser(argparse.ArgumentParser):
         import difflib
         m = re.search(r"invalid choice: '([^']*)' \(choose from (.*)\)", message)
         if m:
-            choices = re.findall(r"'([^']*)'", m.group(2))
+            # Python 3.14 quotes each choice; 3.12 and 3.13 list them bare: "choose from list, add".
+            choices = [c.strip().strip("'") for c in m.group(2).split(",")]
             near = difflib.get_close_matches(m.group(1), choices, 3, 0.6)
             message = (message[:m.start()] + f"invalid choice: '{m.group(1)}'"
                        + (f". Did you mean: {', '.join(near)}?" if near else "") + " (maxpm help lists them)")
