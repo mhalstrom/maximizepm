@@ -204,3 +204,29 @@ def summary_set(conn, item_id, text, actor=None):
                           level="low")
             sent.append(m["id"] if isinstance(m, dict) and "id" in m else p)
     return {"id": dep["id"], "summary": text, "read_cards": sent}
+
+
+def release_marks(conn, agent, days=14, limit=20):
+    """The report blocks of a session's chat (#6031, mark 2026-11-16: 'this is not a rule this should be built into the
+    platform'): each release that this session cut (core._release_cut) or started (it claimed the deploy item), and for
+    the manager every cut. [{id, at, kind: cut|start, by, target, tasks}], oldest first; the page puts each one into
+    the chat at its time and reads its numbers from GET /api/report/<id>."""
+    me = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
+    manager = bool(me and me["role"] == "manager")
+    since = core.iso(core.now() - core.timedelta(days=days))
+    rows = conn.execute(
+        "SELECT e.item_id, e.at, e.actor, e.change, i.target FROM events e JOIN items i ON i.id=e.item_id "
+        "WHERE i.kind='deploy' AND e.at>=? AND (e.change LIKE 'release cut%' OR e.change LIKE 'claimed (%') "
+        "AND (e.actor=? OR (? AND e.change LIKE 'release cut%')) ORDER BY e.id DESC LIMIT ?",
+        (since, agent, 1 if manager else 0, limit)).fetchall()
+    out, seen = [], set()
+    for r in rows:
+        kind = "cut" if r["change"].startswith("release cut") else "start"
+        if (r["item_id"], kind) in seen:
+            continue
+        seen.add((r["item_id"], kind))
+        tasks = conn.execute("SELECT COUNT(*) FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
+                             "AND i.kind NOT IN ('review','deploy')", (r["item_id"],)).fetchone()[0]
+        out.append({"id": r["item_id"], "at": r["at"], "kind": kind, "by": r["actor"], "target": r["target"],
+                    "tasks": tasks})
+    return list(reversed(out))

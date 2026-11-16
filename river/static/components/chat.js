@@ -65,6 +65,62 @@ export function linkRefs(root, refs) {
   }
 }
 
+// 'Report #<id>' or 'release report #<id>' (#6031) opens the review report of that release (reportDialog.js; app.js
+// opens any data-report link). It runs before linkRefs, so its #id belongs to this link; a plain #id stays an item.
+const REPORT = /\b((?:release\s+)?report\s+#(\d{1,7}))\b/gi, HAS_REPORT = /\breport\s+#\d/i;
+export function linkReports(root) {
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => n.parentElement.closest("code, pre, a, button, .link") ? NodeFilter.FILTER_REJECT
+      : HAS_REPORT.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+  const nodes = [];
+  for (let n; (n = walk.nextNode());) nodes.push(n);
+  for (const n of nodes) {
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    n.data.replace(REPORT, (m, words, id, off) => {
+      frag.append(n.data.slice(at, off));
+      const a = el("span", "link report-link", words);
+      a.dataset.report = id; a.tabIndex = 0; a.title = "Open the release report";
+      frag.append(a);
+      at = off + m.length;
+      return m;
+    });
+    if (!at) continue;
+    frag.append(n.data.slice(at));
+    n.replaceWith(frag);
+  }
+}
+
+// The report block of a release in a session's chat (#6031, sessions.view reports): MaximizePM puts it there when
+// the session cut or started the release (the manager: every cut). It sits at its time among the lines (data-at),
+// once; its numbers come from GET api/report/<id> when it is first drawn. Open opens the report dialog.
+export function placeReports(col, reports) {
+  for (const r of reports || []) {
+    const key = `${r.id}:${r.kind}`;
+    if (col.querySelector(`[data-report-block="${CSS.escape(key)}"]`)) continue;
+    const b = el("div", "msg-report");
+    b.dataset.reportBlock = key; if (r.at) b.dataset.at = r.at;
+    const head = el("div", "mr-h");
+    head.append(el("b", "", "Release report"), ` ${r.target || ""}, `);
+    const id = el("span", "link", `#${r.id}`); id.dataset.report = r.id; head.append(id);
+    head.append(el("span", "muted t-s", ` · ${r.kind === "cut" ? "cut" : "deploy started"} by ${r.by || "?"}${r.at ? " · " + when(r.at) : ""}`));
+    const nums = el("div", "mr-n muted t-s", `${r.tasks} task${r.tasks === 1 ? "" : "s"}`);
+    const open = el("button", "btn primary", "Open the report");
+    open.type = "button"; open.dataset.report = r.id;
+    b.append(head, nums, open);
+    const later = r.at ? [...col.querySelectorAll(":scope > [data-at]")].find(x => x.dataset.at > r.at) : null;
+    if (later) later.before(b); else col.append(b);
+    fetch(`api/report/${r.id}`).then(x => x.ok ? x.json() : null).then(j => {
+      if (!j) return;
+      const n = j.numbers, bits = [`${n.tasks} task${n.tasks === 1 ? "" : "s"}`, n.open && `${n.open} open`,
+        n.faults_open && `${n.faults_open} open fault${n.faults_open === 1 ? "" : "s"}`,
+        n.fixes && `${n.fixes} review fix${n.fixes === 1 ? "" : "es"}`, n.decisions && `${n.decisions} decided by you`,
+        n.usd != null && `$${n.usd.toFixed(2)}`];
+      nums.textContent = bits.filter(Boolean).join(" · ") + (j.groups.some(g => g.risk) ? " · risks first" : "");
+    }).catch(() => {});
+  }
+}
+
 // A path to a file the side panel can show becomes a link that opens it there (#4619): a full or ~ path, a file://
 // link, and (#4689) a relative path or a bare file name, which the server looks for in the session's folder and
 // among its files (components/artLinks.js checks each one; a name it finds nothing for goes back to plain text).
@@ -286,6 +342,8 @@ export function appendEntries(col, entries, refs) {
       continue;
     }
     const node = entryNode(e);
+    if (e.at && node.dataset) node.dataset.at = e.at;  // a report block finds its place by time (#6031)
+    linkReports(node);
     linkRefs(node, refs);
     linkPaths(node);
     if (e.role === "tool" || e.role === "event") toolGroup(col).append(node), countGroup(col.lastElementChild);

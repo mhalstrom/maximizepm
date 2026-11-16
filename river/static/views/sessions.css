@@ -209,6 +209,10 @@ button.srow-it { cursor: pointer; }
   padding: var(--sp-3) var(--sp-4); max-height: var(--h-pre); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   color: var(--ink); font: var(--fs-s)/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .msg-event { text-align: center; font-size: var(--fs-s); color: var(--muted); margin: 0 0 var(--sp-4); }
+/* The release report block in a chat (#6031, chat.js placeReports): the release, its numbers, and Open. */
+.msg-report { border: var(--hair) solid var(--accent); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); margin: 0 0 var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2); align-items: flex-start; background: var(--panel); }
+.msg-report .mr-h { overflow-wrap: anywhere; }
 /* A compaction, a resume, the start of the session (#5120): a thin line with its words in the middle. */
 .chat-div { display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-xs); color: var(--muted); }
 .chat-div::before, .chat-div::after { content: ""; flex: 1; border-top: var(--hair) solid var(--line); }

@@ -12,6 +12,7 @@ person types through its Open link (session_url), its terminal, or the text bar 
 import json
 import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 
@@ -898,9 +899,19 @@ def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=Fals
     return {"agent": agent, "transcript": kind, "provider": provider(a.get("agent_type"), kind),
             "entries": got["entries"], "cursor": got["cursor"], "older": older,
             "refs": item_refs(conn, got["entries"]),
+            "reports": _report_marks(conn, agent),  # the release report blocks of its chat (#6031)
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url"),
             "cache": cache_state(conn, agent, found=(kind, path)) if a.get("role") == "expert" else None,
             "context": context_meter(conn, agent, kind, path)}
+
+
+def _report_marks(conn, agent):
+    """report.release_marks; never stops the chat view (a report is an extra)."""
+    from . import report
+    try:
+        return report.release_marks(conn, agent)
+    except (core.RiverError, sqlite3.Error, KeyError, TypeError, ValueError):
+        return []
 
 
 def context_meter(conn, agent, kind, path):

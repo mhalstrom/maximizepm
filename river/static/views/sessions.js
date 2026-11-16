@@ -8,7 +8,7 @@
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle, getJson } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { appendEntries, prependEntries, agePending, wireCopy, plainText, drawWaiting } from "../components/chat.js";
+import { appendEntries, prependEntries, agePending, wireCopy, plainText, drawWaiting, placeReports } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
 import { openWaiting, closeWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
@@ -543,6 +543,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       if (first) { older = j.older || null; readingOlder = false; }
       if (first && !older && j.entries.length) prependEntries(col, j.entries, j.refs, true);
       else appendEntries(col, j.entries, j.refs);
+      placeReports(col, j.reports);  // the release reports of this chat (#6031)
       checkPaths(col, agent);  // what each path means for this session; a refused one says why (#4689)
       agePending(col);
       drawPend(j.pending || []);

@@ -14059,6 +14059,22 @@ class ReleaseReport(Base):
         again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
         self.assertEqual(again["read_cards"], [])  # one Read card only
 
+    def test_the_report_blocks_of_a_chat(self):
+        # #6031: the session that cut a release and the one that started its deploy get its report block in their
+        # chat; the manager gets every cut; another session gets none.
+        from river import report, sessions
+        core.register(self.c, "ops")
+        core.target_own(self.c, "web", "ops")
+        core.target_cut(self.c, "web", actor="ops")
+        self.assertEqual([(m["id"], m["kind"], m["by"], m["tasks"]) for m in report.release_marks(self.c, "ops")],
+                         [(self.deploy, "cut", "ops", 3)])
+        self.assertEqual([m["kind"] for m in report.release_marks(self.c, "boss")], ["cut"])
+        self.assertEqual(report.release_marks(self.c, "dev"), [])
+        with core.tx(self.c):  # the deployer claims the deploy item: the deploy starts
+            core._event(self.c, self.deploy, "dep", "claimed (lease 30m)")
+        self.assertEqual([m["kind"] for m in report.release_marks(self.c, "dep")], ["start"])
+        self.assertEqual(sessions._report_marks(self.c, "ops")[0]["id"], self.deploy)
+
     def test_the_cli_report_and_who_may_write_the_summary(self):
         from river import cli
         out = io.StringIO()
