@@ -2254,11 +2254,12 @@ def pane_process(conn, agent):
     return {"pid": lead[0], "pgid": lead[1], "cmd": lead[3], "pane": pane["pane"]}
 
 
-def kill_agent(conn, agent, reason, actor=None):
+def kill_agent(conn, agent, reason, actor=None, by_serve=False):
     """End now from the page: core.kill_agent, with the foreground of the agent's tmux pane for an agent that has no
-    recorded process (it ran no maxpm command: Aider, a session that never connected)."""
+    recorded process (it ran no maxpm command: Aider, a session that never connected). by_serve: watch_prompts."""
     ag = core._agent(conn, agent)
-    return core.kill_agent(conn, agent, reason, actor, pane=None if ag["pid"] else pane_process(conn, agent))
+    return core.kill_agent(conn, agent, reason, actor, pane=None if ag["pid"] else pane_process(conn, agent),
+                           by_serve=by_serve)
 
 
 def _programs(lines):
@@ -2796,7 +2797,7 @@ def watch_prompts(conn):
     {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
     "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids, procs = {}, {}, {}, {}
+    waiting, states, ids, procs, asks = {}, {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     terminals = agent_terminals(conn)
     for agent in [a for a in STILL if a not in terminals or a in stopped]:
@@ -2826,6 +2827,8 @@ def watch_prompts(conn):
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
                 STILL.pop(agent, None)
+                if q is not None and parts.get("command"):  # a permission prompt for a command (#5959)
+                    asks[agent] = parts
             elif (still := _stuck(conn, agent, tail, ad)):
                 held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                     "ORDER BY id", (agent,)).fetchone()
@@ -2876,7 +2879,53 @@ def watch_prompts(conn):
                 told.append(agent)
         if told or closed:
             core.sync_needs_you(conn)
+    ended = _end_at_prompt(conn, waiting, asks, t)
+    if ended:
+        reported["ended"] = ended
     return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed, **reported}
+
+
+def _end_at_prompt(conn, waiting, asks, t):
+    """#5959 (policy p3: never type into a permission prompt; end the session and release its work): a session that
+    stands at the same permission prompt for a command for prompt_end ends. Only its own process (kill_agent: the PID
+    it recorded, or its pane's foreground group); its task goes back to the queue with the prompt in the event, and
+    the manager (else each person) gets one alert with the command. Not the manager, an expert, or a live test session.
+    Returns the agents it ended."""
+    limit = core.parse_duration(core.setting(conn, "prompt_end"))
+    if not asks or limit.total_seconds() <= 0:
+        return []
+    out = []
+    for agent, parts in sorted(asks.items()):
+        st = PROMPTS.get(agent)
+        if not st or t - st["since"] < limit:
+            continue
+        ag = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
+        _body, _sig, q, held, _pane = waiting[agent]
+        tier = conn.execute("SELECT tier FROM items WHERE id=?", (held,)).fetchone() if held else None
+        if not ag or ag["role"] in ("manager", "expert") or (tier and tier["tier"] in ("expert", "test")):
+            continue
+        what = f"({parts.get('tool') or 'a tool'}): {parts['command']}"
+        why = f"stood {core.setting(conn, 'prompt_end')} at a permission prompt to run {what}"
+        try:
+            res = kill_agent(conn, agent, why, "maxpm", by_serve=True)
+        except RiverError as e:
+            print(f"maxpm: could not end {agent} at its permission prompt: {e}", file=sys.stderr, flush=True)
+            continue
+        PROMPTS.pop(agent, None)
+        manager = core.active_manager(conn)
+        to = [manager] if manager else [r["name"] for r in conn.execute(
+            "SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+        back = "; ".join(f"#{h['id']} {h['title'][:80]}" for h in res.get("released") or [])
+        text = (f"maxpm serve ended {agent}: it stood at a permission prompt for {core.setting(conn, 'prompt_end')} "
+                f"and nobody answered it (policy p3). It asked to run {what}. Question: {q[:200]}."
+                + (f" Back in the queue, to check first: {back}." if back else "")
+                + " Decide: run the command, allow it in the settings for later sessions, or change the task.")
+        with core.tx(conn):
+            for p in to:
+                core._send(conn, "alert", "maxpm", text, to=p, item_id=held)
+            core.sync_needs_you(conn)
+        out.append(agent)
+    return out
 
 
 def _pane_session_id(conn, agent, pane, ad):

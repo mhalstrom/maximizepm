@@ -296,6 +296,12 @@ DEFAULT_SETTINGS = {
     # rule (#4943); reply text that asks a question, and the input box, are no prompt.
     "prompt_pattern": r"Do you (want to|trust)|Would you like to|[Ee]nter to confirm|[❯›]\s*\d+\.\s",
     "prompt_wait": "20s",
+    # A session that stands at a permission prompt for a command (a tool call that auto mode or the person must allow)
+    # for prompt_end with nobody answering it: maxpm serve ends the session's process, its task goes back to the queue
+    # with the prompt in the note, and the manager (else each person) gets one alert with the command (#5959, policy
+    # p3: never type into such a prompt). Not the manager, an expert, or a live test session; not a question with no
+    # command (a trust question, a menu). 0s: never.
+    "prompt_end": "10m",
     # A pane whose last lines stay the same for stuck_after with no question card, no idle prompt and no work (its
     # adapter's screen rules; an agent with hooks: before its first hook) waits on a screen that no rule knows (a
     # sign-in, an update, a question of a new CLI version): one alert with its last lines goes to the active manager
@@ -2765,7 +2771,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
@@ -12595,19 +12601,20 @@ def set_process(conn, name, pid, cmd, host=None, env=None):
     return True
 
 
-def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None, pane=None):
+def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None, pane=None, by_serve=False):
     """Emergency only (the normal path is maxpm stop): end the agent's process on this host, then release
     everything it held. Checks that the PID still runs the recorded command, so a reused PID is not killed.
     pane: for an agent with no recorded process (it ran no maxpm command: Aider, a session that never connected), the
     foreground process group of its tmux pane as maxpm serve found it ({"pid", "pgid", "cmd", "pane"},
-    server.pane_process); the whole group ends, a pipeline such as 'printf <prompt> | amp' too (#5278)."""
+    server.pane_process); the whole group ends, a pipeline such as 'printf <prompt> | amp' too (#5278).
+    by_serve: maxpm serve itself ends it (a session stuck at a permission prompt, #5959); no command passes it."""
     import signal
     import subprocess
     import time
     sleep = sleep or time.sleep
     if not reason or not reason.strip():
         raise RiverError("say why: maxpm stop <agent> --kill --reason \"...\"")
-    why = may_change_queue(conn, actor, agent)
+    why = None if by_serve else may_change_queue(conn, actor, agent)
     if why:
         raise RiverError(f"refused: a person or a manager kills an agent ({why})")
     ag = _agent(conn, agent)

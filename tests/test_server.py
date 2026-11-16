@@ -2826,6 +2826,54 @@ class LaunchInTmux(unittest.TestCase):
             notify.loop(stop, interval_s=1)
         self.assertEqual(looks, [1])
 
+    def test_a_session_at_a_permission_prompt_for_prompt_end_is_ended_and_its_task_released(self):
+        # #5959 (policy p3): nobody answers a permission prompt for a command; serve ends that session's own process,
+        # its task goes back to the queue with the prompt, and the manager hears of it once. Keys are never typed.
+        import subprocess
+        import sys
+        from unittest import mock
+        core.register(self.c, "mark", human=True)
+        iid = core.item_add(self.c, "shop", "clean the build")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        core.register(self.c, name)
+        core.claim(self.c, iid, name)
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
+        info = core.proc_info(p.pid)
+        if info is None:
+            self.skipTest("no ps on this system")
+        core.set_process(self.c, name, p.pid, info[2])
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.PROMPTS.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+        def watch(after):
+            clock[0] += core.timedelta(seconds=after)
+            return server.watch_prompts(self.c)
+        keys = list(pane["keys"])
+        # A trust question has no command: it never ends a session.
+        pane["screen"] = "Do you trust the files in this folder?\n\x1b[34m❯ 1. Yes, proceed\x1b[0m\n  2. No, exit"
+        watch(1)
+        self.assertNotIn("ended", watch(3600))
+        server.PROMPTS.clear()
+        pane["screen"] = "\x1b[1mBash command\x1b[0m\n  rm -rf build\n\nDo you want to proceed?\n\x1b[34m❯ 1. Yes\x1b[0m\n  2. No"
+        watch(1)
+        self.assertNotIn("ended", watch(9 * 60))
+        self.assertEqual(watch(61)["ended"], [name])
+        p.wait(10)
+        it = core.item_show(self.c, iid)
+        self.assertEqual((it["status"], it["assignee"]), ("open", None))
+        self.assertIn("permission prompt to run (Bash command): rm -rf build",
+                      " ".join(e["change"] for e in it["events"]))
+        (alert,) = [m for m in core.inbox(self.c, "mark") if m["from_agent"] == "maxpm" and "ended" in m["body"]]
+        self.assertIn("rm -rf build", alert["body"])
+        self.assertEqual(pane["keys"], keys)  # no key typed into the prompt
+        # Off with 0s.
+        core.config_set(self.c, "prompt_end", "0s")
+        self.assertEqual(server._end_at_prompt(self.c, {}, {"x": {"command": "ls"}}, core.now()), [])
+
     def test_a_prompt_alert_says_what_to_answer_and_who_reads_lines_with_no_question(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)
