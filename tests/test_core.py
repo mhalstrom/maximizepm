@@ -11879,13 +11879,15 @@ class Ops(Base):
             core.ops_profile_apply(self.c, {"maxpm_ops_profile": 1, "checks": []}, actor="mark")
 
     def test_the_settings_of_the_scope_go_with_the_profile(self):
-        with mock.patch.dict(core.DEFAULT_SETTINGS, {"ops_page": "unhealed 15m"}):
-            p = {"maxpm_ops_profile": 1, "scope": "site", "checks": [], "settings": {"ops_page": "always"}}
-            self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {"ops_page": "always"})
+        p = {"maxpm_ops_profile": 1, "scope": "site", "checks": [], "settings": {"ops_page": "every"}}
+        self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {"ops_page": "every"})
+        core.ops_profile_apply(self.c, p, yes=True, actor="mark")
+        self.assertEqual(core.setting(self.c, "ops_page", project_id=core._project(self.c, "site")["id"]), "every")
+        self.assertEqual(core.ops_profile_export(self.c, "site")["settings"], {"ops_page": "every"})
+        self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {})
+        p["settings"]["ops_page"] = "always"
+        with self.assertRaisesRegex(RiverError, "ops_page is untaken"):
             core.ops_profile_apply(self.c, p, yes=True, actor="mark")
-            self.assertEqual(core.setting(self.c, "ops_page", project_id=core._project(self.c, "site")["id"]), "always")
-            self.assertEqual(core.ops_profile_export(self.c, "site")["settings"], {"ops_page": "always"})
-            self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {})
 
     def test_the_command_line_exports_to_a_file_and_applies_it_with_yes(self):
         from river import cli
@@ -12103,6 +12105,81 @@ class Ops(Base):
                                       "Why is it needed? (one line for the manager) "])
         self.assertIn("proposed check_jobs to the manager", out)
         self.assertEqual([p["name"] for p in core.ops_proposals(self.c, "site")], ["check_jobs"])
+
+    # ---- paging (#5434): ops_page untaken (the default), every, main:<check>
+
+    def page_check(self, name="api", severity="page"):
+        core.ops_add(self.c, "site", name, "plugin", {"command": f"check_{name}", "every": "1m", "fail_after": 1,
+                                                      "severity": severity}, actor="mark")
+
+    def pages(self, at):
+        sent = []
+
+        def notice(title, body):
+            sent.append((title, body))
+            return [{"channel": "ntfy", "ok": True, "error": None}]
+        core.ops_pages(self.c, notice, at)
+        return sent
+
+    def test_a_page_fault_that_does_not_heal_and_that_nobody_took_pages_after_ops_page_after_once(self):
+        self.page_check()
+        t = core.now()
+        r = self.run_at("site", "api", t, self.proc(2, "API CRITICAL - no answer"))
+        [x] = [i for i in r["items"] if i["action"] == "opened"]
+        self.assertEqual(self.pages(t + timedelta(minutes=14)), [])  # the manager has 15 minutes
+        [(title, body)] = self.pages(t + timedelta(minutes=15))
+        self.assertEqual(title, "MaximizePM: site/api is down")
+        self.assertIn("ops:site:api: API CRITICAL - no answer. in fault since", body)
+        self.assertIn(f"nobody took it in 15m (ops_page untaken). Item #{x['item']}.", body)
+        self.assertEqual(self.pages(t + timedelta(minutes=16)), [])  # one page for one fault
+        for i in (17, 18):
+            self.run_at("site", "api", t + timedelta(minutes=i), self.proc(0, "API OK"))
+        [(title, _)] = self.pages(t + timedelta(minutes=19))
+        self.assertEqual(title, "MaximizePM: site/api works again")
+        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
+
+    def test_no_page_when_a_session_holds_the_fault_item_or_the_manager_answered_its_alert_or_it_heals(self):
+        self.page_check()
+        t = core.now()
+        r = self.run_at("site", "api", t, self.proc(2, "API CRITICAL"))
+        item = [i for i in r["items"] if i["action"] == "opened"][0]["item"]
+        core.claim(self.c, item, "dev")
+        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
+        core.release(self.c, item, actor="dev")
+        alert = self.c.execute("SELECT id FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
+                               (item,)).fetchone()["id"]
+        core.decline_message(self.c, alert, note="a known restart; it heals by itself", actor="boss")
+        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
+        self.c.execute("UPDATE messages SET state='read' WHERE id=?", (alert,))  # read is not an answer
+        self.c.execute("DELETE FROM messages WHERE reply_to=?", (alert,))
+        self.c.commit()
+        self.run_at("site", "api", t + timedelta(minutes=19), self.proc(0, "API OK"))  # heals: one pass of 2
+        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
+        self.run_at("site", "api", t + timedelta(minutes=21), self.proc(2, "API CRITICAL"))
+        self.assertEqual(len(self.pages(t + timedelta(minutes=22))), 1)
+
+    def test_ops_page_every_and_main_page_at_once_and_the_bell_off_sends_nothing(self):
+        with self.assertRaisesRegex(RiverError, "ops_page is untaken .* not 'main'"):
+            core.config_set(self.c, "ops_page", "main", project="site")
+        core.config_set(self.c, "ops_page", "every", project="site")
+        self.page_check("api")
+        self.page_check("db")
+        self.page_check("docs", severity="item")
+        t = core.now()
+        for name in ("api", "db", "docs"):
+            self.run_at("site", name, t, self.proc(2, "CRITICAL"))
+        self.assertEqual(sorted(x[0] for x in self.pages(t)), ["MaximizePM: site/api is down",
+                                                               "MaximizePM: site/db is down"])
+        core.config_set(self.c, "ops_page", "main:db", project="site")
+        self.c.execute("DELETE FROM ops_events WHERE state='paged'")
+        self.c.commit()
+        [(title, body)] = self.pages(t)
+        self.assertEqual(title, "MaximizePM: site/db is down")
+        self.assertIn("ops_page main: db is a main service", body)
+        self.c.execute("DELETE FROM ops_events WHERE state='paged'")
+        self.c.commit()
+        core.config_set(self.c, "notifications", "off")
+        self.assertEqual(self.pages(t), [])
 
 
 class OpsNoise(Base):

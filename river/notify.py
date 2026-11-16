@@ -512,6 +512,11 @@ def ops_deadman(conn):
     return core.ops_deadman(conn) if SERVE_PORT.get("port") else None
 
 
+def ops_pages(conn):
+    """Paging (core.ops_pages, #5434): a fault of a check of severity page goes to notify_channels by ops_page."""
+    return core.ops_pages(conn, lambda title, body: direct(conn, title, body))
+
+
 def sweep(conn):
     """The sweep of maxpm serve, once a pass (core.poll_activity: at most each POLL_SWEEP). The page build ran it
     before #5597, in the request of the page."""
@@ -567,6 +572,7 @@ def loop(stop, interval_s=None):
                 space.serve_pass,  # over db_max_size or folder_max_size: the oldest removable data goes (#5711)
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
+                ops_pages,  # a fault of a check of severity page reaches the person by ops_page (#5434)
                 canvas_routes.rqs_responses,  # comments and votes of realquicksite pages, to the canvas's session (#5790)
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
                 vault.grant_summary,  # once a day: the manager's credential grants, to the person (#5828)
