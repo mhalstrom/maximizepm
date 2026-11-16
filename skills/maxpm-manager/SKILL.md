@@ -319,7 +319,9 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm serve` starts gets the scope of what it starts for (#6028): an item's task, a target's deploys, a
   release's review, the project of an item to unblock; after that task it waits for your next scope.
 - `maxpm queue add <agent> <id> [--first|--before <id>]`, `maxpm queue add <agent> --message "..."`,
-  `maxpm queue list|move|remove`: an agent's own queue comes before the project queue.
+  `maxpm queue list|move|remove`: an agent's own queue comes before the project queue. Scopes replace the
+  queue (#5981): prefer `maxpm scope widen <agent> tasks:<id>`; `maxpm runs --replaced` counts the use of
+  the replaced commands.
 - `maxpm note|alert|ask <agent> "..."`: messages (they also go through the
   agent platform's own messaging when MaximizePM knows it).
 - `maxpm stop <agent> --reason "..."`: a request; the agent commits, releases, and ends.

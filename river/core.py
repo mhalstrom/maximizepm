@@ -887,7 +887,8 @@ CREATE TABLE IF NOT EXISTS runs (
   words    TEXT NOT NULL,  -- the words after maxpm, JSON, with secrets and tokens masked (mask_words)
   exit     INTEGER,
   ms       INTEGER,
-  refused  TEXT            -- why it failed: the refusal, the usage error, or the exception
+  refused  TEXT,           -- why it failed: the refusal, the usage error, or the exception
+  token    INTEGER         -- 1: the command ran with a session token (MAXPM_TOKEN, #6029)
 );
 CREATE INDEX IF NOT EXISTS runs_at ON runs(at);
 CREATE INDEX IF NOT EXISTS runs_session ON runs(session);
@@ -2228,6 +2229,8 @@ def _migrate(conn):
     if "scope" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:
         for c in ("scope", "scope_by", "scope_at", "scope_told"):
             conn.execute(f"ALTER TABLE agents ADD COLUMN {c} TEXT")
+    if "token" not in {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}:  # #6029
+        conn.execute("ALTER TABLE runs ADD COLUMN token INTEGER")
     if "go_seen" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:  # #5978
         conn.execute("ALTER TABLE agents ADD COLUMN go_seen TEXT")
     # The session of the command that wrote a history entry or sent a message (#5969).
@@ -2724,7 +2727,7 @@ def mask_words(words):
     return [w if len(w) <= RUN_WORD_MAX else w[:RUN_WORD_MAX] + "…" for w in out]
 
 
-def log_run(words, at, ms, code, cmd, refused=None, actor=None, session=None):
+def log_run(words, at, ms, code, cmd, refused=None, actor=None, session=None, token=None):
     """Write one row of the run log (#5969). It never fails or holds up the command: a queue that is locked for more
     than a second, that does not exist, or that has no runs table yet (an older schema) gets no row."""
     p = db_path()
@@ -2739,11 +2742,16 @@ def log_run(words, at, ms, code, cmd, refused=None, actor=None, session=None):
                 return
             c.execute("PRAGMA busy_timeout=1000")
         try:
-            c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, refused) "
-                      "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                      (at, session, actor, CALLER_PPID or os.getppid(), _cwd(), cmd or "",
-                       json.dumps(mask_words(words)), code, ms,
-                       _mask_text(refused)[:2000] if refused else None))
+            row = (at, session, actor, CALLER_PPID or os.getppid(), _cwd(), cmd or "", json.dumps(mask_words(words)),
+                   code, ms, _mask_text(refused)[:2000] if refused else None)
+            try:
+                c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, refused, token) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?,?)", row + (1 if token else None,))
+            except sqlite3.OperationalError as e:
+                if "token" not in str(e):  # a locked queue: no row, and no second wait
+                    raise
+                c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, refused) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?)", row)  # an older schema with no token column
         finally:
             if own:
                 c.close()
@@ -2758,6 +2766,59 @@ def _cwd():
         return os.getcwd()
     except OSError:  # the folder was removed under the command
         return None
+
+
+# #6029: the commands that tokens and scopes replace (design canvas mux-design section 10, talk #5935, mark
+# 2026-11-15). They still work; an agent that runs one is told the replacement, and maxpm runs --replaced counts their
+# use. #5981 removes each when sessions with a token no longer run it (7 days with no such use).
+_SCOPED = "the scope that maxpm serve or the manager gives your session (maxpm go gives work in it)"
+REPLACED = {
+    "--as": "your session token: a session that maxpm serve starts is named by it",
+    "register": "the token of a session that maxpm serve starts", "session": "the token of the session",
+    "unregister": "the end of the session (maxpm serve unregisters it)",
+    "heartbeat": "the token: a live session keeps its lease (#5979)",
+    "claim": _SCOPED, "next": _SCOPED, "keep": _SCOPED, "push": "maxpm scope widen <agent> tasks:<id>",
+    "accept": _SCOPED, "decline": _SCOPED, "offer": "a message to the manager, who widens a scope",
+    "give": "maxpm scope (the manager moves the task)", "split": "maxpm add ... --blocks <id>",
+    "move": "nothing (no use since 2026-11-09)", "plan": "nothing (an old alias)",
+    "queue add": "maxpm scope widen|set", "queue list": "maxpm scope show", "queue move": "maxpm scope set",
+    "queue remove": "maxpm scope narrow",
+    "goal own": "maxpm scope set <agent> goal:<name>", "goal release": "maxpm scope narrow|end",
+    "goal give": "maxpm scope set <agent> goal:<name>", "goal take": "maxpm scope set <agent> goal:<name>",
+    "goal edit": "nothing (no use since 2026-11-09)",
+}
+
+
+def replaced_key(cmd, words):
+    """The REPLACED entry that a command is, or None. cmd: the command and its subcommand as the run log has it."""
+    cmd = (cmd or "").strip()
+    if cmd in REPLACED:
+        return cmd
+    head = cmd.split(" ")[0]
+    if head in REPLACED and head not in ("queue", "goal"):
+        return head
+    return None
+
+
+def replaced_uses(conn, since="7d"):
+    """maxpm runs --replaced (#6029): for each replaced command, its runs since `since`: all, by a session with a
+    token, by an agent, the sessions, and the last use. --as counts the commands that named an actor with --as."""
+    t = iso(now() - parse_duration(since))
+    out = {k: {"runs": 0, "token": 0, "sessions": set(), "last": None} for k in REPLACED}
+    for r in conn.execute("SELECT at, session, cmd, words, token FROM runs WHERE at>=?", (t,)):
+        keys = [replaced_key(r["cmd"], None)]
+        if '"--as"' in (r["words"] or "") or '"--as=' in (r["words"] or ""):
+            keys.append("--as")
+        for k in filter(None, keys):
+            o = out[k]
+            o["runs"] += 1
+            o["token"] += 1 if r["token"] else 0
+            if r["session"]:
+                o["sessions"].add(r["session"])
+            o["last"] = max(o["last"] or "", r["at"])
+    return {"since": since, "replaced": [{"command": k, "instead": REPLACED[k], "runs": o["runs"], "token": o["token"],
+                                          "sessions": len(o["sessions"]), "last": o["last"]}
+                                         for k, o in sorted(out.items(), key=lambda kv: -kv[1]["runs"])]}
 
 
 def runs(conn, session=None, agent=None, since=None, failed=False, limit=30, counts=False, command=None):

@@ -14536,3 +14536,41 @@ class Permissions(Base):
         self.assertIn("for a person", server.op_rights(self.c, "start_manager", "boss", page=False))
         self.assertIsNone(server.op_rights(self.c, "item_add", "w", page=False))
         self.assertIsNone(server.op_rights(self.c, "a_test_action", "w", page=False))  # one a test adds for itself
+
+
+class Replaced(Base):
+    """#6029: the commands that tokens and scopes replace say so, and the run log counts their use."""
+
+    def test_replaced_commands_are_named_and_said(self):
+        from river import cli
+        k = core.replaced_key
+        self.assertEqual([k("next", None), k("queue add", None), k("goal own", None), k("heartbeat", None)],
+                         ["next", "queue add", "goal own", "heartbeat"])
+        self.assertEqual([k("goal show", None), k("queue", None), k("add", None), k("", None)], [None] * 4)
+        core.project_add(self.c, "web", path=self.dir.name)
+        core.register(self.c, "w")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                mock.patch.dict(os.environ, {"MAXPM_QUIET": "1"}):
+            cli.run(["--as", "w", "heartbeat"])
+        self.assertIn("maxpm: 'heartbeat' is replaced by the token: a live session keeps its lease", err.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            cli.run(["--as", "w", "list"])
+        self.assertNotIn("is replaced by", err.getvalue())  # --as without a token: still needed, nothing said
+
+    def test_replaced_uses_count_runs_by_session_and_token(self):
+        from river import cli
+        t = core.iso(core.now())
+        rows = [("next", '["--as", "w", "next"]', "s1", 1), ("next", '["next"]', "s2", None),
+                ("queue add", '["queue", "add", "w", "3"]', "s3", None), ("show", '["show", "3"]', "s1", 1)]
+        for cmd, words, session, token in rows:
+            self.c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, token) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)", (t, session, "w", 1, "/", cmd, words, 0, 3, token))
+        got = {r["command"]: (r["runs"], r["token"], r["sessions"]) for r in core.replaced_uses(self.c)["replaced"]}
+        self.assertEqual((got["next"], got["queue add"], got["--as"], got["claim"]),
+                         ((2, 1, 2), (1, 0, 1), (1, 1, 1), (0, 0, 0)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_runs(core.replaced_uses(self.c))
+        self.assertIn("Replaced commands, last 7d", out.getvalue())

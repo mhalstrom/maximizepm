@@ -67,6 +67,11 @@ you to a fresh session, and ends you after `idle_end` (15m) with nothing in hand
 
 ## Identity (by hand)
 
+A session that `maxpm serve` starts has a token: it needs no `register`, no
+`--as`, no `heartbeat`, and its scope gives it its work. The commands that
+tokens and scopes replace still work, and say so when they run (#6029). A
+session that a person started in a terminal has no token: it uses them.
+
 Register once, then name yourself on every command:
 
 ```

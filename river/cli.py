@@ -579,8 +579,33 @@ def _usage_line(u):
             f"peak context {_k(u['peak_context'])}")
 
 
+def _say_replaced(conn, args, actor):
+    """#6029: an agent that runs a command that tokens and scopes replace gets one line on stderr with the
+    replacement; --as only when the session has a token (without one it still needs it)."""
+    if getattr(args, "json", False) or not (_inside_agent() or (actor and core._is_ai(conn, actor))):
+        return
+    key = getattr(args, "replaced", None)
+    if key:
+        print(f"maxpm: '{key}' is replaced by {core.REPLACED[key]}; it still works until sessions stop using it "
+              f"(#5981)", file=sys.stderr)
+    if getattr(args, "as_typed", False) and os.environ.get(core.TOKEN_ENV):
+        print(f"maxpm: --as is not needed: {core.REPLACED['--as']}", file=sys.stderr)
+
+
+def render_replaced(res):
+    """maxpm runs --replaced (#6029)."""
+    print(f"Replaced commands, last {res['since']} (token: runs by a session with a token; #5981 removes a command "
+          f"after 7 days with none):")
+    print(f"  {'command':14} {'runs':>5} {'token':>5} {'sessions':>8}  last              instead")
+    for r in res["replaced"]:
+        last = core.parse_iso(r["last"]).astimezone().strftime("%Y-%m-%d %H:%M") if r["last"] else "-"
+        print(f"  {r['command']:14} {r['runs']:>5} {r['token']:>5} {r['sessions']:>8}  {last:16}  {r['instead']}")
+
+
 def render_runs(res):
     """maxpm runs: the gone records of the agent, then the rows (newest first) or the counts per command."""
+    if "replaced" in res:
+        return render_replaced(res)
     def local(t, fmt="%Y-%m-%d %H:%M"):
         return core.parse_iso(t).astimezone().strftime(fmt)
 
@@ -1981,6 +2006,8 @@ def build_parser(only=None):
     x.add_argument("--since", help="how far back: 1h, 7d (default: all rows; 7d with --counts)")
     x.add_argument("--failed", action="store_true", help="only the runs that failed")
     x.add_argument("--counts", action="store_true", help="per command: runs, failures, retries, median and max time")
+    x.add_argument("--replaced", action="store_true",
+                   help="the use of each command that tokens and scopes replace (default --since 7d)")
     x.add_argument("-n", "--limit", type=int, default=30, help="how many rows (default 30)")
     x = sub.add_parser("health", help="does MaximizePM work: person minutes per done item, items done per day, the "
                        "rework rate, the person's waits, session idle time and cost, against the time before")
@@ -2788,7 +2815,8 @@ def run(argv=None):
         core.TOKEN_AGENT.reset(agent_tok)
         if not (core.POLL and rec["code"] == core.POLL_AGAIN):  # a poll that found nothing: no row (#6008)
             core.log_run(words, rec["at"], int((time.monotonic() - start) * 1000), rec["code"], rec["cmd"],
-                         rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session)
+                         rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session,
+                         token=bool(os.environ.get(core.TOKEN_ENV)))
 
 
 class _Tee:
@@ -2824,6 +2852,7 @@ def _run_words(words, rec):
         subs = [getattr(args, k) for k in sorted(vars(args)) if k.endswith("cmd") and k != "cmd"
                 and isinstance(getattr(args, k), str)]
         rec["cmd"] = " ".join([args.cmd, *subs[:1]])
+    args.replaced = core.replaced_key(rec.get("cmd"), words) if args.cmd else None  # #6029
     if args.cmd is None:
         print(QUICKSTART)
         return 0
@@ -3045,6 +3074,7 @@ def _run(args, conn):
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
     _rights(conn, args, actor)  # the permission table (#5974)
+    _say_replaced(conn, args, actor)
     # Escalation by state (#5976, mark 2026-11-15: the session does not set the priority): an agent's --blocked and
     # --level of a message change nothing; its message escalates when it stops working (core.escalate_by_state).
     if args.cmd != "secret" and (_inside_agent() or (actor and core._is_ai(conn, actor))):
@@ -4577,6 +4607,8 @@ def dispatch(conn, a, actor):
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "runs":
+        if a.replaced:  # #6029
+            return core.replaced_uses(conn, a.since or "7d")
         return core.runs(conn, a.session, a.agent, a.since or ("7d" if a.counts else None), a.failed, a.limit,
                          a.counts, a.command)
     if c == "health":
