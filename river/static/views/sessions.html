@@ -54,12 +54,12 @@
            lists), then one ⋯ menu: Open session, Give work, Settings, the links to Plan, End. -->
       <div class="sess-head">
         <button class="btn" type="button" id="sessBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
-        <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id (maxpm --as)"></span></h2>
+        <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id"></span></h2>
         <span id="sessState" class="sess-st"></span>
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>
-        <span class="sess-lists" role="group" aria-label="Open in the side panel">
-          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="Items it worked on">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="Files and pages it made">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="This project's browser">Browser</button><button class="btn sess-tab" type="button" data-sp-changes aria-pressed="false" title="The diff of this session">Changes<span class="sp-count" data-changes-count></span></button>
+        <span class="sess-lists" role="group" aria-label="Open in the panel">
+          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="Items it worked on">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="Files it made">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="This project's browser">Browser</button><button class="btn sess-tab" type="button" data-sp-changes aria-pressed="false" title="This session's diff">Changes<span class="sp-count" data-changes-count></span></button>
         </span>
         <span class="sess-more">
           <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" aria-controls="sessMenu" title="Session actions" aria-label="More of this session">⋯</button>
@@ -73,11 +73,11 @@
           </div>
         </span>
       </div>
-      <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div><div id="sessPend" class="chat-col sess-pend" aria-label="Messages that wait for the turn"></div></div>
+      <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div><div id="sessPend" class="chat-col sess-pend" aria-label="Messages waiting their turn"></div></div>
       <div class="chat-col chat-foot">
         <div id="sessWait" class="sess-wait hidden"></div>
         <div id="sessBarWhy" class="muted sess-why hidden"></div>
-        <div id="sessFiles" class="sess-files hidden" aria-label="Files that go with the message"></div>
+        <div id="sessFiles" class="sess-files hidden" aria-label="Attached files"></div>
         <div id="sessDictate" class="sess-dictate hidden" aria-live="polite"></div>
         <form id="sessBar" class="sbar composer" autocomplete="off"></form>
       </div>
@@ -88,16 +88,16 @@
     <!-- view: cost -->
     <!-- view: browsers -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
-      <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
+      <div class="sp-grip" id="spGrip" title="Resize the panel"></div>
       <!-- The tabs and the panel's ✕ share one line: the ✕ never stands alone under the address bar (#5323). -->
       <div class="sp-top"><div class="sp-tabs" id="spTabs"></div>
         <button class="iconbtn" type="button" id="spClose" title="Close the side panel" aria-label="Close the side panel">✕</button></div>
       <form class="sp-bar" id="spForm" autocomplete="off">
-        <input id="spAddr" placeholder="Address or path" aria-label="A web address or a full file path">
-        <button class="btn" type="button" id="spFindBtn" title="Find in this tab (Cmd+F)" aria-controls="spFind" aria-expanded="false">Find</button>
+        <input id="spAddr" placeholder="Address or path" aria-label="Address or file path">
+        <button class="btn" type="button" id="spFindBtn" title="Find in tab (Cmd+F)" aria-controls="spFind" aria-expanded="false">Find</button>
         <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
-        <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">New tab</button>
-        <button class="btn" type="button" id="spFull" title="Open it alone in a browser tab">Full screen</button>
+        <button class="btn" type="button" id="spNew" title="Open in new tab">New tab</button>
+        <button class="btn" type="button" id="spFull" title="Open alone in tab">Full screen</button>
       </form>
       <div class="sp-find hidden" id="spFind" role="search">
         <input id="spFindQ" type="search" placeholder="Find" aria-label="Find in this tab" autocomplete="off" enterkeyhint="search">

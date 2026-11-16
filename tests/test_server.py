@@ -2899,7 +2899,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
         self.assertEqual(bodies("mark"), [])
         self.assertEqual(bodies("boss"), [f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0), with no question "
-                                          f"river can read. Its last lines: Thinking | Enter to confirm · Esc to cancel"])
+                                          f"MaximizePM can read. Its last lines: Thinking | Enter to confirm · Esc to cancel"])
         # An agent with a stop request gets no alert: an answer would only let it read the stop and end (alert #7392).
         # Its alert closes, and maxpm view --tidy closes its pane, prompt and all.
         core.stop_agent(self.c, name, reason="enough", actor="mark")
@@ -3970,7 +3970,7 @@ class FrameTitle(unittest.TestCase):
         self.assertEqual(q, "Approval Required")
         self.assertIn("Question: Approval Required Keys: Enter = Allow Once (selected now); Down, then Enter = "
                       "Reject with feedback;", body)
-        self.assertNotIn("no question river can read", body)
+        self.assertNotIn("no question MaximizePM can read", body)
 
     def test_a_question_still_wins_and_a_box_with_no_top_border_has_no_title(self):
         box = ["╭─ Edit file ───────╮", "│ Do you want to make this edit?  │", "│ ❯ 1. Yes │", "│   2. No  │",

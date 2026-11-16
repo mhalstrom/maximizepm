@@ -930,7 +930,7 @@ function sessionQueue(name) {
 // The session's item: the one it holds, else the last one in its list.
 const lastItems = {};
 function addForm() {
-  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add an item to this session's project" })}</form>`;
+  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add an item" })}</form>`;
 }
 function wireAdd(form, name) {
   form.addEventListener("submit", async (e) => {

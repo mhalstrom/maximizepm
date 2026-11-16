@@ -221,3 +221,74 @@ class Tooltips(unittest.TestCase):
                         line = text.count("\n", 0, m.start()) + 1
                         found.append(f"{path.relative_to(STATIC)}:{line} ({len(fixed)}): {fixed[:60]}")
         self.assertEqual(found, [])
+
+    # #5963 (policy p146, mark 2026-11-12): a tooltip names what the control does in 1 to 4 words; a part that a
+    # template fills in (${...}) counts as one word. WORDS_ALLOW holds the tooltips of more words that the files had
+    # when the rule came (#5963 shortened index.html and views/sessions.html). It only goes down: a count above it
+    # fails (shorten the new tooltip), and a count below it fails too (set the new, lower number).
+    WORDS = 4
+    WORDS_ALLOW = {
+        "app.js": 5, "components/agentActions.js": 2, "components/artLinks.js": 2, "components/askCard.js": 3,
+        "components/bar.js": 1, "components/browserTool.js": 3, "components/canvasComments.js": 2,
+        "components/canvasDoc.js": 2, "components/card.js": 3, "components/changesView.js": 4, "components/chat.js": 2,
+        "components/drawer.js": 7, "components/endSession.js": 1, "components/itemPop.js": 2,
+        "components/itemRow.js": 1, "components/itemView.js": 1, "components/panZoom.js": 2,
+        "components/reportDialog.js": 1, "components/settingsDialog.js": 3, "components/sidePanel.js": 5,
+        "components/targetHooks.js": 1, "components/taskContext.js": 1, "components/waitDialog.js": 2,
+        "views/artifacts.html": 2, "views/browsers.html": 1, "views/cost.js": 2, "views/done.js": 1, "views/goals.js": 2,
+        "views/graph.html": 1, "views/health.html": 1, "views/health.js": 2, "views/ops.html": 1, "views/ops.js": 3,
+        "views/overview.html": 3, "views/overview.js": 3, "views/plan.html": 2, "views/plan.js": 1,
+        "views/projects.js": 1, "views/sessions-work.js": 6, "views/sessions.js": 4, "views/status.js": 1,
+        "views/targets.js": 6, "views/terminal.html": 1, "views/you-needs.js": 2, "views/you.html": 2, "views/you.js": 4,
+    }
+
+    def test_a_tooltip_has_at_most_4_words(self):
+        counts, long = {}, {}
+        for path in sorted(STATIC.rglob("*")):
+            if path.suffix not in (".html", ".js") or "vendor" in path.parts or "canvaskit" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            name = str(path.relative_to(STATIC))
+            for pat in self.PATTERNS:
+                for m in pat.finditer(text):
+                    fixed = re.sub(r"\$\{[^}]*\}", "X", m.group(2))
+                    if len(fixed.split()) > self.WORDS:
+                        counts[name] = counts.get(name, 0) + 1
+                        long.setdefault(name, []).append(f"line {text.count(chr(10), 0, m.start()) + 1}: {fixed[:60]}")
+        over = {f: (n, long[f]) for f, n in counts.items() if n > self.WORDS_ALLOW.get(f, 0)}
+        under = {f: (counts.get(f, 0), n) for f, n in self.WORDS_ALLOW.items() if counts.get(f, 0) < n}
+        self.assertEqual(over, {}, "tooltips of more than 4 words (shorten them)")
+        self.assertEqual(under, {}, "fewer long tooltips than WORDS_ALLOW says: set the lower number")
+
+
+class ProductName(unittest.TestCase):
+    """#5963 (policy p93, mark 2026-10-03): text that maxpm prints or the page shows calls the product MaximizePM and
+    the command maxpm, never river (the package's old name). A sentence (3 words or more) that holds the word river is
+    refused; the package name in code (import river, river/, river.core) is no sentence."""
+
+    WORD = re.compile(r"(?<![\w./-])[Rr]iver(?![\w./-])")
+
+    def sentences(self, text):
+        return len(text.split()) >= 3 and "import " not in text and self.WORD.search(text)
+
+    def test_no_text_for_a_person_says_river(self):
+        import ast
+        root = STATIC.parent
+        found = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docs = {id(n.body[0].value) for n in ast.walk(tree)
+                    if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body
+                    and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs \
+                        and self.sentences(n.value):
+                    found.append(f"{path.relative_to(root)}:{n.lineno}: {n.value[:60]}")
+        for path in sorted(STATIC.rglob("*")):
+            if path.suffix not in (".html", ".js") or "vendor" in path.parts:
+                continue
+            text = strip_comments(path.read_text(encoding="utf-8"), path.suffix)
+            for m in re.finditer(r"""(["'`])((?:(?!\1).)*?)\1""", text):
+                if self.sentences(m.group(2)):
+                    found.append(f"static/{path.relative_to(STATIC)}: {m.group(2)[:60]}")
+        self.assertEqual(found, [])

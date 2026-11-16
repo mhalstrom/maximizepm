@@ -30,7 +30,7 @@ const stateText = (p) => p.state === "writing" ? "being written" : p.state === "
 // The row (or, with column: true, the column) of the parts. Plain text only: esc comes from the caller's page.
 export function outlineHtml(parts, esc, { column = false } = {}) {
   if (!parts.length) return "";
-  return `<nav class="doc-outline${column ? " col" : ""}" aria-label="The parts of this document">${parts.map(p =>
+  return `<nav class="doc-outline${column ? " col" : ""}" aria-label="Document parts">${parts.map(p =>
     `<a class="doc-part ${p.state}" href="#${esc(p.id)}" data-doc-part="${esc(p.id)}" title="${esc(stateText(p))}">`
     + `<span class="doc-dot" aria-hidden="true"></span>${esc(p.title)}<span class="doc-ps">${esc(stateText(p))}</span></a>`).join("")}</nav>`;
 }

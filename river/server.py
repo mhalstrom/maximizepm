@@ -2825,7 +2825,7 @@ def prompt_alert(agent, target, tail, pane=None, item=None, layout=None):
         where += f", on #{item['id']} {item['title'][:80]}"
     if q is None:
         last = " | ".join(x.strip() for x in tail[-3:])
-        return f"{where}, with no question river can read. Its last lines: {last[:300]}", None, "\n".join(tail[-3:])
+        return f"{where}, with no question MaximizePM can read. Its last lines: {last[:300]}", None, "\n".join(tail[-3:])
     text = where
     if parts["command"]:
         text += f". It asks to run ({parts['tool']}): {parts['command']}"
@@ -3060,7 +3060,7 @@ def stuck_alert(agent, target, tail, pane, item, after):
     if item:
         where += f", on #{item['id']} {item['title'][:80]}"
     last = " | ".join(x.strip() for x in tail[-8:])
-    return (f"{where}, with no question river can read: its screen has shown the same lines for {after} "
+    return (f"{where}, with no question MaximizePM can read: its screen has shown the same lines for {after} "
             f"(stuck_after), with no idle prompt and no work. Its last lines: {last[:600]}. Answer it in its pane "
             f"(the Terminal on the Sessions tab), or tell the person what it needs")
 

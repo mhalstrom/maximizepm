@@ -40,12 +40,12 @@
   <!-- A phone (#4903): the name of the tab opens the list of all tabs (the nav below, as a sheet), and the magnifier opens the search. -->
   <button class="tabbtn" type="button" id="tabBtn" aria-expanded="false" aria-controls="tabNav" title="Show all tabs"><span id="tabName">Sessions</span> <span class="caret" aria-hidden="true">▾</span></button>
   <nav id="tabNav">
-    <button data-tab="sessions" class="on" title="Running sessions and what they do">Sessions</button>
-    <button data-tab="plan" title="Projects, goals, items and releases">Plan</button>
-    <button data-tab="terminal" title="A shell on this computer">Terminal</button>
+    <button data-tab="sessions" class="on" title="Sessions and their work">Sessions</button>
+    <button data-tab="plan" title="Projects, goals and items">Plan</button>
+    <button data-tab="terminal" title="A shell here">Terminal</button>
   </nav>
   <span class="spacer"></span>
-  <input type="search" id="search" placeholder="Search items" title="Search items (Enter or /)" autocomplete="off">
+  <input type="search" id="search" placeholder="Search items" title="Search items (/)" autocomplete="off">
   <button class="iconbtn" type="button" id="searchBtn" title="Search items" aria-label="Search items"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
   <!-- All notices on or off in one click (#6001): a bell, crossed while off (components/notifyBell.js). -->
   <button class="iconbtn" type="button" id="notifyBtn" aria-pressed="true" aria-label="Notifications on" title="Notifications"></button>
@@ -57,12 +57,12 @@
   <div class="hdr-menu" id="hdrMenu">
   <button class="btn" type="button" id="settingsBtn" data-tab="settings" title="Settings and people">Settings</button>
   <label class="sub" id="themeLbl">Theme
-  <select id="theme" title="Light, dark, or the computer's setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+  <select id="theme" title="Light or dark"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   </label>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
   <button class="btn" id="updateBtn" title="Update MaximizePM and restart">Update</button>
-  <label class="sub" id="actorLbl" title="Your name on this page">You are
+  <label class="sub" id="actorLbl" title="Your name here">You are
     <select id="actor"></select>
   </label>
   <span class="sub" id="stamp"></span>
@@ -86,7 +86,7 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js" integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2" crossorigin="anonymous"></script>
 <div id="setup" class="hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle"><div class="box">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="setupTitle" style="margin:0" title="Steps to your first agent">Set up MaximizePM</h2>
+    <h2 id="setupTitle" style="margin:0" title="First agent steps">Set up MaximizePM</h2>
     <button class="iconbtn" id="setupClose" title="Close for now">✕</button>
   </div>
   <div id="setupSteps"></div>
@@ -112,7 +112,7 @@
     <button class="iconbtn" id="waitClose" title="Close">✕</button>
   </div>
   <div id="waitList"></div>
-  <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn" id="waitDismiss" title="Close this and show the chat">Dismiss</button></div>
+  <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn" id="waitDismiss" title="Show the chat">Dismiss</button></div>
 </div></div>
 
 <div id="setDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="setTitle"><div class="box">
@@ -124,7 +124,7 @@
   <div class="set-foot">
     <label class="muted"><input type="checkbox" id="setDefault"> Also make these the default for new sessions</label>
     <span class="spacer"></span>
-    <button class="btn primary" id="setRestart" type="button" disabled title="End and resume the same chat">Restart with these settings</button>
+    <button class="btn primary" id="setRestart" type="button" disabled title="Restart the same chat">Restart with these settings</button>
   </div>
 </div></div>
 
@@ -142,10 +142,10 @@
           </div>
           <div class="two">
             <label>Doer<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
-            <label title="Expert: a long talk with one session">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
+            <label title="A long expert talk">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
           </div>
-          <label title="Ids of the items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
-          <label title="Items whose output it reads">Reads<input id="addFeeds" placeholder="4"></label>
+          <label title="Items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
+          <label title="Items it reads from">Reads<input id="addFeeds" placeholder="4"></label>
           <label>Goal<select id="addGoal"><option value="">no goal</option></select></label>
           <label>Notes<textarea id="addNotes" rows="2" placeholder="Why, where, what is decided"></textarea></label>
           <div class="actions add-actions"><button class="btn primary" id="addGo">Add</button></div>
@@ -155,13 +155,13 @@
             <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="launch-legal"></label></div>
             <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
             <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
-            <label title="Make it a sub-goal of that goal">Parent<select id="goalParent"><option value="">none: a goal of its own</option></select></label>
+            <label title="Sub-goal of that goal">Parent<select id="goalParent"><option value="">none: a goal of its own</option></select></label>
             <button class="btn" id="goalGo">Add goal</button>
           </div>
         </details>
         <details id="addProjPart" class="add-part"><summary>Add a project</summary>
-          <div id="projFolderForm" title="A project linked to a folder"></div>
-          <div class="form add-form" title="A project without a folder"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
+          <div id="projFolderForm" title="Project with a folder"></div>
+          <div class="form add-form" title="Project without a folder"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
         </details>
       
 </div></div>
@@ -177,7 +177,7 @@
     <select id="searchProject" title="Project"><option value="">All projects</option></select>
     <select id="searchSince" title="Added or closed in"><option value="">Any time</option><option value="1d">last day</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option></select>
   </div>
-  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0" title="Items that hold every word"></div>
+  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0" title="Items with every word"></div>
   <div id="searchList"></div>
 </div></div>
 
