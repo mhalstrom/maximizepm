@@ -567,6 +567,14 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
   model and task that reads only your notes (`maxpm expert fresh <you>`): your
   notes are then all that it knows.
 
+## Operations
+
+MaximizePM watches each project with checks (`maxpm ops list`). A fault opens
+an operational item, `ops:<scope>:<check>`, with the evidence and the steps,
+and starts a new session for it. Before you take such an item, add a check, or
+write a check script, read `maxpm guide ops`: the parts, who may do what, how
+to state a cause with a proof, and how a check script reports.
+
 ## Blocked on another agent's item
 
 `maxpm blockers <id>` shows who holds what. Then:

@@ -1675,6 +1675,19 @@ class Plan(Base):
             cli.run(["guide", "planner"])
         self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text(encoding="utf-8"))
 
+    def test_guide_ops_prints_the_operations_guide_that_the_worker_guide_names(self):
+        # #5439: the operations guide is a file beside the worker guide, so the skill carries it too.
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["guide", "ops"]), 0)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("# MaximizePM operations"), text[:80])
+        for part in ("## The parts", "## Who may do what", "## When you hold a fault item", "## Writing a check script",
+                     "maxpm ops cause <id>", "ops_page"):
+            self.assertIn(part, text)
+        self.assertIn("`maxpm guide ops`", (cli.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8"))
+
 
 
 class DueDates(Base):
