@@ -367,6 +367,8 @@ COMMAND_PAGES = ("usage",)
 #      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
 #      "import":       the line with {file} by which its instruction file imports another one ("@{file}"), or None;
 #                      an agent whose file is not SHARED_INSTRUCTIONS and that has it reads AGENTS.md through it,
+#      "replaces":     the instruction file it read before, whose rules maxpm init moves into SHARED_INSTRUCTIONS and
+#                      then deletes (Claude Code: CLAUDE.md, #6024), or None,
 #      "skills_dir":   the folder of its skills (~ expands), or None,
 #      "voice":        what its own voice mode does, one sentence, or None,
 #      "open_link":    the label of the page's button that opens a session's web link (IDENTITY["url"]), or None,
@@ -375,7 +377,8 @@ COMMAND_PAGES = ("usage",)
 #    }
 # write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
 # mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
-SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "skills_dir": (str, type(None)),
+SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "replaces": (str, type(None)),
+              "skills_dir": (str, type(None)),
               "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
               "no_link": (str, type(None))}
 
@@ -995,27 +998,30 @@ def by_exe(exe):
 # Setup (#5184): the instruction files of a project folder, the MCP server entry, and what the page reads
 # ---------------------------------------------------------------------------------------------------------------
 
-# The instruction file that most agents read in a project folder (Codex, OpenCode, Amp and others). An agent with its
-# own file and an import line (SETUP["import"]) reads it through that line: Claude Code's CLAUDE.md is "@AGENTS.md".
+# The instruction file that most agents read in a project folder (Claude Code, Codex, OpenCode, Amp and others). An
+# agent with its own file and an import line (SETUP["import"]) reads it through that line: Gemini's GEMINI.md is
+# "@AGENTS.md".
 SHARED_INSTRUCTIONS = "AGENTS.md"
 
 
-def instruction_files():
-    """(own, shared, line, label): the instruction file of the first agent that imports the shared file, the shared
-    file, the import line that its own file holds, and that agent's label; ('CLAUDE.md', 'AGENTS.md', '@AGENTS.md',
-    'Claude Code') with the built-in agents."""
+def replaced_files():
+    """[(old, label)]: the instruction file that an agent read before it read SHARED_INSTRUCTIONS (SETUP["replaces"]),
+    and that agent's label, one entry per file, in registry order; [('CLAUDE.md', 'Claude Code')] with the built-in
+    agents (#6024). maxpm init moves the rules of each one into SHARED_INSTRUCTIONS and deletes it."""
+    out, seen = [], set()
     for m in ids():
         a = load()[m]
-        st = a.setup or {}
-        if st.get("import") and st.get("instructions") not in (None, SHARED_INSTRUCTIONS):
-            return st["instructions"], SHARED_INSTRUCTIONS, st["import"].format(file=SHARED_INSTRUCTIONS), a.label
-    raise RiverError("no registered agent imports " + SHARED_INSTRUCTIONS)  # a defect: claude.py has it
+        old = (a.setup or {}).get("replaces")
+        if old and old != SHARED_INSTRUCTIONS and old not in seen:
+            seen.add(old)
+            out.append((old, a.label))
+    return out
 
 
 def import_files():
     """[(own, line, label)] for every agent whose own instruction file reads SHARED_INSTRUCTIONS through an import line
-    (SETUP["import"]), one entry per file, in registry order: ('CLAUDE.md', '@AGENTS.md', 'Claude Code') first, then
-    ('GEMINI.md', '@AGENTS.md', 'Gemini CLI') and any other (#5218). maxpm init writes each of them."""
+    (SETUP["import"]), one entry per file, in registry order: ('GEMINI.md', '@AGENTS.md', 'Gemini CLI') with the
+    built-in agents (#5218). maxpm init writes each of them."""
     out, seen = [], set()
     for m in ids():
         a = load()[m]
@@ -1025,12 +1031,6 @@ def import_files():
             seen.add(own)
             out.append((own, st["import"].format(file=SHARED_INSTRUCTIONS), a.label))
     return out
-
-
-def shared_readers():
-    """The labels of the agents that read SHARED_INSTRUCTIONS itself ('Codex' with the built-in agents)."""
-    got = load()
-    return [got[m].label for m in ids() if (got[m].setup or {}).get("instructions") == SHARED_INSTRUCTIONS]
 
 
 def setup_entry():
@@ -1071,7 +1071,7 @@ def page_list():
 
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
-           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "import_files", "shared_readers",
+           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files", "import_files",
            "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
 
 

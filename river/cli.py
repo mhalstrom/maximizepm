@@ -64,13 +64,13 @@ SETUP = """Setting up agents to use MaximizePM
 1. Put the command on PATH (install.sh does it):
      ln -s <repo>/bin/maxpm ~/.local/bin/maxpm
 
-2. Tell your agents about it. Add this block to the instructions file your
-   agent reads (CLAUDE.md for Claude Code, AGENTS.md for Codex and others):
+2. Tell your agents about it. Add this block to AGENTS.md in the project
+   folder, the instructions file that Claude Code, Codex and others read:
 
 """ + "\n".join("     " + line for line in AGENT_SNIPPET.splitlines()) + """
 
    Or let maxpm add it:  maxpm init   (AGENTS.md holds the rules and the block;
-   CLAUDE.md imports it with the line @AGENTS.md, so every agent reads one file)
+   the rules of an old CLAUDE.md move into it, and CLAUDE.md is deleted)
 
 3. Claude Code only, optional: install the skills so they load when needed:
      ln -s <repo>/skills/maxpm ~/.claude/skills/maxpm
@@ -2006,8 +2006,8 @@ def build_parser(only=None):
     x.add_argument("--description", default="", help="what the project covers, for agents")
     x.add_argument("--file", action="append", help="add the block to this file only (repeatable)")
     x.add_argument("--move", action="store_true", default=None,
-                   help="move the rules in CLAUDE.md to AGENTS.md; CLAUDE.md becomes @AGENTS.md")
-    x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md and AGENTS.md apart")
+                   help="move the rules in CLAUDE.md to AGENTS.md and delete CLAUDE.md (the default with no terminal)")
+    x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md as it is")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -2455,7 +2455,7 @@ def build_parser(only=None):
     x = sub.add_parser("guide", help="how to use MaximizePM: worker loop, manager (and writing tasks), or agent setup")
     x.add_argument("which", nargs="?", default="worker",
                    choices=["worker", "manager", "setup", "decisions", "ops"])
-    x = sub.add_parser("setup-agent", help="print (or append) the instructions block for CLAUDE.md / AGENTS.md")
+    x = sub.add_parser("setup-agent", help="print (or append) the instructions block for AGENTS.md")
     x.add_argument("--append", metavar="FILE", help="append the block to this file if it is not there yet")
     x.add_argument("--claude-desktop", action="store_true",
                    help="add MaximizePM (maxpm mcp) to the Claude desktop app's MCP servers, leaving the others as they are")
@@ -3659,12 +3659,13 @@ def _append_block(f):
     return f"{f.name}: added the work queue block"
 
 
-def _imports_agents(text):
-    """An instruction file that imports AGENTS.md (Claude Code: a line @AGENTS.md in CLAUDE.md), so its agent reads
-    the same rules as other agents. The file names and the line come from the adapters (agents.instruction_files)."""
+def _old_rules(text):
+    """The rules of an old instruction file (CLAUDE.md, #6024): its text without the work queue block and without a
+    line that imports AGENTS.md (@AGENTS.md, which maxpm init wrote there before)."""
     from . import agents
-    line = agents.instruction_files()[2]
-    return any(x.strip() == line for x in text.splitlines())
+    line = "@" + agents.SHARED_INSTRUCTIONS
+    text = text.replace(OLD_SNIPPET, "").replace(AGENT_SNIPPET, "")
+    return "\n".join(x for x in text.splitlines() if x.strip() != line).strip()
 
 
 def _only_block(text):
@@ -3672,51 +3673,65 @@ def _only_block(text):
 
 
 def instructions_layout(folder):
-    """How a folder's agent instructions are laid out (the names of the built-in agents; the adapters give them:
-    agents.instruction_files):
-    shared: CLAUDE.md imports AGENTS.md, so every agent reads one file.
-    none: no rules (no file, or only the work queue block).  agents_only: the rules are in AGENTS.md.
-    claude_only: the rules are in CLAUDE.md, and AGENTS.md is missing or holds only the work queue block.
-    both: each file holds its own rules."""
+    """How a folder's agent instructions are laid out. AGENTS.md is the one file of every agent; CLAUDE.md is the old
+    file of Claude Code (the adapters give the names: agents.SHARED_INSTRUCTIONS, agents.replaced_files):
+    none: no rules (no file, or only the work queue block or the line @AGENTS.md).  agents_only: the rules are in
+    AGENTS.md.  claude_only: the rules are in CLAUDE.md, and AGENTS.md has none.  both: each file holds rules."""
     from . import agents
-    own, shared, _, _ = agents.instruction_files()
-    c, a = Path(folder, own), Path(folder, shared)
-    ct = c.read_text(errors="replace", encoding="utf-8") if c.exists() else None
+    a = Path(folder, agents.SHARED_INSTRUCTIONS)
     at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else None
-    if ct is not None and _imports_agents(ct):
-        return "shared"
-    c_rules = ct is not None and not _only_block(ct)
+    old = [Path(folder, f) for f, _ in agents.replaced_files()]
+    c_rules = any(f.exists() and _old_rules(f.read_text(errors="replace", encoding="utf-8")) for f in old)
     a_rules = at is not None and not _only_block(at)
     return "both" if c_rules and a_rules else "claude_only" if c_rules else "agents_only" if a_rules else "none"
 
 
-def move_hint():
-    """The choice that maxpm init names when only CLAUDE.md holds a folder's rules."""
+def move_hint(old):
+    """The choice that maxpm init names when an old instruction file (CLAUDE.md) holds rules of a folder."""
     from . import agents
-    own, shared, line, label = agents.instruction_files()
-    readers = (agents.shared_readers() or ["Other agents"])[0]  # the first one (Codex): the line stays short
-    return (f"{own} holds this folder's rules, but {readers} and other agents read {shared} and miss them. "
-            f"To give every agent one file: maxpm init --move (the text of {own} goes to {shared}, and "
-            f"{own} becomes the one line {line}, which {label} reads as an import)")
+    shared = agents.SHARED_INSTRUCTIONS
+    return (f"{old} holds rules of this folder. Every agent reads {shared}; to keep the rules in that one file: "
+            f"maxpm init --move (the rules of {old} go to {shared}, and {old} is deleted)")
+
+
+def _paragraphs(text):
+    import re
+    return [p.strip("\n") for p in re.split(r"\n[ \t]*\n", text) if p.strip()]
+
+
+def _move_rules(old, a):
+    """Move the rules of the old instruction file old into AGENTS.md a: each paragraph that a does not hold yet
+    (the same words, whitespace aside) goes after a's own rules, before its work queue block when it holds only that
+    block. Returns the line that says what moved."""
+    rules = _old_rules(old.read_text(errors="replace", encoding="utf-8"))
+    at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else ""
+    have = {" ".join(p.split()) for p in _paragraphs(at)}
+    new = [p for p in _paragraphs(rules) if " ".join(p.split()) not in have]
+    if not new:
+        return f"{a.name}: holds every rule of {old.name} already"
+    moved = "\n\n".join(new) + "\n"
+    if _only_block(at):
+        text = moved + ("\n" + at.lstrip("\n") if at.strip() else "")
+    else:
+        text = at.rstrip("\n") + "\n\n" + moved
+    a.write_text(text, encoding="utf-8")
+    return f"{a.name}: now holds the rules from {old.name}"
 
 
 def setup_instructions(folder, move=None):
-    """_setup_shared, and the instruction file of every other agent that imports AGENTS.md (_setup_importers), whose
-    lines come before the advice that ends the lines of a folder whose rules are in CLAUDE.md (claude_only, both)."""
-    layout = instructions_layout(folder)
-    main, more = _setup_shared(folder, move), _setup_importers(folder)
-    if layout == "both" or (layout == "claude_only" and not move):
-        return main[:-1] + more + main[-1:]
-    return main + more
+    """_setup_shared, and the instruction file of every agent that imports AGENTS.md (_setup_importers), whose lines
+    come before the advice that ends the lines of a folder whose CLAUDE.md keeps its rules (move not True)."""
+    main, note = _setup_shared(folder, move)
+    return main + _setup_importers(folder) + note
 
 
 def _setup_importers(folder):
-    """The own instruction file of each agent after the first that imports AGENTS.md (Gemini CLI: GEMINI.md, #5218):
-    missing, or holding only the work queue block, it becomes the one import line; holding its own rules, it gets the
-    work queue block, and nothing else of it changes. Returns one line per change."""
+    """The own instruction file of each agent that imports AGENTS.md (Gemini CLI: GEMINI.md, #5218): missing, or
+    holding only the work queue block, it becomes the one import line; holding its own rules, it gets the work queue
+    block, and nothing else of it changes. Returns one line per change."""
     from . import agents
     out = []
-    for own, line, label in agents.import_files()[1:]:
+    for own, line, label in agents.import_files():
         f = Path(folder) / own
         text = f.read_text(errors="replace", encoding="utf-8") if f.exists() else None
         if text is not None and any(x.strip() == line for x in text.splitlines()):
@@ -3731,40 +3746,30 @@ def _setup_importers(folder):
 
 
 def _setup_shared(folder, move=None):
-    """Add the work queue block so that every agent reads it, and, when asked, one set of rules for all.
+    """Put the rules of a folder and the work queue block in the one file that every agent reads, AGENTS.md (#6024).
 
-    AGENTS.md holds the rules and the block; CLAUDE.md imports it with @AGENTS.md (the names come from the adapters:
-    agents.instruction_files). move=True moves the rules from CLAUDE.md into AGENTS.md; move=False keeps both files
-    as they are (the block goes in each); move=None does what needs no choice and says the choice. Returns one line
-    per change."""
+    An old instruction file (CLAUDE.md, agents.replaced_files) that holds no rules (only the block or the line
+    @AGENTS.md) is deleted. One that holds rules: move=True moves them into AGENTS.md and deletes it; move=False keeps
+    it as it is; move=None keeps it and says the choice. Returns (one line per change, the closing advice)."""
     from . import agents
-    own, shared, line, label = agents.instruction_files()
     folder = Path(folder)
-    c, a = folder / own, folder / shared
-    layout = instructions_layout(folder)
-    out = []
-    if layout == "claude_only" and move:
-        a.write_text(c.read_text(encoding="utf-8"), encoding="utf-8")
-        out += [f"{shared}: now holds the rules from {own}", _append_block(a)]
-        c.write_text(line + "\n", encoding="utf-8")
-        out.append(f"{own}: now the one line {line}, so {label} and every other agent read the same rules")
-        return out
-    if layout in ("none", "agents_only", "shared"):
-        if layout != "shared" and c.exists():  # CLAUDE.md holds only the block: AGENTS.md has it now
-            c.write_text(line + "\n", encoding="utf-8")
-            out.append(f"{own}: now the one line {line} (it held only the work queue block)")
-        out.append(_append_block(a))
+    a = folder / agents.SHARED_INSTRUCTIONS
+    out, note = [], []
+    for name, label in agents.replaced_files():
+        c = folder / name
         if not c.exists():
-            c.write_text(line + "\n", encoding="utf-8")
-            out.append(f"{own}: created as the one line {line}, so {label} reads {shared} too")
-        return out
-    out += [_append_block(c), _append_block(a)]
-    if layout == "claude_only":
-        out.append(move_hint() if move is None else f"{shared}: kept apart from {own}; it holds only the work queue block")
-    else:
-        out.append(f"{own} and {shared} hold different rules, and each agent reads only one of them. To share "
-                   f"them: move the rules from {own} into {shared} and make {own} the one line {line}")
-    return out
+            continue
+        if not _old_rules(c.read_text(errors="replace", encoding="utf-8")):
+            c.unlink()
+            out.append(f"{name}: deleted (it held no rules of its own); {label} reads {a.name}")
+        elif move:
+            out.append(_move_rules(c, a))
+            c.unlink()
+            out.append(f"{name}: deleted; {label} reads {a.name}")
+        else:
+            note.append(move_hint(name) if move is None else f"{name}: kept as it is; {label} reads it and {a.name}")
+    out.append(_append_block(a))
+    return out, note
 
 
 def folder_project_name(folder):
@@ -3805,19 +3810,18 @@ def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
-    # AGENTS.md for Codex, OpenCode, and the other agents that read it; CLAUDE.md imports it for Claude Code.
+    # AGENTS.md for every agent (Claude Code, Codex, OpenCode, ...); an old CLAUDE.md gives its rules to it (#6024).
     if args.file:
         lines += [_append_block(Path(f)) for f in args.file]
     else:
         move = args.move
-        if move is None and instructions_layout(here) == "claude_only" and sys.stdin.isatty():
+        if move is None and instructions_layout(here) in ("claude_only", "both") and sys.stdin.isatty():
             from . import agents
-            own, shared, line, _ = agents.instruction_files()
-            readers = (agents.shared_readers() or ["Other agents"])[0]  # the first one (Codex): the line stays short
-            ans = input(f"{own} holds this folder's rules; {readers} and other agents read {shared}. Move the rules "
-                        f"to {shared} and make {own} import it ({line}), so every agent reads them? [Y/n] ")
+            olds = " and ".join(f for f, _ in agents.replaced_files() if (here / f).exists())
+            ans = input(f"{olds} holds rules of this folder. Move them to {agents.SHARED_INSTRUCTIONS}, which every "
+                        f"agent reads, and delete {olds}? [Y/n] ")
             move = ans.strip().lower() in ("", "y", "yes")
-        lines += setup_instructions(here, move)
+        lines += setup_instructions(here, True if move is None else move)
     shown = name or linked_here[0]
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')

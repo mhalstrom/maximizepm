@@ -287,8 +287,10 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   open). `write_mcp_config(path=None, remove=False)` adds MaximizePM's MCP server (`agents.setup_entry()`) to the
   agent's config file, or takes it out, and returns what changed: `claude` writes the Claude desktop app's config,
   `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`).
-- `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`. `agents.instruction_files()` gives the file of the agent that imports
-  it (CLAUDE.md), and `maxpm init`, the setup guide and the Projects folder form take the names from there.
+- `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`, the one instruction file of a project folder. `agents.replaced_files()`
+  gives each old file an agent read before (`SETUP["replaces"]`: CLAUDE.md), whose rules `maxpm init`, the setup guide
+  and the Projects folder form move into AGENTS.md before they delete it. `agents.import_files()` gives each file
+  that imports AGENTS.md (`SETUP["import"]`: GEMINI.md is `@AGENTS.md`).
 - `GET /api/agents` (`agents.page_list()`) gives each agent's describe part, the parts it supports, its launch
   capabilities and its setup texts; `main` marks the first registered agent. The page reads it once
   (`static/components/agents.js`), and `views/sessions.js` tests no agent name. A session's `provider` has `agent`,

@@ -671,15 +671,15 @@ function renderSetup(st) {
       : rc.launcher === "old" ? "The maxpm command still points at an older copy of MaximizePM. Update it to this one."
       : "The agents you start talk to MaximizePM with a small command, maxpm. One click adds it to this Mac.",
     rc.in_app_image ? "" : `<button class="btn primary" data-su="maxpmcmd">${rc.launcher === "old" ? "Update" : "Add"} the maxpm command</button>`));
-  // One instructions file for every agent: AGENTS.md holds the rules, CLAUDE.md imports it (@AGENTS.md).
-  const blocks = st.folders.filter(f => f.exists && (f.claude_md !== "current" || f.agents_md !== "current"));
+  // One instructions file for every agent: AGENTS.md holds the rules; an old CLAUDE.md gives its rules to it (#6024).
+  const blocks = st.folders.filter(f => f.exists && (f.agents_md !== "current" || (f.empty_old || []).length));
   const layouts = { claude_only: "its CLAUDE.md has rules that Codex and other agents don't read",
-    both: "CLAUDE.md and AGENTS.md have different rules; each agent reads only one" };
+    both: "its CLAUDE.md has rules that Codex and other agents don't read" };
   out.push(step(st.folders.length > 0 && blocks.length === 0, "Add a project folder",
     st.folders.length ? st.folders.map(f => `<div title="${esc(f.path)}">${esc(f.path.replace(/^\/(Users|home)\/[^/]+/, "~"))} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
       + (!f.exists ? " · folder not found" : layouts[f.layout] ? " · " + esc(layouts[f.layout]) : "")
-      + (f.layout === "claude_only" ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
-          title="Move CLAUDE.md into AGENTS.md">Share them with every agent</button>` : "")
+      + (layouts[f.layout] ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
+          title="Move to AGENTS.md">Share them with every agent</button>` : "")
       + `</div>`).join("")
       + `<details style="margin-top:6px"><summary>Add another folder</summary>${folderForm()}</details>`
       : "The folder of something you're building. Agents you start work in it." + folderForm(),

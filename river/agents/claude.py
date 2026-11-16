@@ -765,9 +765,11 @@ def read_commands(folder):
 # ---------------------------------------------------------------------------------------------------------------
 
 SETUP = {
-    "instructions": "CLAUDE.md",
-    # CLAUDE.md that holds the one line @AGENTS.md imports it: Claude Code reads the same rules as other agents.
-    "import": "@{file}",
+    # Claude Code reads AGENTS.md of the folder (checked in Claude Code 2.1.325), so a folder keeps its rules in that
+    # one file for every agent; maxpm init moves the rules of an old CLAUDE.md into it and deletes it (#6024).
+    "instructions": "AGENTS.md",
+    "import": None,
+    "replaces": "CLAUDE.md",
     "skills_dir": "~/.claude/skills",
     # Voice (#4626): Claude Code records the microphone of the computer it runs on and takes no audio from outside
     # (checked in Claude Code 2.1.319), so the page dictates into its message box as for every agent (#5107).

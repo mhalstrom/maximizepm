@@ -1204,12 +1204,13 @@ class Setup(Env):
     are in the adapters, and the page reads them from GET /api/agents instead of testing agent names."""
 
     def test_the_instruction_files_come_from_the_adapters(self):
-        self.assertEqual(agents.get("claude").setup["instructions"], "CLAUDE.md")
+        # #6024: Claude Code reads AGENTS.md too; CLAUDE.md is only the old file whose rules maxpm init moves.
+        self.assertEqual(agents.get("claude").setup["instructions"], "AGENTS.md")
         self.assertEqual(agents.get("codex").setup["instructions"], "AGENTS.md")
-        self.assertEqual(agents.instruction_files(), ("CLAUDE.md", "AGENTS.md", "@AGENTS.md", "Claude Code"))
-        self.assertEqual(agents.shared_readers()[0], "Codex")  # and the other agents that read AGENTS.md (Pi)
-        self.assertTrue(cli._imports_agents("# rules\n@AGENTS.md\n"))
-        self.assertIn("Codex and other agents read AGENTS.md", cli.move_hint())
+        self.assertEqual(agents.replaced_files(), [("CLAUDE.md", "Claude Code")])
+        self.assertEqual(cli._old_rules("@AGENTS.md\n" + cli.AGENT_SNIPPET), "")
+        self.assertEqual(cli._old_rules("# rules\n@AGENTS.md\n"), "# rules")
+        self.assertIn("maxpm init --move", cli.move_hint("CLAUDE.md"))
 
     def test_a_user_adapter_with_its_own_file_name_changes_what_init_writes(self):
         # A user module that replaces claude with another file name: init and the layout follow it.
@@ -1223,7 +1224,7 @@ class Setup(Env):
         self.assertEqual((d / "CLAUDE.local.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
         self.assertFalse((d / "CLAUDE.md").exists())
         self.assertTrue(any("CLAUDE.local.md: created" in x for x in lines))
-        self.assertEqual(cli.instructions_layout(d), "shared")
+        self.assertEqual(cli.instructions_layout(d), "none")
 
     def test_the_voice_text_comes_from_the_adapter(self):
         self.assertEqual(sessions.provider("claude-code")["voice_cli"], agents.get("claude").setup["voice"])

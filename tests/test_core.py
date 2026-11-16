@@ -3982,46 +3982,51 @@ class AgentBlock(unittest.TestCase):
     def test_instructions_one_file_for_every_agent(self):
         from pathlib import Path
         from river import cli
+        # #6024: AGENTS.md is the one file of every agent, Claude Code too; maxpm init writes no CLAUDE.md.
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            cli.setup_instructions(d)  # nothing yet: AGENTS.md holds the block, CLAUDE.md imports it
-            self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
-            self.assertEqual(cli.instructions_layout(d), "shared")
-            cli.setup_instructions(d)  # again: nothing changes
-            self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
+            cli.setup_instructions(d)  # nothing yet: AGENTS.md holds the block
+            self.assertEqual((c.exists(), a.read_text(encoding="utf-8")), (False, cli.AGENT_SNIPPET))
+            self.assertEqual(cli.instructions_layout(d), "none")
+            self.assertEqual(cli.setup_instructions(d), ["AGENTS.md: already has the work queue block"])
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("# Rules\n\nPush to main deploys.\n", encoding="utf-8")
             a.write_text(cli.AGENT_SNIPPET, encoding="utf-8")  # what an older maxpm init made
             self.assertEqual(cli.instructions_layout(d), "claude_only")
-            lines = cli.setup_instructions(d)  # no choice given: both get the block, and the choice is named
+            lines = cli.setup_instructions(d)  # no choice given (the page): CLAUDE.md stays, and the choice is named
             self.assertIn("maxpm init --move", lines[-1])
             self.assertIn("Push to main", c.read_text(encoding="utf-8"))
-            cli.setup_instructions(d, move=True)
-            self.assertEqual(c.read_text(encoding="utf-8"), "@AGENTS.md\n")
+            self.assertNotIn("Work queue", c.read_text(encoding="utf-8"))
+            lines = cli.setup_instructions(d, move=True)
+            self.assertFalse(c.exists())
+            self.assertIn("CLAUDE.md: deleted; Claude Code reads AGENTS.md", lines)
             text = a.read_text(encoding="utf-8")
-            self.assertIn("Push to main deploys", text)
+            self.assertTrue(text.startswith("# Rules\n\nPush to main deploys.\n\n## Work queue"), text)
             self.assertEqual(text.count("## Work queue"), 1)
-            self.assertEqual(cli.instructions_layout(d), "shared")
+            self.assertEqual(cli.instructions_layout(d), "agents_only")
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("claude rules\n", encoding="utf-8"); a.write_text("codex rules\n", encoding="utf-8")
+            c.write_text("# Rules\n\nshared rule\n\nclaude rule\n", encoding="utf-8")
+            a.write_text("# Rules\n\nshared  rule\n", encoding="utf-8")
             self.assertEqual(cli.instructions_layout(d), "both")
-            lines = cli.setup_instructions(d, move=True)  # two sets of rules: river never merges them
-            self.assertIn("different rules", lines[-1])
-            self.assertIn(cli.AGENT_SNIPPET, c.read_text(encoding="utf-8")); self.assertIn(cli.AGENT_SNIPPET, a.read_text(encoding="utf-8"))
-            self.assertIn("claude rules", c.read_text(encoding="utf-8"))
+            cli.setup_instructions(d, move=True)  # the paragraphs AGENTS.md lacks go after its own rules
+            self.assertFalse(c.exists())
+            self.assertEqual(a.read_text(encoding="utf-8"), "# Rules\n\nshared  rule\n\nclaude rule\n\n" + cli.AGENT_SNIPPET)
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("claude rules\n", encoding="utf-8")
-            cli.setup_instructions(d, move=False)  # keep apart
-            self.assertEqual((c.read_text(encoding="utf-8").count("## Work queue"), a.read_text(encoding="utf-8")), (1, cli.AGENT_SNIPPET))
+            lines = cli.setup_instructions(d, move=False)  # keep it as it is
+            self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("claude rules\n", cli.AGENT_SNIPPET))
+            self.assertIn("CLAUDE.md: kept as it is", lines[-1])
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("@AGENTS.md\n", encoding="utf-8")
+            c.write_text("@AGENTS.md\n" + cli.AGENT_SNIPPET, encoding="utf-8")  # what an older maxpm init made
             a.write_text(cli.OLD_SNIPPET + "\n## Rules\n\nTest first.\n", encoding="utf-8")  # an init before #4978: the 'maxpm plan' line
-            lines = cli.setup_instructions(d)  # init again: the old block becomes the current one, the rules stay
-            self.assertIn("AGENTS.md: the work queue block is current again", lines[0])
+            lines = cli.setup_instructions(d)  # init again: CLAUDE.md goes, the old block becomes the current one
+            self.assertFalse(c.exists())
+            self.assertIn("CLAUDE.md: deleted (it held no rules of its own); Claude Code reads AGENTS.md", lines[0])
+            self.assertIn("AGENTS.md: the work queue block is current again", lines[1])
             self.assertEqual(a.read_text(encoding="utf-8"), cli.AGENT_SNIPPET + "\n## Rules\n\nTest first.\n")
             self.assertEqual(cli.setup_instructions(d)[0], "AGENTS.md: already has the work queue block")
 

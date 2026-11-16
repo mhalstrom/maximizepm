@@ -700,7 +700,7 @@ def read_commands(folder):
 SETUP = {
     "instructions": "GEMINI.md",
     # GEMINI.md takes Gemini's own import: a token @<path> after whitespace (memoryImportProcessor, relative to the
-    # file's folder), so maxpm init makes it the one line @AGENTS.md, as Claude Code's CLAUDE.md (#5218).
+    # file's folder), so maxpm init makes it the one line @AGENTS.md (#5218).
     "import": "@{file}",
     "skills_dir": "~/.gemini/skills",
     "voice": "/voice turns Gemini's voice dictation on or off.",

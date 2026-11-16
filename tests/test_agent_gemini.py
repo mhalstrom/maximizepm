@@ -501,7 +501,7 @@ class Setup(Home):
 
 class InitFile(unittest.TestCase):
     """#5218: maxpm init makes GEMINI.md the one line @AGENTS.md (Gemini's own import), so a Gemini CLI session reads
-    the work queue block and the rules of AGENTS.md, as Claude Code reads them through CLAUDE.md."""
+    the work queue block and the rules of AGENTS.md."""
 
     def setUp(self):
         self.d = Path(tempfile.mkdtemp())

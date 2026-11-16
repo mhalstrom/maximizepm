@@ -812,6 +812,6 @@ def read_commands(folder):
     return out
 
 
-# Grok reads AGENTS.md and CLAUDE.md (and Agents.md, AGENT.md, CLAUDE.local.md) in each folder: the CLAUDE.md that
-# MaximizePM's setup writes for Claude Code reaches it too, so a second file would say the same twice.
-SETUP = {"instructions": "CLAUDE.md", "skills_dir": "~/.grok/skills", "voice": None, "open_link": None}
+# Grok reads AGENTS.md and CLAUDE.md (and Agents.md, AGENT.md, CLAUDE.local.md) in each folder: the AGENTS.md that
+# MaximizePM's setup writes for every agent reaches it too, so a second file would say the same twice.
+SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.grok/skills", "voice": None, "open_link": None}

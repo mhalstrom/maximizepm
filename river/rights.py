@@ -52,7 +52,7 @@ COMMANDS = {
     "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "heartbeat": ANY,
     "report": ANY, "capacity": ANY, "host": ONLY_PERSON, "agent-login": ONLY_PERSON, "phone": ONLY_PERSON,
     "config": {"get": ANY, "set": LEAD, "unset": LEAD},
-    "serve": ANY,  # serve --restart: sessions run it after a commit (CLAUDE.md)
+    "serve": ANY,  # serve --restart: sessions run it after a commit (AGENTS.md)
     "skills": ANY, "activity": ANY, "db": ANY, "mcp": ANY, "connect": ANY, "guide": ANY, "setup-agent": ANY,
 }
 

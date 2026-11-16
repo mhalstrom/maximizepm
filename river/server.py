@@ -5060,15 +5060,20 @@ def _shown_cmd(conn, cmd):
 
 
 def _block_state(path):
-    from . import agents
-    from .cli import AGENT_SNIPPET, _imports_agents
+    from .cli import AGENT_SNIPPET
     if not path.exists():
         return "missing"
     text = path.read_text(errors="replace", encoding="utf-8")
-    own, shared, _, _ = agents.instruction_files()
-    if path.name == own and _imports_agents(text):
-        return _block_state(path.with_name(shared))  # Claude Code reads AGENTS.md through the import
     return "current" if AGENT_SNIPPET in text else "old" if core.names_product(text) else "missing"
+
+
+def _empty_old_files(folder):
+    """The old instruction files of a folder (CLAUDE.md, agents.replaced_files) that hold no rules of their own: the
+    setup guide's Update deletes them (#6024)."""
+    from . import agents
+    from .cli import _old_rules
+    return [n for n, _ in agents.replaced_files() if Path(folder, n).is_file()
+            and not _old_rules(Path(folder, n).read_text(errors="replace", encoding="utf-8"))]
 
 
 def _tailnet_status(conn):
@@ -5118,7 +5123,7 @@ def setup_status(conn):
     from . import notify
     from . import agents as adapters
     from .cli import instructions_layout
-    own, shared, _, _ = adapters.instruction_files()
+    shared = adapters.SHARED_INSTRUCTIONS
     folders = {}
     for p in core.project_list(conn):
         if p["path"]:
@@ -5135,7 +5140,8 @@ def setup_status(conn):
     return {
         "done": core.setting(conn, "setup_done") == "on",
         "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
-                     "claude_md": _block_state(Path(d, own)), "agents_md": _block_state(Path(d, shared)),
+                     "agents_md": _block_state(Path(d, shared)),
+                     "empty_old": _empty_old_files(d) if Path(d).is_dir() else [],
                      "layout": instructions_layout(d) if Path(d).is_dir() else None}
                     for d, names in folders.items()],
         "projects_without_folder": [p["name"] for p in core.project_list(conn) if not p["path"]],
@@ -5167,7 +5173,7 @@ def setup_status(conn):
 
 def setup_block(conn, path, move=None):
     """Add or update the work queue block for every agent in a registered project folder (maxpm init):
-    AGENTS.md holds it and CLAUDE.md imports it; move=True first moves the rules in CLAUDE.md to AGENTS.md."""
+    AGENTS.md holds it; move=True first moves the rules in CLAUDE.md to AGENTS.md and deletes CLAUDE.md."""
     from .cli import setup_instructions
     folder = Path(path).expanduser().resolve()
     if folder not in {Path(p["path"]).resolve() for p in core.project_list(conn) if p["path"]}:
@@ -5181,7 +5187,7 @@ def folder_add(conn, path, name=None, description="", move=None, actor=None):
     """Add a project folder from the page: what maxpm init does in that folder, without a terminal. The
     project is created (default name: the folder's) or linked; a project linked to another folder that
     still exists is refused (only the user moves it: maxpm project path --move). Then the agent block
-    goes in AGENTS.md, and CLAUDE.md imports it; move is the CLAUDE.md rules choice (None: ask)."""
+    goes in AGENTS.md; move is the choice for the rules of an old CLAUDE.md (None: ask)."""
     from .cli import link_folder, setup_instructions, instructions_layout, folder_project_name
     if not (path or "").strip():
         raise RiverError("choose a folder")

@@ -53,13 +53,14 @@ export function wireFolderForms(onAdded) {
     try {
       const r = await act("folder_add", { path: v("path"), name: v("name") || undefined, description: v("description"), move });
       const out = form.querySelector(".ff-out");
-      // CLAUDE.md holds this folder's rules: ask once whether every agent should read them (AGENTS.md).
-      out.innerHTML = r.layout === "claude_only"
+      // An old CLAUDE.md holds rules of this folder: ask once whether to move them to AGENTS.md, which every agent reads.
+      const old = r.layout === "claude_only" || r.layout === "both";
+      out.innerHTML = old
         ? `Added <b>${esc(r.project)}</b>. This folder's CLAUDE.md has rules that Codex and other agents do not read.
            <button class="btn" data-ff-move="1">Share them with every agent</button><button class="btn" data-ff-move="0">Keep CLAUDE.md as it is</button>`
         : `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
       // Keep the fields while the CLAUDE.md choice is open: its buttons send the same folder again.
-      if (!(r.layout === "claude_only" && move === undefined)) {
+      if (!(old && move === undefined)) {
         for (const k of ["path", "name", "description"]) form.querySelector(`[data-ff="${k}"]`).value = "";
         if (move !== undefined) out.innerHTML = `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
       }

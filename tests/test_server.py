@@ -4143,13 +4143,17 @@ class SetupGuide(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
-    def test_block_fix_writes_both_files_and_status_follows(self):
+    def test_block_fix_writes_agents_md_and_status_follows(self):
         before = server.setup_status(self.c)
         self.assertFalse(before["done"])
-        self.assertEqual(before["folders"][0]["claude_md"], "missing")
+        self.assertEqual(before["folders"][0]["agents_md"], "missing")
+        with open(os.path.join(self.folder, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write("@AGENTS.md\n")  # what an older maxpm init made: Update deletes it (#6024)
+        self.assertEqual(server.setup_status(self.c)["folders"][0]["empty_old"], ["CLAUDE.md"])
         server.setup_block(self.c, self.folder)
         f = server.setup_status(self.c)["folders"][0]
-        self.assertEqual((f["claude_md"], f["agents_md"]), ("current", "current"))
+        self.assertEqual((f["agents_md"], f["empty_old"]), ("current", []))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "CLAUDE.md")))
 
     def test_block_fix_can_move_claude_rules_to_agents_md(self):
         with open(os.path.join(self.folder, "CLAUDE.md"), "w", encoding="utf-8") as f:
@@ -4157,7 +4161,8 @@ class SetupGuide(unittest.TestCase):
         self.assertEqual(server.setup_status(self.c)["folders"][0]["layout"], "claude_only")
         server.setup_block(self.c, self.folder, move=True)
         f = server.setup_status(self.c)["folders"][0]
-        self.assertEqual((f["claude_md"], f["agents_md"], f["layout"]), ("current", "current", "shared"))
+        self.assertEqual((f["agents_md"], f["layout"]), ("current", "agents_only"))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "CLAUDE.md")))
 
     def test_add_a_project_folder_from_the_page(self):
         blog = os.path.join(self.dir.name, "My Blog")
@@ -4171,8 +4176,9 @@ class SetupGuide(unittest.TestCase):
         self.assertIn("MaximizePM", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         # the rules choice, then the same folder again: nothing new, still one project
         r = server.folder_add(self.c, blog, move=True)
-        self.assertEqual((r["project"], r["layout"]), ("my-blog", "shared"))
-        self.assertEqual(Path(os.path.join(blog, "CLAUDE.md")).read_text(encoding="utf-8").strip(), "@AGENTS.md")
+        self.assertEqual((r["project"], r["layout"]), ("my-blog", "agents_only"))
+        self.assertFalse(os.path.exists(os.path.join(blog, "CLAUDE.md")))
+        self.assertIn("No tabs.", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
     def test_add_a_project_folder_refuses_bad_paths_and_a_name_in_use_elsewhere(self):

@@ -15,7 +15,7 @@ When the user says "go" (or asks you to take work from the queue), run
   part for which element, and the tokens. `tests/test_ui_parts.py` refuses a raw button, a dialog
   of its own, or a literal color or px size in a view.
 - After a commit that changes `river/*.py`, `maxpm serve` starts again by itself
-  within a minute or two and runs the new code. To have it at once, run
+  and runs the new code, at most once in `serve_reload_min` (15m). To have it at once, run
   `maxpm serve --restart`: it waits until the page answers. Never add an item
   for a person to restart `maxpm serve`.
 
@@ -33,5 +33,6 @@ run the code in that folder. One conflict marker there stops maxpm for every ses
   When `--ff-only` refuses, `main` moved: rebase again in your worktree and test again.
   Never resolve a conflict in the main tree.
 - Release: commit in your worktree, then `merge --ff-only` into the local `main`. Do not
-  push, and do not use `--ship`: the manager pushes after mark's yes. Then run
-  `maxpm done <id>` and `maxpm alert <manager> "<branch> is on main" --item <id> --blocked`.
+  push. Then run `maxpm done <id> --ship`: the task joins the next release of the target
+  maximizepm-github. A release is a push of `main` and a version tag to GitHub, at most once
+  a week unless mark asks (mark 2026-11-15, policy p114); the manager does it.
