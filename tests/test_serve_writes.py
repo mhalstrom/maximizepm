@@ -277,6 +277,24 @@ class ServeWritesPolls(unittest.TestCase):
         self.assertTrue(client._pollable("wait", ["wait"]) and client._pollable("inbox", ["inbox", "--wait"]))
         self.assertFalse(client._pollable("inbox", ["inbox"]))
 
+    def test_serve_writes_a_wait_polls_again_through_a_proxy_502(self):
+        # #6030: while serve restarts, the sandbox's HTTP proxy answers 502 (or 504); serve never does. The wait
+        # polls again, as when serve stops answering, and does not end with "took the command but gave no answer".
+        answers = [(200, b'{"code": 75, "out": "", "err": "", "poll": {"started": "t0"}}'),
+                   (502, b"<html>Bad Gateway</html>"), (504, b""),
+                   (200, b'{"code": 0, "out": "WORK: #3 is ready.\\n", "err": ""}')]
+        sent, naps = [], []
+
+        def post(port, body, token, timeout):
+            sent.append(1)
+            return answers[len(sent) - 1]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "_post", post), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = client._poll_loop(1, "t", {"argv": ["wait"]}, sleep=naps.append)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "WORK: #3 is ready.\n", ""))
+        self.assertEqual(len(sent), 4)
+
     def test_serve_writes_a_runner_answers_a_poll_with_its_state(self):
         proc = subprocess.Popen([sys.executable, "-m", "river.runner", self.db], cwd=ROOT, text=True,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)

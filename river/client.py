@@ -358,8 +358,9 @@ def _poll_loop(port, token, req, sleep=None, clock=None):
     first, lost = True, None
     while True:
         status, answer = _post_fresh(port, _dumps(req).encode(), token)
-        if status is None or 400 <= status < 500 or status in (503, 599):
+        if status is None or 400 <= status < 500 or status in (502, 503, 504, 599):
             # serve does not run it now: a restart (no connection, older code), every runner busy, a lost answer.
+            # serve never answers 502 or 504: the sandbox's HTTP proxy does, when serve is down for a restart (#6030).
             if first and status != 599:
                 return None
             lost = lost if lost is not None else clock()
