@@ -273,7 +273,11 @@ button.srow-it { cursor: pointer; }
 .acard-tries { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--w-try), 1fr)); gap: var(--sp-3); }
 .acard-try { display: flex; flex-direction: column; gap: var(--sp-2); border: var(--hair) solid var(--line);
   border-radius: var(--r-m); padding: var(--sp-3); min-width: 0; }
-.acard-try .btn { align-self: flex-start; }
+.acard-tryacts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+/* a try's first canvas in line (#6040): the page at half size, so its first screenshots show; it scrolls in the box */
+.acard-trybox { height: var(--h-try); overflow: hidden; border: var(--hair) solid var(--line); border-radius: var(--r-s); background: var(--panel); }
+.acard-tryframe { width: 200%; height: 200%; border: 0; zoom: .5; }
+.acard-more summary { cursor: pointer; color: var(--muted); }
 /* Images for a session (#4610): thumbnails in the message box, and in the person's turn. The files of the message box
    sit in a tray over the pill, as wide as the pill, with the radius and the color of a chat bubble (#5304). */
 .sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); margin-left: calc(var(--h-cmp) + var(--sp-3));

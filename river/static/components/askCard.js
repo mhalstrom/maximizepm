@@ -5,7 +5,7 @@
 // line, maxpm guide decisions), the answer box, the earlier decisions (#5955); and on its right the comments (the
 // messages on it), its history, Share (#6006: a private page of the card; the votes and comments of the people it
 // is shared with come back here), and Discuss with the manager.
-import { esc, ago, clip, getJson } from "../lib.js";
+import { esc, ago, clip, getJson, pageToken } from "../lib.js";
 import { chip, prioNumChip, projectChip } from "./chip.js";
 import { button } from "./button.js";
 import { earlierHtml } from "./card.js";
@@ -63,14 +63,50 @@ export function loadDiffs(box) {
   });
 }
 
-// The tries of one task side by side (#5996): each try's state and what its session said to look at, and a button
-// that keeps it. A try that is not done yet has no button: the card is ready when every try is done.
+// A try's output as its summary (the first sentence) and the rest, which the card folds under "more" (#6040).
+export function trySummary(text) {
+  const s = String(text || "").trim();
+  const m = /^[\s\S]*?[.!?](?=\s|$)/.exec(s);
+  const head = (m ? m[0] : s).trim();
+  if (head.length > 280) return { summary: clip(s, 280), rest: s };
+  return { summary: head, rest: s.slice(head.length).trim() };
+}
+
+// The tries of one task side by side (#5996): each try's result (#6040: its first canvas in a frame, a button that
+// opens that canvas in a tab of its own, and the first sentence of its output, the rest under "more") and a button
+// that keeps it. A try that is not done yet has no Keep button: the card is ready when every try is done.
 export function triesHtml(c) {
   if (!c.tries || !c.tries.length) return "";
-  return `<div class="acard-tries">${c.tries.map(t => `<div class="acard-try">
+  return `<div class="acard-tries">${c.tries.map(t => {
+    const cv = (t.canvases || [])[0], done = t.status === "done";
+    const { summary, rest } = trySummary(t.output);
+    const text = !done ? `Not done yet (${esc(t.status.replace("_", " "))})`
+      : summary ? esc(summary) : "No output: open the item";
+    const frame = cv ? `<div class="acard-trybox"><iframe class="acard-tryframe" data-try-frame="${cv.id}"
+      title="${esc(cv.title || cv.name)}" sandbox="allow-scripts" loading="lazy"></iframe></div>` : "";
+    const acts = (cv ? button(`Open try ${t.k}`, { data: { "try-open": cv.id, "try-item": t.id, "try-session": t.assignee || "" },
+      title: "Open the canvas" }) : "") + (done ? button(`Keep try ${t.k}`, { kind: "primary", data: { opt: String(t.k) } }) : "");
+    return `<div class="acard-try">
     <div class="acard-h"><b>Try ${t.k}</b><span class="muted t-s">#${t.id}${t.assignee ? ` · ${esc(t.assignee)}` : ""}</span></div>
-    <div class="acard-d">${t.status === "done" ? esc(clip(t.output || "No output: open the item", 600)) : `Not done yet (${esc(t.status.replace("_", " "))})`}</div>
-    ${t.status === "done" ? button(`Keep try ${t.k}`, { kind: "primary", data: { opt: String(t.k) } }) : ""}</div>`).join("")}</div>`;
+    ${frame}
+    <div class="acard-d">${text}</div>
+    ${done && rest ? `<details class="acard-more"><summary class="t-s">more</summary><div class="acard-d">${esc(rest)}</div></details>` : ""}
+    ${acts ? `<div class="acard-tryacts">${acts}</div>` : ""}</div>`;
+  }).join("")}</div>`;
+}
+
+// The canvas frames of the tries on the cards in box: each loads with a full-screen key for its canvas, as a canvas
+// tab of the side panel does (#4768), never with the page's token.
+export function loadTryFrames(box) {
+  box.querySelectorAll("iframe[data-try-frame]").forEach(async (f) => {
+    try {
+      const q = new URLSearchParams({ target: "canvas:" + f.dataset.tryFrame, token: await pageToken() });
+      const r = await fetch("api/view-key?" + q), j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const u = new URLSearchParams(j.url.split("?")[1]);
+      f.src = `canvas/${f.dataset.tryFrame}/latest?e=${u.get("e")}&k=${encodeURIComponent(u.get("k"))}`;
+    } catch (_) { f.replaceWith(Object.assign(document.createElement("div"), { className: "muted t-s", textContent: "The canvas did not load." })); }
+  });
 }
 
 // The level in the head: an item's priority; a question's level (low, or high when nobody said low), and that its

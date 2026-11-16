@@ -17308,7 +17308,8 @@ def item_show(conn, item_id, ann=None):
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
         a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
-            a["tries"] = [{"k": k, **t} for k, t in sorted(tries_of(conn, iid).items())]
+            a["tries"] = [{"k": k, **t, "canvases": try_canvases(conn, t)}
+                          for k, t in sorted(tries_of(conn, iid).items())]
         a["approval"] = approval(conn, iid)  # #5957
         a["release_yes"] = release_yes_of(conn, iid)  # a sign-off on a release: its card shows the report (#6039)
         a["exhibits"] = exhibits_for(conn, "item", [iid]).get(iid, [])  # #5956
@@ -21090,6 +21091,23 @@ def tries_of(conn, look_id):
         if m:
             out[int(m.group(1))] = dict(r)
     return out
+
+
+def try_canvases(conn, t):
+    """The canvases that show a try's result, for its Look card (#6040: the person saw only the try's output text and
+    had no way to its screenshots): the canvases of the try item, first made first, then a canvas of the same project
+    that its output names. [{id, name, title, kind}]."""
+    cols = "c.id, c.name, c.title, c.kind"
+    rows = [dict(r) for r in conn.execute(f"SELECT {cols} FROM canvases c WHERE c.item_id=? AND c.deleted_at IS NULL "
+                                          "ORDER BY c.id", (t["id"],))]
+    out = t.get("output") or ""
+    if out:
+        seen = {r["id"] for r in rows}
+        for r in conn.execute(f"SELECT {cols} FROM canvases c JOIN items i ON i.project_id=c.project_id WHERE i.id=? "
+                              "AND c.deleted_at IS NULL ORDER BY c.id", (t["id"],)):
+            if r["id"] not in seen and re.search(r"(?<![\w-])" + re.escape(r["name"]) + r"(?![\w-])", out):
+                rows.append(dict(r))
+    return rows
 
 
 def tries_add(conn, project, title, n, actor=None, priority=2, context="", touches=None, check="", short=None,

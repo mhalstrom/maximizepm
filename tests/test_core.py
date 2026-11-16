@@ -14068,6 +14068,18 @@ class Tries(Base):
         self.assertFalse(self.c.execute("SELECT 1 FROM deps WHERE kind='conflicts' AND item_id IN (?,?) AND "
                                         "blocked_by IN (?,?)", (t1, t2, t1, t2)).fetchone())
 
+    def test_the_card_names_each_tries_canvases(self):
+        """#6040: the Look card shows each try's result, so it gets the canvases of each try: the try's own, then one
+        of the project that its output names."""
+        look, tries = self.r["look"], self.r["tries"]
+        core.canvas_put(self.c, "header-1", "<p>one</p>", "s1", kind="html", item=tries[0])
+        core.canvas_put(self.c, "header-shots", "<p>two</p>", "s2", kind="html", project="a")
+        core.canvas_put(self.c, "header-shots-old", "<p>old</p>", "s2", kind="html", project="a")
+        self.c.execute("UPDATE items SET output='See the canvas header-shots.' WHERE id=?", (tries[1],))
+        self.c.commit()
+        got = {t["k"]: [c["name"] for c in t["canvases"]] for t in core.item_show(self.c, look)["tries"]}
+        self.assertEqual(got, {1: ["header-1"], 2: ["header-shots"], 3: []})
+
     def test_a_try_starts_in_a_new_session(self):
         core.register(self.c, "w")
         other = self.add("a", "something else")

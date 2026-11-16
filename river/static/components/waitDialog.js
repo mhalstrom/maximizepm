@@ -10,7 +10,8 @@ import { $, esc, act, toast, typeAction, actor, getJson } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
-import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, fromEvent, typeChip, discussText, loadDiffs } from "./askCard.js";
+import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, fromEvent, typeChip, discussText, loadDiffs, loadTryFrames } from "./askCard.js";
+import { openFullScreen } from "./sidePanel.js";
 import { S, nav } from "../page.js";
 import { openOnRqs } from "./rqsPublish.js";
 import { button } from "./button.js";
@@ -145,6 +146,7 @@ function shown() {
   $("#waitDlg").classList.toggle("has-cards", cards.size > 0);
   fillSides();
   loadDiffs($("#waitList"));  // a commit's diff on a card (#5956)
+  loadTryFrames($("#waitList"));  // the canvas of each try (#6040)
   dlg.open();
   const first = $("#waitList").querySelector("input:checked, textarea");
   if (first) first.focus();
@@ -214,6 +216,11 @@ $("#waitList").addEventListener("click", async (e) => {
     return;
   }
   if (e.target.closest("[data-open]")) dlg.close();
+  const tryOpen = e.target.closest("[data-try-open]");  // a try's canvas in a tab of its own: the card stays (#6040)
+  if (tryOpen) {
+    const d = tryOpen.dataset;
+    return openFullScreen("canvas:" + d.tryOpen, d.trySession || "", d.tryItem || "");
+  }
   const opt = e.target.closest("[data-opt]");  // an option of the decision form: it is the answer
   if (opt) {
     const form = opt.closest("form");
