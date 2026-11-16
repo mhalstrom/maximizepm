@@ -5139,6 +5139,25 @@ def canvas_opens():
 
 DICTATE_OPS = ("dictate_start", "dictate_audio", "dictate_stop")
 
+
+def op_rights(conn, op, actor, page):
+    """Why this caller may not run the page action op (river/rights.py, #5974), or None. The page acts as the person.
+    A command that asks serve (cli.ask_server) has the rights of the session that the processes holding its connection
+    prove (vault.session_of), never of the name it sends; with no proof, the rights of a session."""
+    from . import rights, vault
+    if page:
+        return rights.op_refusal(op, rights.PERSON)
+    try:
+        who = vault.session_of(conn, actor)
+    except RiverError:
+        who = {"name": actor, "person": False}
+    if who["person"]:
+        return rights.op_refusal(op, rights.PERSON, who["name"])
+    r = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (who["name"],)).fetchone() \
+        if who["name"] else None
+    return rights.op_refusal(op, rights.MANAGER if r and r["role"] == "manager" else rights.SESSION, who["name"])
+
+
 OPS = {
     "canvas_open": canvas_open,
     # The setup guide's Your phone (#5863): the person's click runs tailscale serve --bg <serve_port>.
@@ -5899,7 +5918,11 @@ class Handler(BaseHTTPRequestHandler):
                                                  "old: reload the page"})
             actor = body.get("actor") or None
             _same_queue(body.get("args", {}).get("db"))  # only a river command sends it (cli.ask_server)
+            # The page (a browser sends Origin; the relay and Tailscale mark their own) acts as the person (#5974).
+            page = bool(origin) or relay.page_request(self.headers) or bool(self.headers.get("Tailscale-User-Login"))
             if body.get("op") in DICTATE_OPS:  # audio, a few times a second: no queue, no history (#5107)
+                if not page:
+                    return self._send(403, {"error": "dictation is the person's, on the page"})
                 return self._send(200, {"ok": True, "result": op(None, body.get("args", {}), actor)})
             conn = core.connect()
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
@@ -5925,6 +5948,9 @@ class Handler(BaseHTTPRequestHandler):
                                         ((vault.TAILNET_PAGE, self.client_address[1], srv[1], ts) if ts else
                                          (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid")))
                                         if srv and len(self.client_address) > 1 else (None, None, None))
+                    why = op_rights(conn, body.get("op"), actor, page)  # the permission table (#5974)
+                    if why:
+                        raise RiverError(why)
                     result = op(conn, body.get("args", {}), actor)
                 finally:
                     vault.PEER.value = None

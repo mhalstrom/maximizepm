@@ -3743,7 +3743,8 @@ class CommandNames(unittest.TestCase):
         from pathlib import Path
         root = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory() as d:
-            env = {**os.environ, "MAXPM_DB": str(Path(d, "q.db"))}
+            from tests import person_env
+            env = {**person_env(), "MAXPM_DB": str(Path(d, "q.db"))}  # a person's terminal: no name needed (#5974)
             h = subprocess.run([sys.executable, str(root / "bin" / "maxpm"), "--help"], capture_output=True, text=True, env=env)
             self.assertEqual(h.returncode, 0, h.stderr)
             self.assertTrue(h.stdout.startswith("usage: maxpm "), h.stdout[:40])
@@ -13571,3 +13572,88 @@ class Scopes(Base):
         self.assertIn("w: scope none", run("--as", "boss", "scope", "end", "w"))
         with self.assertRaisesRegex(RiverError, "--scope: w is an agent"):
             run("--as", "w", "launch", "--project", "b", "--scope", "project:b")
+
+
+class Permissions(Base):
+    """#5974: one table says who may run each command and page action, checked before each call, from the session's
+    token or the session itself, never from a person's name typed inside an agent."""
+
+    def setUp(self):
+        super().setUp()
+        from river import cli
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w")
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.register(self.c, "mark", human=True)
+        old = cli.INSIDE_AGENT
+        cli.INSIDE_AGENT = lambda: True  # these commands run inside an agent session
+        self.addCleanup(setattr, cli, "INSIDE_AGENT", old)
+
+    def run_cli(self, *words):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(list(words))
+        return out.getvalue()
+
+    def test_permission_table_lists_every_command_and_page_action(self):
+        import argparse
+        from river import cli, rights, server
+        p = cli.build_parser()
+        sub = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+        missing = []
+        for name, sp in sub.choices.items():
+            entry = rights.COMMANDS.get(name)
+            subs = [a for a in sp._actions if isinstance(a, argparse._SubParsersAction)]
+            if entry is None:
+                missing.append(name)
+            elif subs and isinstance(entry, dict):
+                missing += [f"{name} {s}" for s in subs[0].choices if s not in entry and "*" not in entry]
+        self.assertEqual(missing, [], "add each command to river/rights.py COMMANDS")
+        self.assertEqual(sorted(set(server.OPS) - set(rights.OPS)), [], "add each action to river/rights.py OPS")
+        self.assertEqual(sorted(set(rights.OPS) - set(server.OPS)), [], "an action in rights.OPS that is gone")
+        self.assertEqual(sorted(set(rights.COMMANDS) - set(sub.choices)), [], "a command in rights.COMMANDS that is gone")
+
+    def test_permission_a_session_runs_only_its_own_commands(self):
+        with self.assertRaisesRegex(RiverError, "maxpm scope set is for a person or the manager, and the session w"):
+            self.run_cli("--as", "w", "scope", "set", "w", "project:a")
+        self.assertIn("w: scope project a", self.run_cli("--as", "boss", "scope", "set", "w", "project:a"))
+        self.run_cli("--as", "w", "add", "a", "a task of the session")
+        # A person's name typed inside an agent: refused, whatever the command.
+        with self.assertRaisesRegex(RiverError, "never runs as a person"):
+            self.run_cli("--as", "mark", "add", "a", "x")
+        # No name inside an agent: it may only read.
+        self.assertIn("a task of the session", self.run_cli("list"))
+        with self.assertRaisesRegex(RiverError, "no name, so it may only read"):
+            self.run_cli("add", "a", "y")
+        # Nobody becomes the manager by running manage; a takeover comes from the person.
+        with self.assertRaisesRegex(RiverError, "w is not the manager"):
+            self.run_cli("--as", "w", "manage")
+        with self.assertRaisesRegex(RiverError, "a takeover of the manager comes from the person"):
+            self.run_cli("--as", "boss", "manage", "--takeover", "mine now")
+        refused = self.c.execute("SELECT refused FROM runs WHERE refused LIKE 'refused: not allowed%'").fetchall()
+        self.assertGreaterEqual(len(refused), 5)  # each refusal is in the run log
+
+    def test_permission_repeated_refusals_alert_the_manager_once(self):
+        for _ in range(4):
+            with self.assertRaises(RiverError):
+                self.run_cli("--as", "w", "config", "set", "away_after", "2h")
+        alerts = self.c.execute("SELECT body FROM messages WHERE to_agent='boss' AND body LIKE 'w was refused%'").fetchall()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("maxpm runs --agent w --failed", alerts[0]["body"])
+
+    def test_permission_a_person_terminal_may_do_what_the_page_does(self):
+        from river import cli
+        cli.INSIDE_AGENT = lambda: False
+        self.assertIn("w: scope project a", self.run_cli("--as", "mark", "scope", "set", "w", "project:a"))
+        self.run_cli("config", "set", "away_after", "2h")
+
+    def test_permission_page_actions(self):
+        from river import server
+        self.assertIsNone(server.op_rights(self.c, "config_set", "mark", page=True))
+        self.assertIn("for a person or the manager", server.op_rights(self.c, "config_set", "w", page=False))
+        self.assertIsNone(server.op_rights(self.c, "kill_agent", "boss", page=False))
+        self.assertIn("for a person", server.op_rights(self.c, "start_manager", "boss", page=False))
+        self.assertIsNone(server.op_rights(self.c, "item_add", "w", page=False))
+        self.assertIn("in no permission table", server.op_rights(self.c, "no_such_action", "mark", page=True))

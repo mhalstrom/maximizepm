@@ -2409,6 +2409,71 @@ def _token_self(conn, args):
         args.actor = who["agent"]
 
 
+INSIDE_AGENT = None  # tests: fn() -> bool, in place of the environment (the tests run inside an agent CLI)
+
+
+def _inside_agent():
+    """Whether this command runs inside an agent session: its token, a chat, MAXPM_AGENT, or an agent CLI's own
+    variables (agent_type_from_env). Outside one, it is a person's terminal."""
+    if INSIDE_AGENT is not None:
+        return INSIDE_AGENT()
+    return bool(core.TOKEN_AGENT.get() or core.HTTP_CHAT.get() or os.environ.get("MAXPM_CHAT")
+                or os.environ.get("MAXPM_AGENT") or core.agent_type_from_env(os.environ))
+
+
+def _rights(conn, args, actor):
+    """The permission table (#5974) for this command: the caller is the session's token, else the session itself,
+    never a person's name typed inside an agent. A refusal raises; it goes to the run log, and the third one of a
+    session within REPEAT_WINDOW_MIN alerts the manager."""
+    from . import rights
+    key = rights.command_key(args)
+    if not _inside_agent():
+        caller, name = rights.PERSON, actor
+    else:
+        name = core.TOKEN_AGENT.get() or _session_self(conn) or actor
+        r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+        if r and r["kind"] == "human":
+            _refuse_again(conn, name or actor, f"{rights.REFUSED}: a command inside an agent session never runs as a "
+                                               f"person (--as {actor}). Run it as the session; a person acts on the "
+                                               f"page or in their own terminal")
+        me = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone() if name else None
+        caller = None if not name else rights.MANAGER if me and me["role"] == "manager" else rights.SESSION
+    # A chat app (Claude desktop through maxpm mcp) is the person's own talk: it may become the manager (its manage tool).
+    if args.cmd == "manage" and not (core.HTTP_CHAT.get() or os.environ.get("MAXPM_CHAT")):
+        why = None
+        if getattr(args, "takeover", None) and caller != rights.PERSON:
+            why = (f"{rights.REFUSED}: a takeover of the manager comes from the person, on the page (Start manager) "
+                   f"or in their own terminal")
+        elif caller == rights.SESSION:
+            why = (f"{rights.REFUSED}: {name} is not the manager: a manager is a session that maxpm serve started as "
+                   f"the manager (the page's Start manager). Ask the manager, or the person")
+        if why:
+            _refuse_again(conn, name, why)
+    why = rights.refusal(key, caller, name)
+    if why:
+        _refuse_again(conn, name, why)
+
+
+def _refuse_again(conn, name, why):
+    """Raise the refusal; when the same session was refused REPEAT times within REPEAT_WINDOW_MIN (this one too),
+    the manager gets one alert: a session that tries again and again to get around a rule."""
+    from . import rights
+    if name:
+        since = core.iso(core.now() - core.timedelta(minutes=rights.REPEAT_WINDOW_MIN))
+        n = conn.execute("SELECT COUNT(*) FROM runs WHERE actor=? AND at>=? AND refused LIKE ?",
+                         (name, since, rights.REFUSED + "%")).fetchone()[0]
+        to = core.active_manager(conn)
+        mark = f"{name} was refused {rights.REPEAT} times"
+        if n + 1 >= rights.REPEAT and to and to != name and not conn.execute(
+                "SELECT 1 FROM messages WHERE to_agent=? AND body LIKE ? AND created_at>=?",
+                (to, mark + "%", since)).fetchone():
+            with core.tx(conn):
+                core._send(conn, "alert", core.COMMAND, f"{mark} in {rights.REPEAT_WINDOW_MIN} minutes by the "
+                                                        f"permission table (maxpm runs --agent {name} --failed); the "
+                                                        f"last: {why}", to=to)
+    raise RiverError(why)
+
+
 def _caller_chain():
     """The processes above this command, from the kernel ([(pid, ppid, comm, start)]), or None when it does not tell
     (a sandbox). In a runner of maxpm serve: the caller's, which serve read (core.CALLER_CHAIN)."""
@@ -2784,6 +2849,7 @@ def _run(args, conn):
     _token_self(conn, args)
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
+    _rights(conn, args, actor)  # the permission table (#5974)
     if args.cmd not in ("go", "plan"):
         core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None

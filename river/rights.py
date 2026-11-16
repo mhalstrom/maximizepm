@@ -1,0 +1,142 @@
+"""Who may run each command and page action (#5974; design of talk #5935, mark 2026-11-15).
+
+One table for the commands (COMMANDS) and one for the page actions (OPS): each names the callers that may run it.
+A caller is a person (a terminal outside an agent, or the page), the manager (a session that maxpm serve started as
+the manager, or that already is one), or a session (any other agent session). The caller comes from the session's
+token (#5972) or from the name of a session, never from --as alone: a command inside an agent never runs as a person,
+and inside an agent with no name it may only read (READS). cli._run and server's /api/action check the table before
+each call; a refusal goes to the run log (runs.refused), and a session that is refused again and again alerts the
+manager. A test refuses a command or an action that is missing from a table.
+
+Rules of the queue itself (a target's owner, a goal's owner, a review's authors, a credential's grant) stay in the
+functions that do the work: the table says who may ask, the function says whether this one thing may happen."""
+
+PERSON, MANAGER, SESSION = "person", "manager", "session"
+ANY = frozenset({PERSON, MANAGER, SESSION})
+LEAD = frozenset({PERSON, MANAGER})  # the person, or the manager that works for the person
+ONLY_PERSON = frozenset({PERSON})
+
+# command -> callers, or {subcommand: callers} (a subcommand that is not named takes "*", else ANY).
+COMMANDS = {
+    # project path: go tells a session to link its folder
+    "project": {"add": LEAD, "describe": ANY, "path": ANY, "show": ANY, "target": LEAD, "rank": LEAD,
+                "archive": LEAD, "restore": LEAD, "list": ANY},
+    "browser": {"*": ANY},
+    "canvas": {"*": ANY},
+    "realquicksite": {"status": ANY, "connect": ONLY_PERSON, "disconnect": ONLY_PERSON},
+    "secret": {"*": ANY},  # each credential has its own levels and grants (river/vault.py)
+    "goal": {"add": ANY, "list": ANY, "show": ANY, "edit": LEAD, "own": ANY, "give": ANY, "release": ANY,
+             "base": ANY, "handoff": ANY, "done": ANY},
+    "schedule": {"*": ANY},
+    "ops": {"*": ANY, "setup": LEAD, "profile": LEAD},
+    "target": {"add": LEAD, "describe": LEAD, "deployer": LEAD, "watch": LEAD, "cadence": LEAD, "cut": ANY,
+               "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
+    "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
+    "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON}, "prompt": ANY, "needs-you": ANY, "status": ANY,
+    "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
+    "manage": ANY,  # becoming the manager: may_manage (serve made this session the manager, or a person)
+    "plan": ANY, "launch": ANY, "workspace": ANY,
+    "expert": {"start": LEAD, "request": ANY, "adopt": ANY, "end": LEAD, "list": ANY, "fresh": LEAD, "notes": ANY},
+    "view": ANY, "stop": LEAD, "interrupt": LEAD,
+    "scope": {"*": LEAD, "show": ANY},
+    "queue": {"add": LEAD, "list": ANY, "remove": ANY, "move": LEAD},
+    "claim": ANY, "done": ANY, "wait": ANY, "cleanup": ANY, "check": ANY, "ship": ANY, "review": ANY,
+    # add: a session adds the rule that the user states in its chat (the worker guide, section Policies)
+    "policy": {"list": ANY, "show": ANY, "add": ANY, "edit": LEAD, "retire": LEAD},
+    "release": ANY, "drop": ANY, "takeover": ANY, "reopen": ANY, "backlog": ANY, "activate": LEAD, "prio": ANY,
+    "move": ANY, "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
+    "give": ANY, "split": ANY, "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
+    "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "inbox": ANY, "thread": ANY,
+    "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "heartbeat": ANY,
+    "report": ANY, "capacity": ANY, "host": ONLY_PERSON, "agent-login": ONLY_PERSON, "phone": ONLY_PERSON,
+    "config": {"get": ANY, "set": LEAD, "unset": LEAD},
+    "serve": ANY,  # serve --restart: sessions run it after a commit (CLAUDE.md)
+    "skills": ANY, "activity": ANY, "db": ANY, "mcp": ANY, "connect": ANY, "guide": ANY, "setup-agent": ANY,
+}
+
+# The commands that change nothing: a command inside an agent with no name (no token, no --as) may run only these.
+READS = {"project show", "project list", "canvas list", "canvas show", "canvas comments", "goal list", "goal show",
+         "ops list", "ops show", "ops history", "target show", "target list", "artifacts", "search", "duplicates",
+         "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
+         "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
+         "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status"}
+
+# page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
+# the session that its processes prove (vault.session_of).
+OPS = {op: ANY for op in (
+    "accept", "activate", "answer", "backlog", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
+    "browser_input", "browser_secret", "browser_steps", "canvas_answer", "canvas_comment", "canvas_comments",
+    "canvas_discard", "canvas_edit", "canvas_kit", "canvas_list", "canvas_open", "canvas_publish", "canvas_put",
+    "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
+    "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
+    "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "launch_agent", "message_read", "move",
+    "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_repair",
+    "ops_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
+    "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_send",
+    "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock")}
+OPS.update({op: LEAD for op in (
+    "agent_interrupt", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
+    "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
+    "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
+    "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add")})
+OPS.update({op: ONLY_PERSON for op in (
+    "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
+    "relay_disconnect", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",
+    "session_pin", "session_restart", "session_seen", "session_send", "session_setting", "session_upload",
+    "session_upload_drop", "setup_agent_add", "setup_block", "setup_maxpm_cmd", "setup_ntfy", "setup_skills",
+    "shell_close", "shell_keys", "shell_open", "start_manager", "tailnet_serve", "takeover_seen", "takeovers_seen",
+    "terminal_keys", "undo_takeover", "update")})
+
+REFUSED = "refused: not allowed"  # the first words of a refusal of this table (the run log counts them)
+REPEAT = 3  # refusals of one session within REPEAT_WINDOW that alert the manager
+REPEAT_WINDOW_MIN = 10
+
+
+def command_key(args):
+    """'goal own' for maxpm goal own, 'list' for maxpm list: the key of the table and of READS."""
+    subs = [getattr(args, k) for k in sorted(vars(args)) if k.endswith("cmd") and k != "cmd"
+            and isinstance(getattr(args, k), str)]
+    return " ".join([args.cmd, *subs[:1]])
+
+
+def callers_of(key):
+    """The callers that may run a command key ('goal own')."""
+    cmd, _, sub = key.partition(" ")
+    entry = COMMANDS.get(cmd)
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        return entry.get(sub) or entry.get("*") or ANY
+    return entry
+
+
+def refusal(key, caller, name=None):
+    """Why this caller may not run the command, or None. caller: person, manager, session, or None (inside an agent
+    with no name)."""
+    allowed = callers_of(key)
+    if allowed is None:
+        return f"{REFUSED}: maxpm {key} is in no permission table (river/rights.py)"
+    if caller is None:
+        if key in READS:
+            return None
+        return (f"{REFUSED}: this command runs inside an agent session with no name, so it may only read. The session "
+                f"that maxpm serve started has its token; else name it: maxpm --as <session> {key} ...")
+    if caller in allowed:
+        return None
+    who = {PERSON: "a person", MANAGER: "the manager", SESSION: f"the session {name}" if name else "a session"}[caller]
+    may = " or ".join({PERSON: "a person", MANAGER: "the manager", SESSION: "a session"}[c]
+                      for c in (PERSON, MANAGER, SESSION) if c in allowed)
+    return (f"{REFUSED}: maxpm {key} is for {may}, and {who} runs it. "
+            + ("Ask the manager: maxpm alert <manager> \"<what you need>\" --blocked" if caller == SESSION else
+               "The person does it on the page" if allowed == ONLY_PERSON else ""))
+
+
+def op_refusal(op, caller, name=None):
+    allowed = OPS.get(op)
+    if allowed is None:
+        return f"{REFUSED}: the action {op} is in no permission table (river/rights.py)"
+    if caller in allowed:
+        return None
+    return (f"{REFUSED}: the action {op} is for " + " or ".join(
+        {PERSON: "a person", MANAGER: "the manager", SESSION: "a session"}[c] for c in (PERSON, MANAGER, SESSION)
+        if c in allowed) + f", and {name or 'this caller'} asks for it")

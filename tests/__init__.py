@@ -55,6 +55,24 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
         os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
+from river import cli as _cli  # noqa: E402
+# The tests run inside an agent CLI (its variables are in their environment), but a test's command is a person's
+# terminal unless the test says otherwise: the permission table (#5974) reads this hook. Its tests set their own.
+_cli.INSIDE_AGENT = lambda: False
+
+
+def person_env(env=None):
+    """An environment for a maxpm subprocess that runs as a person's terminal: no agent CLI's own variables, no
+    session name or token (a subprocess does not see the hook above)."""
+    env = dict(os.environ if env is None else env)
+    got = _agents.load()
+    inside = {k for m in got for k in ((got[m].identity or {}).get("inside_env") or ())}
+    for k in list(env):
+        if k in inside or k in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_TOKEN", "MAXPM_CHAT"):
+            del env[k]
+    return env
+
+
 server.CLAUDE_JSON = os.devnull  # Claude Code's settings of the person who runs the tests say nothing here (#5892)
 from river import review as _review  # noqa: E402
 _review.COUNT_AGAIN = float("inf")  # the page state starts no git count of the sessions' folders (#5855)
