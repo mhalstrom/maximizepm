@@ -303,6 +303,115 @@ def release_review(conn, dep_id):
     return next((v for v in ("release", "push") if v in vals), "off")
 
 
+# ---- the code of a whole release (#6038)
+
+_RANGES = {}  # (root, base sha, head sha) -> the release code, so a second read of a report runs no git log
+
+
+def release_range(conn, dep_id):
+    """Where the code of a release starts and ends: {root, base, base_label, head, head_label}, or None (no repository).
+    head: the release pin (cut_rev), else local main. base: the newer of the pin of the target's last done deploy and
+    the last version tag before head (mark 2026-11-16: 'surely there are more code changes than that')."""
+    dep = core._item(conn, dep_id)
+    # A deploy item lives in the target's own project, often with no folder: then the folder of a project it ships, or
+    # of a project that uses the target.
+    paths = conn.execute(
+        "SELECT path FROM projects WHERE id=? UNION ALL "
+        "SELECT p.path FROM deps d JOIN items i ON i.id=d.blocked_by JOIN projects p ON p.id=i.project_id "
+        "WHERE d.item_id=? UNION ALL SELECT path FROM projects WHERE target=?",
+        (dep["project_id"], dep_id, dep["target"])).fetchall()
+    root = next((r for r in (repo_root(p["path"]) for p in paths if p["path"] and os.path.isdir(p["path"])) if r), None)
+    if not root:
+        return None
+    head = dep["cut_rev"] or next((r for r in ("main", "master") if git(root, "rev-parse", "--verify", "--quiet", r)), None)
+    if not head or git(root, "rev-parse", "--verify", "--quiet", head + "^{commit}") is None:
+        return None
+    cands = []
+    tag = git(root, "describe", "--tags", "--abbrev=0", head)
+    if tag and tag.strip():
+        cands.append((tag.strip(), tag.strip()))
+    prev = conn.execute("SELECT id, cut_rev FROM items WHERE kind='deploy' AND target=? AND status='done' AND id<>? AND "
+                        "cut_rev IS NOT NULL ORDER BY closed_at DESC LIMIT 1", (dep["target"], dep_id)).fetchone()
+    if prev and git(root, "merge-base", "--is-ancestor", prev["cut_rev"], head, ok=(0,)) is not None:
+        cands.append((prev["cut_rev"], f"the pin of release #{prev['id']}"))
+    base = None
+    for ref, label in cands:  # the newest candidate: every other one is its ancestor
+        if base is None or git(root, "merge-base", "--is-ancestor", base[0], ref, ok=(0,)) is not None:
+            base = (ref, label)
+    if not base:
+        return None
+    return {"root": root, "base": base[0], "base_label": base[1], "head": head,
+            "head_label": "the release pin" if dep["cut_rev"] else "local main"}
+
+
+def release_code(conn, dep_id):
+    """The size and the files of a release: {base, base_label, head, head_label, files, added, removed, commits,
+    file_list: [{path, added, removed, tasks}], untasked: [{sha, subject}]}; None with no range. Two git calls; the
+    answer is kept per (root, base, head) commit, so it costs nothing again until the range moves (p147)."""
+    rng = release_range(conn, dep_id)
+    if not rng:
+        return None
+    shas = (git(rng["root"], "rev-parse", rng["base"] + "^{commit}", rng["head"] + "^{commit}") or "").split()
+    key = (rng["root"], *shas)
+    if len(shas) == 2 and key in _RANGES:
+        return {**_RANGES[key], **{k: rng[k] for k in ("base", "base_label", "head", "head_label")}}
+    span = f"{rng['base']}..{rng['head']}"
+    files = {}
+    for line in (git(rng["root"], "diff", "--numstat", "-M", "--no-ext-diff", span) or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            add, rem, path = parts
+            path = re.sub(r"\{[^{}]* => ([^{}]*)\}", r"\1", path).replace("//", "/")
+            path = path.split(" => ")[-1]
+            files[path] = {"path": path, "added": int(add) if add.isdigit() else 0,
+                           "removed": int(rem) if rem.isdigit() else 0, "tasks": []}
+    log = git(rng["root"], "log", "--no-merges", "--name-only", "--format=%x1e%H%x00%s%x00%b%x00", span) or ""
+    recs = []
+    for rec in log.split("\x1e")[1:]:
+        parts = rec.split("\x00")
+        if len(parts) < 4:
+            continue
+        named = [int(n) for n in re.findall(r"#(\d{1,7})\b", parts[1] + "\n" + parts[2])]
+        recs.append((parts[0].strip(), parts[1], named, [f for f in parts[3].split("\n") if f.strip()]))
+    ids = sorted({n for r in recs for n in r[2]})
+    known = {r[0] for r in conn.execute(f"SELECT id FROM items WHERE id IN ({','.join('?' * len(ids)) or 'NULL'})", ids)}
+    untasked = []
+    for sha, subject, named, paths in recs:
+        tasks = [n for n in named if n in known]
+        if not tasks:
+            untasked.append({"sha": sha[:10], "subject": subject})
+        for f in paths:
+            if f in files:
+                files[f]["tasks"] = sorted(set(files[f]["tasks"]) | set(tasks))
+    out = {"files": len(files), "added": sum(f["added"] for f in files.values()),
+           "removed": sum(f["removed"] for f in files.values()), "commits": len(recs),
+           "file_list": sorted(files.values(), key=lambda f: f["path"]), "untasked": untasked}
+    if len(shas) == 2:
+        _RANGES[key] = out
+    return {**out, **{k: rng[k] for k in ("base", "base_label", "head", "head_label")}}
+
+
+def _named(label, ref):
+    """'v1.2.1', or 'the pin of release #12 (4f2a9c1)': a label with its ref when they differ."""
+    return label if label == ref else f"{label} ({ref[:10]})"
+
+
+def range_diff(conn, dep_id):
+    """The Changes view of a whole release (GET /api/diff?item=<deploy>&range=1): one block, the diff from its base to
+    its head, in the form of item_diff (the file list stays whole; the lines stop at MAX_LINES)."""
+    it = core._item(conn, dep_id)
+    rng = release_range(conn, dep_id)
+    if not rng:
+        raise RiverError(f"#{dep_id} has no code range: its project has no git folder, or no tag or earlier pin; "
+                         f"see maxpm target report {dep_id}")
+    budget = {"left": MAX_LINES}
+    text = git(rng["root"], "diff", "-M", "--no-color", "--no-ext-diff", f"{rng['base']}..{rng['head']}") or ""
+    block = {"sha": rng["head"], "subject": f"from {_named(rng['base_label'], rng['base'])} to {rng['head_label']}", "item": None, "root": rng["root"], "files": parse(text, budget)}
+    return {"item": it["id"], "kind": it["kind"], "title": it["title"], "items": [it["id"]], "commits": [block],
+            "cut": budget["left"] <= 0, "folder": rng["root"], "range": True, "review_at": release_review(conn, it["id"]),
+            "waits": it["blocked_set_by"] == REVIEW_BY, "state": state_of(conn, f"item:{it['id']}", "-")}
+
+
 # ---- the person's answer
 
 REVIEW_BY = "maxpm review"  # the blocked_set_by of a release that waits for the person's Approve (review_at release)

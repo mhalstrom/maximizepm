@@ -153,12 +153,25 @@ def report(conn, item_id):
     s = conn.execute("SELECT * FROM release_reports WHERE deploy_id=?", (dep["id"],)).fetchone()
     summary = ({"text": s["summary"], "by": s["by"], "at": s["at"]} if s
                else {"text": _plain_summary(dep, numbers, groups), "by": "maxpm", "at": None})
-    return {"release": {"id": dep["id"], "title": dep["title"], "target": dep["target"], "status": dep["status"],
+    code = _code(conn, dep["id"])
+    if code:  # the size of the whole release, not only of its tasks (#6038)
+        numbers.update(files=code["files"], added=code["added"], removed=code["removed"])
+    return {"code": code,
+            "release": {"id": dep["id"], "title": dep["title"], "target": dep["target"], "status": dep["status"],
                         "cut_at": dep["cut_at"], "cut_rev": dep["cut_rev"], "closed_at": dep["closed_at"],
                         "review": ({"id": review["id"], "status": review["status"], "assignee": review["assignee"],
                                     "output": review["output"]} if review else None)},
             "summary": summary, "numbers": numbers, "groups": groups, "tasks": tasks,
             "faults": faults}
+
+
+def _code(conn, dep_id):
+    """review.release_code; a report without git (no folder, no tag) still opens, with no code numbers."""
+    from . import review as rv
+    try:
+        return rv.release_code(conn, dep_id)
+    except (RiverError, OSError, ValueError):
+        return None
 
 
 def _person(conn, name):

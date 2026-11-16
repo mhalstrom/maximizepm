@@ -19,7 +19,8 @@ export function numbersHtml(n) {
   const bits = [[n.done, "done"], [n.dropped, "dropped"], [n.open, "open"], [n.faults_open, "open faults", n.faults_open ? "c-p0" : ""],
     [n.fixes, "review fixes"], [n.decisions, "decided by you"]];
   return `<div class="rep-nums">${bits.filter(([v, label]) => v || label === "done").map(([v, label, cls]) =>
-    chip(cls || "c-p", `<b>${v}</b> ${label}`)).join("")}${n.usd != null ? chip("c-p", `<b>${usd(n.usd)}</b> cost`) : ""}</div>`;
+    chip(cls || "c-p", `<b>${v}</b> ${label}`)).join("")}${n.usd != null ? chip("c-p", `<b>${usd(n.usd)}</b> cost`) : ""}${n.files != null
+    ? chip("c-p", `<b>${n.files}</b> file${n.files === 1 ? "" : "s"} <b>+${n.added}</b> <b>−${n.removed}</b>`) : ""}</div>`;
 }
 
 const taskLine = (t) => `<div class="rep-t${picked === t.id ? " on" : ""}" data-rep-task="${t.id}" role="button" tabindex="0">
@@ -38,7 +39,28 @@ export function leftHtml(r) {
     <summary><b>${esc(g.name)}</b> <span class="muted t-s">${g.items.length} task${g.items.length === 1 ? "" : "s"}</span>
       ${g.line && !g.risk ? `<div class="muted t-s">${esc(g.line)}</div>` : ""}</summary>
     ${g.items.map(i => taskLine(r.tasks[i])).join("")}</details>`).join("");
-  return scope + sum + numbersHtml(r.numbers) + (groups || `<div class="muted">This release ships no task yet.</div>`);
+  // The code of the whole release (#6038): one line that opens it on the right, and the commits that name no task.
+  const c = r.code;
+  const code = c ? `<div class="rep-t${picked === "code" ? " on" : ""}" data-rep-code="1" role="button" tabindex="0">
+      <b>The code of the whole release</b><div class="muted t-s">${c.commits} commit${c.commits === 1 ? "" : "s"}, ${c.files} file${c.files === 1 ? "" : "s"}, from ${esc(c.base_label)} to ${esc(c.head_label)}</div></div>` : "";
+  const untasked = c && c.untasked.length ? `<details class="rep-g risk"><summary><b>Commits with no task</b>
+      <span class="muted t-s">${c.untasked.length}</span><div class="muted t-s">No queue item names them: read them in the code</div></summary>
+      ${c.untasked.map(u => `<div class="rep-t"><code>${esc(u.sha)}</code> ${esc(u.subject)}</div>`).join("")}</details>` : "";
+  return scope + sum + numbersHtml(r.numbers) + code + untasked + (groups || `<div class="muted">This release ships no task yet.</div>`);
+}
+
+// The right side for the code of the whole release: its files with their tasks, and the Changes view of the range.
+export function codeHtml(c, tasks) {
+  const tabs = `<div class="rep-tabs" role="tablist">${button("Files", { cls: tab !== "changes" ? "on" : "", data: { "rep-tab": "files" }, attrs: `role="tab" aria-selected="${tab !== "changes"}"` })}${button("Changes", { cls: tab === "changes" ? "on" : "", data: { "rep-tab": "changes" }, attrs: `role="tab" aria-selected="${tab === "changes"}"` })}</div>`;
+  const ref = (n) => `<span class="link" ${tasks[n] ? `data-rep-task="${n}"` : `data-open="${n}"`}>#${n}</span>`;
+  const files = c.file_list.map(f => `<div class="rep-file"><span class="rep-path">${esc(f.path)}</span>
+      <span class="muted t-s">+${f.added} −${f.removed}</span>
+      <span class="t-s">${f.tasks.length ? f.tasks.map(ref).join(" ") : `<span class="muted">no task</span>`}</span></div>`).join("");
+  return tabs + `<div class="rep-pane" ${tab !== "changes" ? "" : "hidden"}>
+      <h3>The whole release</h3>
+      <div class="muted t-s">${esc(c.base_label)}${c.base_label === c.base ? "" : ` (${esc(c.base.slice(0, 10))})`} to ${esc(c.head_label)}: ${c.commits} commits, ${c.files} files, +${c.added} −${c.removed}</div>
+      <div class="rep-files">${files || `<div class="muted">No file changed.</div>`}</div></div>
+    <div class="rep-pane rep-code" ${tab === "changes" ? "" : "hidden"}></div>`;
 }
 
 export function taskHtml(t) {
@@ -67,9 +89,11 @@ function draw() {
   el.querySelector("h2").textContent = `Release #${rel.id} of ${rel.target || "its target"}`;
   el.querySelector(".rep-l").innerHTML = leftHtml(r);
   const right = el.querySelector(".rep-r");
-  right.innerHTML = `<div class="rep-back">${button("‹ Back", { data: { "rep-back": 1 } })}</div>` + taskHtml(picked ? r.tasks[picked] : null);
+  right.innerHTML = `<div class="rep-back">${button("‹ Back", { data: { "rep-back": 1 } })}</div>`
+    + (picked === "code" && r.code ? codeHtml(r.code, r.tasks) : taskHtml(picked ? r.tasks[picked] : null));
   el.querySelector(".rep-grid").classList.toggle("picked", !!picked);
-  if (picked && tab === "code") renderChanges(right.querySelector(".rep-code"), { item: picked });
+  if (picked === "code" && tab === "changes") renderChanges(right.querySelector(".rep-code"), { item: rel.id, range: true });
+  else if (picked && picked !== "code" && tab === "code") renderChanges(right.querySelector(".rep-code"), { item: picked });
 }
 
 export async function openReport(id) {
@@ -84,7 +108,7 @@ export async function openReport(id) {
     document.body.append(el);
     dlg = makeDialog(el, { draft: false });
     el.addEventListener("click", onClick);
-    el.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.dataset.repTask) onClick(e); });
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.target.dataset.repTask || e.target.dataset.repCode)) onClick(e); });
   }
   picked = null; tab = "task";
   el.querySelector(".rep-l").innerHTML = `<div class="muted">Reading the release…</div>`;
@@ -103,6 +127,7 @@ async function onClick(e) {
   if (t.closest("[data-open]")) return dlg.close();  // the item opens in the drawer
   const task = t.closest("[data-rep-task]");
   if (task) { picked = +task.dataset.repTask; tab = "task"; return draw(); }
+  if (t.closest("[data-rep-code]")) { picked = "code"; tab = "files"; return draw(); }
   const tb = t.closest("[data-rep-tab]");
   if (tb) { tab = tb.dataset.repTab; return draw(); }
   if (t.closest("[data-rep-back]")) { picked = null; return draw(); }

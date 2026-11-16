@@ -19,7 +19,7 @@ const ctxs = {};  // key -> {base, comments, sel}: kept while the page lives, so
 const phone = () => matchMedia("(max-width: 759px)").matches;
 
 function ctxOf(src) {
-  const key = src.session ? "s:" + src.session : "i:" + src.item;
+  const key = src.session ? "s:" + src.session : (src.range ? "r:" : "i:") + src.item;
   return ctxs[key] || (ctxs[key] = { base: "origin", comments: [], sel: null, data: null, rows: [] });
 }
 
@@ -27,7 +27,7 @@ export async function renderChanges(box, src) {
   const ctx = ctxOf(src);
   box.classList.add("chg-host");
   box.innerHTML = `<div class="chg muted t-m">Reading the changes…</div>`;
-  const q = src.session ? `session=${encodeURIComponent(src.session)}&base=${ctx.base}` : `item=${src.item}`;
+  const q = src.session ? `session=${encodeURIComponent(src.session)}&base=${ctx.base}` : `item=${src.item}${src.range ? "&range=1" : ""}`;
   try { ctx.data = await getJson("api/diff?" + q); }
   catch (e) { box.innerHTML = `<div class="chg muted">${esc(e.message)}</div>`; return; }
   draw(box, src, ctx);
@@ -126,7 +126,7 @@ function draw(box, src, ctx) {
        <div class="t-m muted">Against ${esc(d.against || "")}. ${d.commits_ahead != null ? `${d.commits_ahead} commit${d.commits_ahead === 1 ? "" : "s"} not on GitHub.` : ""}</div>
        ${(d.shared || []).length ? `<div class="t-m chg-shared">This folder is shared with ${d.shared.map(esc).join(", ")}: the diff holds every session's changes here. The workspace setting gives each session its own folder and its own diff (#5856).</div>` : ""}`
     : `<div class="t-m"><b>#${d.item}</b> ${esc(d.title)}</div>
-       <div class="t-m muted">${d.kind === "deploy" ? `What release #${d.item} ships: the commits of ${d.items.length} item${d.items.length === 1 ? "" : "s"}.` : "The commits whose message names #" + d.item + ", also after the push."}</div>
+       <div class="t-m muted">${d.range ? `Release #${d.item}: all its code, ${esc(d.commits[0]?.subject || "")}.` : d.kind === "deploy" ? `What release #${d.item} ships: the commits of ${d.items.length} item${d.items.length === 1 ? "" : "s"}.` : "The commits whose message names #" + d.item + ", also after the push."}</div>
        ${d.waits ? `<div class="t-m chg-shared">This release waits for your Approve.</div>` : ""}`;
   const n = ctx.comments.length;
   const actions = `<div class="chg-acts">

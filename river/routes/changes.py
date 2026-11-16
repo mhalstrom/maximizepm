@@ -12,6 +12,8 @@ def diff(h, path):
     q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
     conn = core.connect()
     try:
+        if q.get("item", "").isdigit() and q.get("range"):  # the whole release of a deploy item (#6038)
+            return h._send(200, review.range_diff(conn, int(q["item"])))
         if q.get("item", "").isdigit():
             return h._send(200, review.item_diff(conn, int(q["item"])))
         if q.get("session"):

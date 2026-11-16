@@ -14059,6 +14059,43 @@ class ReleaseReport(Base):
         again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
         self.assertEqual(again["read_cards"], [])  # one Read card only
 
+    def test_the_code_of_the_whole_release(self):
+        # #6038: from the last tag to local main: the files, their size and tasks, and the commits that name no task.
+        import subprocess
+        from river import report, review
+        def git(*a):
+            return subprocess.run(["git", "-C", self.dir.name, "-c", "user.name=t", "-c", "user.email=t@example.test",
+                                   *a], capture_output=True, check=True, text=True).stdout
+        def commit(path, text, msg):
+            with open(os.path.join(self.dir.name, path), "w") as f:
+                f.write(text)
+            git("add", path)
+            git("commit", "-q", "-m", msg)
+        git("init", "-q", "-b", "main")
+        commit("a.txt", "one\n", "start")
+        git("tag", "v1.0.0")
+        commit("a.txt", "one\ntwo\n", f"Pay page (#{self.a})")
+        commit("b.txt", "x\ny\n", f"Footer (#{self.b}); see #99999")
+        commit("a.txt", "two\n", "A fix that names no task")
+        c = review.release_code(self.c, self.deploy)
+        self.assertEqual((c["base"], c["head_label"], c["files"], c["added"], c["removed"], c["commits"]),
+                         ("v1.0.0", "local main", 2, 3, 1, 3))
+        self.assertEqual({f["path"]: f["tasks"] for f in c["file_list"]}, {"a.txt": [self.a], "b.txt": [self.b]})
+        self.assertEqual([u["subject"] for u in c["untasked"]], ["A fix that names no task"])
+        r = report.report(self.c, self.deploy)
+        self.assertEqual((r["numbers"]["files"], r["numbers"]["added"], r["numbers"]["removed"]), (2, 3, 1))
+        d = review.range_diff(self.c, self.deploy)
+        self.assertTrue(d["range"])
+        self.assertEqual(sorted(f["path"] for f in d["commits"][0]["files"]), ["a.txt", "b.txt"])
+        # A done earlier release with a pin after the tag: the range starts at that pin.
+        pin = git("rev-parse", "HEAD~1").strip()
+        old = core.item_add(self.c, "site", "Deploy web before")["id"]
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET kind='deploy', target='web', status='done', cut_rev=?, closed_at=? "
+                           "WHERE id=?", (pin, core.iso(core.now()), old))
+        c = review.release_code(self.c, self.deploy)
+        self.assertEqual((c["base_label"], c["files"], c["commits"]), (f"the pin of release #{old}", 1, 1))
+
     def test_the_report_blocks_of_a_chat(self):
         # #6031: the session that cut a release and the one that started its deploy get its report block in their
         # chat; the manager gets every cut; another session gets none.

@@ -27,6 +27,12 @@
 .rep-ans { margin-top: var(--sp-1); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--accent); }
 .rep-acts { display: flex; justify-content: flex-end; margin-top: var(--sp-3); }
 .rep-back { display: none; }
+/* The code of the whole release (#6038): one row per file, its size and its tasks. */
+.rep-files { display: flex; flex-direction: column; margin-top: var(--sp-2); }
+.rep-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--sp-3); align-items: baseline;
+  padding: var(--sp-1) 0; border-top: var(--hair) solid var(--line); }
+.rep-file > :nth-child(3) { grid-column: 1 / -1; overflow-wrap: anywhere; }  /* the tasks under the path */
+.rep-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--fs-s); overflow-wrap: anywhere; }
 @media (max-width: 759px) {
   .rep-grid { grid-template-columns: 1fr; }
   .rep-r { border-left: 0; padding-left: 0; }
