@@ -786,15 +786,6 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   release waits on the user first: one item in Needs you lists the proposed
   fixes; the user edits the list and marks it done (MaximizePM adds the fixes), or
   drops it (no fixes).
-- Review steps per project: an ordered list the review of each release follows,
-  for every project the release ships. `maxpm review step add <project>
-  "<instruction>"` adds a written step; `--run "<command>"` adds a command that
-  must exit 0 in the project folder (`--at <n>` sets the position). Also
-  `maxpm review step list [<project>]`, `edit <id> --text ... --run|--do`,
-  `move <id> <n>`, and `rm <id>`. The REVIEWER brief shows the steps, and
-  `maxpm review pass <id> --confirm all` (or the step ids) confirms the written
-  steps, runs the commands, and records each result in the review's history.
-  `review_prompt` and `review_cmd` still apply next to the steps.
 - Releases move by themselves: the running `maxpm serve` takes a release from
   its review to its deploy with no manager. With `auto_review` on (the
   default), a ready review goes to a session that waits for work in a project

@@ -268,8 +268,6 @@ DEFAULT_SETTINGS = {
     # Review before release: with review on, each deploy item waits on a review item that waits on
     # everything the release ships. review_prompt tells the reviewer what to do (your review process);
     # review_cmd, when set, must exit 0 before maxpm review pass accepts the review.
-    # Each project can also keep an ordered list of review steps (maxpm review step add): the review
-    # of a release follows the steps of every project it ships, next to review_prompt and review_cmd.
     # Set them globally or on the deploy project (deploy-<target>).
     # The outside tracker a project uses, in words an agent can act on: which tracker, where, and with
     # what tool, e.g. "github owner/shop via gh" or "jira PROJ via the Jira MCP server". Set it per
@@ -571,7 +569,7 @@ DEFAULT_SETTINGS = {
     "review": "off",
     "review_prompt": "",
     "review_cmd": "",
-    # maxpm review pass stops a review command or a run step that takes longer than review_timeout, with every
+    # maxpm review pass stops a review command that takes longer than review_timeout, with every
     # process it started (0s: no limit). The reviewer's leases stay renewed while the command runs. Set it on the
     # deploy project (deploy-<target>) when one target's gate is slow.
     "review_timeout": "4h",
@@ -1057,15 +1055,6 @@ CREATE TABLE IF NOT EXISTS workspaces (
   checked_at  TEXT,
   kept_why    TEXT,                       -- why the sweep keeps it (uncommitted changes, unmerged commits)
   removed_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS review_steps (
-  id          INTEGER PRIMARY KEY,
-  project_id  INTEGER NOT NULL REFERENCES projects(id),
-  pos         INTEGER NOT NULL,
-  kind        TEXT NOT NULL CHECK (kind IN ('do','run')),
-  text        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -2330,6 +2319,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN held_at TEXT")
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='aliases'").fetchone():
         conn.execute("DROP TABLE aliases")  # the old names of renamed projects and targets are gone (#810)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_steps'").fetchone():
+        conn.execute("DROP TABLE review_steps")  # the review steps of projects are gone (#5992)
 
 
 LOCK_TRIES = 3  # a write waits busy_timeout (10s) this many times for the lock of the queue
@@ -14761,101 +14752,6 @@ def _review_item(conn, item_id, actor):
     return it
 
 
-# ---------------------------------------------------------------- review steps
-
-def _review_step(conn, step_id):
-    r = conn.execute("SELECT s.*, p.name project FROM review_steps s JOIN projects p ON p.id=s.project_id WHERE s.id=?",
-                     (int(step_id),)).fetchone()
-    if not r:
-        raise RiverError(f"no review step {step_id}; list them: maxpm review step list [<project>]")
-    return r
-
-
-def _renumber_steps(conn, project_id):
-    ids = [r["id"] for r in conn.execute("SELECT id FROM review_steps WHERE project_id=? ORDER BY pos, id", (project_id,))]
-    for n, sid in enumerate(ids, 1):
-        conn.execute("UPDATE review_steps SET pos=? WHERE id=?", (n, sid))
-
-
-def review_steps(conn, project=None):
-    """The review steps of one project, or of every project, in order."""
-    project = _project(conn, project)["name"] if project else None
-    q = ("SELECT s.id, s.pos, s.kind, s.text, p.name project FROM review_steps s JOIN projects p ON p.id=s.project_id "
-         + ("WHERE p.name=? " if project else "WHERE p.archived=0 ") + "ORDER BY p.rank, p.id, s.pos, s.id")
-    if project:
-        _project(conn, project)
-    return [dict(r) for r in conn.execute(q, (project,) if project else ())]
-
-
-def review_step_add(conn, project, text, run=False, at=None, actor=None):
-    """Add a review step to a project: a written instruction, or with run a command that must exit 0."""
-    p = _project(conn, project)
-    text = (text or "").strip()
-    if not text:
-        raise RiverError("say what the step is: maxpm review step add <project> \"<instruction>\" (or --run \"<command>\")")
-    with tx(conn):
-        n = conn.execute("SELECT COUNT(*) FROM review_steps WHERE project_id=?", (p["id"],)).fetchone()[0]
-        pos = n + 1 if at is None else max(1, min(int(at), n + 1))
-        conn.execute("UPDATE review_steps SET pos=pos+1 WHERE project_id=? AND pos>=?", (p["id"], pos))
-        cur = conn.execute("INSERT INTO review_steps(project_id,pos,kind,text,created_at) VALUES (?,?,?,?,?)",
-                           (p["id"], pos, "run" if run else "do", text, iso(now())))
-        _event(conn, None, actor, f"review step {pos} added to {p['name']}: {text}")
-    return dict(_review_step(conn, cur.lastrowid))
-
-
-def review_step_edit(conn, step_id, text=None, run=None, actor=None):
-    """Change a step's text, or make it a command (run=True) or a written instruction (run=False)."""
-    st = _review_step(conn, step_id)
-    if text is None and run is None:
-        raise RiverError(f"say what changes: maxpm review step edit {step_id} --text \"...\" and/or --run / --do")
-    if text is not None and not text.strip():
-        raise RiverError("the step text cannot be empty; to remove it: maxpm review step rm " + str(step_id))
-    with tx(conn):
-        conn.execute("UPDATE review_steps SET text=?, kind=? WHERE id=?",
-                     (text.strip() if text is not None else st["text"],
-                      st["kind"] if run is None else ("run" if run else "do"), st["id"]))
-        _event(conn, None, actor, f"review step {st['pos']} of {st['project']} changed")
-    return dict(_review_step(conn, st["id"]))
-
-
-def review_step_remove(conn, step_id, actor=None):
-    st = _review_step(conn, step_id)
-    with tx(conn):
-        conn.execute("DELETE FROM review_steps WHERE id=?", (st["id"],))
-        _renumber_steps(conn, st["project_id"])
-        _event(conn, None, actor, f"review step {st['pos']} removed from {st['project']}: {st['text']}")
-    return review_steps(conn, st["project"])
-
-
-def review_step_move(conn, step_id, to, actor=None):
-    """Move a step to position to (1 is first) within its project."""
-    st = _review_step(conn, step_id)
-    with tx(conn):
-        n = conn.execute("SELECT COUNT(*) FROM review_steps WHERE project_id=?", (st["project_id"],)).fetchone()[0]
-        to = max(1, min(int(to), n))
-        ids = [r["id"] for r in conn.execute("SELECT id FROM review_steps WHERE project_id=? AND id<>? ORDER BY pos, id",
-                                             (st["project_id"], st["id"]))]
-        ids.insert(to - 1, st["id"])
-        for k, sid in enumerate(ids, 1):
-            conn.execute("UPDATE review_steps SET pos=? WHERE id=?", (k, sid))
-        _event(conn, None, actor, f"review step of {st['project']} moved from {st['pos']} to {to}")
-    return review_steps(conn, st["project"])
-
-
-def release_review_steps(conn, item_id):
-    """The review steps a release review follows: of each project whose items it covers, by project rank."""
-    rows = conn.execute("SELECT DISTINCT p.id, p.name, p.path, p.rank FROM deps d JOIN items i ON i.id=d.blocked_by "
-                        "JOIN projects p ON p.id=i.project_id WHERE d.item_id=? AND i.kind<>'review' "
-                        "ORDER BY p.rank, p.id", (int(item_id),)).fetchall()
-    out = []
-    for p in rows:
-        steps = [dict(r) for r in conn.execute("SELECT id, pos, kind, text FROM review_steps WHERE project_id=? "
-                                               "ORDER BY pos, id", (p["id"],))]
-        if steps:
-            out.append({"project": p["name"], "path": p["path"], "steps": steps})
-    return out
-
-
 def _git_commit(path, rev="HEAD"):
     """The full id of a commit in a git folder, or None: no folder, no repository, or no such commit."""
     import subprocess
@@ -14896,32 +14792,16 @@ def _review_pin(conn, review_id, rev=None):
             "cut_rev": dep["cut_rev"]}
 
 
-def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, confirm=None, rev=None):
+def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, rev=None):
     """Accept a release review.
 
-    Every written step of the projects the release ships must be confirmed (confirm: "all", or the
-    step ids), and every command step must exit 0 in its project folder; so must the item's review
-    command (in cwd). Each step's result goes into the item's history. In a release with a git folder, the
-    commit that the folder holds after the steps is the reviewed one (#5498): it must be the release's pin or rev
+    The item's review command must exit 0 (in cwd). In a release with a git folder, the
+    commit that the folder holds after the command is the reviewed one (#5498): it must be the release's pin or rev
     (the reviewer's word), and a release with no pin is pinned at it, so the deploy hook gets it as MAXPM_REV and
-    a later commit of the folder does not go out unreviewed. The check is after the steps, because a gate step
+    a later commit of the folder does not go out unreviewed. The check is after the command, because a gate
     may check out the pinned commit itself."""
     it = _review_item(conn, item_id, actor)
     pin = _review_pin(conn, it["id"], (rev or "").strip() or None)
-    groups = release_review_steps(conn, item_id)
-    todo = [(g, s) for g in groups for s in g["steps"] if s["kind"] == "do"]
-    if isinstance(confirm, str):
-        confirm = [confirm]
-    confirm = [str(x).strip() for c in (confirm or []) for x in str(c).split(",") if str(x).strip()]
-    if not all(x == "all" or x.isdigit() for x in confirm):
-        raise RiverError("--confirm takes all, or the ids of the written steps you did (e.g. --confirm 3,5)")
-    everything = "all" in confirm
-    missing = [(g, s) for g, s in todo if not everything and str(s["id"]) not in confirm]
-    if missing:
-        raise RiverError("confirm each written review step after you did it:\n"
-                         + "\n".join(f"  step {s['id']} ({g['project']} {s['pos']}): {s['text']}" for g, s in missing)
-                         + f"\nThen: maxpm review pass {item_id} --confirm all   (or --confirm "
-                         + ",".join(str(s["id"]) for _, s in missing) + ")")
     limit = parse_duration(setting(conn, "review_timeout", item_id=it["id"])).total_seconds()
 
     def renew():
@@ -14950,15 +14830,6 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
             raise RiverError(f"{what} failed (exit {r.returncode}): {cmd}\n{tail}\n"
                              f"Fix it, or send the release back: maxpm review fail {item_id} \"<fix>\"")
 
-    results = []
-    for g in groups:
-        where = g["path"] if g["path"] and os.path.isdir(g["path"]) else cwd
-        for s in g["steps"]:
-            if s["kind"] == "run":
-                must_pass(s["text"], where, f"review step {s['id']} ({g['project']} {s['pos']})")
-                results.append({"id": s["id"], "project": g["project"], "kind": "run", "text": s["text"], "result": "exit 0"})
-            else:
-                results.append({"id": s["id"], "project": g["project"], "kind": "do", "text": s["text"], "result": "confirmed"})
     cmd = (it["check"] or "").strip()
     ran = None
     if cmd:
@@ -14970,8 +14841,8 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
         want = pin["named"] or pin["pin"]
         if want and head != want:
             raise RiverError(
-                f"refused: after the review steps {pin['folder']} is at {(head or 'no commit')[:12]}, but the release "
-                f"is {'pinned' if pin['pin'] else 'named'} at {want[:12]}: the steps checked other code than the release "
+                f"refused: after the review command {pin['folder']} is at {(head or 'no commit')[:12]}, but the release "
+                f"is {'pinned' if pin['pin'] else 'named'} at {want[:12]}: the review checked other code than the release "
                 f"ships, so nothing is recorded. Bring the folder to {want[:12]} and pass again, or ask the target owner "
                 f"or the manager to move the pin: maxpm target cut {pin['target']} --rev {(head or '')[:12]}")
         reviewed = want or head
@@ -14981,9 +14852,7 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
             _event(conn, pin["deploy"], actor, f"release pinned at {reviewed[:12]} by review #{it['id']}: the commit "
                                                f"it checked")
             _add_note(conn, pin["deploy"], f"[maxpm] release pinned at {iso(now())} by review #{it['id']}: {reviewed}")
-        for r in results:
-            _event(conn, it["id"], actor, f"review step {r['id']} ({r['project']}) {r['result']}: {r['text']}")
-    summary = [f"{len(results)} review step(s) followed"] if results else []
+    summary = []
     if ran:
         summary.append(f"{ran} exit 0")
     if reviewed:
@@ -14991,7 +14860,6 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
     res = done(conn, item_id, output or "; ".join(["review passed"] + summary), actor)
     res["reviewed"] = reviewed
     res["review_cmd"] = ran
-    res["review_steps"] = results
     return res
 
 
@@ -16311,7 +16179,6 @@ def item_show(conn, item_id, ann=None):
         "SELECT at, actor, change FROM events WHERE item_id=? ORDER BY id DESC LIMIT 50", (iid,))]
     if a["kind"] == "review":
         a["reviews"] = [d for d in a["waits_on_detail"]]
-        a["review_steps"] = release_review_steps(conn, iid)
         dep = _review_deploy(conn, iid)
         a["release_rev"] = _item(conn, dep)["cut_rev"] if dep else None  # MAXPM_REV of its commands (#5500)
     if a["kind"] == "deploy":

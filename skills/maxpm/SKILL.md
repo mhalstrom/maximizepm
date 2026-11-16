@@ -161,9 +161,9 @@ your type from your CLI's environment.
    held a task before: a review starts in a new session, with a clean context
    (`maxpm serve` starts one). After its review, a session takes any work.
    Follow the review process in
-   its context and the review steps the brief lists for each project, then
-   `maxpm review pass <id> --confirm all --output "<what you checked>"`
-   (confirms the written steps; runs the command steps and `review_cmd`, which
+   its context, then
+   `maxpm review pass <id> --output "<what you checked>"`
+   (runs `review_cmd`, which
    must exit 0; a command still running after `review_timeout` (4h) is stopped
    with every process it started, and the error names the setting; the
    release's folder must then hold its pinned commit, or `--rev <commit>`,

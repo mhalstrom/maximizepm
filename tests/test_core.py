@@ -4471,49 +4471,6 @@ class ReleaseReview(Base):
         self.c.execute("UPDATE items SET \"check\"=? WHERE id=?", (f'"{sys.executable}" -c "pass"', self.review))
         self.assertEqual(core.review_pass(self.c, self.review, None, "rev")["status"], "done")
 
-    def test_review_steps_add_edit_move_remove(self):
-        a = core.review_step_add(self.c, "site", "read every diff")
-        b = core.review_step_add(self.c, "site", "make test", run=True)
-        c = core.review_step_add(self.c, "site", "check the page on a phone", at=1)
-        self.assertEqual([s["id"] for s in core.review_steps(self.c, "site")], [c["id"], a["id"], b["id"]])
-        self.assertEqual([s["pos"] for s in core.review_steps(self.c, "site")], [1, 2, 3])
-        core.review_step_move(self.c, c["id"], 3)
-        self.assertEqual([s["id"] for s in core.review_steps(self.c, "site")], [a["id"], b["id"], c["id"]])
-        e = core.review_step_edit(self.c, a["id"], text="read every diff twice", run=True)
-        self.assertEqual((e["text"], e["kind"]), ("read every diff twice", "run"))
-        core.review_step_remove(self.c, b["id"])
-        self.assertEqual([(s["id"], s["pos"]) for s in core.review_steps(self.c, "site")], [(a["id"], 1), (c["id"], 2)])
-        with self.assertRaises(RiverError):
-            core.review_step_add(self.c, "site", "  ")
-        with self.assertRaises(RiverError):
-            core.review_step_add(self.c, "nope", "x")
-
-    def test_pass_follows_the_steps_of_each_project(self):
-        do = core.review_step_add(self.c, "site", "read every diff")
-        cmd = core.review_step_add(self.c, "site", "make test", run=True)
-        rv = core.item_show(self.c, self.review)
-        self.assertEqual([s["id"] for s in rv["review_steps"][0]["steps"]], [do["id"], cmd["id"]])
-        core.claim(self.c, self.review, "rev")
-        ran = []
-
-        class R:
-            def __init__(self, code):
-                self.returncode, self.stdout, self.stderr = code, "", "boom"
-        with self.assertRaises(RiverError) as e:
-            core.review_pass(self.c, self.review, None, "rev", runner=lambda c, d: ran.append(c) or R(0))
-        self.assertIn("read every diff", str(e.exception))
-        self.assertEqual(ran, [])  # nothing runs before the written steps are confirmed
-        with self.assertRaises(RiverError) as e:
-            core.review_pass(self.c, self.review, None, "rev", confirm="all", runner=lambda c, d: R(2))
-        self.assertIn("make test", str(e.exception))
-        res = core.review_pass(self.c, self.review, None, "rev", confirm=[str(do["id"])],
-                               runner=lambda c, d: ran.append((c, d)) or R(0))
-        self.assertEqual(res["status"], "done")
-        self.assertEqual([(c, os.path.realpath(d)) for c, d in ran], [("make test", os.path.realpath(self.dir.name))])  # in the project folder
-        self.assertEqual([r["result"] for r in res["review_steps"]], ["confirmed", "exit 0"])
-        hist = [e["change"] for e in core.item_show(self.c, self.review)["events"]]
-        self.assertTrue(any(f"review step {do['id']} (site) confirmed" in h for h in hist))
-
     def test_after_the_cut_new_work_joins_the_next_release_with_a_review_of_its_own(self):
         # #1619: nine late ship requests joined a release whose review had passed; it got a second review, and
         # its deploy item could not close for the release that was live.
@@ -7549,6 +7506,20 @@ class AliasesTable(Base):
         self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='aliases'").fetchone())
         self.assertEqual(core.project_show(self.c, "old")["name"], "old")
 
+    def test_an_old_queue_loses_its_review_steps_table(self):
+        # The review steps of projects are gone (#5992); connect drops their table.
+        core.project_add(self.c, "old")
+        self.c.execute("CREATE TABLE review_steps (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL "
+                       "REFERENCES projects(id), pos INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('do','run')), "
+                       "text TEXT NOT NULL, created_at TEXT NOT NULL)")
+        self.c.execute("INSERT INTO review_steps VALUES (1, 1, 1, 'do', 'read every diff', '2026-09-01T00:00:00Z')")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
+        self.c.commit()
+        self.c.close()
+        self.c = core.connect(self.path)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='review_steps'").fetchone())
+        self.assertEqual(core.project_show(self.c, "old")["name"], "old")
+
 
 class Locked(Base):
     """Other commands hold the write lock of the queue longer than busy_timeout (#1615)."""
@@ -9759,7 +9730,7 @@ class ManagerWake(Base):
         rv = self.c.execute("SELECT blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by "
                             "WHERE d.item_id=? AND i.kind='review'", (dep,)).fetchone()[0]
         core.claim(self.c, rv, "w2")
-        core.review_pass(self.c, rv, "checked the page", "w2", confirm="all")
+        core.review_pass(self.c, rv, "checked the page", "w2")
         core.claim(self.c, dep, "w3")
         core.done(self.c, dep, "release-1", "w3")
         got = [(m["level"], m["body"]) for m in self.c.execute(
