@@ -259,6 +259,11 @@ button.srow-it { cursor: pointer; }
 .acard-cm { margin-bottom: var(--sp-3); overflow-wrap: anywhere; }
 .acard-hist { margin: 0; padding-left: var(--sp-5); }
 .acard-disc { margin-top: var(--sp-5); }
+/* The tries of one task side by side (#5996). */
+.acard-tries { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--w-try), 1fr)); gap: var(--sp-3); }
+.acard-try { display: flex; flex-direction: column; gap: var(--sp-2); border: var(--hair) solid var(--line);
+  border-radius: var(--r-m); padding: var(--sp-3); min-width: 0; }
+.acard-try .btn { align-self: flex-start; }
 /* Images for a session (#4610): thumbnails in the message box, and in the person's turn. The files of the message box
    sit in a tray over the pill, as wide as the pill, with the radius and the color of a chat bubble (#5304). */
 .sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); margin-left: calc(var(--h-cmp) + var(--sp-3));

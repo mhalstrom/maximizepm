@@ -63,6 +63,7 @@
   --w-dlg-s: 520px; --w-dlg-m: 620px;  /* a small and a middle dialog (--dlg-w) */
   --w-dlg-l: 1000px;   /* a large view over the chat: a task in the work of its session (#5572) */
   --w-card-side: 280px; /* the right column of a card: comments, history, Discuss (#6002) */
+  --w-try: 180px;       /* the narrowest try on a Look card of several tries (#5996) */
   /* The Sessions tab (#5044) */
   --w-sess-min: 280px; --w-sess-max: 360px;  /* the column of the session list */
   --w-panel: 480px;    /* the side panel at its first width, and a bar over it */

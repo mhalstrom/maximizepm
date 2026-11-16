@@ -1795,6 +1795,8 @@ def build_parser(only=None):
                    "needed when the title or context names a later day (now: it can start now)")
     x.add_argument("--notes", default="")
     x.add_argument("--doer", default="any", choices=core.DOERS, help="who can do it (default any)")
+    x.add_argument("--tries", type=int, metavar="N", help="visual work: N sessions each do it their own way, "
+                   "each in its own worktree, and a Look card for you waits on them: you pick one (#5996)")
     x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="a person item: "+"what the person does with it (default: from the first word of the title)")
     x.add_argument("--context", default="", help="what a new agent must know to start: why, where, decisions made")
     x.add_argument("--touches", nargs="*", default=[], help="files or directories it changes")
@@ -2559,6 +2561,11 @@ def _rights(conn, args, actor):
                    f"the manager (the page's Start manager). Ask the manager, or the person")
         if why:
             _refuse_again(conn, name, why)
+    # Several tries start N sessions for one task (#5996): the person or the manager decides that cost.
+    if args.cmd == "add" and getattr(args, "tries", None) and caller == rights.SESSION:
+        _refuse_again(conn, name, f"{rights.REFUSED}: maxpm add --tries is for the person or the manager, as it starts "
+                                  f"a session for each try. Add the task, and ask the manager: maxpm alert <manager> "
+                                  f"\"<why it needs several tries>\"")
     why = rights.refusal(key, caller, name)
     if why:
         _refuse_again(conn, name, why)
@@ -4381,6 +4388,11 @@ def dispatch(conn, a, actor):
         else:
             title = a.words[0]
             project = core.project_for_add(conn, os.getcwd(), a.blocks if a.blocks is not None else a.found_during)
+        if a.tries:  # several tries and the Look card (#5996)
+            if a.doer == "human" or a.blocks is not None:
+                raise RiverError("--tries is for agent work, with no --blocks: maxpm add \"<title>\" --tries 3")
+            return core.tries_add(conn, project, title, a.tries, actor, a.priority, a.context, a.touches, a.check,
+                                  a.short, None if not a.goal and not a.no_goal else ([] if a.no_goal else a.goal))
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, _models(a),
@@ -7147,6 +7159,12 @@ def render(a, res):
         return
     if c == "manage":
         return render_manage(res)
+    if c == "add" and isinstance(res, dict) and "tries" in res and "look" in res:  # #5996
+        print(f"Added {len(res['tries'])} tries of one task to {res['project']}: "
+              + ", ".join(f"#{t}" for t in res["tries"]) + f"; each starts in a new session and its own worktree.")
+        print(f"The Look card #{res['look']} waits on them: the person picks one (maxpm done {res['look']} --output <k>), "
+              f"a task merges that try, and maxpm serve removes the others.")
+        return
     if c == "add" and isinstance(res, dict) and "dry_run" in res:
         rows = res["items"]
         print(("Would add" if res["dry_run"] else "Added") + f" {len(rows)} item(s) to {res['project']}:")

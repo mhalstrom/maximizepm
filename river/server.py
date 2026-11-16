@@ -334,7 +334,9 @@ def _workspace(conn, t, name, project_id, make=True):
     of it); a session that has one keeps it. setup: t['setup'] is the project's workspace_setup command, which
     _open_terminal runs in the worktree before the agent. The session gets MAXPM_WORKSPACE and MAXPM_PROJECT_DIR.
     make=False (a resumed chat): only a worktree that the session has already."""
-    mode = core.setting(conn, "workspace", project_id=project_id)
+    # The item's own value first: each try of a task works in a worktree (#5996), also in a shared project.
+    item_id = (t.get("item") or {}).get("id") if isinstance(t.get("item"), dict) else t.get("task")
+    mode = core.setting(conn, "workspace", item_id=item_id, project_id=project_id)
     if mode == "shared":
         return t
     project = core._project_name(conn, project_id)
@@ -384,13 +386,15 @@ def workspace_sweep(conn):
     of its own). git worktree remove, then git branch -d. Else it stays, with the reason (maxpm workspace list), and
     is looked at again after WORKSPACE_LOOK. Returns {path: removed | why kept}."""
     out, t = {}, core.now()
+    unpicked = core.unpicked_try_agents(conn)  # #5996: a try the person did not pick goes with its commits
     for w in core.workspace_list(conn):
         if not _session_ended(conn, w):
             continue
-        if w["checked_at"] and w["kept_why"] and t - core.parse_iso(w["checked_at"]) < WORKSPACE_LOOK:
+        if w["agent"] not in unpicked and w["checked_at"] and w["kept_why"] \
+                and t - core.parse_iso(w["checked_at"]) < WORKSPACE_LOOK:
             continue
         try:
-            why = _workspace_remove(w)
+            why = _workspace_remove(w, force=w["agent"] in unpicked)
         except RiverError as e:
             why = str(e)
         core.workspace_mark(conn, w["id"], removed=why is None, kept_why=why)
@@ -401,12 +405,19 @@ def workspace_sweep(conn):
 WORKSPACE_LOOK = core.timedelta(minutes=10)
 
 
-def _workspace_remove(w):
+def _workspace_remove(w, force=False):
     """Remove one worktree and its branch; None when done (or its folder is gone). Else the reason it stays,
-    because something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks."""
+    because something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks.
+    force: the person picked another try (#5996), so its changes and commits go too."""
     wt, repo = Path(w["path"]), Path(w["repo"])
     if not wt.is_dir():
         _git(repo, "worktree", "prune", check=False)
+        if force:
+            _git(repo, "branch", "-D", w["branch"], check=False)
+        return None
+    if force:
+        _git(repo, "worktree", "remove", "--force", str(wt))
+        _git(repo, "branch", "-D", w["branch"], check=False)
         return None
     dirty = _git(wt, "status", "--porcelain", check=False)
     if dirty:

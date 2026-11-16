@@ -44,6 +44,17 @@ class AskCard(unittest.TestCase):
         self.assertIn(">Done<", html)
         self.assertNotIn("data-opt", html)  # no decision form, no option buttons
 
+    def test_a_look_card_of_tries_shows_them_side_by_side(self):
+        # #5996: each try with what its session said to look at; a button keeps a done try.
+        html = run("m.cardHtml(m.fromItem({id: 20, title: 'Look at the 2 tries and pick one: x', type: 'look', "
+                   "context: 'Your answer: \"1\" or \"2\"', tries: [{k: 1, id: 21, status: 'done', output: 'canvas h1', "
+                   "assignee: 's1'}, {k: 2, id: 22, status: 'in_progress', output: null}]}))")
+        self.assertIn("Try 1", html)
+        self.assertIn("canvas h1", html)
+        self.assertIn('data-opt="1"', html)
+        self.assertNotIn('data-opt="2"', html)  # not done yet
+        self.assertIn("Not done yet (in progress)", html)
+
     def test_text_is_escaped(self):
         html = run("m.cardHtml(m.fromItem({id: 9, title: '<img src=x onerror=alert(1)>', type: 'do'}))")
         self.assertNotIn("<img src=x", html)

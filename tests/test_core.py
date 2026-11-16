@@ -13507,6 +13507,80 @@ class RunLog(Base):
         self.assertEqual(self.rows(), [])
 
 
+class Tries(Base):
+    """#5996: one visual task as several tries, each in a new session and its own worktree, and the person's Look card
+    that picks one."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.register(self.c, "mark", human=True)
+        self.r = core.tries_add(self.c, "a", "Draw the new header", 3, "mark", short="New header")
+
+    def test_tries_and_their_look_card(self):
+        look, tries = self.r["look"], self.r["tries"]
+        self.assertEqual(len(tries), 3)
+        it = core.item_show(self.c, look)
+        self.assertEqual((it["doer"], it["type"]), ("human", "look"))
+        self.assertIn('Your answer: "1" or "2" or "3"', it["context"])
+        self.assertEqual([t["k"] for t in it["tries"]], [1, 2, 3])
+        self.assertEqual({r[0] for r in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?", (look,))}, set(tries))
+        for t in tries:
+            self.assertEqual(core.setting(self.c, "workspace", item_id=t), "worktree")
+            self.assertTrue(core.is_try(core._item(self.c, t)))
+        with self.assertRaisesRegex(RiverError, "2 to 5"):
+            core.tries_add(self.c, "a", "One try", 1, "mark")
+
+    def test_a_try_starts_in_a_new_session(self):
+        core.register(self.c, "w")
+        other = self.add("a", "something else")
+        core.claim(self.c, other, "w")
+        core.done(self.c, other, "ok", "w")
+        with self.assertRaisesRegex(RiverError, "try .* starts in a new session"):
+            core.claim(self.c, self.r["tries"][0], "w")
+        core.register(self.c, "fresh")
+        core.claim(self.c, self.r["tries"][0], "fresh")
+
+    def test_the_pick_keeps_one_try_and_marks_the_others(self):
+        look, tries = self.r["look"], self.r["tries"]
+        for n, t in enumerate(tries, 1):
+            core.register(self.c, f"s{n}")
+            core.claim(self.c, t, f"s{n}")
+        with self.assertRaisesRegex(RiverError, "still waits on"):
+            core.done(self.c, look, "2", "mark")
+        for n, t in enumerate(tries, 1):
+            core.done(self.c, t, f"see canvas header-{n}", f"s{n}")
+        with self.assertRaisesRegex(RiverError, "say which try you keep"):
+            core.done(self.c, look, "the second one", "mark")
+        with self.assertRaisesRegex(RiverError, "say which try you keep"):
+            core.done(self.c, look, "7", "mark")
+        res = core.done(self.c, look, "2", "mark")
+        merge = core._item(self.c, res["merge_task"])
+        self.assertIn("Merge the picked try 2 of: Draw the new header", merge["title"])
+        self.assertIn("maxpm/s2", merge["context"])
+        self.assertEqual(core.unpicked_try_agents(self.c), {"s1", "s3"})
+        # A session that also did other work keeps its worktree: that work is never lost.
+        other = self.add("a", "other work")
+        self.c.execute("INSERT INTO events (item_id, at, actor, change) VALUES (?, ?, 's3', 'claimed')",
+                       (other, core.iso(core.now())))
+        self.c.commit()
+        self.assertEqual(core.unpicked_try_agents(self.c), {"s1"})
+
+    def test_add_tries_from_the_cli_and_only_for_the_person_or_manager(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "add", "a", "Draw the footer", "--tries", "2"])
+        self.assertIn("Added 2 tries of one task to a", out.getvalue())
+        old = cli.INSIDE_AGENT
+        cli.INSIDE_AGENT = lambda: True
+        self.addCleanup(setattr, cli, "INSIDE_AGENT", old)
+        core.register(self.c, "w")
+        with self.assertRaisesRegex(RiverError, "--tries is for the person or the manager"):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(["--as", "w", "add", "a", "Draw the menu", "--tries", "2"])
+
+
 class ActionType(Base):
     """A person's action items and questions carry a type to filter by (#5998)."""
 

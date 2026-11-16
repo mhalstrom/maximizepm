@@ -9,7 +9,7 @@ import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
-import { openCard } from "../components/waitDialog.js";
+import { openCard, openItemCard } from "../components/waitDialog.js";
 import { fromEvent, typeChip } from "../components/askCard.js";
 import { openSignin } from "./signinAsk.js";
 
@@ -125,7 +125,8 @@ export function onClick(t) {
     const id = +nyt.dataset.nyt, e = NY.find(x => x.id === id);
     // #6002: a question or a person item opens its card; a sign-in request opens its permission dialog; another
     // alert opens in the list, as before.
-    if (e && (e.kind === "item" || e.message_kind === "question")) return openCard(fromEvent(e));
+    if (e && e.kind === "item") return openItemCard(e.item_id);  // the whole item: its tries too (#5996)
+    if (e && e.message_kind === "question") return openCard(fromEvent(e));
     const req = e && e.message_kind === "alert" && signinRequest(e.body);
     if (req && (S.signin_asks || []).includes(req)) return openSignin(req);
     nyOpen.has(id) ? nyOpen.delete(id) : nyOpen.add(id); return renderNeedsYou();

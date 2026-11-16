@@ -532,6 +532,13 @@ first task. A shared goal (`--shared`) is the exception: a label for tasks that
 do not depend on each other; the worker that finishes one of its tasks keeps
 its handoff.
 
+Visual work where taste decides (a page, a layout, a picture) can run as
+several tries: `maxpm add "<title>" --tries 3` (2 to 5). Each try starts in a
+new session, in its own worktree, and does not merge. The person gets one Look
+card with the tries side by side and keeps one; a task then merges that try,
+and `maxpm serve` removes the other worktrees. Each try costs a session: use it
+only when the person asked for it or the result is a matter of taste.
+
 ## Operational work goes into a task
 
 Work on the operation of the system is a task of its own, not something you do

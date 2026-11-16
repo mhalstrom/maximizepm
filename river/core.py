@@ -14456,10 +14456,10 @@ def work_refusal(conn, a, view):
         return ("an answer came for it: a fresh session takes it", False)
     if actor and view.still.get(a["id"], actor) != actor:
         return (f"{view.still[a['id']]} still works on it in its session", True)
-    if actor and a["kind"] in FRESH_KINDS and reviewer_refusal(conn, a, actor):
+    if actor and (a["kind"] in FRESH_KINDS or is_try(a)) and reviewer_refusal(conn, a, actor):
         return ("you worked on the release it reviews" if author_refusal(conn, a, actor)
-                else f"{'a review' if a['kind'] == 'review' else 'an operational task'} starts in a new session; "
-                     f"this one held a task", True)
+                else f"{'a try' if is_try(a) else 'a review' if a['kind'] == 'review' else 'an operational task'} "
+                     f"starts in a new session; this one held a task", True)
     if view.ops_first and a["kind"] != "operational" and not view.chosen(a):  # a person may still push one to it
         return (f"this session started for operational task #{view.ops_first} on its own model; other work starts "
                 f"in a new session", True)
@@ -15095,7 +15095,10 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
             _ship_check(conn, _item(conn, item_id))
         except RiverError as e:
             raise RiverError(f"{e}; #{item_id} stays open (close it without --ship when it does not ship)") from None
+    pick = _tries_choice(conn, _item(conn, item_id), output)  # a Look card of tries names the one to keep (#5996)
     res = _close(conn, item_id, "done", actor, output, note, force)
+    if pick:
+        res["merge_task"] = _tries_picked(conn, res, *pick, actor)
     if changed:
         with tx(conn):
             conn.execute("UPDATE items SET changed=? WHERE id=?", (changed, res["id"]))
@@ -16526,6 +16529,8 @@ def item_show(conn, item_id, ann=None):
     if a["doer"] == "human":
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
         a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
+        if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
+            a["tries"] = [{"k": k, **t} for k, t in sorted(tries_of(conn, iid).items())]
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a
 
@@ -19974,16 +19979,121 @@ def reviewer_refusal(conn, item, agent):
     """Why this agent may not take this release review or operational task, or None: it worked on the release
     (author_refusal), or its session held a task before (used_session). A review and an operational task start in
     a new session, with a clean context (#4968, mark: 'all reviews should start with a clean context reviewer';
-    #4973); after it a session may take any work. A person may take any of them."""
+    #4973); after it a session may take any work. A person may take any of them. A try (#5996) starts in a new
+    session too, so that no try sees another one."""
     why = author_refusal(conn, item, agent)
-    if why or item["kind"] not in FRESH_KINDS or not _is_ai(conn, agent):
+    if why or (item["kind"] not in FRESH_KINDS and not is_try(item)) or not _is_ai(conn, agent):
         return why
     used = used_session(conn, agent, item["id"])
     if used is None:
         return None
-    what = "release review" if item["kind"] == "review" else "operational task"
+    what = ("try" if is_try(item) else "release review" if item["kind"] == "review" else "operational task")
     return (f"this session held #{used} before; {what} #{item['id']} starts in a new session with a clean "
             f"context (maxpm serve starts one)")
+
+
+# ---------------------------------------------------------------- several tries (#5996)
+# mark 2026-11-15 (talk #5935): one visual task as N tries, each in its own session and worktree; the person picks one
+# from a Look card that shows them side by side, and the others go. Computed, with no column: a try is an item whose
+# title ends with "(try k of N)"; its Look card is the person item that waits on the tries (TRIES_LOOK in its title).
+# The card's answer ("2") is the pick: done keeps that try (a task merges its branch), and maxpm serve removes the
+# other tries' worktrees and branches (server.workspace_sweep, unpicked_try_agents).
+_TRY = re.compile(r"\(try (\d+) of (\d+)\)\s*$")
+TRIES_LOOK = "tries and pick one:"
+TRIES_MAX = 5
+
+
+def is_try(item):
+    return bool(_TRY.search(item["title"] or ""))
+
+
+def tries_of(conn, look_id):
+    """{k: the try item} of a Look card: the items it waits on whose titles end with (try k of N)."""
+    out = {}
+    for r in conn.execute("SELECT i.id, i.title, i.status, i.assignee, i.output FROM deps d JOIN items i "
+                          "ON i.id=d.blocked_by WHERE d.item_id=? AND d.kind='blocks'", (look_id,)):
+        m = _TRY.search(r["title"] or "")
+        if m:
+            out[int(m.group(1))] = dict(r)
+    return out
+
+
+def tries_add(conn, project, title, n, actor=None, priority=2, context="", touches=None, check="", short=None,
+              goals=None):
+    """Add one visual task as n tries and the person's Look card that waits on all of them (maxpm add --tries n)."""
+    if not 2 <= n <= TRIES_MAX:
+        raise RiverError(f"--tries takes 2 to {TRIES_MAX}: each try is its own session")
+    pick = " or ".join(f'"{k}"' for k in range(1, n + 1))
+    look = item_add(conn, project, f"Look at the {n} {TRIES_LOOK} {title}", priority, "", "human", (), actor,
+                    context=(f"{n} sessions each did the same task in their own way, each in its own worktree. Look "
+                             f"at each one (its output names where to see it), then pick the one to keep: a task "
+                             f"merges its branch, and the others go with their worktrees.\nYour answer: {pick}"),
+                    goals=goals, short=f"Pick a try: {short}" if short else None)
+    tries = []
+    for k in range(1, n + 1):
+        t = item_add(conn, project, f"{title} (try {k} of {n})", priority, "", "any", (), actor,
+                     context=(f"Try {k} of {n} for the Look card #{look['id']}: the same task runs in {n} sessions, "
+                              f"each its own way. Work and commit on your worktree's branch, and do not merge it into "
+                              f"main: the person picks one try first, and a task merges that one. In --output, say "
+                              f"where the person sees your result (a page, a canvas, a screenshot)."
+                              + (f"\n{context}" if context else "")),
+                     touches=touches, check=check, goals=goals,
+                     short=f"{short} (try {k})" if short else None)
+        tries.append(t["id"])
+        config_set(conn, "workspace", "worktree", item=t["id"], actor=actor)  # never the shared folder
+    dep_add(conn, look["id"], tries, actor)
+    return {"look": look["id"], "tries": tries, "project": look["project"]}
+
+
+def _tries_choice(conn, look, output):
+    """Before done closes a Look card of tries: the try that its output names, (k, tries), or a refusal. None for any
+    other item."""
+    if TRIES_LOOK not in (look["title"] or ""):
+        return None
+    tries = tries_of(conn, look["id"])
+    if len(tries) < 2:
+        return None
+    m = re.search(r"\d+", output or "")
+    k = int(m.group(0)) if m else None
+    if k not in tries:
+        raise RiverError(f"say which try you keep: maxpm done {look['id']} --output <1-{max(tries)}> (the card's "
+                         f"buttons do it)")
+    return k, tries
+
+
+def _tries_picked(conn, look, k, tries, actor):
+    """After done closed a Look card of tries: each other try is marked not picked (maxpm serve removes its worktree),
+    and the picked one gets a task that merges its branch. Returns that task's id."""
+    won = tries[k]
+    with tx(conn):
+        for j, t in tries.items():
+            if j != k:
+                _event(conn, t["id"], actor, f"try {j} not picked (#{look['id']} kept try {k}): maxpm serve removes "
+                                            f"its worktree and branch")
+        _event(conn, won["id"], actor, f"picked: try {k} of #{look['id']}")
+    base = _TRY.sub("", won["title"]).strip()
+    who = won["assignee"]
+    merge = item_add(conn, look["project"], f"Merge the picked try {k} of: {base}", 2, "", "any", (), actor,
+                     context=(f"The person picked try {k} (#{won['id']}) on the Look card #{look['id']}. Its work is on "
+                              f"the branch maxpm/{who} of its worktree (maxpm workspace list)." if who else
+                              f"The person picked try {k} (#{won['id']}) on the Look card #{look['id']}.")
+                             + " Merge it into main as any change goes in (tests first); the other tries' worktrees "
+                               "and branches are removed by maxpm serve.", found_during=look["id"])
+    return merge["id"]
+
+
+def unpicked_try_agents(conn):
+    """The sessions whose try was not picked: maxpm serve removes their worktrees and branches, also with commits."""
+    out = set()
+    for r in conn.execute("SELECT id, output FROM items WHERE status='done' AND title LIKE ?", (f"%{TRIES_LOOK}%",)):
+        m = re.search(r"\d+", r["output"] or "")
+        tries = tries_of(conn, r["id"])
+        if m and int(m.group(0)) in tries:
+            out |= {t["assignee"] for j, t in tries.items() if j != int(m.group(0)) and t["assignee"]}
+    # Only a session that worked on nothing but tries: other work in its worktree is never lost.
+    return {a for a in out if all(is_try({"title": r["title"]}) for r in conn.execute(
+        "SELECT DISTINCT i.title FROM events e JOIN items i ON i.id=e.item_id WHERE e.actor=? AND e.change LIKE "
+        "'claimed%'", (a,)))}
 
 
 def _review_folder(conn, item):

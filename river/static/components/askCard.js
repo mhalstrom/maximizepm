@@ -30,7 +30,17 @@ export function fromWaiting(w, session) {
 export function fromItem(it) {
   return { kind: "item", id: it.id, item_id: it.id, title: it.title || "", detail: it.context || it.notes || "",
     type: it.type, priority: it.effective_priority != null ? it.effective_priority : it.priority, project: it.project,
-    at: it.created_at, earlier: it.earlier || [] };
+    at: it.created_at, earlier: it.earlier || [], tries: it.tries || null };
+}
+
+// The tries of one task side by side (#5996): each try's state and what its session said to look at, and a button
+// that keeps it. A try that is not done yet has no button: the card is ready when every try is done.
+export function triesHtml(c) {
+  if (!c.tries || !c.tries.length) return "";
+  return `<div class="acard-tries">${c.tries.map(t => `<div class="acard-try">
+    <div class="acard-h"><b>Try ${t.k}</b><span class="muted t-s">#${t.id}${t.assignee ? ` · ${esc(t.assignee)}` : ""}</span></div>
+    <div class="acard-d">${t.status === "done" ? esc(clip(t.output || "No output: open the item", 600)) : `Not done yet (${esc(t.status.replace("_", " "))})`}</div>
+    ${t.status === "done" ? button(`Keep try ${t.k}`, { kind: "primary", data: { opt: String(t.k) } }) : ""}</div>`).join("")}</div>`;
 }
 
 // The level in the head: an item's priority; a question's level (low, or high when nobody said low), and that its
@@ -64,7 +74,7 @@ export function cardHtml(c, { pane = false } = {}) {
       <div class="wq">${esc(c.title)}</div>
       ${c.detail ? `<div class="acard-d">${esc(clip(c.detail, 1200))}</div>` : ""}
       ${c.note ? `<div class="muted">The manager: ${esc(c.note)}</div>` : ""}
-      ${optionsHtml(c)}
+      ${c.tries && c.tries.length ? triesHtml(c) : optionsHtml(c)}
       ${earlierHtml(c.earlier)}
       ${box}
       <div class="acard-acts">${acts}</div></div>

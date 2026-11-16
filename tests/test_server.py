@@ -1044,6 +1044,43 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "whole path"):
             server.start_session(self.c, "web", runner=sent.append)
 
+    def test_tries_work_in_worktrees_and_the_sweep_removes_the_tries_not_picked(self):
+        """#5996: each try starts in its own worktree, also in a project with shared folders; after the person picks
+        one, the sweep removes the other tries' worktrees and branches with their commits, and keeps the picked one."""
+        import subprocess
+        root = os.path.join(os.path.realpath(self.dir.name), "web")
+        os.makedirs(root)
+
+        def git(*a, cwd=root):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        core.project_add(self.c, "web", path=root)
+        core.register(self.c, "mark", human=True)
+        r = core.tries_add(self.c, "web", "Draw the header", 2, "mark")
+        sent, wts, names = [], [], []
+        for k, t in enumerate(r["tries"], 1):
+            s = server.dispatch_item(self.c, t, runner=sent.append)
+            name = s["session_name"]
+            wt = os.path.join(os.path.dirname(root), "web.worktrees", name)
+            self.assertIn(f"cd {wt} && ", sent[-1])  # its own worktree, though the project's workspace is shared
+            core.claim(self.c, t, name)
+            Path(wt, "header.txt").write_text(f"header {k}\n")
+            git("add", "header.txt", cwd=wt)
+            git("commit", "-q", "-m", f"header {k}", cwd=wt)
+            core.done(self.c, t, f"try {k}", name)
+            core.unregister(self.c, name)
+            wts.append(wt)
+            names.append(name)
+        core.done(self.c, r["look"], "1", "mark")
+        out = server.workspace_sweep(self.c)
+        self.assertEqual(out[wts[1]], "removed")
+        self.assertFalse(os.path.exists(wts[1]))
+        self.assertEqual(git("branch", "--list", f"maxpm/{names[1]}"), "")
+        self.assertIn("not in web's HEAD", out[wts[0]])  # the picked try stays until its merge
+        self.assertTrue(os.path.exists(wts[0]))
+
     def test_a_worktree_for_each_session_and_the_sweep_removes_it_when_merged(self):
         """#5856: workspace worktree gives each session its own git worktree and branch; the sweep keeps one with
         unmerged commits and removes it once merged; setup runs the project's command before the agent."""
