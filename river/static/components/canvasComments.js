@@ -30,8 +30,10 @@ export function pathIn(el, root) {
   return parts.join(" > ");
 }
 
-const partText = (a) => !a ? "the whole page"
+const partText = (a) => !a || !(a.quote || a.text || a.path) ? "the whole page"
   : a.quote ? `“${clip(a.quote, 80)}”` : a.text ? `“${clip(a.text, 80)}”` : a.path || "a part";
+// A comment or suggestion that came from the canvas's shared page (#6012, core.rqs_read_responses).
+export const fromPage = (c) => !!(c.anchor && c.anchor.page);
 
 // box: the element that holds the threads. ref: "c<id>". reload(): fetch the canvas's meta again and render.
 // show(path): scroll the page to a part. Returns { render(meta), pick(anchor), compose(anchor) }.
@@ -64,7 +66,8 @@ export function makeComments(box, { id, ref, reload, show }) {
     // #4844: a reply that the person began to another comment stays when the list draws again.
     const replies = {};
     for (const inp of box.querySelectorAll("[data-cv-reply-text]")) if (inp.value) replies[inp.dataset.cvReplyText] = inp.value;
-    box.innerHTML = `<div class="cv-head"><b>Comments</b> <span class="muted">${open.length} open${drafts.length ? ` · ${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : ""}</span>
+    const shared = open.filter(fromPage).length;
+    box.innerHTML = `<div class="cv-head"><b>Comments</b> <span class="muted">${open.length} open${drafts.length ? ` · ${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : ""}</span>${shared ? ` <span class="chip cv-page">${shared} new from the shared page</span>` : ""}
         <span class="cv-sp"></span>${drafts.length ? `<button class="btn primary" type="button" data-cv-sendall>Send ${drafts.length === 1 ? "the draft" : `all ${drafts.length} drafts`} to the session</button>` : ""}</div>
       ${k ? `<div class="cv-compose">${k.suggest != null
           ? `<div class="muted">Suggest new words for <del>${esc(clip(k.anchor.quote, 300))}</del></div>
@@ -76,7 +79,7 @@ export function makeComments(box, { id, ref, reload, show }) {
           <button class="btn" type="button" data-cv-cancel>Cancel</button></div></div>` : ""}
       ${list.map(c => { const st = stateOf(c);
         return `<div class="cv-c cv-${st}" data-cid="${c.id}">
-          <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>
+          <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>${fromPage(c) ? ` <span class="chip cv-page">on the shared page</span>` : ""}
             ${c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" title="Show this part of the page">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
           ${c.anchor && c.anchor.suggest != null ? `<div class="cv-sugg"><del>${esc(clip(c.anchor.quote, 400))}</del> <ins>${esc(clip(c.anchor.suggest, 400)) || "(deleted)"}</ins></div>` : ""}
           <div class="cv-b">${esc(c.body)}</div>

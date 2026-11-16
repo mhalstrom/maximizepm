@@ -6357,9 +6357,11 @@ def _canvas_line(d):
 def _comment_lines(r, indent="  "):
     a = r.get("anchor")
     part = "the whole page"
-    if a:
+    if a and (a.get("quote") or a.get("text") or a.get("path")):
         part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:80]}\"") + \
                (f" ({a['path']})" if a.get("path") else "")
+    if a and a.get("page"):
+        part += " on the shared page"
     out = [f"{indent}c{r['id']} [{r['state']}] {r['author']} on {part} (v{r['version']}): {r['body']}"]
     if a and a.get("suggest") is not None:  # a suggested change (#6004)
         out.append(f"{indent}  suggests: \"{a['suggest']}\" in place of \"{a['quote']}\""

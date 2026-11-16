@@ -473,6 +473,7 @@ button.srow-it { cursor: pointer; }
 .cv-sugg { overflow-wrap: anywhere; }
 .cv-sugg del, .cv-compose del { color: var(--warn); background: var(--warn-bg); }
 .cv-sugg ins { color: var(--ready); background: var(--ready-bg); text-decoration: none; }
+.cv-page { color: var(--human); background: var(--human-bg); font-size: var(--fs-xs); }  /* from the shared page (#6012) */
 /* Comment mode on a Markdown canvas: the part under the mouse, and a part that Show finds. */
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: var(--hair-2) solid var(--accent); outline-offset: var(--sp-0); }

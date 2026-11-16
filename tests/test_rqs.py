@@ -394,6 +394,25 @@ class Responses(Base):
     def comments(self):
         return core.canvas_show(self.c, "plan")["comments"]
 
+    def test_a_reader_suggests_new_words_and_the_person_accepts(self):
+        # #6012: a comment on selected words that starts with "Suggest:" is a suggestion from the shared page.
+        self.fake.responses[self.sub] = {"comments": [
+            thread("s", "2026-11-13T11:00:00.000Z", "Suggest: One, then two.", kind="person", name="Mark H",
+                   quote="One, two."),
+            thread("t", "2026-11-13T11:01:00.000Z", "Suggest: nothing selected", kind="person", name="Mark H")]}
+        self.assertEqual(self.read()["comments"], 2)
+        cs = {c["body"]: c for c in self.comments()}
+        sug = cs["Suggest: One, then two."]
+        self.assertEqual(sug["anchor"], {"quote": "One, two.", "page": "1", "suggest": "One, then two."})
+        self.assertEqual(cs["Suggest: nothing selected"]["anchor"], {"page": "1"})  # no words selected: a comment
+        res = core.canvas_accept(self.c, sug["id"], "mark")
+        shown = core.canvas_show(self.c, "plan")["shown"]
+        self.assertIn("One, then two.", shown["body"])
+        self.assertEqual(res["version"], shown["version"])  # the newest version holds the accepted words
+        # The published Markdown says how to suggest.
+        files = core._rqs_files(self.c, core._canvas_row(self.c, "plan"), core._canvas_latest(self.c, self.cv))
+        self.assertIn("`Suggest: <your words>`", files[0]["content"])
+
     def test_a_private_page_with_no_named_people_is_the_persons_own(self):
         self.fake.responses[self.sub] = {"comments": [
             thread("a", "2026-11-13T10:00:00.000Z", "Make step two shorter", kind="person", name="Mark H",
@@ -405,7 +424,8 @@ class Responses(Base):
         cs = self.comments()
         top = [c for c in cs if c["body"] == "Make step two shorter"]
         self.assertEqual(len(top), 1, cs)
-        self.assertEqual((top[0]["author"], top[0]["state"], top[0]["anchor"]), ("mark", "sent", {"quote": "One, two."}))
+        self.assertEqual((top[0]["author"], top[0]["state"], top[0]["anchor"]),
+                         ("mark", "sent", {"quote": "One, two.", "page": "1"}))  # marked: from the shared page (#6012)
         ans = [c for c in cs if (c["anchor"] or {}).get("path") == "decision:1"]
         self.assertEqual(ans[0]["body"], "Answer to decision 1 of 1 (Where it runs): Cloudflare")
         self.assertEqual(ans[0]["author"], "mark")

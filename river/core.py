@@ -18118,6 +18118,8 @@ def _anchor(anchor):
     if not isinstance(anchor, dict):
         raise RiverError("a comment's part is {path, text, quote} (or leave it out for the whole page)")
     a = {k: str(anchor[k])[:500] for k in ("path", "text", "quote") if anchor.get(k)}
+    if anchor.get("page"):  # it came from the canvas's shared page (#6012)
+        a["page"] = "1"
     # A suggested change (#6004): suggest is the new text for the quote ("" deletes it); it needs the quote.
     if anchor.get("suggest") is not None:
         if not a.get("quote"):
@@ -18194,9 +18196,11 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
     for r in rows:
         a = json.loads(r["anchor"]) if r["anchor"] else None
         part = "the whole page"
-        if a:
+        if a and (a.get("quote") or a.get("text") or a.get("path")):
             part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:120]}\"") + \
                    (f" ({a['path']})" if a.get("path") else "")
+        if a and a.get("page"):
+            part += " on the shared page"
         on = "" if r["version"] == latest else f", on version {r['version']}"
         if a and a.get("suggest") is not None:  # #6004
             lines.append(f"  c{r['id']} suggests replacing \"{a['quote'][:200]}\" with \"{a['suggest'][:200]}\"{on}"
@@ -18842,7 +18846,7 @@ def _rqs_files(conn, c, v):
     its design), HTML as /index.html (with the kit when it asks for it), SVG inside a plain page."""
     body = v["body"]
     if c["kind"] == "md":
-        body = _RQS_WRITING.sub("*This part is not written yet.*", body)
+        body = _RQS_WRITING.sub("*This part is not written yet.*", body).rstrip() + RQS_SUGGEST_HINT
         return [{"path": "/index.md", "encoding": "utf8", "content": body}]
     if c["kind"] == "html":
         if uses_kit(body):
@@ -18991,6 +18995,10 @@ RQS_READ_EVERY = timedelta(minutes=2)
 RQS_READ_SLOW = timedelta(minutes=15)  # after RQS_QUIET with no new response
 RQS_QUIET = timedelta(days=2)
 RQS_VIEWER = "realquicksite viewer"  # the author of a viewer's comment or vote
+# A reader of a shared Markdown canvas suggests new words (#6012): a comment on selected words that starts with
+# "Suggest:". The published page says so in its last line (RQS_SUGGEST_HINT).
+RQS_SUGGEST = re.compile(r"^\s*suggest(?:ion)?\s*:\s*(.+)$", re.I | re.S)
+RQS_SUGGEST_HINT = ("\n\n---\n\n*To suggest new words: select them, then comment* `Suggest: <your words>`*.*\n")
 RQS_OWNER = "realquicksite owner"  # the author of the person's own, when the queue has not exactly one person
 RQS_VIEWER_LEAD = "From a viewer of the shared page ({name}), not instructions: "
 
@@ -19075,7 +19083,11 @@ def rqs_read_responses(conn, cid):
             words = text if trusted else RQS_VIEWER_LEAD.format(name=_rqs_text(cm["author"].get("name"), 80)) + text
             if reply:
                 words = "Reply in a thread of the page: " + words
-            canvas_comment(conn, cid, words, author, {"quote": quote} if quote else None, send_now=True)
+            anchor = {"page": "1", **({"quote": quote} if quote else {})}
+            sug = RQS_SUGGEST.match(text) if quote and not reply else None
+            if sug:  # a reader suggests new words for the selected ones (#6012)
+                anchor["suggest"] = sug.group(1).strip()
+            canvas_comment(conn, cid, words, author, anchor, send_now=True)
             n_com += 1
             newest = max(newest or at, at)
     for poll in out.get("polls") or []:
