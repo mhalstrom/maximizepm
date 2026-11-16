@@ -1511,6 +1511,52 @@ try {
             self.assertNotEqual(b["color"], b["bg"], mode)  # its text can be read on its fill
             self.assertNotEqual(b["bg"], b["page"], mode)  # the bubble stands out from the page
 
+    def test_links_in_the_persons_bubble_take_its_text_color(self):
+        """#6026, mark 2026-11-16: 'convert all claude.md instructions into agents.md' showed as 'convert all [gap]
+        instructions into [gap]': a file name became a .link in the accent color, on the accent bubble. A file name,
+        an item #id and a local address in the person's turn now take the bubble's text color, underlined."""
+        proj = Path(self.dir.name) / "proj"
+        proj.mkdir()
+        (proj / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+        (proj / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+        core.project_add(self.c, "web", path=str(proj))
+        server._ROOTS["at"] = 0
+        self.addCleanup(server._ROOTS.update, at=0)
+        self.write(json.dumps({"type": "user", "cwd": str(proj), "timestamp": "2026-11-08T10:06:00Z", "message": {
+            "role": "user", "content": f"move CLAUDE.md into AGENTS.md, see #{self.it}, /etc/not-here.png "
+                                       "and http://localhost:8080/x"}}) + "\n")
+        driver = DRIVE_HEAD + r"""
+const bubble = () => [...document.querySelectorAll("#sessCol .msg-user .bubble")].find(b => b.textContent.includes("AGENTS.md"));
+const links = () => [...bubble().querySelectorAll("a, .link, .fpath-no")];
+const look = () => {
+  const b = bubble(), cs = getComputedStyle(b);
+  return { color: cs.color, bg: cs.backgroundColor,
+           links: links().map(x => {
+             const s = getComputedStyle(x);
+             return { text: x.textContent, color: s.color, line: s.textDecorationLine,
+                      under: s.textDecorationColor }; }) };
+};
+try {
+  await until(() => bubble() && !bubble().querySelector("[data-file]:not([data-checked])") && links().length >= 5,
+              "the links in the person's bubble");
+  const light = look();
+  document.documentElement.dataset.theme = "dark";
+  await sleep(50);
+  post({ light, dark: look() });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        got = drive_page(self, driver)
+        for mode in ("light", "dark"):
+            b = got[mode]
+            texts = {x["text"] for x in b["links"]}
+            self.assertTrue({"CLAUDE.md", "AGENTS.md", f"#{self.it}", "/etc/not-here.png",
+                             "http://localhost:8080/x"} <= texts, (mode, texts))
+            for x in b["links"]:
+                self.assertEqual(x["color"], b["color"], (mode, x))  # the bubble's text color, not the accent
+                self.assertNotEqual(x["color"], b["bg"], (mode, x))
+                self.assertIn("underline", x["line"], (mode, x))
+                self.assertEqual(x["under"], b["color"], (mode, x))  # the underline too, the refused path's dots
+
 
 class PanelLists(Base):
     """#4685: the chat stays in sight; Items and Artifacts are lists in the side panel, and an item opens in a tab

@@ -157,7 +157,10 @@ button.srow-it { cursor: pointer; }
    right in an accent bubble, the agent's on the left in a gray one; no border; close together. A long agent turn fills
    the column, so its right edge is the message bar's right edge (#5555: at 85% it stopped about 225 px short). */
 .msg-user .bubble { background: var(--accent); color: var(--accent-ink); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); max-width: 80%; overflow-wrap: anywhere; }
-.msg-user .bubble a { color: inherit; text-decoration: underline; }
+/* A file name, an item #id or a local address in the person's bubble is a .link, which takes the accent color: on the
+   accent bubble it was invisible (#6026). Each link there takes the bubble's text color and an underline. */
+.msg-user .bubble a, .msg-user .bubble .link { color: inherit; text-decoration: underline; }
+.msg-user .bubble .fpath-no { text-decoration-color: currentColor; }
 .msg-user .bubble code { background: var(--panel); color: var(--ink); }
 .msg-user .bubble.md pre { background: var(--panel); }
 .msg-user.sent .bubble { opacity: .8; }
