@@ -219,13 +219,6 @@ button.srow-it { cursor: pointer; }
 .chat-summary > .md { text-align: left; margin-top: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-m); color: var(--ink); }
 .sess-wait { font-size: var(--fs-m); margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-m); background: var(--warn-bg); color: var(--warn); }
 .sess-wait.hidden { display: none; }
-/* The manager's proposal of an expert (#4990): a card above the message box, Continue in an expert or Dismiss. */
-.sess-propose { margin-top: var(--sp-3); padding: var(--sp-4) var(--sp-5); border: var(--hair) solid var(--line); border-radius: var(--r-m); background: var(--panel); font-size: var(--fs-m); }
-.sess-propose.hidden { display: none; }
-.sess-propose .sp-topic { font-weight: 600; overflow-wrap: anywhere; }
-.sess-propose .sp-meta { margin-top: var(--sp-0); font-size: var(--fs-s); }
-.sess-propose .sp-acts { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-3); }
-.sess-propose .sp-acts .btn { font-size: var(--fs-m); }
 .sess-head .btn { font-size: var(--fs-m); }
 /* The item in the head: a quiet link, cut with … (its full title is the tooltip). */
 .sess-item .sess-itembtn { display: block; min-width: 0; max-width: 100%; border: 0; background: none; padding: 0; color: var(--accent);

@@ -7520,6 +7520,22 @@ class AliasesTable(Base):
         self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='review_steps'").fetchone())
         self.assertEqual(core.project_show(self.c, "old")["name"], "old")
 
+    def test_an_old_queue_loses_its_expert_proposals_table(self):
+        # The manager's proposals of an expert are gone (#5992); connect drops their table.
+        core.project_add(self.c, "old")
+        self.c.execute("CREATE TABLE expert_proposals (id INTEGER PRIMARY KEY, manager TEXT NOT NULL, name TEXT NOT NULL, "
+                       "topic TEXT, project TEXT, item_id INTEGER, model TEXT, model_why TEXT, effort TEXT, summary TEXT, "
+                       "sources TEXT, canvases TEXT, sessions TEXT, state TEXT NOT NULL DEFAULT 'open' CHECK (state IN "
+                       "('open','started','dismissed')), created_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT, why TEXT)")
+        self.c.execute("INSERT INTO expert_proposals (id, manager, name, topic, created_at) "
+                       "VALUES (1, 'mgr', 'px', 'the pricing design', '2026-09-01T00:00:00Z')")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
+        self.c.commit()
+        self.c.close()
+        self.c = core.connect(self.path)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM sqlite_master WHERE name='expert_proposals'").fetchone())
+        self.assertEqual(core.project_show(self.c, "old")["name"], "old")
+
 
 class Locked(Base):
     """Other commands hold the write lock of the queue longer than busy_timeout (#1615)."""

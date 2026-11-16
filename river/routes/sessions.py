@@ -207,7 +207,7 @@ def running(h, path):
         if path == "/api/sessions":
             rows = cards(conn)
             with server.read_memo():
-                body = {"sessions": rows, "proposals": core.expert_proposals(conn),
+                body = {"sessions": rows,
                         # The status inbox (#5852): which states send a push notice (the global value; Push on the page).
                         "notify_status": core.setting(conn, "notify_status")}
             return h._send(200, body)
@@ -252,9 +252,6 @@ OPS = {
                                                                 bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: server.prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"),
                                                             a.get("other"), who, a.get("key")),
-    # The card of an expert proposal in the manager's chat (#4990): Continue in an expert, or Dismiss.
-    "expert_accept": lambda c, a, who: server.accept_expert(c, a["id"], who),
-    "expert_dismiss": lambda c, a, who: core.expert_proposal_end(c, a["id"], "dismissed", who, a.get("why")),
     # The person has the session's chat open (#5852): done becomes idle in the status inbox.
     "session_seen": lambda c, a, who: core.session_seen(c, a["agent"], who),
 }

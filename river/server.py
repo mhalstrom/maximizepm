@@ -647,20 +647,6 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why, "handover": handed}
 
 
-def accept_expert(conn, pid, who=None, runner=None):
-    """Continue in an expert (#4990): the person took the manager's proposal. Start the expert as maxpm expert start
-    does, with the talk so far the proposal holds (actor: the manager, which handed the talk over), then close the
-    proposal; the manager hears it. A start that fails keeps the proposal open, so the person can try again."""
-    p = core._proposal(conn, pid)
-    if p["state"] != "open":
-        raise RiverError(f"expert proposal p{p['id']} is {p['state']} already")
-    res = start_expert(conn, p["name"], p["topic"], p["project"], actor=p["manager"], model=p["model"],
-                       effort=p["effort"], item=p["item_id"], summary=p["summary"], sources=p["sources"],
-                       canvases=p["canvases"], sessions=p["sessions"], runner=runner)
-    core.expert_proposal_end(conn, p["id"], "started", who, expert=res["session_name"])
-    return {**res, "proposal": p["id"]}
-
-
 def fresh_expert(conn, name, actor=None, runner=None, new=None):
     """maxpm expert fresh (#5023): the expert's context left the prompt cache, so its next message reads all of it
     again at the write price. A fresh expert on the same model and task reads only the old one's handoff (its notes

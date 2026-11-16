@@ -246,8 +246,7 @@ try {
   post({ url, actions, sent, name, mic, wide, escH: escBox.height });
 } catch (e) { post({ error: String(e.stack || e) }); }
 """
-        got = drive_page(self, driver, routes={"/api/sessions": lambda: {"sessions": rows, "proposals": [],
-                                                                         "notify_status": "off"}}, size="390,844")
+        got = drive_page(self, driver, routes={"/api/sessions": lambda: {"sessions": rows, "notify_status": "off"}}, size="390,844")
         self.assertEqual(got["url"], "/status")
         self.assertEqual(got["actions"], {"ag": ["Answer", "Esc", "Reply"], "w2": ["Esc", "Reply"], "w3": []})
         self.assertEqual(got["sent"], [{"op": "terminal_keys", "args": {"agent": "w2", "keys": [{"key": "Escape"}]}},

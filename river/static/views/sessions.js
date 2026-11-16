@@ -282,7 +282,7 @@ function renderList(el, list, picked, empty) {
 }
 
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
-  let list = [], busy = false, again = false, proposals = [], listRead = false;
+  let list = [], busy = false, again = false, listRead = false;
   // A pane in place of a session's chat (#5102): "you" (what waits on the person), "status" (every session by its
   // state, #5852), "arts" (the artifacts of all sessions), "cost" (what they used, #5857) or "browsers" (every browser
   // that runs, #5879); null while a session shows.
@@ -427,7 +427,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       await loadAgents();  // once: the rows ask it about each session's agent
       const j = await getJson("api/sessions");
       list = j.sessions; listRead = true;
-      proposals = j.proposals || [];
       push = j.notify_status || "off";
       forgetDrafts(list);
       draw();
@@ -474,7 +473,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     drawTabs();
     drawStatus();
     drawState();
-    proposeCard();
     fit();
     autoWait();
   }
@@ -685,50 +683,11 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     barFor(null);
     note("Reading the transcript…");
     waitLine({});
-    proposeCard();
     bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
   document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
-
-  // The manager proposes an expert for a long talk (#4990): a card in its chat, above the message box. Continue in
-  // an expert starts the expert with the talk so far and opens its chat; Dismiss keeps the talk with the manager.
-  const proposeBox = $("#sessPropose");
-  function proposeCard() {
-    const p = proposals.find(x => x.manager === agent);
-    proposeBox.classList.toggle("hidden", !p);
-    if (!p) { proposeBox.innerHTML = ""; delete proposeBox.dataset.id; return; }
-    if (proposeBox.dataset.id === String(p.id)) return;  // a refresh keeps the card (and a click in progress)
-    proposeBox.dataset.id = String(p.id);
-    proposeBox.innerHTML = `<div class="muted">${esc(p.manager)} proposes to continue this talk in an expert</div>
-      <div class="sp-topic">${esc(p.topic)}</div>
-      <div class="sp-meta muted">Expert ${esc(p.name)} · ${esc(p.model)}${p.model_why ? ` (${esc(p.model_why)})` : ""}${p.effort ? " · effort " + esc(p.effort) : ""}</div>
-      <div class="sp-acts">${button("Continue in an expert", { kind: "primary", data: { "propose-go": p.id } })}
-      ${button("Dismiss", { data: { "propose-no": p.id } })}</div>`;
-  }
-  proposeBox.addEventListener("click", async (e) => {
-    const go = e.target.closest("[data-propose-go]"), no = e.target.closest("[data-propose-no]");
-    if (!go && !no) return;
-    const btns = proposeBox.querySelectorAll("button");
-    btns.forEach(b => (b.disabled = true));
-    try {
-      if (no) {
-        await act("expert_dismiss", { id: no.dataset.proposeNo });
-        proposals = proposals.filter(x => String(x.id) !== no.dataset.proposeNo);
-        proposeCard();
-        return;
-      }
-      go.textContent = "Starting the expert…";
-      const res = await act("expert_accept", { id: go.dataset.proposeGo });
-      proposals = proposals.filter(x => String(x.id) !== go.dataset.proposeGo);
-      toast(`The expert ${res.session_name} starts on ${res.model}; its chat opens here.`);
-      if (res.session_name) pick(res.session_name);
-    } catch (err) {  // act showed the error; the card stays, so the person can try again
-      btns.forEach(b => (b.disabled = false));
-      if (go) go.textContent = "Continue in an expert";
-    }
-  });
 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it. A
   // prompt that runs nothing (no tool, no command) is a menu: a slash command's (#5220), not a permission prompt.

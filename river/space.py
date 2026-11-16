@@ -521,7 +521,7 @@ def archivable(conn, cutoff):
         if b in open_ids:
             keep.add(a)
     for sql in ("SELECT item_id FROM queue_entries", "SELECT item_id FROM canvases", "SELECT item_id FROM annotations",
-                "SELECT item_id FROM expert_proposals", "SELECT item_id FROM ops_causes",
+                "SELECT item_id FROM ops_causes",
                 "SELECT item_id FROM ops_detections", "SELECT item_id FROM ops_proposals", "SELECT item_id FROM ops_systems",
                 "SELECT last_item FROM schedules", "SELECT item_id FROM needs_you WHERE closed_at IS NULL",
                 "SELECT ig.item_id FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE g.status='open'",
