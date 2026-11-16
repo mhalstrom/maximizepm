@@ -162,6 +162,7 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the Start button: you were waiting for work", actor)
+        _give_scope(conn, waiting, [f"tasks:{t['item']['id']}"], "Start pushed it to this session", only_widen=True)
         return {**t, "pushed_to": waiting}
     _can_open_terminal(runner, "cd <project folder> && claude go")
     return _start_for_item(conn, t, runner, actor, "Start opened this session for it")
@@ -178,6 +179,7 @@ def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
+        _give_scope(conn, waiting, [f"tasks:{t['item']['id']}"], "Dispatch pushed it to this session", only_widen=True)
         return {**t, "pushed_to": waiting}
     _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go")
     return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it")
@@ -190,6 +192,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     import secrets
     name = f"{t['project']}-{secrets.token_hex(2)}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
+    _give_scope(conn, name, [f"tasks:{t['item']['id']}"], f"{by}: {why}")
     try:
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
         t = _workspace(conn, t, name, core._project(conn, t["project"])["id"])
@@ -476,6 +479,27 @@ def _agent_for(conn, model):
 FOCUS_ROLES = {"deploy": "deployer", "review": "reviewer", "help": "worker", "unblock": "worker"}
 
 
+def _give_scope(conn, name, specs, why, only_widen=False):
+    """The scope of what serve starts a session for (#6028, core.scope_start). only_widen: a waiting session that
+    gets a push widens a scope it has, and gets none when it has none. A failure leaves the session without it."""
+    if not specs or (only_widen and not core.agent_scope(conn, name)):
+        return None
+    try:
+        return core.scope_start(conn, name, specs, why)
+    except RiverError as e:
+        print(f"_give_scope: {name}: {e}", flush=True)
+        return None
+
+
+def _focus_scope(conn, focus, project):
+    """The scope of a focused start: deploy:<t> -> target, review:<t> -> release, help:<id> -> that task,
+    unblock:<id> -> its project (it works on the item's prerequisites); a person's assistant (needs:) none."""
+    kind, _, rest = focus.partition(":")
+    rest = rest.split("@")[0]
+    return {"deploy": [f"target:{rest}"], "review": [f"release:{rest}"], "help": [f"tasks:{rest}"],
+            "unblock": [f"project:{project}"]}.get(kind, [])
+
+
 def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, options=None, agent_name=None):
     """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it. agent_name: the agent name
     it registers as (MAXPM_AGENT), when the caller registered one. Else river names the session (<project>-<hex>, the
@@ -495,6 +519,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
         while conn.execute("SELECT 1 FROM agents WHERE name=?", (named,)).fetchone():
             named = f"{p['name']}-{secrets.token_hex(2)}"
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
+        _give_scope(conn, named, _focus_scope(conn, focus, p["name"]), f"started for {focus}")
     try:
         if kind in ("help", "unblock"):  # sessions that change code; deploy and review work in the project folder
             t = _workspace(conn, t, named, p["id"])
@@ -3300,6 +3325,7 @@ def _resume_for_answer(conn, item_id, why, runner=None):
         return None
     try:
         core.register(conn, name, note=f"{core.STARTED_NOTE} #{item_id} (its chat resumes for the answer)")
+        _give_scope(conn, name, [f"tasks:{item_id}"], "its chat resumes for the answer")
         core.push(conn, item_id, name, f"from maxpm serve: {why}; the same chat resumes", "maxpm")
         platform = core._platform_of(core._adapters().get(c["kind"]))
         first = (f"{why}: the answer to your question is in the notes of #{item_id}. Run maxpm --as {name} go: it "
@@ -3559,6 +3585,7 @@ def start_deployer(conn, target, dep_id, why, runner=None):
          **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title)}
     name = f"deploy-{target}-{tag}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
+    _give_scope(conn, name, [f"target:{target}"], f"started to deploy {target}")
     with core.tx(conn):
         core.target_handoff(conn, target, name, why)
     try:

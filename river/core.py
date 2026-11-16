@@ -15090,6 +15090,23 @@ def scope_text(parts):
                                         else p["value"]) for p in parts or [])
 
 
+def scope_start(conn, agent, specs, why):
+    """maxpm serve gives a session it starts (or a waiting session it pushes work to) the scope of what it starts
+    for (#6028): an item (tasks:<id>), a target (target:<name>), a release (release:<name>). A scope it has already
+    widens. No permission check (serve acts itself), no overlap refusal, and no alert to the manager (scope_state
+    tells it when the scope runs empty). Returns the scope."""
+    parts = [parse_scope(conn, s) for s in specs]
+    with tx(conn):
+        old = agent_scope(conn, agent) or []
+        new = old + [p for p in parts if p not in old]
+        if new == old:
+            return old
+        conn.execute("UPDATE agents SET scope=?, scope_by='maxpm', scope_at=?, scope_told=NULL WHERE name=?",
+                     (json.dumps(new), iso(now()), agent))
+        _event(conn, None, "maxpm", f"{agent} got the scope {scope_text(new)}: {why}")
+    return new
+
+
 def parse_scope(conn, spec):
     """One part of a scope from 'kind:value' (project:web, goal:g, release:web, target:web, tasks:12,13)."""
     kind, sep, value = str(spec).partition(":")

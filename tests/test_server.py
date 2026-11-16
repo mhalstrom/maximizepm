@@ -1623,6 +1623,37 @@ class LaunchInTmux(unittest.TestCase):
         env = [a[i + 1] for i, x in enumerate(a) if x == "-e"]
         return next((e.split("=", 1)[1] for e in env if e.startswith(core.TOKEN_ENV + "=")), None)
 
+    def test_scope_of_each_start_comes_from_what_it_starts_for(self):
+        """#6028: a session that serve starts gets the scope of what it starts for; go then gives it work only
+        there, and says so when the scope has nothing ready (scope_state)."""
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        other = core.item_add(self.c, "shop", "fix the footer")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        self.assertEqual(core.agent_scope(self.c, name), [{"kind": "tasks", "value": [x]}])
+        self.assertTrue(any(f"{name} got the scope tasks #{x}" in e["change"] for e in self.c.execute(
+            "SELECT change FROM events WHERE item_id IS NULL")))
+        b = core.go(self.c, self.dir.name, name)
+        self.assertEqual(b["item"]["id"], x)
+        core.done(self.c, x, "published", name)
+        b = core.go(self.c, self.dir.name, name)
+        self.assertNotEqual((b.get("item") or {}).get("id"), other)  # outside its scope
+        # A waiting session that gets a push: its scope widens; one with no scope gets none.
+        core.register(self.c, "w2")
+        core.scope_start(self.c, "w2", [f"tasks:{x}"], "a test")
+        server._give_scope(self.c, "w2", [f"tasks:{other}"], "a push", only_widen=True)
+        self.assertEqual(core.agent_scope(self.c, "w2"), [{"kind": "tasks", "value": [x]},
+                                                           {"kind": "tasks", "value": [other]}])
+        core.register(self.c, "w3")
+        self.assertIsNone(server._give_scope(self.c, "w3", [f"tasks:{other}"], "a push", only_widen=True))
+        self.assertIsNone(core.agent_scope(self.c, "w3"))
+        # Focused starts.
+        core.target_add(self.c, "web", "push")
+        self.assertEqual(server._focus_scope(self.c, "deploy:web", "shop"), ["target:web"])
+        self.assertEqual(server._focus_scope(self.c, "review:web", "shop"), ["release:web"])
+        self.assertEqual(server._focus_scope(self.c, f"help:{x}@mark", "shop"), [f"tasks:{x}"])
+        self.assertEqual(server._focus_scope(self.c, f"unblock:{x}", "shop"), ["project:shop"])
+        self.assertEqual(server._focus_scope(self.c, "needs:@mark", "shop"), [])
+
     def test_token_goes_into_the_pane_environment_never_into_the_typed_line(self):
         """#5972: serve makes a token for each session it starts (the manager too). It goes into the pane's own
         environment (tmux -e), never into the line typed into the pane, and only its hash is kept; it binds to the
