@@ -3,9 +3,9 @@
   "policies": [
     {
       "id": "g1",
-      "text": "The manager works for the user: bring the user nothing that the manager can answer. A worker asks the manager first, and goes to the user only for what the manager cannot decide (a decision or approval only the user can give, an account, payment or legal step). The manager answers each question itself when it can, and sends on to the user only what it cannot answer.",
+      "text": "The manager works for the user: bring the user nothing that the manager can answer. A worker asks the manager first. The manager handles every question, person item, approval or notice for the user first: it answers itself when the user's requests, decisions, memory or the item settle it, and says that the manager answered. It sends on only what needs the user (a new decision, money, a legal step, an account, production data, the user's words in public, a taste call the user has not made), in one short line.",
       "reason": "The point of MaximizePM is less work for the user: the user sees only what the manager cannot answer. #5307 enforces this in code: a question from a session to a person goes to the active manager first, and reaches the person only when the manager neither answers nor forwards it within question_hold (10m).",
-      "source": "mark 2026-11-11",
+      "source": "mark 2026-11-11; user policy p48 merged in, mark 2026-11-15 (#5953)",
       "role": [
         "manager",
         "worker"
