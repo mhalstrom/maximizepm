@@ -23842,7 +23842,11 @@ def release_waits(conn):
     origin/main with a commit older than unpushed_after; untagged, when an item of those projects that was done in
     the last 14 days names a tag in its title ('... pushes main and the tag v0.3.0') and origin has neither that
     tag nor a later version. On 2026-11-12 local main was 88 commits ahead for a day and the v0.3.0 release waited
-    on a manager that had ended."""
+    on a manager that had ended.
+
+    A target with a release cadence (maximizepm-github: 1w) keeps its commits on local main until its next release
+    on purpose (#6045): before that release can start, neither finding names it; after, each one names the deploy
+    item that sends the commits out, so the manager starts that release instead of a bare push."""
     rows = conn.execute("SELECT t.name target, p.id project_id, p.path FROM targets t JOIN projects p ON p.target=t.name "
                         "WHERE p.archived=0 AND p.path IS NOT NULL AND p.path<>'' AND NOT EXISTS (SELECT 1 FROM hooks h "
                         "WHERE h.target_id=t.id AND h.event='deploy') ORDER BY t.name, p.id").fetchall()
@@ -23856,12 +23860,15 @@ def release_waits(conn):
         if not os.path.isdir(os.path.join(folder, ".git")):
             continue
         folders.setdefault(folder, (r["target"], []))[1].append(r["project_id"])
+    windows = {target: _release_window(conn, target) for target, _ in folders.values()}
+    folders = {f: v for f, v in folders.items() if windows[v[0]] is not False}
     for folder, (target, _) in folders.items():
         out = _git_kept(folder, "ahead", lambda: _git_read(folder, "log", "--format=%ct", "origin/main..main"))
         times = [int(x) for x in (out or "").split() if x.isdigit()]
         if times and t - datetime.fromtimestamp(min(times), timezone.utc) > after:
             unpushed.append({"target": target, "folder": folder, "commits": len(times),
-                             "oldest": _short(t - datetime.fromtimestamp(min(times), timezone.utc))})
+                             "oldest": _short(t - datetime.fromtimestamp(min(times), timezone.utc)),
+                             **(windows[target] or {})})
     untagged = []
     since = iso(t - timedelta(days=14))
     for folder, (target, projects) in folders.items():
@@ -23879,8 +23886,23 @@ def release_waits(conn):
         have = [_version(x.rsplit("/", 1)[1]) for x in out.split() if re.fullmatch(r"refs/tags/v\d+(\.\d+){1,2}", x)]
         for i, title, tag in named:
             if not any(v >= _version(tag) for v in have):
-                untagged.append({"id": i, "title": title, "tag": tag, "target": target})
+                untagged.append({"id": i, "title": title, "tag": tag, "target": target, **(windows[target] or {})})
     return {"unpushed": unpushed, "untagged": untagged}
+
+
+def _release_window(conn, target):
+    """For release_waits (#6045): None when the target has no release cadence (the commits go out by a push);
+    False while its cadence does not permit the next release yet (the commits wait for it on purpose); else the
+    release that sends them out: cadence, deploy (the release that runs, or the one that collects ship requests;
+    None when nothing is shipped) and start (its first step to take)."""
+    tg = conn.execute("SELECT cadence FROM targets WHERE name=?", (target,)).fetchone()
+    if not tg or not parse_cadence(tg["cadence"])[1]:
+        return None
+    p = release_plan(conn, target)
+    if p["until"] and not p["early"]:
+        return False
+    return {"cadence": p["cadence"], "deploy": p["running"] or p["deploy"],
+            "start": p["running"] or p["start"]}
 
 
 def _finding_keys(f):

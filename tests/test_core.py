@@ -4130,6 +4130,39 @@ class ReleaseCadence(Base):
         core.done(self.c, dep["id"], "release v1", "ops")
         return dep["id"]
 
+    def test_unpushed_commits_wait_for_the_release_window_and_then_name_the_release(self):
+        """#6045: local main of a target with a release cadence stays ahead of origin until the next release on
+        purpose; the manager's unpushed and untagged findings skip it until that release can start, then name it."""
+        os.makedirs(os.path.join(self.dir.name, ".git"))
+        core.GIT_RUNNER = lambda folder, args: (f"{int((self.clock[0] - timedelta(hours=3)).timestamp())}\n"
+                                                if args[0] == "log" else "")
+        self.addCleanup(setattr, core, "GIT_RUNNER", None)
+        core._GIT_SEEN.clear()
+        self.addCleanup(core._GIT_SEEN.clear)
+        core.target_cadence(self.c, "web", "1d", "mark")
+        self.release(review=False)
+        self.later(hours=3)
+        a, dep = self.shipped("form")
+        tag = self.add("site", "Release v0.3.0: the notes, then main and the tag v0.3.0 go out")
+        core.claim(self.c, tag, "dev")
+        core.done(self.c, tag, "notes", "dev")
+        self.assertTrue(dep["release"]["waits"])
+        f = core.manager_findings(self.c)
+        self.assertEqual((f["unpushed"], f["untagged"]), ([], []))  # the commits wait for the release on purpose
+        self.later(days=1)
+        core._GIT_SEEN.clear()
+        f = core.manager_findings(self.c)
+        self.assertEqual([(u["target"], u["deploy"], u["start"]) for u in f["unpushed"]], [("web", dep["id"], dep["id"])])
+        self.assertEqual([(u["id"], u["deploy"]) for u in f["untagged"]], [(tag, dep["id"])])
+        from river import cli
+        lines = "\n".join(cli._findings_lines(f, "maxpm --as boss"))
+        self.assertIn(f"UNPUSHED web", lines)
+        self.assertIn(f"release #{dep['id']} sends them out", lines)
+        self.assertNotIn("push origin main", lines)
+        self.assertNotIn("Push main and the tag", lines)
+        core.target_cadence(self.c, "web", "off", "mark")  # no cadence: a push sends the commits out, as before
+        self.assertIn("push origin main", "\n".join(cli._findings_lines(core.manager_findings(self.c), "maxpm")))
+
     def test_cadence_values(self):
         day = timedelta(days=1)
         self.assertEqual([core.parse_cadence(x) for x in ("2h", " 1D ", "1w", "1mo", "off", "", "0")],

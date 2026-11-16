@@ -5030,6 +5030,17 @@ How to write a good task (dependencies, priorities, context, the backlog): maxpm
 To take work instead: maxpm go"""
 
 
+def _release_step(x, r):
+    """The step of an unpushed or untagged finding of a target with a release cadence, whose next release can start
+    (#6045): that release sends the commits out, not a bare push."""
+    if x.get("deploy"):
+        return (f"Its release cadence ({x['cadence']}) permits the next release now: release #{x['deploy']} sends "
+                f"them out.  See {r} show {x['start']}; its target owner takes it (no owner: {r} target give "
+                f"{x['target']} --to <agent>)")
+    return (f"Its release cadence ({x['cadence']}) permits the next release now, but no item is shipped for it: "
+            f"ship the finished items ({r} ship <id>)")
+
+
 def _findings_lines(f, r):
     out = []
     for x in f["stuck"]:
@@ -5088,12 +5099,15 @@ def _findings_lines(f, r):
                    + ". " + x["question"].replace("maxpm ", f"{r} ")
                    + ". Ask the user when only they can tell")
     for x in f.get("unpushed", []):  # #5600: finished work that waits to go out
-        out.append(f"  UNPUSHED {x['target']}: main in {x['folder']} is {x['commits']} commit"
-                   f"{'s' if x['commits'] != 1 else ''} ahead of origin, the oldest {x['oldest']} old.  Run the tests "
-                   f"there and push main (git -C {x['folder']} push origin main), or ask the user for the yes it waits on")
+        head = (f"  UNPUSHED {x['target']}: main in {x['folder']} is {x['commits']} commit"
+                f"{'s' if x['commits'] != 1 else ''} ahead of origin, the oldest {x['oldest']} old.  ")
+        out.append(head + (_release_step(x, r) if x.get("cadence") else
+                           f"Run the tests there and push main (git -C {x['folder']} push origin main), or ask the "
+                           f"user for the yes it waits on"))
     for x in f.get("untagged", []):
         out.append(f"  NOT TAGGED #{x['id']} {_cut(x['title'], 50)}: it is done, and origin has no tag {x['tag']} "
-                   f"or later.  Push main and the tag {x['tag']}: the release waits on them")
+                   f"or later.  " + (_release_step(x, r) if x.get("cadence") else
+                                     f"Push main and the tag {x['tag']}: the release waits on them"))
     for x in f["human_ready"]:
         if x.get("held_for"):  # held for the manager (#5311): the person does not see it yet
             out.append(f"  PERSON ITEM #{x['id']} {_cut(x['title'], 60)}: waits for you, not the person.  "
