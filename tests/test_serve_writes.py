@@ -184,6 +184,23 @@ class ServeWritesCommands(unittest.TestCase):
         self.assertEqual(res["status"], "done")
 
 
+class ServeWritesStale(unittest.TestCase):
+    def test_serve_writes_a_stale_runner_is_asked_again_once(self):
+        """#6018: serve stops a runner with older code, so the second request reaches one with the new code."""
+        answers = [(409, b'{"error": "stale"}'), (200, b'{"code": 0, "out": "ok\\n"}')]
+        with mock.patch.object(client, "_post", side_effect=answers) as post:
+            self.assertEqual(client._post_fresh(1, b"{}", "t"), (200, b'{"code": 0, "out": "ok\\n"}'))
+        self.assertEqual(post.call_count, 2)
+        answers = [(409, b'{"error": "another queue"}')]
+        with mock.patch.object(client, "_post", side_effect=answers) as post:
+            self.assertEqual(client._post_fresh(1, b"{}", "t")[0], 409)
+        self.assertEqual(post.call_count, 1)
+        answers = [(409, b'{"error": "stale"}')] * 2
+        with mock.patch.object(client, "_post", side_effect=answers) as post:
+            self.assertEqual(client._post_fresh(1, b"{}", "t")[0], 409)  # once only
+        self.assertEqual(post.call_count, 2)
+
+
 class ServeWritesPolls(unittest.TestCase):
     """#6008: a wait runs as polls in serve; the caller sleeps between them and keeps the wait's state."""
 

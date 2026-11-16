@@ -309,7 +309,7 @@ def run_remote(words, env=None, cwd=None):
            "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False, **extra}
     if poll:
         return _poll_loop(port, token, req)
-    status, answer = _post(port, _dumps(req).encode(), token, timeout=None)
+    status, answer = _post_fresh(port, _dumps(req).encode(), token)
     if status is None or 400 <= status < 500 or status == 503:
         # No connection, a proxy or serve that refused it (403, an older serve: 404), older code or another queue
         # (409), every runner busy (503): serve did not run it, so it runs here.
@@ -323,6 +323,16 @@ def run_remote(words, env=None, cwd=None):
 POLL_AGAIN = 75  # core.POLL_AGAIN: a poll that found nothing yet
 POLL_SLEEP = 3.0  # seconds between two polls, as the loops of the waits in core
 POLL_LOST = 120.0  # seconds that serve may not answer during a wait (a restart) before the wait runs here
+
+
+def _post_fresh(port, body, token):
+    """_post, asked again once when the runner had older code than this checkout (409 stale): serve stops that runner,
+    and the next request starts one with the new code (#6018: after main moved, a wait fell back to its own
+    process; with a queue that only serve writes, #5975, that fallback is refused)."""
+    status, answer = _post(port, body, token, timeout=None)
+    if status == 409 and b"stale" in (answer or b""):
+        status, answer = _post(port, body, token, timeout=None)
+    return status, answer
 
 
 def _remote_sub(cmd, words):
@@ -347,7 +357,7 @@ def _poll_loop(port, token, req, sleep=None, clock=None):
     req = dict(req, poll={"id": _poll_id(), "state": {}})
     first, lost = True, None
     while True:
-        status, answer = _post(port, _dumps(req).encode(), token, timeout=None)
+        status, answer = _post_fresh(port, _dumps(req).encode(), token)
         if status is None or 400 <= status < 500 or status in (503, 599):
             # serve does not run it now: a restart (no connection, older code), every runner busy, a lost answer.
             if first and status != 599:
