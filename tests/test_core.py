@@ -13851,6 +13851,48 @@ class ReleaseReport(Base):
                 cli.run(["--as", "dev", "target", "summary", str(self.deploy), "All good"])
 
 
+class CardShare(Base):
+    """#6006: a card (a question to a person, or a person item) is shared as a small Markdown canvas; what comes back
+    from the shared page reaches the one who asks, and the card shows it."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+        self.it = self.add("a", "the page")
+        core.claim(self.c, self.it, "w")
+
+    def test_a_question_card_shared_and_its_comments_reach_the_asker(self):
+        q = core.send(self.c, "question", "Decision 1 of 1: the color\nWhat you decide: blue or green?\n"
+                      "Your answer: \"A\" or \"B\"", to="mark", item=self.it, actor="w")
+        r = core.card_share(self.c, "question", q["id"], "mark")
+        self.assertEqual((r["name"], r["version"], r["page"]), (f"card-q{q['id']}", 1, None))
+        shown = core.canvas_show(self.c, r["canvas"])
+        self.assertEqual((shown["kind"], shown["item_id"]), ("md", self.it))
+        self.assertEqual(core.doc_decisions(shown["shown"]["body"])[0]["name"], "the color")
+        # A comment from the shared page goes to the session that asked (rqs_read_responses does this).
+        core.canvas_comment(self.c, r["canvas"], "Green reads better", "mark", send_now=True)
+        self.assertTrue(any("Green reads better" in m["body"] for m in core.inbox(self.c, "w", mark_read=False)))
+        back = core.card_shared(self.c, "question", q["id"])
+        self.assertEqual((back["canvas"], [c["body"] for c in back["comments"]]), (r["canvas"], ["Green reads better"]))
+        self.assertEqual(core.card_share(self.c, "question", q["id"], "mark")["version"], 1)  # same card: same version
+        self.assertEqual(core.card_shared(self.c, "item", 999)["canvas"], None)
+
+    def test_options_with_no_decision_line_get_one_and_a_person_item_goes_to_the_manager(self):
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        i = core.item_add(self.c, "a", "Pick the launch date", doer="human",
+                          context='May or June?\nYour answer: "May" or "June"', short="Launch date")["id"]
+        r = core.card_share(self.c, "item", i, "mark")
+        body = core.canvas_show(self.c, r["canvas"])["shown"]["body"]
+        self.assertTrue(body.startswith("# Launch date\n"))
+        self.assertEqual(len(core.doc_decisions(body)), 1)
+        self.assertEqual(core._canvas_writer(self.c, core._canvas_row(self.c, r["canvas"])), "boss")
+        with self.assertRaisesRegex(core.RiverError, "no person item"):
+            core.card_share(self.c, "item", self.it, "mark")
+
+
 class ActionType(Base):
     """A person's action items and questions carry a type to filter by (#5998)."""
 

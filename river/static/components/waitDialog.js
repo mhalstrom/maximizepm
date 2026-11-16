@@ -12,6 +12,7 @@ import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
 import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText } from "./askCard.js";
 import { S, nav } from "../page.js";
+import { openOnRqs } from "./rqsPublish.js";
 
 const dlg = makeDialog($("#waitDlg"));
 let agent = null, pane = false, onSent = null;
@@ -171,6 +172,16 @@ $("#waitList").addEventListener("click", async (e) => {
     const form = opt.closest("form");
     form.querySelector(".wanswer").value = opt.dataset.opt;
     form.requestSubmit(form.querySelector(".wgo"));
+    return;
+  }
+  if (e.target.closest("[data-share]")) {  // a private page of the card, as Share artifact of a canvas (#6006)
+    const form = e.target.closest("form"), c = form && cards.get(`${form.dataset.kind}:${form.dataset.id}`);
+    if (!c) return;
+    try {
+      const r = await act("card_share", { kind: c.kind, id: c.id });
+      await openOnRqs(r.canvas, { page: r.page }, r.version);
+      fillSides();
+    } catch (err) { /* act showed the error */ }
     return;
   }
   if (e.target.closest("[data-discuss]")) {  // the card goes into the manager's chat, and its chat opens

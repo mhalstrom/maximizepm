@@ -3,7 +3,8 @@
 // a person item, in the dialog Waits for you (waitDialog.js), as card-queue-mockup v15 shows: the type tag (#5998) and
 // the level in its head, the question, the options as buttons when the text has the decision form (its "Your answer:"
 // line, maxpm guide decisions), the answer box, the earlier decisions (#5955); and on its right the comments (the
-// messages on it), its history, and Discuss with the manager. Votes and Share come with #6006.
+// messages on it), its history, Share (#6006: a private page of the card; the votes and comments of the people it
+// is shared with come back here), and Discuss with the manager.
 import { esc, ago, clip, getJson } from "../lib.js";
 import { chip, prioNumChip, projectChip } from "./chip.js";
 import { button } from "./button.js";
@@ -92,22 +93,40 @@ export function sideHtml(rows) {
   const history = rows == null ? "" : rows.history.length
     ? `<ul class="acard-hist">${rows.history.map(h => `<li><span class="muted">${esc(ago(h.at))}</span> ${esc(clip(h.change, 160))}</li>`).join("")}</ul>`
     : `<div class="muted t-s">Nothing yet.</div>`;
-  return `<h4>Comments</h4>${comments}<h4>History</h4>${history}
-    <div class="acard-disc">${button("Discuss with the manager", { data: { discuss: 1 },
+  const sh = rows && rows.shared, page = sh && sh.page;
+  const shared = page && page.url && !page.ended
+    ? `<div class="t-s"><a class="link" href="${esc(page.url)}" target="_blank" rel="noopener noreferrer">The shared page</a>
+        <span class="muted">${page.access === "link" ? "anyone with the link" : "private"}</span></div>` : "";
+  return `<h4>Comments</h4>${comments}<h4>History</h4>${history}${shared ? `<h4>Shared</h4>${shared}` : ""}
+    <div class="acard-disc">${button(page && page.url && !page.ended ? "Share again" : "Share", { data: { share: 1 },
+      title: "A private page of this card, for advice" })}${button("Discuss with the manager", { data: { discuss: 1 },
       title: "Send it to the manager's chat" })}</div>`;
+}
+
+// The votes and comments that came back from the card's shared page (#6006), in the form of the comments above.
+export function sharedComments(sh) {
+  const out = [];
+  for (const c of (sh && sh.comments) || []) {
+    for (const x of [c, ...(c.replies || [])]) {
+      out.push({ from_agent: x.author || "a reader", kind: "on the shared page", body: x.body, created_at: x.created_at });
+    }
+  }
+  return out;
 }
 
 // The comments and the history of a card, from the server. A question: its thread; an item: its messages and events.
 export async function loadSide(c) {
+  const shared = await getJson(`api/card-share/${c.kind}/${c.id}`).catch(() => null);
+  const back = sharedComments(shared);
   if (c.kind === "question") {
     const t = await getJson(`api/thread/${c.id}`);
     const all = t.messages || [];
-    return { comments: all.filter(m => m.id !== c.id),
+    return { shared, comments: [...all.filter(m => m.id !== c.id), ...back],
       history: all.filter(m => m.id === c.id).map(m => ({ at: m.created_at, change: `asked by ${m.from_agent}`
         + (m.delivered_at ? `; shown ${ago(m.delivered_at)}` : "") + (m.read_at ? `; read ${ago(m.read_at)}` : "") })) };
   }
   const j = await getJson(`api/item/${c.id}`);  // item_show: its events newest first
-  return { comments: j.messages || [], history: (j.events || []).slice(0, 8) };
+  return { shared, comments: [...(j.messages || []), ...back], history: (j.events || []).slice(0, 8) };
 }
 
 // The text that Discuss with the manager sends: the card whole, so the manager reads it in its chat.

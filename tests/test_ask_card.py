@@ -55,6 +55,16 @@ class AskCard(unittest.TestCase):
         self.assertNotIn('data-opt="2"', html)  # not done yet
         self.assertIn("Not done yet (in progress)", html)
 
+    def test_share_and_what_came_back_from_the_shared_page(self):
+        side = run("m.sideHtml({comments: m.sharedComments({comments: [{author: 'a reader', body: 'Green', "
+                   "created_at: '2026-11-16T00:00:00Z', replies: []}]}), history: [], shared: {page: {url: "
+                   "'https://x.example/p', access: 'private'}}})")
+        self.assertIn("on the shared page", side)
+        self.assertIn("Green", side)
+        self.assertIn('href="https://x.example/p"', side)
+        self.assertIn("Share again", side)
+        self.assertIn('data-share="1"', run("m.sideHtml({comments: [], history: []})"))
+
     def test_text_is_escaped(self):
         html = run("m.cardHtml(m.fromItem({id: 9, title: '<img src=x onerror=alert(1)>', type: 'do'}))")
         self.assertNotIn("<img src=x", html)

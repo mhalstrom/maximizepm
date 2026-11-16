@@ -18239,6 +18239,63 @@ def canvas_reject(conn, comment_id, actor=None, note=None):
     return canvas_resolve(conn, r["id"], actor, "rejected" + (f": {note.strip()}" if (note or "").strip() else ""))
 
 
+# Share a card (#6006, card-queue-mockup v15): a question to a person or a person item as a private realquicksite
+# page, for advice. The card becomes a small Markdown canvas named card-q<id> or card-i<id>; a card in the decision
+# form keeps it, so the shared page shows its options as a vote. Its comments and votes come back as canvas comments
+# (rqs_read_responses, #5790) to the canvas's writer: for a question, the session that asked; for a person item, the
+# manager. The card's right column shows them (card_shared).
+
+def _card_source(conn, kind, card_id):
+    """(canvas name, title, body, item id, project, writer) of a card."""
+    if kind == "question":
+        m = _message(conn, card_id)
+        if m["kind"] != "question":
+            raise RiverError(f"message {card_id} is no question; share a question or a person item")
+        item = m["item_id"]
+        held = None if item else _held_item(conn, m["from_agent"])
+        project = (_item(conn, item)["project_id"] if item else held["project_id"] if held
+                   else conn.execute("SELECT id FROM projects WHERE archived=0 ORDER BY rank, id LIMIT 1").fetchone()[0])
+        first = m["body"].strip().split("\n")[0][:120]
+        return (f"card-q{m['id']}", f"Card: {first}", m["body"], item or (held["id"] if held else None),
+                _project_name(conn, project), m["from_agent"])
+    it = _item(conn, card_id)
+    if it["doer"] != "human":
+        raise RiverError(f"#{card_id} is no person item; share a question or a person item")
+    body = it["title"] + ("\n\n" + it["context"] if it["context"] else "") + ("\n\n" + it["notes"] if it["notes"] else "")
+    return (f"card-i{it['id']}", f"Card: {it['short'] or it['title'][:120]}", body, it["id"],
+            _project_name(conn, it["project_id"]), active_manager(conn))
+
+
+def card_share(conn, kind, card_id, actor=None):
+    """The canvas of a card, put now with the card's text (a new version when the card changed). The page then
+    publishes it (op canvas_publish, as Share artifact). Returns {canvas, name, version, page}."""
+    if kind not in ("question", "item"):
+        raise RiverError("a card is a question or an item")
+    name, title, text, item, project, writer = _card_source(conn, kind, int(card_id))
+    head = f"# {title[6:] if title.startswith('Card: ') else title}"
+    body = f"{head}\n\n{text.strip()}\n"
+    if not doc_decisions(body) and re.search(r"^\W*Your answer:", text, re.M):
+        # Options with no decision line: the page's vote needs one.
+        body = f"{head}\n\nDecision 1 of 1: {title[6:66]}\n{text.strip()}\n"
+    res = canvas_put(conn, name, body, actor, kind="md", title=title, item=item, project=project,
+                     note="the card, to share")
+    c = _canvas_row(conn, name, project)
+    if writer:
+        with tx(conn):  # its comments and votes go to the one who asks (canvas_send, _canvas_writer)
+            conn.execute("UPDATE canvases SET agent=? WHERE id=?", (writer, c["id"]))
+    return {"canvas": c["id"], "name": name, "version": res["version"], "page": canvas_page(conn, c["id"])}
+
+
+def card_shared(conn, kind, card_id):
+    """The shared page of a card and what came back from it: {canvas, page, comments}, or {canvas: None}."""
+    name = f"card-{'q' if kind == 'question' else 'i'}{int(card_id)}"
+    r = conn.execute("SELECT id FROM canvases WHERE name=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                     (name,)).fetchone()
+    if not r:
+        return {"canvas": None, "page": None, "comments": []}
+    return {"canvas": r["id"], "page": canvas_page(conn, r["id"]), "comments": _canvas_threads(conn, r["id"])}
+
+
 # Docs (#4708): a doc is a Markdown canvas that a session writes section by section, as on claude.ai. A section is a
 # heading and the lines up to the next heading of the same or a higher level; a section whose text is one line
 # "writing: <intent>" is pending, and the page shows it as being written.
