@@ -907,7 +907,7 @@ def build_parser(only=None):
     x = prs.add_parser("rank"); x.add_argument("name"); x.add_argument("rank", type=int)
     x = prs.add_parser("archive", help="archive a project: its items leave the queue and the lists; nothing is deleted")
     x.add_argument("name")
-    x = prs.add_parser("restore", aliases=["unarchive"], help="bring an archived project back, with its items")
+    x = prs.add_parser("restore", help="bring an archived project back, with its items")
     x.add_argument("name")
     x = prs.add_parser("list"); x.add_argument("--archived", action="store_true", help="the archived projects")
 
@@ -1121,16 +1121,6 @@ def build_parser(only=None):
     x = cvs.add_parser("comments", help="the comments on a canvas with their replies (an agent's read marks sent ones read)")
     x.add_argument("name"); x.add_argument("--open", action="store_true", help="only the ones that wait for an answer")
     x.add_argument("--project")
-    x = cvs.add_parser("comment", help="comment on a part of a canvas (--quote, --path) or on the whole page; it is a "
-                       "draft until you send it")
-    x.add_argument("name"); x.add_argument("text")
-    x.add_argument("--quote", help="the words of the page that the comment is about")
-    x.add_argument("--path", help="the part of the page (a CSS path, for example h2:nth-of-type(3))")
-    x.add_argument("--version", type=int); x.add_argument("--project")
-    x.add_argument("--send", action="store_true", help="send it at once")
-    x = cvs.add_parser("send", help="send your draft comments (or the ones named) to the session that wrote the canvas")
-    x.add_argument("name"); x.add_argument("comments", nargs="*", help="comment ids (c12); default: all your drafts")
-    x.add_argument("--project")
     x = cvs.add_parser("reply", help="answer a comment in its thread"); x.add_argument("comment"); x.add_argument("text")
     x = cvs.add_parser("resolve", help="close a comment: say what changed, or why nothing needs to")
     x.add_argument("comment"); x.add_argument("--note")
@@ -1305,7 +1295,6 @@ def build_parser(only=None):
     x = gls.add_parser("list", help="open goals in order (--all: complete ones too)")
     x.add_argument("--project"); x.add_argument("--all", action="store_true")
     x = gls.add_parser("show", help="a goal, its owner, and its items"); x.add_argument("name")
-    x = gls.add_parser("rank", help="move a goal among its project's goals (1 = first)"); x.add_argument("name"); x.add_argument("rank", type=int)
     x = gls.add_parser("edit"); x.add_argument("name"); x.add_argument("--outcome"); x.add_argument("--done-when", dest="done_when")
     x.add_argument("--rename")
     x.add_argument("--shared", dest="shared", action="store_true", default=None,
@@ -1336,7 +1325,6 @@ def build_parser(only=None):
     x = gls.add_parser("done", help="declare a goal complete (refused while its items are open)"); x.add_argument("name")
     x.add_argument("--result", required=True, help="one line: what the goal achieved")
     x.add_argument("--drop-open", action="store_true", help="drop the goal's open items, with the result as the note")
-    x = gls.add_parser("reopen"); x.add_argument("name")
 
     sc = sub.add_parser("schedule", help="scheduled tasks: a repeating obligation (an annual report, taxes, a "
                         "renewal, an access review) adds its item at each due time, less its lead time")
@@ -2086,7 +2074,6 @@ def build_parser(only=None):
     x.add_argument("--note", help="why (required when an agent drops a person's item)")
     x = sub.add_parser("takeover", help="an agent does a person's item itself (the user is told, and can undo)")
     x.add_argument("id", type=int); x.add_argument("--note", required=True, help="how you will do it without the user")
-    x = sub.add_parser("undo-takeover", help="give a taken-over item back to the people"); x.add_argument("id", type=int)
     x = sub.add_parser("reopen", help="open a closed item again"); x.add_argument("id", type=int)
     x = sub.add_parser("backlog", help="move an open item to the backlog (kept, never offered), or list the backlog")
     x.add_argument("id", type=int, nargs="?", help="the item to move; without it, list the backlog")
@@ -3945,7 +3932,7 @@ def dispatch(conn, a, actor):
             return core.project_tracker(conn, a.name, a.text, actor)
         if a.pcmd == "archive":
             return core.project_archive(conn, a.name, actor)
-        if a.pcmd in ("restore", "unarchive"):
+        if a.pcmd == "restore":
             return core.project_restore(conn, a.name, actor)
         if getattr(a, "archived", False):
             return {"archived_projects": core.project_archived(conn)}
@@ -3970,8 +3957,6 @@ def dispatch(conn, a, actor):
             return core.goal_list(conn, a.project, a.all)
         if g == "show":
             return core.goal_show(conn, a.name)
-        if g == "rank":
-            return core.goal_rank(conn, a.name, a.rank, actor)
         if g == "edit":
             return core.goal_edit(conn, a.name, a.outcome, a.done_when, a.rename, actor, a.shared)
         if g == "own":
@@ -3995,8 +3980,6 @@ def dispatch(conn, a, actor):
             return core.goal_handoff(conn, a.name, text, actor, a.version)
         if g == "done":
             return core.goal_done(conn, a.name, a.result, actor, a.drop_open)
-        if g == "reopen":
-            return core.goal_reopen(conn, a.name, actor)
     if c == "workspace":
         return core.workspace_list(conn, removed=getattr(a, "all", False))
     if c == "expert":
@@ -4323,8 +4306,6 @@ def dispatch(conn, a, actor):
         return core.drop(conn, a.id, actor, a.note)
     if c == "takeover":
         return core.takeover(conn, a.id, a.note, actor)
-    if c == "undo-takeover":
-        return core.undo_takeover(conn, a.id, actor)
     if c == "reopen":
         return core.reopen(conn, a.id, actor)
     if c == "backlog":
@@ -5941,11 +5922,6 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_show(conn, a.name, a.project, a.version)
     if v == "comments":
         return core.canvas_comments(conn, a.name, actor, a.open, a.project)
-    if v == "comment":
-        anchor = {"quote": a.quote, "path": a.path} if (a.quote or a.path) else None
-        return core.canvas_comment(conn, a.name, a.text, actor, anchor, a.version, a.project, a.send)
-    if v == "send":
-        return core.canvas_send(conn, a.name, actor, a.comments or None, a.project)
     if v == "reply":
         return core.canvas_reply(conn, a.comment, a.text, actor)
     if v == "resolve":
@@ -6341,17 +6317,6 @@ def render_canvas(a, res):
             print(f"(no {'open ' if a.open else ''}comments on canvas {res['canvas']})")
         for r in res["comments"]:
             print("\n".join(_comment_lines(r, "")))
-        return
-    if v == "comment":
-        if res["state"] == "draft":
-            print(f"comment c{res['id']} on canvas version {res['version']} is a draft; send your drafts: "
-                  f"maxpm canvas send <canvas>")
-        else:
-            print(f"comment c{res['id']} sent")
-        return
-    if v == "send":
-        print(f"sent {', '.join('c%d' % x for x in res['sent'])} on canvas {res['canvas']} to {res['to']} "
-              f"(message #{res['message']})")
         return
     if v == "reply":
         print(f"reply c{res['id']} in the thread of c{res['parent_id']}")
@@ -7049,7 +7014,7 @@ def render(a, res):
     if c == "project" and a.pcmd == "tracker":
         print(f"{res['name']}: tracker " + (res["tracker"] or "none"))
         return
-    if c == "project" and a.pcmd in ("archive", "restore", "unarchive"):
+    if c == "project" and a.pcmd in ("archive", "restore"):
         n = f"{res['open_items']} open item{'s' * (res['open_items'] != 1)}" + (f" ({res['in_progress']} in progress: {', '.join(res['holders'])})"
                                                  if res["in_progress"] else "")
         if res["archived"]:

@@ -747,7 +747,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   Uncommitted work in its folder is lost. Only a person or a manager can do
   it. Use it only when a stop request does not work.
 - Agents can take over or clear a person's item (`maxpm takeover <id>`,
-  `done`, or `drop`), with a notice and Undo (`maxpm undo-takeover <id>`).
+  `done`, or `drop`), with a notice and Undo on the page's You tab.
   Each person's item has a copyable agent prompt (`maxpm prompt`).
 - Messages between agents: alerts, questions and answers, notes, MaximizePM
   notices; `maxpm inbox`, `maxpm answer`, `maxpm thread`, an unread count on

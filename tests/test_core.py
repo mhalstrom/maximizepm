@@ -3389,7 +3389,7 @@ class Takeover(Base):
         self.assertEqual(core.message_show(self.c, q["id"])["state"], "read")
         notes = [m for m in core.inbox(self.c, "mark") if m["kind"] == "notice"]
         self.assertEqual(len(notes), 1)
-        self.assertIn("undo-takeover", notes[0]["body"])
+        self.assertIn("Undo: the page's You tab", notes[0]["body"])
         self.assertEqual([t["id"] for t in core.state(self.c)["takeovers"]], [self.h])
         core.undo_takeover(self.c, self.h, "mark")
         it = core._item(self.c, self.h)
@@ -4696,7 +4696,7 @@ class ProjectArchive(Base):
             return out.getvalue()
         self.assertIn("project a is archived: its 1 open item left the queue", run("project", "archive", "a"))
         self.assertIn("a  (1 open, 0 done; archived", run("project", "list", "--archived"))
-        self.assertIn("project a is back, at rank 1", run("project", "unarchive", "a"))
+        self.assertIn("project a is back, at rank 1", run("project", "restore", "a"))
         self.assertIn("(no archived projects)", run("project", "list", "--archived"))
         self.c = core.connect(self.path)
 
@@ -9058,7 +9058,7 @@ class CloseCheck(TextQueue):
         # An agent closes the person's item with a reason: the person gets one notice and can undo it.
         core.done(self.c, resume, None, "w1", note=f"#{reset} archived the automation")
         notice = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' AND item_id=?", (resume,)).fetchone()
-        self.assertIn("undo-takeover", notice["body"])
+        self.assertIn("Undo: the page's You tab", notice["body"])
         self.assertEqual(core.close_open(self.c), [])
         self.assertEqual(core.manager_findings(self.c)["unneeded"], [])
 

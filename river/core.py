@@ -3623,7 +3623,7 @@ def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=Non
                 raise RiverError(f"goal {parent} is in project {_project_name(conn, up['project_id'])}; a sub-goal is "
                                  f"in its parent's project")
             if up["status"] != "open":
-                raise RiverError(f"goal {parent} is complete; reopen it first: maxpm goal reopen {parent}")
+                raise RiverError(f"goal {parent} is complete; a person reopens it on the page first")
         top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM goals WHERE project_id=?", (p["id"],)).fetchone()["m"]
         conn.execute("INSERT INTO goals(project_id,name,outcome,done_when,rank,created_at,shared,parent_id) "
                      "VALUES (?,?,?,?,?,?,?,?)", (p["id"], name, outcome or "", done_when or "", top + 1, iso(now()),
@@ -3737,7 +3737,7 @@ def goal_own(conn, name, actor=None, lease=None):
         _sweep(conn)
         g = _goal(conn, name)
         if g["status"] != "open":
-            raise RiverError(f"goal {name} is complete; reopen it first: maxpm goal reopen {name}")
+            raise RiverError(f"goal {name} is complete; a person reopens it on the page first")
         if g["shared"]:
             raise RiverError(f"goal {name} is shared: nobody owns it, and its items are open to every agent. "
                              f"Take its items with maxpm go. A person or a manager changes that: "
@@ -14927,7 +14927,7 @@ def _record_takeover(conn, it, kind, note, actor):
     humans = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
     for h in humans:
         _send(conn, "notice", actor, f"{actor} {_TAKEOVER_WORDS[kind]} #{it['id']} {it['title']} (it was yours): {note}. "
-              f"Undo: maxpm undo-takeover {it['id']}", to=h, item_id=it["id"])
+              f"Undo: the page's You tab", to=h, item_id=it["id"])
     if humans:
         conn.execute(f"UPDATE messages SET state='read', read_at=COALESCE(read_at, ?) WHERE item_id=? "
                      f"AND kind IN ('question','alert') AND state='open' AND to_agent IN ({','.join('?' * len(humans))})",
@@ -17158,8 +17158,7 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
         rows = conn.execute("SELECT * FROM canvas_comments WHERE canvas_id=? AND state='draft' AND parent_id IS NULL "
                             "AND author=? ORDER BY id", (c["id"], actor)).fetchall()
     if not rows:
-        raise RiverError(f"no draft comments on canvas {c['name']} to send; write one first: "
-                         f"maxpm canvas comment {c['name']} \"...\"")
+        raise RiverError(f"no draft comments on canvas {c['name']} to send; write one on the page first")
     to = _canvas_writer(conn, c)
     if to is None and not c["item_id"]:
         raise RiverError(f"the session that wrote canvas {c['name']} has ended and the canvas has no item, so nobody "
