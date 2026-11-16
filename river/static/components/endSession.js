@@ -45,7 +45,11 @@ function el() {
     const reason = (q("[data-end-reason]") || {}).value?.trim() || "";
     const closeTask = !!(q("[data-end-done]") || {}).checked;
     if (e.target.closest("[data-end-cancel], [data-end-close]")) return dlg.close();
-    if (e.target.closest("[data-end-go]")) { finish({ how: e.target.closest("[data-end-go]").dataset.endGo, reason, done: closeTask }); return dlg.close(); }
+    const field = q("[data-end-reason]");
+    const how = (e.target.closest("[data-end-go]") || {}).dataset?.endGo;
+    // #5960 (policy p5): a stop of a session that holds work needs the person's words.
+    if (how === "stop" && field && field.required && !reason) { field.focus(); field.reportValidity?.(); return; }
+    if (how) { finish({ how, reason, done: closeTask }); return dlg.close(); }
     if (e.target.closest("[data-end-now-ask]")) { q(".end-now").classList.remove("hidden"); q(".end-now button").focus(); }
   });
   d.addEventListener("change", (e) => {
@@ -59,7 +63,9 @@ const taskList = (s) => (s.holds || []).map(h => `#${h.id} ${esc(h.title)}`).joi
 // The text and buttons of the dialog for one session (a card of GET /api/sessions).
 export function endHtml(s) {
   const name = esc(s.name), held = (s.holds || []).length;
-  const reason = `<div class="form"><label>Why (optional; ${s.role === "expert" ? "the history keeps it" : "the session sees it"})<input data-end-reason placeholder="the plan changed"></label></div>`;
+  // #5960: a worker that holds a task or a goal stops only with the person's reason.
+  const needs = s.role !== "expert" && (held || (s.goals || []).length || s.goal);
+  const reason = `<div class="form"><label>Why (${needs ? "needed: it holds work" : "optional"}; ${s.role === "expert" ? "the history keeps it" : "the session sees it"})<input data-end-reason${needs ? " required" : ""} placeholder="the plan changed"></label></div>`;
   const now = s.can_kill ? `<div class="end-now hidden"><b>End ${name} now?</b> ${s.pid ? `Its process (PID ${esc(s.pid)})` : "The program in its tmux pane"} ends at once. Use this only
       when the session does not answer. Work that it did not commit stays in its folder, and nothing commits it. MaximizePM releases its
       task, goals and targets.<div class="actions">${button(`End ${name} now`, { kind: "warn", data: { "end-go": "kill" } })}</div></div>` : "";

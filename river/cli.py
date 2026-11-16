@@ -7147,8 +7147,10 @@ def render(a, res):
         return
     if c == "stop":
         print(f"asked {res['agent']} to stop ({res['reason']}); it ends {res['ends']}"
-              + (f"; native delivery: {res['native']}" if res.get("native") else "")
-              + ("; it holds " + ", ".join(f"#{h['id']}" for h in res["holds"]) if res["holds"] else ""))
+              + (f"; native delivery: {res['native']}" if res.get("native") else ""))
+        has = core.holdings_text({"items": res["holds"], "goals": res.get("goals") or [],
+                                  "targets": res.get("targets") or []})
+        print(f"  it holds: {has} (it releases them when it ends)" if has else "  it holds nothing")
         return
     if c == "target":
         if isinstance(res, list):

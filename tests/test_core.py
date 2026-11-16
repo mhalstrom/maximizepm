@@ -5718,6 +5718,30 @@ class Stop(Base):
             core.register(self.c, n)
         core.register(self.c, "mark", human=True)
 
+    def test_stop_names_what_the_session_holds_and_needs_a_reason_then(self):
+        # #5960 (policy p5): check what a session holds before you stop it.
+        x = self.add("a", "x")
+        core.claim(self.c, x, "s1")
+        core.goal_add(self.c, "a", "g")
+        core.goal_own(self.c, "g", "s1")
+        with self.assertRaisesRegex(RiverError, r"s1 holds #\d+ x \(in progress\); goal g\. Say why"):
+            core.stop_agent(self.c, "s1", "stop", actor="mark")
+        r = core.stop_agent(self.c, "s1", "wrong model", actor="mark")
+        self.assertEqual(([h["id"] for h in r["holds"]], r["goals"], r["targets"]), ([x], ["g"], []))
+        # A session that holds nothing stops with one word; a session stops itself with one word too.
+        self.assertEqual(core.stop_agent(self.c, "s2", "enough", actor="mark")["holds"], [])
+        core.register(self.c, "s3")
+        core.claim(self.c, self.add("a", "z"), "s3")
+        core.stop_agent(self.c, "s3", "done", actor="s3")
+        # The page: no words for a session that holds work is refused; one that holds nothing gets the default.
+        from river import server
+        core.register(self.c, "s4")
+        core.claim(self.c, self.add("a", "w"), "s4")
+        with self.assertRaisesRegex(RiverError, "s4 holds .*: say why it must stop"):
+            server.OPS["stop_agent"](self.c, {"agent": "s4"}, "mark")
+        core.register(self.c, "s5")
+        self.assertIn("stopped from the page", server.OPS["stop_agent"](self.c, {"agent": "s5"}, "mark")["reason"])
+
     def test_a_stopped_agent_keeps_no_reservation(self):
         # #641: only its pushes were taken back; an item it released after the stop stayed reserved for it.
         x, pre, y = self.add("a", "x"), self.add("a", "a prerequisite"), self.add("a", "y")
@@ -6522,7 +6546,7 @@ class Manager(Base):
         # The manager acts: queue, give a target, stop; the history says so.
         core.queue_add(self.c, "w2", z, actor="boss")
         core.target_give(self.c, "web", "w2", actor="boss")
-        core.stop_agent(self.c, "w1", "stuck", actor="boss")
+        core.stop_agent(self.c, "w1", "stuck in a loop", actor="boss")  # it holds work: a reason in words (#5960)
         changes = [e["change"] for e in core.recent_events(self.c)]
         self.assertTrue(any(c.startswith("stopped w1") and c.endswith("(by manager boss)") for c in changes))
         self.assertTrue(any("target web given to w2" in c and "(by manager boss)" in c for c in changes))

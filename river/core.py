@@ -12893,16 +12893,42 @@ def _deliver_entry(conn, entry_id):
     return st
 
 
+STOP_REASON_WORDS = 2  # a stop of a session that holds work names why in at least this many words (#5960, p5)
+
+
+def holdings(conn, agent):
+    """What a session holds: {"items": [{id, title, status}], "goals": [names], "targets": [names]}."""
+    return {"items": [dict(r) for r in conn.execute(
+                "SELECT id, title, status FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                (agent,))],
+            "goals": [r["name"] for r in conn.execute(
+                "SELECT name FROM goals WHERE owner=? AND status='open' ORDER BY rank, id", (agent,))],
+            "targets": [r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=? ORDER BY name", (agent,))]}
+
+
+def holdings_text(h):
+    """'#12 title (in progress); goal g; target t', or '' for nothing."""
+    parts = [f"#{x['id']} {x['title'][:60]} ({x['status'].replace('_', ' ')})" for x in h["items"]]
+    parts += [f"goal {g}" for g in h["goals"]] + [f"target {t}" for t in h["targets"]]
+    return "; ".join(parts)
+
+
 def stop_agent(conn, agent, reason, actor=None):
     """maxpm stop: a request, not a kill. A stop entry goes to the front of the agent's queue; a waiting agent
     ends at once (maxpm wait returns STOP), a working one on its next river command, after it commits and
-    releases its item. A person or a manager may stop any agent; an agent may stop only itself."""
+    releases its item. A person or a manager may stop any agent; an agent may stop only itself.
+    #5960 (policy p5): the reply names what the session holds (tasks, goals, targets); a stop of another session
+    that holds any of them needs a reason of STOP_REASON_WORDS words or more."""
     if not reason or not reason.strip():
         raise RiverError("say why: maxpm stop <agent> --reason \"...\"")
     if actor != agent:
         why = may_change_queue(conn, actor, agent)
         if why:
             raise RiverError(f"refused: an agent may not stop another; a person or a manager stops agents ({why})")
+        has = holdings_text(holdings(conn, agent))
+        if has and len(reason.split()) < STOP_REASON_WORDS:
+            raise RiverError(f"refused: {agent} holds {has}. Say why it must stop, in a few words: maxpm stop {agent} "
+                             f"--reason \"<why>\". A note may do instead: maxpm note {agent} \"<what to change>\"")
     with tx(conn):
         ag = _agent(conn, agent)
         if ag["kind"] != "ai":
@@ -12923,7 +12949,9 @@ def stop_agent(conn, agent, reason, actor=None):
               f"hand back your item with a note, then end this session.", to=agent)
     waiting = ag["role"] == "waiting" and not holds
     native = None if waiting else _deliver_entry(conn, eid)
+    h = holdings(conn, agent)
     return {"agent": agent, "reason": reason.strip(), "waiting": waiting, "holds": holds, "native": native,
+            "goals": h["goals"], "targets": h["targets"],
             "ends": "now: maxpm wait returns STOP within seconds" if waiting
             else "after its next maxpm command, once it commits and releases its item"}
 

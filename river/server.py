@@ -5091,6 +5091,15 @@ def _page_reason(a, who):
     return (a.get("reason") or "").strip() or f"stopped from the page by {who or 'a person'}"
 
 
+def _stop_reason(conn, a, who):
+    """The page's stop (#5960, policy p5): a session that holds work needs the person's own words; one that holds
+    nothing stops with the default reason."""
+    has = core.holdings_text(core.holdings(conn, a["agent"]))
+    if has and not (a.get("reason") or "").strip():
+        raise RiverError(f"{a['agent']} holds {has}: say why it must stop, in a few words")
+    return _page_reason(a, who)
+
+
 # Requests to open a canvas in the page (#4783): maxpm canvas open asks this server, the state carries the request,
 # and the page opens the canvas in the side panel of that session. In memory only; a request lives
 # CANVAS_OPEN_KEEP seconds, and a page counts only the ones that came after it loaded.
@@ -5216,8 +5225,8 @@ OPS = {
     "ops_accept": lambda c, a, who: core.ops_accept(c, a["scope"], a["name"], who, a.get("note") or None),
     "ops_reject": lambda c, a, who: core.ops_reject(c, a["scope"], a["name"], who, a.get("note") or None),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
-    # A person stops from the page without a reason; the agent then reads who stopped it.
-    "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
+    # A person stops a session that holds nothing from the page without a reason; the agent then reads who stopped it.
+    "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _stop_reason(c, a, who), who),
     "kill_agent": lambda c, a, who: kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),
