@@ -5,11 +5,21 @@ start refuses; a test of an installed tmux sets core.tmux_path itself.
 
 The tests also run as no session: a session that maxpm serve opened has its name, purpose, and model in
 the environment (MAXPM_FOCUS=deploy:<target> makes go look only for a deploy), and a test that runs go or
-the MCP server there would read them (#2261). A test that needs one sets it itself. MAXPM_DB stays: a test
-names its own database, and the variable never points a test at the real queue by being removed."""
-import os
+the MCP server there would read them (#2261). A test that needs one sets it itself.
 
-from river import core, dictation, server
+MAXPM_DB names a queue in a temporary folder before any test runs: a test names its own database, and one that does
+not (cli.run of a command that needs no queue, such as agent-login) writes its run log row there, never to the real
+queue (#5969)."""
+import atexit
+import os
+import shutil
+import tempfile
+
+_queue_dir = tempfile.mkdtemp(prefix="maxpm-tests-")
+atexit.register(shutil.rmtree, _queue_dir, True)
+os.environ["MAXPM_DB"] = os.path.join(_queue_dir, "maxpm.db")
+
+from river import core, dictation, server  # noqa: E402
 
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS", "MAXPM_FORK_OF",
               "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL"):
