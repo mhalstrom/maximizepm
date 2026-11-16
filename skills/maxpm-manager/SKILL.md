@@ -29,19 +29,21 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
 
 1. Read NEEDS ATTENTION in the briefing and act on each line (below).
 2. Start `maxpm --as <you> manage --watch` as a background command (Claude
-   Code: `run_in_background` with a time limit above `manage_every`, 30m; in a
-   foreground shell with a 10-minute limit, add `--step 9m`). It is your only
-   watcher. It exits when a new finding needs you (an agent is stuck or gone,
-   an agent waits longer than `wait_too_long`, a project has ready agent work
-   and no agent, a target owner is away or gone, a question for the user), and
-   when a message or question comes to you: it prints the message, which is
-   then delivered, not read. After the first new finding it waits `manage_settle` (2m) more and
-   returns every finding that came meanwhile, so a group of findings wakes you
-   once. A finding it reported before does not wake it again. With nothing new
-   it exits after `manage_every` with one line. Each message has a level,
-   and each level a wait before it wakes you: high after `manage_wait_high`
-   (10m: the default, also an alert and a question), low after
-   `manage_wait_low` (30m: a person's message sent with `--level low`). A ship
+   Code: `run_in_background` with no time limit, or one above
+   `manage_quiet_every`, 4h; in a foreground shell with a 10-minute limit, add
+   `--step 9m`). It is your only watcher. You are async (#5977): the watch
+   exits at once only for an escalation: an urgent finding (an agent is stuck,
+   a lost lease, a target, a question for the user, a project with ready agent
+   work and no agent), a blocked message, a person's message, a stop. After
+   the first urgent finding it waits `manage_settle` (2m) more and returns
+   every finding that came meanwhile. Everything else (other messages and
+   findings) waits for the beat, `manage_every` (50m, inside the hour your
+   prompt cache lives), or until `manage_wake_count` (5) of them wait. A beat
+   with nothing new is one short turn: start the watch again and end the turn.
+   In quiet time (no session holds work, no person acted for
+   `manage_quiet_after`, 1h) the beat comes after `manage_quiet_every`. A
+   finding it reported before does not wake it again. Printed messages are
+   delivered, not read. A ship
    request, a review that passed, and a deploy that is done wake you at once
    (a notice of level now): the release waits on you. A blocked message wakes you at once: its
    sender stopped working after it sent it (it runs `maxpm wait` or `inbox --wait`, its turn ended, it

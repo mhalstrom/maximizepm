@@ -829,8 +829,8 @@ def _fmt_msg(m, indent="", states=False):
     return "\n".join(lines)
 
 
-LEVEL_HELP = ("a person's message to the manager: high (the default; manage_wait_high, 10m) or low (manage_wait_low, "
-              "30m). An agent's level counts no more: its state escalates (#5976)")
+LEVEL_HELP = ("high (the default) or low. A person's message wakes the manager at once; an agent's level counts no "
+              "more: its message waits for the manager's beat and escalates by the sender's state (#5976, #5977)")
 BLOCKED_HELP = ("a person's message that cannot wait wakes the manager's watch at once. An agent's flag counts no more: "
                 "its message escalates when it stops working (#5976)")
 
@@ -2010,7 +2010,7 @@ def build_parser(only=None):
 
     x = sub.add_parser("manage", help="start the manager session (one at a time): what needs attention, and its rules")
     x.add_argument("--takeover", metavar="REASON", help="take over from the active manager")
-    x.add_argument("--watch", action="store_true", help="block until a new finding or a message needs the manager (at most manage_every); run it in the background")
+    x.add_argument("--watch", action="store_true", help="block until an escalation, the beat (manage_every; manage_quiet_every in quiet time), or enough waiting messages and findings (manage_wake_count) need the manager; run it in the background")
     x.add_argument("--step", help="with --watch: return after this long at most (a foreground shell: below its time limit)")
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
@@ -5137,7 +5137,10 @@ def render_manage(b):
                  f"or reply, or act on its item)"] if old else []
         print((f"Act on what is new" + (": " + "; ".join(seen) if seen else "")
                + f", then start {r} manage --watch again in the background."
-               if b["new"] or seen else f"Start {r} manage --watch again in the background."))
+               if b["new"] or seen else
+               # #5977: a beat keeps the prompt cache warm; it is one short turn.
+               f"A beat: nothing needs you. Keep this turn short: start {r} manage --watch again in the background "
+               f"and end the turn."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
     if b["new_name"]:
@@ -5176,15 +5179,19 @@ def render_manage(b):
             (f"In a chat, run {r} manage again when the user asks what changed (manage --watch is for a terminal)."
              if b.get("chat") else
              f"Then watch: keep {r} manage --watch running as a background command (Claude Code: run_in_background "
-             f"with a time limit above {b['every']}; a foreground shell: add --step 9m). It exits on a new finding"
+             f"with no time limit or one above manage_quiet_every {b.get('quiet_every', '4h')}; a foreground shell: "
+             f"add --step 9m). It exits at once for an escalation: an urgent finding"
              + (f" (after manage_settle {b['settle']}, with the findings that came meanwhile)"
                 if b.get("settle") and core.parse_duration(b["settle"]).total_seconds() else "")
              + (", " if b.get("native") else
-                f", a message to you (a blocked one or a person's at once, another after manage_wait_high "
-                f"{b.get('wait_high', '10m')}, a low one after manage_wait_low {b.get('wait_low', '30m')}; it prints "
-                f"every message that waits; a blocked one comes alone, the rest with the next watch), ")
-             + f"or after manage_every {b['every']} with one line; start it again each time. It is your only "
-               f"watcher: MaximizePM refuses a second wait for your messages."),
+                ", a blocked message, a person's message (it prints every message that waits; a blocked one comes "
+                "alone, the rest with the next watch), ")
+             + f"a stop. Everything else waits for the beat, manage_every {b['every']} (one short turn that keeps "
+               f"your cache warm)"
+             + (f", or until manage_wake_count {b.get('wake_count', '5')} messages and findings wait"
+                if str(b.get("wake_count", "5")) not in ("0", "") else "")
+             + "; in quiet time (no session works, the person away) the beat is manage_quiet_every. Start it again "
+               "each time. It is your only watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [
             "Messages: MaximizePM delivers a blocked one and a person's into this session itself (native_message); "
             "what reached this session does not wake the watch. The watch brings each other message after its wait, "

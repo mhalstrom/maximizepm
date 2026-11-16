@@ -661,7 +661,7 @@ the command again only when it still applies.
 An alert means stop and read now. A notice comes from MaximizePM itself, for
 example when your lease expired.
 
-A message to the manager wakes it within 10 minutes (`manage_wait_high`). It
+A message to the manager waits for its next beat (within 50 minutes). It
 wakes the manager at once when you stop working after you sent it: you run
 `maxpm wait` or `inbox --wait`, end your turn, release or block its item, or
 your session ends. You set no priority yourself.

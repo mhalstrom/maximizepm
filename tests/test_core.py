@@ -6082,11 +6082,69 @@ class Stop(Base):
         self.assertEqual([e["kind"] for e in core.queue_list(self.c, "s2")["entries"]], ["stop"])
 
 
+def sync_manager(c):
+    """The waits of the manager's watch before the async manager (#5977): these tests check how levels, findings
+    and the beat work, with the shorter times that they were written for. ManagerBeat checks the new defaults."""
+    for k, v in (("manage_every", "30m"), ("manage_wait_high", "10m"), ("manage_wait_low", "30m"),
+                 ("manage_wake_count", "0"), ("manage_quiet_after", "0s")):
+        core.config_set(c, k, v)
+
+
+class ManagerBeat(Base):
+    """#5977: the async manager. Escalations wake it at once; other messages and findings wait for the beat inside
+    the cache hour, or until manage_wake_count of them wait; quiet time makes the beat longer."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        for n in ("w1", "w2"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def watch(self):
+        """The watch with a clock that moves one minute for each poll: (result, minutes)."""
+        t0, naps = core.now(), []
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", sleep=naps.append)
+        return w["result"], len(naps)
+
+    def test_manager_beat_defaults_and_a_note_waits_for_the_beat(self):
+        d = core.DEFAULT_SETTINGS
+        self.assertEqual((d["manage_every"], d["manage_wait_high"], d["manage_wait_low"], d["manage_wake_count"],
+                          d["manage_quiet_every"]), ("50m", "50m", "50m", "5", "4h"))
+        self.assertEqual(self.watch(), ("tick", 50))  # a beat with nothing new
+        core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
+        self.assertEqual(self.watch(), ("messages", 50))
+
+    def test_manager_beat_enough_waiting_wakes_it_early_and_an_escalation_at_once(self):
+        for i in range(4):
+            core.send(self.c, "note", f"note {i}", to="boss", actor="w1")
+        core.send(self.c, "alert", "main is red", to="boss", actor="w2")
+        self.assertEqual(self.watch(), ("messages", 0))  # five wait: at once
+        core.send(self.c, "question", "may I push?", to="boss", actor="mark")  # a person's message
+        self.assertEqual(self.watch(), ("messages", 0))
+
+    def test_manager_beat_quiet_time_makes_the_beat_longer(self):
+        old = core.iso(core.now() - timedelta(hours=2))
+        self.c.execute("UPDATE agents SET last_seen=? WHERE kind='human'", (old,))
+        self.assertTrue(core._manager_quiet(self.c, "boss", timedelta(hours=1)))
+        self.assertEqual(self.watch(), ("tick", 240))
+        x = core.item_add(self.c, "a", "Build the cart")["id"]
+        core.claim(self.c, x, "w1")  # a session works: no quiet time
+        self.assertFalse(core._manager_quiet(self.c, "boss", timedelta(hours=1)))
+        core.config_set(self.c, "manage_quiet_after", "0s")
+        core.release(self.c, x, actor="w1")
+        self.assertFalse(core._manager_quiet(self.c, "boss", timedelta(0)))
+
+
 class NativeDelivery(Base):
     """Queue instructions, stops, and messages also go through the agent platform's own messaging (#426)."""
 
     def setUp(self):
         super().setUp()
+        sync_manager(self.c)
         core.project_add(self.c, "a", path=self.dir.name)
         for n in ("cx", "cc", "plain"):
             core.register(self.c, n)
@@ -6677,6 +6735,7 @@ class Manager(Base):
 
     def setUp(self):
         super().setUp()
+        sync_manager(self.c)
         core.project_add(self.c, "a", path=self.dir.name)
         core.project_add(self.c, "b", path=self.dir.name)
         for n in ("w1", "w2"):
@@ -6820,7 +6879,7 @@ class Manager(Base):
         self.assertEqual((w["result"], w["new"]), ("change", ["uncovered:b"]))
         core.config_unset(self.c, "manage_settle")
         # A finding it reported before does not wake it again: it waits the whole manage_every.
-        self.assertEqual(core.DEFAULT_SETTINGS["manage_every"], "30m")
+        self.assertEqual(core.setting(self.c, "manage_every"), "30m")  # sync_manager; the default is 50m (#5977)
         t0, naps = core.now(), []
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps) * 10)):
             w = core.manage_watch(self.c, "boss", sleep=naps.append)
@@ -6888,9 +6947,9 @@ class Manager(Base):
             cli.render_manage(core.manage(self.c, self.dir.name, "boss"))
         self.assertIn("BLOCKED MESSAGES (1)", out.getvalue())
         self.assertIn("w2 is stuck", out.getvalue())
-        self.assertIn("a message to you (a blocked one or a person's at once, another after manage_wait_high 10m, a low "
-                      "one after manage_wait_low 30m; it prints every message that waits; a blocked one comes alone, "
-                      "the rest with the next watch)", out.getvalue())
+        self.assertIn("a blocked message, a person's message (it prints every message that waits; a blocked one comes "
+                      "alone, the rest with the next watch), a stop. Everything else waits for the beat, manage_every "
+                      "30m", out.getvalue())  # #5977
         self.assertNotIn("inbox --wait", out.getvalue())
         # With native delivery the platform brings messages: what it brought (sent) does not wake the watch (#5686:
         # a message that no delivery tried still does).
@@ -7251,8 +7310,8 @@ class Manager(Base):
         # #1583: on 2026-10-08, 124 of 181 wakes of the manager were messages, most of them one note.
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        self.assertEqual((core.MESSAGE_LEVELS, core.DEFAULT_SETTINGS["manage_wait_high"],
-                          core.DEFAULT_SETTINGS["manage_wait_low"]), (("high", "low"), "10m", "30m"))
+        self.assertEqual((core.MESSAGE_LEVELS, core.setting(self.c, "manage_wait_high"),
+                          core.setting(self.c, "manage_wait_low")), (("high", "low"), "10m", "30m"))  # sync_manager
         # A note is high: it wakes the watch ten minutes after it was sent.
         m = core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
         self.assertEqual((m["level"], m["level_set"], m["blocked"], m["manager_wait"]), ("high", False, None, "10m"))
@@ -7811,6 +7870,7 @@ class Locked(Base):
 
     def setUp(self):
         super().setUp()
+        sync_manager(self.c)
         core.project_add(self.c, "a", path=self.dir.name)
         for n in ("w1", "w2"):
             core.register(self.c, n)
@@ -8409,7 +8469,7 @@ class DeployHook(Base):
         t0, naps = core.now(), []
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "boss", step="2h", sleep=naps.append)
-        self.assertEqual((w["result"], len(naps)), ("messages", 30))  # manage_wait_low: the start alone does not wake it
+        self.assertEqual((w["result"], len(naps)), ("messages", 50))  # the beat (#5977): the start alone does not wake it
         self.assertIn(f"the deploy hook of target web started for deploy #{self.deploy}", w["messages"][0]["body"])
         r = core.run_hooks(self.c, token="test-token")
         self.assertEqual((r[0]["deploy_end"], r[0]["alerted"]), ("failed", "ops"))

@@ -78,8 +78,11 @@ BLOCKED_WINDOW = timedelta(minutes=3)
 # New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
 # person gets a notification for an item that is ready for them, and the closer decides the items its close
 # check listed (unneeded, #3286). A goal with nothing open waits for nobody (goal, #4970). Finished work that waits
-# to go out is hours old already (unpushed, untagged, #5600).
-LOW_FINDINGS = ("waiting", "human", "unneeded", "goal", "unpushed", "untagged")
+# to go out is hours old already (unpushed, untagged, #5600). The async manager (#5977): only the urgent kinds (a
+# session that stands still with work, a lost lease, a release target, a question held for the manager, serve's
+# own loop, a broken rule, a project with ready work and no session) wake it after manage_settle; the end of a
+# session and one that never connected wait like the others: maxpm serve frees their work itself.
+LOW_FINDINGS = ("waiting", "human", "unneeded", "goal", "unpushed", "untagged", "ends", "unconnected")
 
 DEFAULT_SETTINGS = {
     "lease_ttl": "30m",
@@ -557,7 +560,18 @@ DEFAULT_SETTINGS = {
     # maxpm health (#5353): the person's minutes that one needs-you row stands for. The headline 'person minutes per
     # done item' is needs-you rows x this / items done: a proxy, since MaximizePM cannot see the person's real time.
     "health_person_minutes": "3",
-    "manage_every": "30m",
+    # The async manager (#5977, mark 2026-11-15: 'less sync and more async except to keep its cache active'): its
+    # watch returns at once only for an escalation (a blocked message, a person's message, a notice of level now, a
+    # stop, an URGENT finding after manage_settle). Everything else waits for the beat, manage_every after the last
+    # return, inside the hour that its prompt cache lives (20 turns on a warm cache cost about one cold read), or
+    # until manage_wake_count such messages and findings wait (0: no early wake). A beat with nothing new is one short
+    # turn. Quiet time: no session holds work and no person did anything for manage_quiet_after: the beat comes
+    # after manage_quiet_every instead (an escalation still wakes it at once). Between wakes maxpm serve does the
+    # computed work.
+    "manage_every": "50m",
+    "manage_wake_count": "5",
+    "manage_quiet_after": "1h",
+    "manage_quiet_every": "4h",
     # maxpm manage --watch waits this long after the first new finding, and then returns all new findings at
     # once: they often come in groups (an agent ends, then its lease runs out), and each wake makes the manager
     # read its whole context again (#1312). A finding that goes away in this time wakes nothing. Messages and a
@@ -569,9 +583,10 @@ DEFAULT_SETTINGS = {
     # deploy hook that started comes with the next wake. A blocked message (--blocked, or MaximizePM sees that its item stands still)
     # and a person's message wake the watch at once. The new findings "an agent waits" and "an item is ready
     # for a person" wait manage_wait_low; another finding waits manage_settle. A wake brings every message that
-    # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once.
-    "manage_wait_high": "10m",
-    "manage_wait_low": "30m",
+    # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once. With the
+    # async manager (#5977) both wait for the beat by default.
+    "manage_wait_high": "50m",
+    "manage_wait_low": "50m",
     # A blocked message stays open for the manager until it answers it (an answer, send --reply, or an action on
     # its item): each watch lists it at the top with its age, and the watch wakes the manager again for it
     # manage_rewake after it last showed it, until manage_unanswered after the send. Then maxpm serve tells the
@@ -2982,7 +2997,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "conflict_max_lines", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes",
+                 "manage_wake_count"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -23390,6 +23406,8 @@ def manage(conn, cwd, actor=None, takeover=None):
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
             "wait_high": setting(conn, "manage_wait_high", agent=actor),
             "wait_low": setting(conn, "manage_wait_low", agent=actor),
+            "wake_count": setting(conn, "manage_wake_count", agent=actor),  # #5977
+            "quiet_every": setting(conn, "manage_quiet_every", agent=actor),
             "wait_too_long": setting(conn, "wait_too_long"),
             "tidy_every": setting(conn, "tidy_every"),
             "hooks": {t["name"]: h for t in target_list(conn) for h in [target_hooks(conn, t["name"])] if h},
@@ -23423,7 +23441,11 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         base = set()
     state = _poll_state()  # #6008: a watch that the caller repeats, one poll at a time
     state.setdefault("since", iso(now()))
-    deadline = parse_iso(state["since"]) + parse_duration(step or setting(conn, "manage_every", agent=actor))
+    every = parse_duration(step or setting(conn, "manage_every", agent=actor))
+    deadline = parse_iso(state["since"]) + every
+    wake_count = int(setting(conn, "manage_wake_count", agent=actor) or 0)  # #5977: enough waits wake it early
+    quiet_after = parse_duration(setting(conn, "manage_quiet_after", agent=actor))
+    quiet_every = parse_duration(setting(conn, "manage_quiet_every", agent=actor))
     settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
     waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=actor)),
@@ -23459,7 +23481,13 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
             low_due = None
         elif low_due is None:
             low_due = now() + waits["low"]
-        if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or now() >= deadline:
+        many = bool(wake_count) and len(low) + len(waiting) >= wake_count  # #5977: sooner than the beat
+        beat = now() >= deadline
+        if beat and not step and _manager_quiet(conn, actor, quiet_after):
+            # Quiet time (#5977): no session works and the person is away; the beat comes after manage_quiet_every
+            # instead (an escalation still wakes it at once), so the watch still ends within a known time.
+            beat = now() >= parse_iso(state["since"]) + quiet_every
+        if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or many or beat:
             # All that waits comes along. Printed is delivered, not read (#5685): the manager reads a message with
             # its own command (inbox, thread, an answer, a reply, an action on its item).
             try:
@@ -23502,6 +23530,18 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
             state.update(settled=settled and iso(settled), low_due=low_due and iso(low_due))
             return POLL_AGAIN_RESULT
         sleep(poll)
+
+
+def _manager_quiet(conn, manager, after):
+    """Quiet time for the manager's beat (#5977): no other agent holds work, and no person ran a command or acted
+    on the page for `after` (0s: never quiet)."""
+    if not after:
+        return False
+    if conn.execute("SELECT 1 FROM items i JOIN agents a ON a.name=i.assignee WHERE a.kind='ai' AND a.name<>? AND "
+                    "i.status IN ('in_progress','held') LIMIT 1", (manager,)).fetchone():
+        return False
+    seen = conn.execute("SELECT MAX(last_seen) FROM agents WHERE kind='human'").fetchone()[0]
+    return bool(seen) and parse_iso(seen) + after <= now()  # no person registered: MaximizePM cannot tell
 
 
 def _brought(native, m):
