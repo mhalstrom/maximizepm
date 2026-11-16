@@ -495,7 +495,8 @@ class Responses(Base):
 
 class PanelButton(unittest.TestCase):
     """The button and the line under the bar in Chrome, at 1500 px and at a 390 px phone (p57): the line wraps inside
-    the panel, the button stands in the bar (on a phone under its ⋯), and a new version of a shared page asks first."""
+    the panel, the button stands in the bar (on a phone under its ⋯), and a new version of a shared page goes in one
+    press (#6011): the click sends confirm, with no dialog."""
 
     def setUp(self):
         from tests import test_view_sessions as tvs
@@ -534,13 +535,21 @@ try {
                 label: q("[data-cv-rqs]").textContent,
                 more: vis(".sp-cbar .cv-more"), barh: q(".sp-cbar").getBoundingClientRect().height };
   if (out.more) q(".sp-cbar .cv-more").click();
+  // The publish call is caught here: nothing goes to realquicksite, and no tab opens.
+  const sent = [], realFetch = window.fetch;
+  window.fetch = (u, o) => {
+    const b = o && typeof o.body === "string" && o.body.includes('"canvas_publish"') ? JSON.parse(o.body) : null;
+    if (!b) return realFetch(u, o);
+    sent.push(b);
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { wait: "about:blank" } }),
+      { status: 200, headers: { "Content-Type": "application/json" } }));
+  };
+  window.open = () => null;
   q("[data-cv-rqs]").click();
-  await until(() => vis("#rqsDlg .rqs-box"), "the dialog");
-  const box = q("#rqsDlg .rqs-box").getBoundingClientRect();
-  out.dialog = q("#rqsDlg p").textContent; out.dlgInside = box.left >= 0 && box.right <= innerWidth;
-  q("[data-rqs-cancel]").click();
-  await sleep(300);
-  out.closed = !vis("#rqsDlg .rqs-box");
+  await until(() => sent.length, "the publish call");
+  await sleep(200);
+  out.confirm = sent[0].args.confirm; out.dialog = !!q("#rqsDlg");
+  window.fetch = realFetch;
   post(out);
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''
@@ -551,18 +560,11 @@ try {
         self.assertEqual(got["label"], "Share artifact")  # mark 2026-11-13
         self.assertIn("relay-plan-with-a-long-name-k3x9.realquicksite.app", got["text"])
         self.assertIn("shared: anyone with the link", got["text"])
-        self.assertIn("v1 (this is v2)", got["text"])
+        self.assertIn("the shared page shows v1; this is v2: Share artifact publishes it", got["text"])
         self.assertIn("1 problem found", got["text"])
         self.assertLessEqual(got["over"], 0, got)
         self.assertTrue(got["inside"], got)
-        self.assertEqual(got["dialog"], "This page is shared. Anyone with the link sees the new version. Publish it?")
-        self.assertTrue(got["dlgInside"], got)
-        self.assertTrue(got["closed"], got)
-        c = core.connect()
-        try:
-            self.assertEqual(core.canvas_page(c, core.canvas_show(c, "relay")["id"])["version"], 1, "Cancel sends nothing")
-        finally:
-            c.close()
+        self.assertEqual((got["confirm"], got["dialog"]), (True, False), "one press: the click is the yes (#6011)")
 
     def test_wide(self):
         got = self.drive("1500,900")
