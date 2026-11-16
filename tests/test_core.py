@@ -158,6 +158,52 @@ class Ordering(Base):
                 w(bad)
         self.assertEqual(core.show_time("2026-09-28T11:00:00Z", "America/New_York")[-9:], " 7:00 EDT")
 
+    def test_an_item_added_with_a_start_waits_until_then(self):
+        # g4 in code (#5954): an item for a later day is held in the same step as its add.
+        core.project_add(self.c, "a")
+        core.register(self.c, "ag")
+        x = core.item_add(self.c, "a", "renew the domain", actor="ag", start="3d")
+        a = core.annotate(self.c)[x["id"]]
+        self.assertFalse(a["ready"])
+        self.assertEqual(a["blocked_reason"], core.START_REASON)
+        self.assertEqual(self.c.execute("SELECT blocked_set_by FROM items WHERE id=?", (x["id"],)).fetchone()[0], "ag")
+        self.assertEqual(core.ready_list(self.c), [])
+        # Its day comes: the sweep that every command runs ends the wait.
+        self.c.execute("UPDATE items SET blocked_until=?", (core.iso(core.now() - timedelta(seconds=1)),))
+        core.activity(self.c, "ag")
+        self.assertTrue(core.annotate(self.c)[x["id"]]["ready"])
+        for bad, why in (({"start": "2020-01-01"}, "not in the future"),
+                         ({"start": "2d", "backlog": "later"}, "backlog"),
+                         ({"start": "2d", "mine": True}, "--mine")):
+            with self.assertRaisesRegex(RiverError, why):
+                core.item_add(self.c, "a", "another", actor="ag", **bad)
+
+    def test_an_add_that_names_a_later_day_needs_a_start(self):
+        core.project_add(self.c, "a")
+        start = core.parse_iso("2026-11-15T20:00:00Z")
+        for text, hit in (("Renew the domain tomorrow", "tomorrow"), ("ship it next week", "next week"),
+                          ("call the bank on Monday", "on Monday"), ("check again in 3 days", "in 3 days"),
+                          ("the vendor opens 2026-12-01", "2026-12-01")):
+            self.assertEqual(core.later_day(text, "UTC", start), hit)
+        for text in ("mark 2026-11-15 said yes", "decided 2026-10-07", "the monday report", "next steps",
+                     "tomorrowland"):
+            self.assertIsNone(core.later_day(text, "UTC", start), text)
+        with self.assertRaisesRegex(RiverError, "--start <time>"):
+            core.item_add(self.c, "a", "Renew the domain next week", actor="t", start_check=True)
+        with self.assertRaisesRegex(RiverError, "names a later day"):
+            core.item_add(self.c, "a", "Renew the domain", context="the registrar opens tomorrow", actor="t",
+                          start_check=True)
+        # The ways out: a start, 'now', a person's step, a due date, the backlog; and only maxpm add checks.
+        for more in ({"start": "mon 09:00"}, {"start": "now"}, {"doer": "human"}, {"due": "fri"},
+                     {"backlog": "not now"}, {"start_check": False}):
+            core.item_add(self.c, "a", "Renew the domain next week", actor="t", **{"start_check": True, **more})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.c.execute("PRAGMA database_list").fetchone()[2]}):
+            from river import cli
+            cli.run(["--as", "t", "add", "a", "Pay the invoice on friday", "--start", "fri 9:00", "--new", "test"])
+        self.assertIn("blocked until", out.getvalue())
+
     def test_the_machine_zone_keeps_its_summer_time_rules(self):
         # #5549: with no timezone setting, a date in summer showed the winter offset of today (22:59 PST for a
         # time due 23:59 PDT), and a time typed for that date was an hour off.

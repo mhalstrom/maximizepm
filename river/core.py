@@ -1829,6 +1829,32 @@ def parse_due(s: str | None, zone: str = "") -> str | None:
     return iso(parse_when(" ".join(words), zone))
 
 
+_FULL_DAYS = "|".join(_DAY_NAMES)
+_LATER_WORDS = re.compile(
+    rf"\b(tomorrow|next (?:week|month|year|{_FULL_DAYS})|(?:on|until|after|from|starting) (?:{_FULL_DAYS})"
+    rf"|in \d+ (?:days?|weeks?|months?))\b", re.I)
+_ISO_DAY = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+START_REASON = "starts at a set time (maxpm add --start)"
+
+
+def later_day(text: str, zone: str = "", start: datetime | None = None) -> str | None:
+    """The words of `text` that name a later day ('tomorrow', 'next week', 'on monday', 'in 3 days', or a date
+    after today in the zone), or None. maxpm add refuses such an item without --start (global policy g4: an
+    item for a later day is held at its add, so no session starts it before its day)."""
+    m = _LATER_WORDS.search(text or "")
+    if m:
+        return m.group(1)
+    today = (start or now()).astimezone(local_zone(zone)).date()
+    for m in _ISO_DAY.finditer(text or ""):
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d > today:
+            return m.group(1)
+    return None
+
+
 def show_time(iso_s: str | None, zone: str = "") -> str:
     """'Mon 7:00 EDT' for a stored UTC time, in the zone; the date too when it is more than six days away."""
     if not iso_s:
@@ -9127,8 +9153,11 @@ def agent_now(conn, name, doing, headline=None):
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
-             kind=None, short=None):
+             kind=None, short=None, start=None, start_check=False):
     """Add an item. `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
+    `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
+    (a timed outside blocker that the sweep ends); 'now' says that it can start now. `start_check` (maxpm add):
+    refuse an agent item whose title or context names a later day (later_day) with no start and no due date (g4).
     `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
     `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
     (similar_items); `new` says how this item differs, and adds it anyway (the history keeps it).
@@ -9163,6 +9192,22 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         raise RiverError("priority is 0 (highest) to 4 (lowest)")
     if new is not None and not new.strip():
         raise RiverError("say how this item differs from the matches: --new \"<how it differs>\"")
+    zone = setting(conn, "timezone")
+    start_at = None
+    if start is not None and start.strip().lower() != "now":
+        if backlog is not None:
+            raise RiverError("a backlog item waits for maxpm activate, not for a time: leave out --start or --backlog")
+        if mine:
+            raise RiverError("--mine is for work you do now, and --start is for a later time: leave out one of them")
+        start_at = iso(parse_when(start, zone))
+        if start_at <= iso(now()):
+            raise RiverError(f"--start {start!r} is not in the future ({show_time(start_at, zone)})")
+    elif start is None and start_check and doer != "human" and backlog is None and not due:
+        hit = later_day(f"{title}\n{context or ''}", zone)
+        if hit:
+            raise RiverError(f"refused: the item names a later day ({hit!r}), so give its start; it waits until "
+                             f"then: maxpm add ... --start <time> (tomorrow 9:00, 2026-12-01, 'mon 07:00 "
+                             f"America/New_York', 3d). It can start now: --start now. A person's step: --doer human")
     like = similar_items(conn, project, title, context, touches, [blocks, found_during, *after, *(feeds or ())],
                          actor, doer=doer) if check_similar or new else []
     if like and check_similar and new is None:
@@ -9184,6 +9229,10 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         _event(conn, iid, actor, f"added to {p['name']} at P{priority}")
         if short:
             conn.execute("UPDATE items SET short=? WHERE id=?", (short, iid))
+        if start_at:
+            conn.execute("UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, blocked_at=? "
+                         "WHERE id=?", (START_REASON, start_at, actor, iso(now()), iid))
+            _event(conn, iid, actor, f"starts {show_time(start_at, zone)}: it waits until then")
         if new is not None:
             _event(conn, iid, actor, f"added as new work" + (f" although like {', '.join('#' + str(m['id']) for m in like)}"
                                                              if like else "") + f": {new.strip()}")

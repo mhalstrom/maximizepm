@@ -1695,6 +1695,8 @@ def build_parser(only=None):
     x.add_argument("--after", type=int, nargs="*", default=[], help="items this one waits on")
     x.add_argument("--feeds", type=int, nargs="*", default=[], help="items this one waits on and whose output it reads")
     x.add_argument("--due", help="due date: 2026-10-15 (end of day), 'fri 17:00 America/New_York'; warns, does not reorder")
+    x.add_argument("--start", help="it waits until then: tomorrow 9:00, 2026-12-01, 'mon 07:00 America/New_York', 3d; "
+                   "needed when the title or context names a later day (now: it can start now)")
     x.add_argument("--notes", default="")
     x.add_argument("--doer", default="any", choices=core.DOERS, help="who can do it (default any)")
     x.add_argument("--context", default="", help="what a new agent must know to start: why, where, decisions made")
@@ -4151,7 +4153,7 @@ def dispatch(conn, a, actor):
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
-                            kind=a.kind, short=a.short)
+                            kind=a.kind, short=a.short, start=a.start, start_check=True)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res

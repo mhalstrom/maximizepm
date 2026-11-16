@@ -29,8 +29,8 @@
     },
     {
       "id": "g4",
-      "text": "When you add an item for a later day, hold it in the same step: make it a person's item (--doer human), or run maxpm blocked <id> --until <time> right after the add.",
-      "reason": "A ready item goes to an idle session within seconds.",
+      "text": "An item for a later day: maxpm add ... --start <time>.",
+      "reason": "A ready item goes to an idle session within seconds. maxpm add refuses an agent item whose title or context names a later day with no --start (#5954).",
       "source": "mark 2026-11-11"
     },
     {
