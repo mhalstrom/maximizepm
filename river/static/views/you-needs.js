@@ -44,6 +44,28 @@ export function needsCount() {
   return all.filter(e => !h || !e.human || e.human === h).length;
 }
 
+// The filter above the list (#6007, card-queue-mockup v15): All and each type that a line has (decide, look,
+// approve, do, read, #5998), with its count, and a menu of the projects. It shows only when the lines differ in type or
+// project; this browser keeps the choice. A choice that matches no line any more shows them all.
+const TYPE_ORDER = ["decide", "look", "approve", "do", "read"];
+const nyType = () => store("river.ny.type") || "", nyProject = () => store("river.ny.project") || "";
+export function nyFilterHtml(list, type, project) {
+  const types = TYPE_ORDER.filter(t => list.some(e => e.type === t));
+  const projects = [...new Set(list.map(e => e.project).filter(Boolean))].sort();
+  if (types.length < 2 && projects.length < 2) return "";
+  const b = (t, label, n) => button(`${label} <span class="muted">${n}</span>`, { cls: "ny-f", data: { nyf: t },
+    attrs: `aria-pressed="${type === t}"` });
+  const inP = list.filter(e => !project || e.project === project);  // the counts of the chosen project
+  return (types.length > 1 ? b("", "All", inP.length) + types.map(t => b(t, t[0].toUpperCase() + t.slice(1),
+      inP.filter(e => e.type === t).length)).join("") : "")
+    + (projects.length > 1 ? `<select class="ny-fp" aria-label="Project"><option value="">All projects</option>${projects.map(p =>
+      `<option value="${esc(p)}"${p === project ? " selected" : ""}>${esc(p)}</option>`).join("")}</select>` : "");
+}
+export function nyFiltered(list, type, project) {
+  const out = list.filter(e => (!type || e.type === type) && (!project || e.project === project));
+  return out.length ? out : list;
+}
+
 export function renderNeedsYou() {
   const total = needsCount();
   document.title = total ? `(${total}) MaximizePM` : "MaximizePM";
@@ -51,10 +73,13 @@ export function renderNeedsYou() {
   $("#needsYouPanel").classList.toggle("hidden", !NY.length);
   $("#nothingForYou").classList.toggle("hidden", !!NY.length || !!(S && (S.takeovers || []).length));
   renderYou();
-  const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen], total]);
+  // A kept choice that no line has now counts as All.
+  const type = NY.some(e => e.type === nyType()) ? nyType() : "", project = NY.some(e => e.project === nyProject()) ? nyProject() : "";
+  const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen], total, type, project]);
   if (sig === nySig) return;
   nySig = sig;
-  $("#needsYou").innerHTML = NY.map(e => {
+  $("#nyFilter").innerHTML = nyFilterHtml(NY, type, project);
+  $("#needsYou").innerHTML = nyFiltered(NY, type, project).map(e => {
     const isItem = e.kind === "item";
     const detail = isItem ? (e.item_context || e.item_notes) : e.body;
     const buttons = isItem
@@ -81,6 +106,14 @@ export function renderNeedsYou() {
   document.querySelectorAll("#needsYou .nyx .ny-c").forEach(x => linkArtifacts(x, x.closest(".nyx").dataset.agent || null));
   document.querySelectorAll("#needsYou .ny-sf").forEach(x => wireSecretFill(x.querySelector(".sf"), () => ({ session: x.dataset.session })));
 }
+
+$("#nyFilter").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-nyf]"); if (!b) return;
+  store("river.ny.type", b.dataset.nyf); renderNeedsYou();
+});
+$("#nyFilter").addEventListener("change", (e) => {
+  if (e.target.matches(".ny-fp")) { store("river.ny.project", e.target.value); renderNeedsYou(); }
+});
 
 // One browser notification per event, once: seen ids live in localStorage. The first
 // load only records what is already open, so opening the page does not fire a burst.
