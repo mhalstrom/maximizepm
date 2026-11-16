@@ -380,6 +380,11 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   on the answer, and the answer starts a fresh session with the question, the
   answer and your note. A session still at its prompt `question_wait_end` (1h)
   after its question is ended by `maxpm serve` the same way.
+  For a deletion, or a post that needs the yes on its day, add the ask as a
+  person's item instead: `maxpm add "Approve: <what>" --doer human --once`
+  (or `--on <day>`, `--blocks <id>`). Right before the step, run
+  `maxpm approval use <its id> --for "<the action>"`: it refuses a spent yes,
+  or one of another day.
   While a manager is active, a question to a person goes to the manager first:
   it answers it, or sends it on to the person (`maxpm forward`). The person
   gets it by itself after `question_hold` (10m).

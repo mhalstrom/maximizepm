@@ -441,6 +441,12 @@ def _print_show(a):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    ap = a.get("approval")
+    if ap:  # #5957
+        print("  approval: " + ", ".join((["one action"] if ap["once"] else []) + ([f"only on {ap['on_day']}"]
+                                                                                   if ap["on_day"] else []))
+              + (f"; used by {ap['used_by']} for {ap['used_for']!r}" if ap["used_at"]
+                 else f"; the acting session runs maxpm approval use {a['id']} --for \"<the action>\" first"))
     for line in _earlier_lines(a.get("earlier")):
         print(line)
     if a.get("related"):
@@ -530,6 +536,12 @@ def _print_brief(a, n=240):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    ap = a.get("approval")
+    if ap:  # #5957
+        print("  approval: " + ", ".join((["one action"] if ap["once"] else []) + ([f"only on {ap['on_day']}"]
+                                                                                   if ap["on_day"] else []))
+              + (f"; used by {ap['used_by']} for {ap['used_for']!r}" if ap["used_at"]
+                 else f"; the acting session runs maxpm approval use {a['id']} --for \"<the action>\" first"))
     for line in _earlier_lines(a.get("earlier")):
         print(line)
     if a.get("related"):
@@ -1803,6 +1815,10 @@ def build_parser(only=None):
     x.add_argument("--due", help="due date: 2026-10-15 (end of day), 'fri 17:00 America/New_York'; warns, does not reorder")
     x.add_argument("--start", help="it waits until then: tomorrow 9:00, 2026-12-01, 'mon 07:00 America/New_York', 3d; "
                    "needed when the title or context names a later day (now: it can start now)")
+    x.add_argument("--once", action="store_true", help="with --doer human: the person's yes counts for one action "
+                   "(maxpm approval use spends it)")
+    x.add_argument("--on", dest="approve_on", metavar="DAY", help="with --doer human: the yes counts only on this "
+                   "day (2026-12-01, tomorrow, fri); the item opens at 08:00 that day")
     x.add_argument("--notes", default="")
     x.add_argument("--doer", default="any", choices=core.DOERS, help="who can do it (default any)")
     x.add_argument("--tries", type=int, metavar="N", help="visual work: N sessions each do it their own way, "
@@ -2082,6 +2098,15 @@ def build_parser(only=None):
     x.add_argument("--reason", help="why; each session sees it")
     x.add_argument("--status", action="store_true", help="only show the pause and what the sessions still hold")
     sub.add_parser("resume", help="end a pause: new sessions start again")
+    x = sub.add_parser("approval", help="use a person's approval right before the step it allows: maxpm approval use "
+                       "<id> --for \"<the action>\" (a --once approval is spent; an --on one counts only on its day)")
+    aps = x.add_subparsers(dest="apcmd", required=True)
+    y = aps.add_parser("use", help="name the approval for this action; refused when it has no yes, is spent, or is "
+                       "for another day")
+    y.add_argument("id", type=int)
+    y.add_argument("--for", dest="action", required=True, help="the action it allows, in a few words")
+    y = aps.add_parser("show", help="the approval of a person's item: once, its day, and its use")
+    y.add_argument("id", type=int)
     x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
                                          "and item); --message then types a message into it at once (a person, or the manager)")
     x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
@@ -4339,6 +4364,13 @@ def dispatch(conn, a, actor):
         return core.pause(conn, a.until, a.restart, a.reason, actor)
     if c == "resume":
         return core.resume(conn, actor)
+    if c == "approval":  # #5957
+        if a.apcmd == "use":
+            return core.approval_use(conn, a.id, a.action, actor)
+        ap = core.approval(conn, a.id)
+        if ap is None:
+            raise RiverError(f"#{a.id} is no approval item")
+        return {"id": a.id, "status": core._item(conn, a.id)["status"], **ap}
     if c == "scope":
         if a.scmd == "show":
             return {"scopes": core.scope_show(conn, a.agent)}
@@ -4428,7 +4460,8 @@ def dispatch(conn, a, actor):
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
-                            kind=a.kind, short=a.short, start=a.start, start_check=True)
+                            kind=a.kind, short=a.short, start=a.start, start_check=True, approve_once=a.once,
+                            approve_on=a.approve_on)
         if a.atype and res.get("id"):
             core.config_set(conn, "action_type", a.atype, item=res["id"], actor=actor)
         return res
@@ -7433,6 +7466,15 @@ def render(a, res):
               + (", ".join(f"#{h['id']}" for h in res["released"]) or "no items")
               + (f"; queued items back: {', '.join('#' + str(i) for i in res['queued_back'])}" if res["queued_back"] else "")
               + f". {res['warning']}")
+        return
+    if c == "approval":
+        if a.apcmd == "use":
+            print(f"approval #{res['id']} used for: {res['used_for']}" + (" (spent: a new action needs a new yes)"
+                                                                         if res["spent"] else ""))
+        else:
+            print(f"approval #{res['id']} ({res['status']}): " + ", ".join(
+                (["one action"] if res["once"] else []) + ([f"only on {res['on_day']}"] if res["on_day"] else []))
+                  + (f"; used by {res['used_by']} for {res['used_for']!r}" if res["used_at"] else "; not used"))
         return
     if c == "resume":
         print("the pause ended: new sessions start again" if res["resumed"] else "nothing was paused")

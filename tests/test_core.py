@@ -5834,6 +5834,66 @@ class AgentQueue(Base):
         self.assertIsNone(core.annotate(self.c)[y]["reserved_for"])
 
 
+class Approvals(Base):
+    """#5957 (policies p4 and p109): a person's yes that counts for one action, or only on one day."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "timezone", "UTC")
+
+    def test_a_once_approval_is_given_by_the_person_and_spent_by_one_use(self):
+        i = core.item_add(self.c, "a", "Approve: delete the 4 old servers", doer="human", actor="w1",
+                          approve_once=True)["id"]
+        self.assertEqual(core.item_show(self.c, i)["approval"]["once"], 1)
+        with self.assertRaisesRegex(RiverError, "no yes yet"):
+            core.approval_use(self.c, i, "delete the servers", actor="w1")
+        with self.assertRaisesRegex(RiverError, "only the person approves it"):
+            core.done(self.c, i, actor="w1")
+        core.done(self.c, i, "yes", actor="mark")
+        r = core.approval_use(self.c, i, "delete the 4 old servers", actor="w1")
+        self.assertTrue(r["spent"])
+        with self.assertRaisesRegex(RiverError, "used already by w1 .*a new action needs a new yes"):
+            core.approval_use(self.c, i, "delete one more", actor="w1")
+        with self.assertRaisesRegex(RiverError, "--doer human"):
+            core.item_add(self.c, "a", "Approve: x", actor="w1", approve_once=True)
+        with self.assertRaisesRegex(RiverError, "no approval item"):
+            core.approval_use(self.c, self.add("a", "plain"), "x", actor="w1")
+
+    def test_a_dated_approval_opens_at_eight_that_day_and_counts_only_then(self):
+        start = core.parse_iso("2026-11-16T20:00:00Z")
+        clock = [start]
+        with mock.patch.object(core, "now", lambda: clock[0]):
+            i = core.item_add(self.c, "a", "Review today: the launch post", doer="human", actor="w1",
+                              approve_on="2026-11-18")["id"]
+            a = core.annotate(self.c)[i]
+            self.assertFalse(a["ready"])
+            self.assertEqual(a["blocked_until"], "2026-11-18T08:00:00Z")
+            with self.assertRaisesRegex(RiverError, "counts from .* not before"):
+                core.done(self.c, i, "yes", actor="mark")
+            clock[0] = core.parse_iso("2026-11-18T09:00:00Z")
+            core.done(self.c, i, "yes", actor="mark")
+            self.assertFalse(core.approval_use(self.c, i, "publish the post", actor="w1")["spent"])
+            clock[0] = core.parse_iso("2026-11-19T09:00:00Z")
+            with self.assertRaisesRegex(RiverError, "is for 2026-11-18, and today is 2026-11-19"):
+                core.approval_use(self.c, i, "publish the post", actor="w1")
+            with self.assertRaisesRegex(RiverError, "has passed"):
+                core.item_add(self.c, "a", "Approve: old", doer="human", actor="w1", approve_on="2026-11-18")
+
+    def test_the_cli_adds_and_uses_an_approval(self):
+        out = io.StringIO()
+        db = self.c.execute("PRAGMA database_list").fetchone()[2]
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": db}):
+            from river import cli
+            cli.run(["--as", "w1", "add", "a", "Approve the refund of order 7", "--doer", "human", "--once",
+                     "--new", "test"])
+        i = self.c.execute("SELECT MAX(id) FROM items").fetchone()[0]
+        self.assertEqual(core.approval(self.c, i)["once"], 1)
+
+
 class Pause(Base):
     """#5962 (policies p79 and p136): maxpm pause stops every working session, holds every new session, changes no
     setting, says what is still held, and restarts serve once nothing is; maxpm resume ends it."""

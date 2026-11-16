@@ -38,6 +38,7 @@ COMMANDS = {
     "plan": ANY, "launch": ANY, "workspace": ANY,
     "expert": {"start": LEAD, "request": ANY, "adopt": ANY, "end": LEAD, "list": ANY, "fresh": LEAD, "notes": ANY},
     "view": ANY, "stop": LEAD, "interrupt": LEAD, "pause": LEAD, "resume": LEAD,
+    "approval": ANY,  # the acting session names the person's yes (#5957); the function checks the yes itself
     "scope": {"*": LEAD, "show": ANY},
     "queue": {"add": LEAD, "list": ANY, "remove": ANY, "move": LEAD},
     "claim": ANY, "done": ANY, "wait": ANY, "cleanup": ANY, "check": ANY, "ship": ANY, "review": ANY,

@@ -1011,6 +1011,19 @@ CREATE TABLE IF NOT EXISTS earlier_decisions (
   PRIMARY KEY (kind, ref_id, match_kind, match_id)
 );
 
+-- Approvals (#5957; policies p4 and p109): a person's item whose yes (a person marks it
+-- done) counts for one action (once) and/or only on one day (on_day, YYYY-MM-DD in the timezone setting; the item is
+-- blocked until 08:00 that day). The acting session runs maxpm approval use <id> --for "<action>" right before the
+-- step; used_* records the use of a once approval. Readers: approval_use, done (only a person approves), item_show.
+CREATE TABLE IF NOT EXISTS approvals (
+  item_id   INTEGER PRIMARY KEY REFERENCES items(id),
+  once      INTEGER NOT NULL DEFAULT 0,
+  on_day    TEXT,
+  used_at   TEXT,
+  used_by   TEXT,
+  used_for  TEXT
+);
+
 -- The close check (#3286): an open item that the close of closed_id may have made unnecessary, and why.
 -- decided_at is set when the closer (or a manager) keeps it; closing the item itself decides it too.
 CREATE TABLE IF NOT EXISTS close_checks (
@@ -1856,6 +1869,81 @@ _LATER_WORDS = re.compile(
     rf"|in \d+ (?:days?|weeks?|months?))\b", re.I)
 _ISO_DAY = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 START_REASON = "starts at a set time (maxpm add --start)"
+APPROVAL_OPENS = "08:00"  # an approval for a day opens at this time of that day (p109: 08:00 in the person's zone)
+APPROVAL_REASON = "an approval for {day}: it opens at " + APPROVAL_OPENS + " that day"
+
+
+def _approval_day(text, zone=""):
+    """(day 'YYYY-MM-DD', when it opens as UTC ISO) of maxpm add --on <date>: a date, today, tomorrow or a weekday,
+    in the timezone setting. Refused for a day that has passed."""
+    words = (text or "").split()
+    if len(words) != 1 or _CLOCK.match(words[0].lower()):
+        raise RiverError(f"--on takes a day: 2026-12-01, tomorrow or fri, not {text!r}")
+    tz = local_zone(zone)
+    w = words[0].lower()
+    if w == "today":
+        d = now().astimezone(tz).date()
+    else:
+        d = parse_when(w + " 00:00" if not re.match(r"^\d{4}-\d{2}-\d{2}$", w) else w, zone).astimezone(tz).date()
+    if d < now().astimezone(tz).date():
+        raise RiverError(f"--on {text!r} is a day that has passed")
+    day = d.isoformat()
+    return day, iso(parse_when(f"{day} {APPROVAL_OPENS}", zone))
+
+
+def approval(conn, item_id):
+    """The approval properties of a person's item ({once, on_day, used_at, used_by, used_for}), or None."""
+    r = conn.execute("SELECT * FROM approvals WHERE item_id=?", (int(item_id),)).fetchone()
+    return dict(r) if r else None
+
+
+def _approval_close_refusal(conn, it, actor):
+    """Why done of an approval item is refused (#5957), or None: only a person gives the yes, and a dated one only
+    from APPROVAL_OPENS of its day on."""
+    ap = approval(conn, it["id"])
+    if ap is None:
+        return None
+    if not _is_person(conn, actor):
+        return (f"refused: #{it['id']} is a person's approval; only the person approves it (on the page, or maxpm done "
+                f"in their own terminal). The manager forwards it: maxpm forward --item {it['id']}")
+    zone = setting(conn, "timezone")
+    if ap["on_day"]:
+        opens = iso(parse_when(f"{ap['on_day']} {APPROVAL_OPENS}", zone))
+        if iso(now()) < opens:
+            return (f"refused: #{it['id']} is an approval for {ap['on_day']}; a yes counts from "
+                    f"{show_time(opens, zone)} that day, not before (policy p109)")
+    return None
+
+
+def approval_use(conn, item_id, action, actor=None):
+    """maxpm approval use <id> --for "<action>" (#5957, policies p4 and p109): the acting session names the person's
+    yes right before the step. Refused when the item is not done by a person, when a once approval is spent, or when
+    a dated approval is for another day. A once approval is spent by this use."""
+    if not (action or "").strip():
+        raise RiverError("say what the approval is used for: maxpm approval use <id> --for \"<the action>\"")
+    with tx(conn):
+        it = _item(conn, item_id)
+        ap = approval(conn, it["id"])
+        if ap is None:
+            raise RiverError(f"#{it['id']} is no approval item: a person's approval is added with maxpm add ... "
+                             f"--doer human --once and/or --on <date>")
+        if it["status"] != "done":
+            raise RiverError(f"refused: #{it['id']} has no yes yet ({it['status']}); wait for the person's answer")
+        zone = setting(conn, "timezone")
+        today = now().astimezone(local_zone(zone)).date().isoformat()
+        if ap["on_day"] and ap["on_day"] != today:
+            raise RiverError(f"refused: the approval #{it['id']} is for {ap['on_day']}, and today is {today}; "
+                             f"ask again for today (policy p109)")
+        if ap["once"] and ap["used_at"]:
+            raise RiverError(f"refused: the approval #{it['id']} was used already by {ap['used_by']} for "
+                             f"{ap['used_for']!r} ({show_time(ap['used_at'], zone)}); a new action needs a new yes "
+                             f"(policy p4)")
+        if ap["once"]:
+            conn.execute("UPDATE approvals SET used_at=?, used_by=?, used_for=? WHERE item_id=?",
+                         (iso(now()), actor, action.strip(), it["id"]))
+        _event(conn, it["id"], actor, f"approval used for: {action.strip()}" + (" (spent)" if ap["once"] else ""))
+    return {"id": it["id"], "title": it["title"], "used_for": action.strip(), "once": bool(ap["once"]),
+            "on_day": ap["on_day"], "spent": bool(ap["once"])}
 
 
 def later_day(text: str, zone: str = "", start: datetime | None = None) -> str | None:
@@ -9420,8 +9508,9 @@ def agent_now(conn, name, doing, headline=None):
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
-             kind=None, short=None, start=None, start_check=False):
-    """Add an item. `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
+             kind=None, short=None, start=None, start_check=False, approve_once=False, approve_on=None):
+    """Add an item. `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
+    yes counts for one action, and/or only on that day (approvals, #5957). `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
     (a timed outside blocker that the sweep ends); 'now' says that it can start now. `start_check` (maxpm add):
     refuse an agent item whose title or context names a later day (later_day) with no start and no due date (g4).
@@ -9460,6 +9549,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     if new is not None and not new.strip():
         raise RiverError("say how this item differs from the matches: --new \"<how it differs>\"")
     zone = setting(conn, "timezone")
+    day, opens = _approval_day(approve_on, zone) if approve_on else (None, None)
+    if (approve_once or approve_on) and doer != "human":
+        raise RiverError("--once and --on make a person's approval: add --doer human")
     start_at = None
     if start is not None and start.strip().lower() != "now":
         if backlog is not None:
@@ -9499,6 +9591,13 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             conn.execute("UPDATE items SET short=? WHERE id=?", (short, iid))
         if earlier:
             _earlier_store(conn, "item", iid, earlier)
+        if approve_once or approve_on:
+            conn.execute("INSERT INTO approvals(item_id, once, on_day) VALUES (?,?,?)", (iid, int(bool(approve_once)), day))
+            _event(conn, iid, actor, "approval: " + ", ".join(
+                (["valid for one action"] if approve_once else []) + ([f"valid only on {day}"] if day else [])))
+            if opens and opens > iso(now()):
+                conn.execute("UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, blocked_at=? "
+                             "WHERE id=?", (APPROVAL_REASON.format(day=day), opens, actor, iso(now()), iid))
         if start_at:
             conn.execute("UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, blocked_at=? "
                          "WHERE id=?", (START_REASON, start_at, actor, iso(now()), iid))
@@ -15141,6 +15240,9 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
             _ship_check(conn, _item(conn, item_id))
         except RiverError as e:
             raise RiverError(f"{e}; #{item_id} stays open (close it without --ship when it does not ship)") from None
+    why = _approval_close_refusal(conn, _item(conn, item_id), actor)  # #5957: only the person's yes, on its day
+    if why:
+        raise RiverError(why)
     pick = _tries_choice(conn, _item(conn, item_id), output)  # a Look card of tries names the one to keep (#5996)
     res = _close(conn, item_id, "done", actor, output, note, force)
     if pick:
@@ -16577,6 +16679,7 @@ def item_show(conn, item_id, ann=None):
         a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
             a["tries"] = [{"k": k, **t} for k, t in sorted(tries_of(conn, iid).items())]
+        a["approval"] = approval(conn, iid)  # #5957
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a
 
