@@ -112,6 +112,10 @@ your type from your CLI's environment.
    each `maxpm` command; after 30 minutes without one, run `maxpm heartbeat`.
    A loop that only renews the lease is not work.
 4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>" --changed "<the same for a person: plain words>"`.
+   Add the proof of the result: `--test "<the test command>" --result "<its last line>"`, and for a
+   visible change `--shot <screenshot or short video>` (or `--shot canvas:<name>`). The commits that name
+   `#<id>` are found by themselves (else `--commit <sha>`). A work task of a project with code is refused
+   without them; with no commit or test, say why: `--no-proof "<why>"`.
    The reply lists items that became ready, and MAY BE UNNECESSARY NOW: open items the close may have
    made unnecessary. Decide each one at once: close it (`done|drop <id> --note "<why>"`, a person's item
    too), merge it, or `maxpm keep <id> --close <your-id> --note "<why it is still needed>"`.

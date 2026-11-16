@@ -42,9 +42,16 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "as": _AS, "project": {"type": "string"}, "cwd": {"type": "string", "description": "the project folder"}}}},
     {"name": "done",
-     "description": "Finish an item you hold. Put what changed and the commit id in output.",
+     "description": "Finish an item you hold. Put what changed and the commit id in output. A work task in a project "
+                    "with code needs its proof: commits (default: the ones that name #id), the test you ran and its "
+                    "result, a shot of a visible change; or no_proof with the reason.",
      "inputSchema": {"type": "object", "required": ["id", "output"], "properties": {
-         "id": {"type": "integer"}, "output": {"type": "string"}, "as": _AS}}},
+         "id": {"type": "integer"}, "output": {"type": "string"}, "as": _AS,
+         "commits": {"type": "array", "items": {"type": "string"}},
+         "test": {"type": "string", "description": "the test command you ran"},
+         "result": {"type": "string", "description": "what it printed last, for example 'OK (911 tests)'"},
+         "shots": {"type": "array", "items": {"type": "string"}, "description": "files, or canvas:<name>"},
+         "no_proof": {"type": "string", "description": "why the result has no commit or test"}}}},
     {"name": "show",
      "description": "One item with its notes, links, and history.",
      "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}, "as": _AS}}},
@@ -298,6 +305,13 @@ class Server:
             words = ["go"] + (["--project", a["project"]] if a.get("project") else [])
         elif name == "done":
             words = ["done", str(a["id"]), "--output", a["output"]]
+            for c in a.get("commits") or ():  # the proof (#5988)
+                words += ["--commit", c]
+            for s in a.get("shots") or ():
+                words += ["--shot", s]
+            for k in ("test", "result", "no_proof"):
+                if a.get(k):
+                    words += ["--" + k.replace("_", "-"), a[k]]
         elif name == "show":
             words = ["show", str(a["id"])]
         elif name == "goal":

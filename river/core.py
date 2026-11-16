@@ -155,6 +155,11 @@ DEFAULT_SETTINGS = {
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
     # confirms it; a project where nobody chose has ask_first.
     "result_look": "ask_first",
+    # The proof of a done result (#5988, mark 2026-11-15: the person trusts a result without a check of his own).
+    # require: an agent's done of a work task in a project with a git folder needs a commit (given, or one that
+    # names the item), a test (--test with --result) and, when it touches page files, a screenshot (--shot); else
+    # --no-proof "<why>". ask: done says what is missing. off: no check.
+    "done_proof": "require",
     # The type of a person item (#5998): auto (from the first word of its title, action_type) or one of
     # ACTION_TYPES. maxpm add|edit --type sets it for one item; --project for the person items of a project.
     "action_type": "auto",
@@ -794,6 +799,7 @@ CREATE TABLE IF NOT EXISTS items (
   agent             TEXT,                     -- the agent type that takes it: a launch platform (codex, claude-code)
   tier              TEXT,                     -- 'expert': a task that a person talks through with an expert session (#4959)
   changed           TEXT,                     -- what changed, one plain line for a person (maxpm done --changed, #5570)
+  proof             TEXT,                     -- JSON: the commits, tests and shots that prove a done result (#5988)
   ran_model         TEXT,                     -- the model (ladder name) of the last session that claimed it (#4961)
   backlog_at        TEXT,                     -- in the backlog since then: kept, never offered (maxpm activate ends it)
   backlog_note      TEXT,                     -- why not now
@@ -2439,6 +2445,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN short TEXT")
     if "changed" not in icols:  # what changed, one plain line for a person (#5570)
         conn.execute("ALTER TABLE items ADD COLUMN changed TEXT")
+    if "proof" not in icols:  # the proof of a done result (#5988)
+        conn.execute("ALTER TABLE items ADD COLUMN proof TEXT")
     if "ran_model" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN ran_model TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(queue_entries)")}:
@@ -3151,6 +3159,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("action_type is auto (from the first word of the title) or one of " + ", ".join(ACTION_TYPES))
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
+    elif key == "done_proof" and value not in ("require", "ask", "off"):
+        raise RiverError("done_proof is require, ask or off")
     elif key == "workspace" and value not in ("shared", "worktree", "setup"):
         raise RiverError("workspace is shared (the project folder), worktree (a git worktree for each session), or "
                          "setup (a worktree, then the command in workspace_setup)")
@@ -15853,11 +15863,110 @@ def _approved_fixes(conn, it, actor):
     return [{"id": a["id"], "title": a["title"]} for a in added]
 
 
-def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None):
+PROOF_SHOT_MAX = 30 * 1024 * 1024  # a screenshot or a short video (#5988)
+_VISIBLE = re.compile(r"(^|[\s,/])static/|\.(html|css|js|svg)\b", re.I)
+
+
+def _git_folder(conn, project_id):
+    """The project's folder when it is a git work tree, else None."""
+    r = conn.execute("SELECT path FROM projects WHERE id=?", (project_id,)).fetchone()
+    path = Path(r["path"]).expanduser() if r and r["path"] else None
+    return str(path) if path and (path / ".git").exists() else None
+
+
+def proof_commits(folder, item_id, given=None):
+    """The commits of a result (#5988): the ones given, checked in the git folder (RiverError for one it does not
+    have), else up to 20 on any branch whose message names #<item_id>. None when git cannot answer."""
+    import subprocess
+    args = (["log", "--no-walk=unsorted", "--format=%h%x09%s", *given] if given else
+            ["log", "--all", "-n", "20", "-E", f"--grep=#{int(item_id)}([^0-9]|$)", "--format=%h%x09%s"])
+    try:
+        r = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode:
+        if given:
+            why = (r.stderr.strip().splitlines() or ["not a commit"])[-1]
+            raise RiverError(f"--commit: {why} (in {folder}); name commits of the project's git folder")
+        return None
+    return [{"sha": ln.split("\t", 1)[0], "subject": ln.split("\t", 1)[1][:200]}
+            for ln in r.stdout.splitlines() if "\t" in ln]
+
+
+def _proof_shots(conn, item_id, shots):
+    """Each --shot (#5988): canvas:<name> names a canvas; a file is copied beside the queue (proof/<item>/), so the
+    proof stays when the session's temp folder goes."""
+    out = []
+    for s in shots or ():
+        if s.startswith("canvas:"):
+            name = s.split(":", 1)[1].strip().lower()
+            if not conn.execute("SELECT 1 FROM canvases WHERE name=? AND deleted_at IS NULL", (name,)).fetchone():
+                raise RiverError(f"--shot {s}: no canvas {name} (maxpm canvas list)")
+            out.append({"canvas": name})
+            continue
+        p = Path(CALLER_FILES.get(s, s)).expanduser()
+        if not p.is_file():
+            raise RiverError(f"--shot {s}: no such file; give a screenshot or a short video, or canvas:<name>")
+        size = p.stat().st_size
+        if size > PROOF_SHOT_MAX:
+            raise RiverError(f"--shot {s} has {size} bytes; at most {PROOF_SHOT_MAX} (a short video, or a screenshot)")
+        dest = db_path().expanduser().parent / "proof" / str(int(item_id)) / Path(s).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, dest)
+        out.append({"file": str(dest), "name": Path(s).name, "bytes": size})
+    return out
+
+
+def proof_line(proof):
+    """The proof of a result in one line (#5988): for show, the event and the summaries."""
+    parts = []
+    if proof.get("commits"):
+        parts.append("commits " + ", ".join(c["sha"] for c in proof["commits"]) + (" (found by #id)" if proof.get("found") else ""))
+    parts += [f"test `{t['cmd']}`: {t['result']}" for t in proof.get("tests", ())]
+    if proof.get("shots"):
+        parts.append("shots " + ", ".join(s.get("name") or "canvas " + s.get("canvas", "") for s in proof["shots"]))
+    if proof.get("none"):
+        parts.append(f"no proof: {proof['none']}")
+    return "; ".join(parts)
+
+
+def done_proof(conn, item_id, actor, commits=None, tests=None, result=None, shots=None, none=None):
+    """The proof of a done result (#5988), before the close: {"commits", "found", "tests", "shots", "none"} and the
+    list of what is missing. RiverError when the setting done_proof is require and something is missing: an agent,
+    a work task, and a project with a git folder."""
+    it = _item(conn, item_id)
+    folder = _git_folder(conn, it["project_id"])
+    if tests and not result:
+        raise RiverError("--test needs --result \"<the last line it printed>\" (for example 'OK (911 tests)')")
+    proof = {"tests": [{"cmd": t, "result": result} for t in tests or ()]}
+    found = proof_commits(folder, item_id, commits) if folder else None
+    proof.update(commits=found or [{"sha": c, "subject": None} for c in commits or ()], found=not commits and bool(found))
+    proof["shots"] = _proof_shots(conn, item_id, shots)
+    missing = []
+    if folder:
+        missing += ["a commit (--commit <sha>, or name #%d in the commit message)" % it["id"]] if not proof["commits"] else []
+        missing += ["a test (--test \"<command>\" --result \"<its last line>\")"] if not proof["tests"] else []
+        if not proof["shots"] and _VISIBLE.search(it["touches"] or ""):
+            missing.append("a screenshot or a short video of the page (--shot <file>, or --shot canvas:<name>)")
+    mode = setting(conn, "done_proof", item_id=it["id"])
+    if none:
+        proof["none"] = " ".join(none.split())
+        missing = []
+    if missing and mode == "require" and it["kind"] == "work" and actor and not _is_person(conn, actor):
+        raise RiverError(f"#{it['id']} is a work task of a project with code: done needs the proof of its result "
+                         f"(setting done_proof): {'; '.join(missing)}. When there is none, say why: "
+                         f"--no-proof \"<why>\". #{it['id']} stays open")
+    keep = {k: v for k, v in proof.items() if v}
+    return (keep or None), (missing if mode != "off" else [])
+
+
+def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None, proof=None):
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
-    checked before the close."""
+    checked before the close. proof: the arguments of done_proof (#5988; the CLI passes them, a person's page
+    close does not)."""
     changed = check_changed(changed) if changed else None
+    proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
         try:
             _ship_check(conn, _item(conn, item_id))
@@ -15875,6 +15984,11 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
             conn.execute("UPDATE items SET changed=? WHERE id=?", (changed, res["id"]))
             _event(conn, res["id"], actor, f"what changed: {changed}")
         res["changed"] = changed
+    if proof:
+        with tx(conn):
+            conn.execute("UPDATE items SET proof=? WHERE id=?", (json.dumps(proof), res["id"]))
+            _event(conn, res["id"], actor, "proof: " + proof_line(proof))
+    res["proof"], res["proof_missing"] = proof, missing
     try:  # the cost of the item, from its sessions' transcripts on this computer; never stops a done
         measure_usage(conn, res["id"])
         res["usage"] = item_usage(conn, res["id"])

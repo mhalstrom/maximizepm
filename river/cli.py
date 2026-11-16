@@ -445,6 +445,14 @@ def _print_show(a):
               f"maxpm done {a['id']} --output \"...\"   (to work on it alone first: maxpm claim {a['id']})")
     if a.get("changed"):
         print("  changed:", a["changed"])
+    if a.get("proof"):  # #5988: a dict from done, JSON text from show
+        p = a["proof"] if isinstance(a["proof"], dict) else json.loads(a["proof"])
+        print("  proof:", core.proof_line(p))
+        for s in p.get("shots", ()):
+            if s.get("file"):
+                print(f"    shot: {s['file']}")
+    if a.get("proof_missing"):
+        print("  proof missing:", "; ".join(a["proof_missing"]))
     if a.get("output"):
         print("  output:", a["output"])
     if a.get("found_during"):
@@ -2212,6 +2220,13 @@ def build_parser(only=None):
     x.add_argument("--ship", action="store_true", help="also ask for it to be deployed (maxpm ship)")
     x.add_argument("--note", help="why an agent may close a person's item (required then; the user is told)")
     x.add_argument("--force", metavar="REASON", help="close it although items it waits on are still open (not a deploy)")
+    x.add_argument("--commit", action="append", metavar="SHA", help="a commit of the result (repeatable; default: "
+                   "the commits whose message names #<id>)")
+    x.add_argument("--test", action="append", metavar="COMMAND", help="a test command you ran (repeatable)")
+    x.add_argument("--result", help="what the tests printed last, for example 'OK (911 tests)'")
+    x.add_argument("--shot", action="append", metavar="FILE", help="a screenshot or short video of a visible change, "
+                   "or canvas:<name> (repeatable; the file is kept beside the queue)")
+    x.add_argument("--no-proof", metavar="WHY", help="the result has no commit or test: why (setting done_proof)")
     x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
                        "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
     x.add_argument("--project", help="project name(s) to wait on (default: this folder's)")
@@ -4705,7 +4720,10 @@ def dispatch(conn, a, actor):
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
         return core.claim(conn, a.id, actor)
     if c == "done":
-        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.force, a.changed)
+        shots = [s if s.startswith("canvas:") or os.path.isabs(os.path.expanduser(s)) else os.path.abspath(s)
+                 for s in a.shot or ()]
+        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.force, a.changed,
+                         proof=dict(commits=a.commit, tests=a.test, result=a.result, shots=shots, none=a.no_proof))
     if c == "cleanup":
         if a.space or a.dry_run:  # the size limits (#5711)
             from . import space

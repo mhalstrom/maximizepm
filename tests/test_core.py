@@ -14786,6 +14786,82 @@ class Replaced(Base):
         self.assertIn("Replaced commands, last 7d", out.getvalue())
 
 
+class Proof(Base):
+    """#5988 (mark 2026-11-15: proof on each result, so the person trusts it without a check): done records the
+    commits, the test and its result, and a shot of a visible change; an agent's work task in a git project needs
+    them (done_proof require)."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.dir.name, "repo")
+        os.makedirs(self.repo)
+        self.git("init", "-q")
+        core.project_add(self.c, "web", path=self.repo)
+        core.register(self.c, "w")
+        core.register(self.c, "mark", human=True)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.test", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def done(self, *words):
+        from river import cli
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.run(["--as", "w", "done", *map(str, words)])
+        except RiverError as e:
+            return 2, str(e)
+        return code, out.getvalue() + err.getvalue()
+
+    def test_proof_is_required_recorded_and_shown(self):
+        x = core.item_add(self.c, "web", "Fix the cart")["id"]
+        core.claim(self.c, x, "w")
+        code, text = self.done(x, "--output", "fixed")
+        self.assertEqual(code, 2)
+        self.assertIn(f"#{x} is a work task of a project with code: done needs the proof of its result", text)
+        self.assertIn("a commit (--commit <sha>", text)
+        self.assertEqual(core._item(self.c, x)["status"], "in_progress")
+        # The commit that names the item is found; the test needs its result.
+        with open(os.path.join(self.repo, "cart.py"), "w") as f:
+            f.write("x = 1\n")
+        self.git("add", "cart.py")
+        self.git("commit", "-q", "-m", f"Fix the cart (#{x})")
+        sha = self.git("rev-parse", "--short", "HEAD")
+        self.assertIn("--test needs --result", self.done(x, "--test", "python3 -m unittest")[1])
+        code, text = self.done(x, "--output", "fixed", "--test", "python3 -m unittest", "--result", "OK (3 tests)")
+        self.assertEqual(code, 0, text)
+        self.assertIn(f"proof: commits {sha} (found by #id); test `python3 -m unittest`: OK (3 tests)", text)
+        shown = core.item_show(self.c, x)
+        self.assertEqual(json.loads(shown["proof"])["commits"], [{"sha": sha, "subject": f"Fix the cart (#{x})"}])
+        # A visible change needs a shot; the file is kept beside the queue.
+        y = core.item_add(self.c, "web", "Blue button", touches="river/static/app.css")["id"]
+        core.claim(self.c, y, "w")
+        base = ["--commit", sha, "--test", "npm test", "--result", "ok"]
+        self.assertIn("a screenshot or a short video", self.done(y, *base)[1])
+        self.assertIn("--commit: ", self.done(y, "--commit", "deadbeef1", "--test", "t", "--result", "ok")[1])
+        shot = os.path.join(self.dir.name, "button.png")
+        with open(shot, "wb") as f:
+            f.write(b"\x89PNG fake")
+        code, text = self.done(y, *base, "--shot", shot)
+        self.assertEqual(code, 0, text)
+        kept = os.path.join(self.dir.name, "proof", str(y), "button.png")
+        self.assertTrue(os.path.isfile(kept))
+        self.assertIn(f"shot: {kept}", text)
+        # --no-proof says why; a person, and the setting off, need none.
+        z = core.item_add(self.c, "web", "Read the logs")["id"]
+        core.claim(self.c, z, "w")
+        code, text = self.done(z, "--no-proof", "an investigation: the findings are in #12")
+        self.assertEqual(code, 0, text)
+        self.assertIn("no proof: an investigation", text)
+        p = core.item_add(self.c, "web", "Pick a color")["id"]
+        core.done(self.c, p, actor="mark", proof={})
+        core.config_set(self.c, "done_proof", "off")
+        q = core.item_add(self.c, "web", "Small fix")["id"]
+        core.claim(self.c, q, "w")
+        self.assertEqual(self.done(q)[0], 0)
+
+
 class FullQuestion(Base):
     """#5987 (mark 2026-11-15: a later mention without the text made him search or ask): every text that names an
     open question or a person's item shows it whole."""
