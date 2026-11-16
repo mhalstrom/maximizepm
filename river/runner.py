@@ -96,6 +96,8 @@ def run_one(cli, core, conn, req, env):
     os.environ.update(env)
     core.CALLER_PPID = int(req.get("ppid") or 0) or None
     core.CALLER_TOKEN = req.get("caller") or None  # #5845: serve's one-time token of the caller's connection
+    # #5972: the processes above the caller, which serve read from the kernel (a session token is checked on them).
+    core.CALLER_CHAIN = [tuple(c) for c in req["chain"]] if isinstance(req.get("chain"), list) else None
     sys.argv = ["maxpm", *req["argv"]]
     out, err = io.StringIO(), io.StringIO()
     fd_out, fd_err = _capture(), _capture()
@@ -124,6 +126,7 @@ def run_one(cli, core, conn, req, env):
         os.close(saved[1])
         core.CALLER_PPID = None
         core.CALLER_TOKEN = None
+        core.CALLER_CHAIN = None
         if conn.in_transaction:  # a command that stopped inside a transaction: none stays open for the next
             conn.rollback()
             for k in ("ann", "ann_open", "ann_kept", "ann_closed_kept", ("graph", True), ("graph", False)):  # they may hold changes that are gone

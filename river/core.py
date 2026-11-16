@@ -892,6 +892,26 @@ CREATE TABLE IF NOT EXISTS gone_agents (
 );
 CREATE INDEX IF NOT EXISTS gone_agents_name ON gone_agents(name);
 
+-- Session tokens (#5972): maxpm serve makes one for each session it starts (the manager too) and puts it into the
+-- pane's own environment (MAXPM_TOKEN, tmux -e). Only its hash is stored. A command with the token runs as the
+-- token's agent, before --as and MAXPM_AGENT, and only from the processes below the pane's shell (pid, pid_start).
+-- Its reader: cli._token_self (token_session) on each command of a session with a token.
+CREATE TABLE IF NOT EXISTS session_tokens (
+  hash          TEXT PRIMARY KEY,  -- sha256 of the token
+  agent         TEXT NOT NULL,     -- the session record (agents.name)
+  role          TEXT,              -- its role when the token was made (manager, or NULL: go gives one)
+  scope         TEXT,              -- the scope that the manager gave it (#5973); NULL: none yet
+  pane          TEXT,              -- the tmux pane it was made for
+  pid           INTEGER,           -- the pane's shell: a command must have it above itself
+  pid_start     INTEGER,           -- that process's start time (a reused pid is not it)
+  host          TEXT,
+  created_at    TEXT NOT NULL,
+  created_by    TEXT,
+  cancelled_at  TEXT,
+  cancelled_why TEXT
+);
+CREATE INDEX IF NOT EXISTS session_tokens_agent ON session_tokens(agent);
+
 CREATE TABLE IF NOT EXISTS agents (
   name           TEXT PRIMARY KEY,
   kind           TEXT NOT NULL DEFAULT 'ai' CHECK (kind IN ('ai','human')),
@@ -2473,7 +2493,7 @@ _SECRET_FIELD = re.compile(r"password|passcode|passwd|token|secret|api.?key|one.
 # Text that holds a secret: the known key forms, a JWT, 'token=...' and 'Bearer ...' (the value only).
 _SECRET_TEXT = re.compile(
     r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}|\bxox[abposr]-[\w-]{10,}"
-    r"|\bAKIA[0-9A-Z]{16}\b|\bglpat-[\w-]{20,}|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}")
+    r"|\bAKIA[0-9A-Z]{16}\b|\bglpat-[\w-]{20,}|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}|\bmxt_[\w-]{16,}")
 _SECRET_KV = re.compile(r"(?i)\b((?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*|bearer\s+)([^\s,;'\"]+)")
 # A long random string: 32 characters or more with upper and lower case letters and digits. A commit id or a
 # session id (hex, lower case) stays.
@@ -2624,6 +2644,73 @@ def _keep_gone(conn, name, by, why, keys=None):
     conn.execute("INSERT INTO gone_agents(name, gone_at, gone_by, why, sessions, row) VALUES (?,?,?,?,?,?)",
                  (name, iso(now()), by, why, json.dumps(sessions),
                   json.dumps({k: r[k] for k in (keys or r.keys()) if r[k] is not None})))
+
+
+# ---------------------------------------------------------------- session tokens
+
+TOKEN_ENV = "MAXPM_TOKEN"  # the variable of the pane that holds a session's token (#5972)
+TOKEN_PREFIX = "mxt_"  # so the run log's mask and a person who sees one know what it is
+# The agent of the token of the command that runs now (cli._run sets it): _session_self takes it first.
+TOKEN_AGENT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_token_agent", default=None)
+# The processes above the caller of a command that a runner of serve runs (serve reads them from the kernel, as
+# vault._chain_now does): [(pid, ppid, comm, start)], or None. The runner sets it for each command.
+CALLER_CHAIN = None
+
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def token_new(conn, agent, role=None, scope=None, by=COMMAND):
+    """A new token for the session record agent (#5972), and the end of every earlier token of it: a revive, an
+    adoption into tmux or a new start makes a new one for the same record. Returns the token; only its hash is kept."""
+    import secrets
+    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+    t = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE session_tokens SET cancelled_at=?, cancelled_why='replaced by a new token' "
+                     "WHERE agent=? AND cancelled_at IS NULL", (t, agent))
+        conn.execute("INSERT INTO session_tokens(hash, agent, role, scope, host, created_at, created_by) "
+                     "VALUES (?,?,?,?,?,?,?)", (_token_hash(token), agent, role, scope, this_host(), t, by))
+    return token
+
+
+def token_bind(conn, token, pane, pid):
+    """Bind a token to the pane it was made for and to the pane's shell process: only commands below that process
+    may use it. A pid whose start time the kernel does not tell binds by pid alone."""
+    from . import peer
+    info = peer.info(pid) if pid else None
+    with tx(conn):
+        conn.execute("UPDATE session_tokens SET pane=?, pid=?, pid_start=? WHERE hash=?",
+                     (pane, pid, info[3] if info else None, _token_hash(token)))
+
+
+def token_cancel(conn, agent, why):
+    """Inside a tx: end every live token of agent (stop, end, takeover)."""
+    conn.execute("UPDATE session_tokens SET cancelled_at=?, cancelled_why=? WHERE agent=? AND cancelled_at IS NULL",
+                 (iso(now()), why, agent))
+
+
+def token_session(conn, token, chain):
+    """The session of a token: {'agent', 'role', 'scope', 'checked'}. chain: the processes above the command, from
+    the kernel ([(pid, ppid, comm, start)]), or None when the kernel does not tell (a sandbox; then a command that
+    goes through maxpm serve is checked there). Refused: a token that MaximizePM did not make, one that was
+    cancelled, and one that a process outside its session uses."""
+    r = conn.execute("SELECT * FROM session_tokens WHERE hash=?", (_token_hash(token),)).fetchone()
+    if not r:
+        raise RiverError(f"{TOKEN_ENV} holds a token that this queue did not make: the session's token comes only "
+                         f"from maxpm serve when it starts the session")
+    if r["cancelled_at"]:
+        raise RiverError(f"the token of session {r['agent']} was cancelled at {show_time(r['cancelled_at'])} "
+                         f"({r['cancelled_why']}): this session has ended and has no rights. Stop here and tell the "
+                         f"person what you finished")
+    checked = False
+    if r["pid"] and chain is not None and r["host"] == this_host():
+        if not any(c[0] == r["pid"] and (r["pid_start"] is None or c[3] == r["pid_start"]) for c in chain):
+            raise RiverError(f"the token of session {r['agent']} is used from a process outside that session: a token "
+                             f"works only in the pane that maxpm serve started it in")
+        checked = True
+    return {"agent": r["agent"], "role": r["role"], "scope": r["scope"], "checked": checked}
 
 
 # ---------------------------------------------------------------- settings
@@ -12713,6 +12800,7 @@ def _killed(conn, agent, reason, actor, pid, killed):
             _move_manager_mail(conn, agent, active_manager(conn, but=agent), f"{agent} was killed")
         conn.execute("UPDATE agents SET stop_at=?, stop_by=?, stop_reason=?, role='stopped', note='killed' WHERE name=?",
                      (iso(now()), actor, "killed: " + reason.strip(), agent))
+        token_cancel(conn, agent, f"killed by {actor}")  # #5972
         _event(conn, None, actor, f"killed {agent} (by {actor}: {reason.strip()})")
     return {"agent": agent, "pid": pid, "killed": killed, "released": held, "queued_back": queued,
             "warning": "Uncommitted work in the agent's folder is not saved: look at git status there."}
@@ -12991,6 +13079,8 @@ def end_stopped(conn, agent):
             conn.execute("UPDATE items SET needs_check=1 WHERE id=? AND status='open'", (r["id"],))
         released.append(r["id"])
     _finish_stop(conn, agent)
+    with tx(conn):
+        token_cancel(conn, agent, f"stopped: {why}")  # #5972: it did not finish its stop itself
     out = end_idle(conn, agent, why, force=True)
     return {**(out or {"ended": None, "why": why}), "released": released}
 
@@ -13752,6 +13842,7 @@ def unregister(conn, name, actor=None):
         _free_reservations(conn, name, f"{name} ended")
         _release_goals(conn, name, f"{name} ended")
         _keep_gone(conn, name, actor or name, "unregistered")  # the name stays traceable (#5969)
+        token_cancel(conn, name, "the session ended (unregister)")  # #5972
         conn.execute("DELETE FROM agents WHERE name=?", (name,))
         conn.execute("DELETE FROM settings WHERE scope=?", (f"agent:{name}",))
         _event(conn, None, actor or name, f"agent {name} unregistered")
@@ -22345,6 +22436,7 @@ def manage(conn, cwd, actor=None, takeover=None):
         with tx(conn):
             handed += _move_manager_mail(conn, other, actor, f"{other} is no longer the manager ({actor} took over)")
             conn.execute("UPDATE agents SET role=NULL, note='manager until taken over' WHERE name=?", (other,))
+            token_cancel(conn, other, f"{actor} took over as manager")  # #5972
             _send(conn, "alert", actor, f"{actor} took over as manager: {takeover}. You are no longer the manager.",
                   to=other)
             _event(conn, None, actor, f"took over as manager from {other}: {takeover}")

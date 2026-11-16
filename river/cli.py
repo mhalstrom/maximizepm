@@ -2411,14 +2411,48 @@ def _session_self(conn):
     """The agent this command's session is (#5576): MAXPM_AGENT while it names a registered AI agent; else the agent
     that MaximizePM recorded last for this session id (it may be gone now); else MAXPM_AGENT when it names no agent
     yet (a session that maxpm serve started and named, before its first go); else None (a person's terminal). In
-    a chat over MCP HTTP the environment is maxpm serve's, not the chat's: None."""
+    a chat over MCP HTTP the environment is maxpm serve's, not the chat's: None. A session with a token (#5972) is the
+    token's agent, before all of these."""
     if core.HTTP_CHAT.get():
         return None
+    if core.TOKEN_AGENT.get():
+        return core.TOKEN_AGENT.get()
     me = (os.environ.get("MAXPM_AGENT") or "").strip()
     row = me and conn.execute("SELECT kind FROM agents WHERE name=?", (me,)).fetchone()
     if row and row["kind"] == "ai":
         return me
     return core.session_owner(conn, core.session_from_env()) or (me if me and not row else None)
+
+
+def _token_self(conn, args):
+    """A session that maxpm serve started has its token in MAXPM_TOKEN (#5972): the command runs as the token's agent,
+    before --as and MAXPM_AGENT. A --as of another name stays for _for_other to judge (only the manager may). A token
+    that MaximizePM did not make, that was cancelled, or that a process outside its pane uses is refused. maxpm report
+    (the session's hooks) is not refused: an ended session's last hooks only record its state."""
+    tok = os.environ.get(core.TOKEN_ENV)
+    if not tok or core.HTTP_CHAT.get():
+        return
+    try:
+        who = core.token_session(conn, tok, _caller_chain())
+    except RiverError:
+        if args.cmd == "report":
+            return
+        raise
+    core.TOKEN_AGENT.set(who["agent"])
+    if not getattr(args, "as_typed", False):
+        args.actor = who["agent"]
+
+
+def _caller_chain():
+    """The processes above this command, from the kernel ([(pid, ppid, comm, start)]), or None when it does not tell
+    (a sandbox). In a runner of maxpm serve: the caller's, which serve read (core.CALLER_CHAIN)."""
+    if core.CALLER_PPID:
+        return core.CALLER_CHAIN
+    from . import peer
+    try:
+        return peer.chain(os.getpid())
+    except Exception:  # noqa: BLE001 - no answer is the same as a sandbox's
+        return None
 
 
 def _for_other(conn, actor, cmd=None):
@@ -2509,6 +2543,7 @@ def run(argv=None):
     start = time.monotonic()
     session = core.run_session()
     tok = core.RUN_SESSION.set(session)
+    agent_tok = core.TOKEN_AGENT.set(None)  # _run sets it from the session's token (#5972)
     try:
         rec["code"] = _run_words(words, rec)
         return rec["code"]
@@ -2526,6 +2561,8 @@ def run(argv=None):
         raise
     finally:
         core.RUN_SESSION.reset(tok)
+        rec["actor"] = core.TOKEN_AGENT.get() or rec["actor"]
+        core.TOKEN_AGENT.reset(agent_tok)
         core.log_run(words, rec["at"], int((time.monotonic() - start) * 1000), rec["code"], rec["cmd"],
                      rec["refused"], rec["actor"] or os.environ.get("MAXPM_AGENT") or None, session)
 
@@ -2555,6 +2592,10 @@ def _run_words(words, rec):
             rec["refused"] = (lines[-1].split(" (choose from ")[0] if lines else "usage error")
         raise
     rec["actor"] = getattr(args, "actor", None)
+    # Whether the words name the actor (--as), not only MAXPM_AGENT: a session's token goes before the variable, not
+    # before a typed --as (#5972).
+    cut = words.index(args.cmd) if args.cmd in words else len(words)
+    args.as_typed = any(w == "--as" or w.startswith("--as=") for w in words[:cut])
     if args.cmd:
         subs = [getattr(args, k) for k in sorted(vars(args)) if k.endswith("cmd") and k != "cmd"
                 and isinstance(getattr(args, k), str)]
@@ -2774,6 +2815,7 @@ def _run(args, conn):
         port = args.port or int(core.setting(conn, "serve_port"))
         server.serve(port, open_browser=args.open, dev=args.dev)
         return 0
+    _token_self(conn, args)
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
     if args.cmd not in ("go", "plan"):

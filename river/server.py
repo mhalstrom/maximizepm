@@ -194,7 +194,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
         t = _workspace(conn, t, name, core._project(conn, t["project"])["id"])
         _started(conn, name, t)
-        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
+        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner, conn)
     except Exception as e:
         _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
     if t.get("fork_of"):  # it reads the goal's base from the cache, which keeps the base warm
@@ -326,7 +326,7 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
         if project:
             t = _workspace(conn, t, name, project["id"])
         _started(conn, name, t)
-        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
+        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner, conn)
     except Exception as e:
         _undo_start(conn, name, e, actor=actor)
     return {**t, "session_name": name, "folder": t["path"]}
@@ -493,7 +493,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
         if kind in ("help", "unblock"):  # sessions that change code; deploy, review and context work in the project folder
             t = _workspace(conn, t, named, p["id"])
         _started(conn, named, t)
-        _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner)
+        _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner, conn)
     except Exception:
         if agent_name is None:  # no session started: no name of ours stays on the page
             core.unregister(conn, named)
@@ -535,7 +535,7 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     core._set_role_note(conn, name, "manager", None)  # the next Start manager sees it at once
     try:
         _started(conn, name, t)
-        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
+        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner, conn)
     except Exception as e:
         _undo_start(conn, name, e, actor=actor)
     return {**t, "session_name": name}
@@ -640,7 +640,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     # Its own worktree (#5856); a resumed chat only in the worktree it had, as its chat belongs to that folder.
     t = _workspace(conn, t, name, p["id"], make=not t.get("resumed"))
     _started(conn, name, t)
-    _open_terminal(t, t["env"], runner)
+    _open_terminal(t, t["env"], runner, conn)
     with core.tx(conn):
         core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
             f" (resumes session {sid})" if sid else (" (fresh: no session to resume)" if resume else "")))
@@ -704,10 +704,12 @@ def _started(conn, name, t):
         core.record_session(conn, name, t["session_id"])  # a start that chose its session's id (Aider, #5280)
 
 
-def _open_terminal(t, env, runner=None):
+def _open_terminal(t, env, runner=None, conn=None):
     """Run the agent command (t["command"]) in the project folder (t["path"]) with env set, in a new pane of the
     maxpm tmux session (#5105). runner (tests) gets the command line that would go into the pane; TMUX_RUNNER gets
-    the tmux commands."""
+    the tmux commands. With conn, a session that env names (MAXPM_AGENT) gets a new token (#5972): it goes into the
+    pane's own environment (tmux -e), never into the typed line (the screen, the shell's history, a chat log), and
+    it binds to the pane's shell process."""
     import os
     import shlex
     import subprocess
@@ -734,7 +736,13 @@ def _open_terminal(t, env, runner=None):
     if runner:
         runner(line)
         return
-    t["tmux_pane"] = _tmux_open(t, env, line)
+    token = None
+    if conn is not None and env.get("MAXPM_AGENT"):
+        r = conn.execute("SELECT role FROM agents WHERE name=?", (env["MAXPM_AGENT"],)).fetchone()
+        token = core.token_new(conn, env["MAXPM_AGENT"], role=r["role"] if r else None)
+    t["tmux_pane"], pid = _tmux_open(t, env, line, {core.TOKEN_ENV: token} if token else None)
+    if token and t["tmux_pane"]:
+        core.token_bind(conn, token, t["tmux_pane"], pid)
     if t.get("first_prompt") and t.get("platform") and t["tmux_pane"]:
         hold_first_prompt(t["tmux_pane"], t["platform"], t["first_prompt"])
 
@@ -1006,14 +1014,16 @@ def _tmux_pane_of(tty):
         return None
 
 
-def _tmux_open(t, env, line):
-    """Start an agent in a new pane of the maxpm tmux session and return the pane id: a window of its own,
-    or one more pane of the side-by-side window when maxpm view made one. tmux starts the pane's own login
-    shell and river types the command line into it, as Terminal's do script does: the shell's PATH finds
+def _tmux_open(t, env, line, pane_env=None):
+    """Start an agent in a new pane of the maxpm tmux session and return (the pane id, the pid of its shell or None):
+    a window of its own, or one more pane of the side-by-side window when maxpm view made one. tmux starts the pane's
+    own login shell and river types the command line into it, as Terminal's do script does: the shell's PATH finds
     the agent CLI, and the pane stays (with what the agent printed) after the agent ends. Nothing takes
-    the keyboard: a person who answers a prompt in another pane keeps typing there."""
+    the keyboard: a person who answers a prompt in another pane keeps typing there. pane_env goes into the
+    environment of this pane alone (tmux -e; never tmux's global environment): the session's token (#5972)."""
     name = t.get("session_title") or t["project"]
-    new = ["-c", t["path"], "-P", "-F", "#{pane_id}"]
+    new = ["-c", t["path"], *(x for k, v in (pane_env or {}).items() for x in ("-e", f"{k}={v}")),
+           "-P", "-F", "#{pane_id} #{pane_pid}"]
     pane = None
     if _tmux("has-session", "-t", "=" + TMUX_SESSION, check=False) is None:
         # With no terminal attached yet, a window gets this size; it follows the terminal that attaches.
@@ -1026,6 +1036,8 @@ def _tmux_open(t, env, line):
             if pane:
                 _tmux("select-layout", "-t", tile, "tiled")
         pane = pane or _tmux("new-window", "-d", "-t", f"={TMUX_SESSION}:", "-n", name, *new)
+    pane, _, pid = (pane or "").partition(" ")
+    pid = int(pid) if pid.strip().isdigit() else None
     _tmux("set-option", "-p", "-t", pane, "@maxpm_name", name)
     _tmux("set-option", "-p", "-t", pane, "@maxpm_started", str(int(core.now().timestamp())))
     _tmux("set-option", "-p", "-t", pane, "@maxpm_db", _queue_db())  # only this queue tidies the pane (#5054)
@@ -1033,7 +1045,7 @@ def _tmux_open(t, env, line):
         _tmux("set-option", "-p", "-t", pane, "@maxpm_agent", env["MAXPM_AGENT"])
     _tmux("send-keys", "-t", pane, "-l", _typed_line(line) + _exit_mark())
     _tmux("send-keys", "-t", pane, "Enter")
-    return pane
+    return pane, pid
 
 
 def _exit_mark():
@@ -1865,7 +1877,7 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
                                          f"({t['agent']})")
     spec = {"command": t["command"], "path": cwd, "project": name, "session_title": a.get("session") or name,
             "platform": t.get("platform"), "first_prompt": t.get("first_prompt")}
-    _open_terminal(spec, t["env"], runner)
+    _open_terminal(spec, t["env"], runner, conn)
     return spec.get("tmux_pane")
 
 
@@ -3341,7 +3353,7 @@ def start_deployer(conn, target, dep_id, why, runner=None):
         core.target_handoff(conn, target, name, why)
     try:
         _started(conn, name, t)
-        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner)
+        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner, conn)
     except Exception as e:
         _undo_start(conn, name, e, item_id=dep_id, target=target)
     return {**t, "session_name": name}
@@ -5813,6 +5825,12 @@ class Handler(BaseHTTPRequestHandler):
             if srv and len(self.client_address) > 1:
                 CALLERS[token] = (self.client_address[1], srv[1], str(req.get("ppid") or ""))
                 req["caller"] = token
+                # #5972: a session token is valid only below its pane's shell. The runner cannot see the caller's
+                # processes; serve reads them here from the kernel (about 0.1 ms; 11 ms when no hint holds it).
+                if isinstance(req.get("env"), dict) and req["env"].get(core.TOKEN_ENV):
+                    from . import peer
+                    pid = peer.holder(self.client_address[1], srv[1], [req.get("pid"), req.get("ppid")])
+                    req["chain"] = peer.chain(pid) if pid else None
             try:
                 ans = run_command(req)
             finally:

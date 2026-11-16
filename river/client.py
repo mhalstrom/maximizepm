@@ -200,7 +200,7 @@ def run_remote(words, env=None, cwd=None):
         cwd = cwd or os.getcwd()
     except OSError:
         return None
-    body = _dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(),
+    body = _dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(), "pid": os.getpid(),
                        "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False}).encode()
     status, answer = _post(port, body, token, timeout=None)
     if status is None or 400 <= status < 500 or status == 503:

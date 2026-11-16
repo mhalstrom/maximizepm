@@ -1512,6 +1512,7 @@ class FakeTmux:
     def __init__(self):
         self.session, self.panes, self.windows, self.calls, self.n = False, [], {}, [], 0
         self.full = False  # True: no space for one more pane in a window
+        self.pane_pid = None  # a pid: a new pane's shell, which -F '#{pane_id} #{pane_pid}' prints after the id
 
     def end(self, pane):
         """The agent CLI of this pane ended a long time after its start: a shell is all that runs there."""
@@ -1545,13 +1546,14 @@ class FakeTmux:
         pane = next((p for p in self.panes if p["id"] in (opt("-t"), opt("-s"))), None)
         if cmd == "has-session":
             return "" if self.session and self.panes else None
+        made = lambda p: f"{p} {self.pane_pid}" if self.pane_pid and "#{pane_pid}" in (opt("-F") or "") else p  # noqa: E731
         if cmd == "new-session":
             self.session = True
-            return self._pane(name=opt("-n"))
+            return made(self._pane(name=opt("-n")))
         if cmd == "new-window":
-            return self._pane(name=opt("-n"))
+            return made(self._pane(name=opt("-n")))
         if cmd == "split-window":
-            return None if self.full else self._pane(window=opt("-t"))
+            return None if self.full else made(self._pane(window=opt("-t")))
         opts = {"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db",
                 "@maxpm_exit": "exit"}
         if cmd == "set-option" and "-p" in a and "-u" in a:  # unset: the pane has the option no more
@@ -1623,6 +1625,113 @@ class LaunchInTmux(unittest.TestCase):
         self.c.close()
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
+
+    def _token_of(self, pane_index=-1):
+        """The token that the launch put into a pane's environment (tmux -e), from the tmux calls."""
+        made = [a for a in self.tmux.calls if a[0] in ("new-session", "new-window", "split-window")]
+        a = made[pane_index]
+        env = [a[i + 1] for i, x in enumerate(a) if x == "-e"]
+        return next((e.split("=", 1)[1] for e in env if e.startswith(core.TOKEN_ENV + "=")), None)
+
+    def test_token_goes_into_the_pane_environment_never_into_the_typed_line(self):
+        """#5972: serve makes a token for each session it starts (the manager too). It goes into the pane's own
+        environment (tmux -e), never into the line typed into the pane, and only its hash is kept; it binds to the
+        pane's shell."""
+        self.tmux.pane_pid = os.getppid()
+        t = server.start_manager(self.c)
+        tok = self._token_of()
+        self.assertTrue(tok and tok.startswith(core.TOKEN_PREFIX), tok)
+        pane = self.tmux.panes[-1]
+        self.assertNotIn(tok, json.dumps(pane["typed"]))
+        self.assertNotIn(core.TOKEN_ENV, json.dumps(pane["typed"]))
+        self.assertFalse([a for a in self.tmux.calls if a[0] in ("set-environment", "setenv")])  # never tmux's global
+        rows = [dict(r) for r in self.c.execute("SELECT * FROM session_tokens")]
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertNotIn(tok, json.dumps(rows))  # the hash only
+        self.assertEqual((r["agent"], r["role"], r["pane"], r["pid"]), (t["session_name"], "manager", pane["id"],
+                                                                        os.getppid()))
+        self.assertIsNotNone(r["pid_start"])
+        # The session's own commands (this test's process is below that shell) run as the token's agent.
+        from river import cli
+        who = core.token_session(self.c, tok, cli._caller_chain())
+        self.assertEqual((who["agent"], who["role"], who["checked"]), (t["session_name"], "manager", True))
+        # A person's Start (no item) gets a token too, with no role and no scope.
+        t2 = server.start_session(self.c, self.dir.name)
+        who = core.token_session(self.c, self._token_of(), None)
+        self.assertEqual((who["agent"], who["role"], who["scope"], who["checked"]), (t2["session_name"], "plain", None,
+                                                                                      False))
+
+    def test_token_names_the_session_before_as_and_maxpm_agent_and_works_only_in_its_pane(self):
+        from river import cli
+        self.tmux.pane_pid = os.getppid()
+        t = server.start_session(self.c, self.dir.name)
+        name, tok = t["session_name"], self._token_of()
+        core.register(self.c, name)
+        core.register(self.c, "other")
+
+        def run(*words, env=None):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {core.TOKEN_ENV: tok, "MAXPM_AGENT": "other", **(env or {})}), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(list(words))
+            return out.getvalue()
+
+        run("now", "testing tokens")  # MAXPM_AGENT says other; the token says the session
+        self.assertEqual(self.c.execute("SELECT actor FROM runs ORDER BY id DESC").fetchone()["actor"], name)
+        self.assertIn("testing tokens", json.dumps(core.agent_status(self.c, name)))
+        # Another session's --as is refused, as before (only the manager may run for others).
+        with self.assertRaisesRegex(RiverError, f"this session is {name}, and only the manager runs a command as"):
+            run("--as", "other", "now", "x")
+        # The same token from a process outside the pane is refused.
+        with mock.patch.object(cli, "_caller_chain", return_value=[(99999, 1, "zsh", 1)]):
+            with self.assertRaisesRegex(RiverError, "outside that session"):
+                run("now", "x")
+        # A runner of serve checks the caller's processes that serve read; with none known it cannot check.
+        with mock.patch.object(core, "CALLER_PPID", 1), mock.patch.object(core, "CALLER_CHAIN", [(5, 1, "zsh", 2)]):
+            with self.assertRaisesRegex(RiverError, "outside that session"):
+                run("now", "x")
+        with mock.patch.object(cli, "_caller_chain", return_value=None):
+            run("now", "in a sandbox")
+        # A token this queue did not make is refused.
+        with self.assertRaisesRegex(RiverError, "did not make"):
+            run("now", "x", env={core.TOKEN_ENV: core.TOKEN_PREFIX + "x" * 40})
+
+    def test_token_is_replaced_and_cancelled_on_end_kill_and_takeover(self):
+        from river import cli
+        t = server.start_session(self.c, self.dir.name)
+        name, first = t["session_name"], self._token_of()
+        core.register(self.c, name)
+        # A revive or an adoption makes a new token for the same record: the old one ends.
+        second = core.token_new(self.c, name)
+        with self.assertRaisesRegex(RiverError, "cancelled .*replaced by a new token"):
+            core.token_session(self.c, first, None)
+        core.token_session(self.c, second, None)
+        core.unregister(self.c, name)
+        with self.assertRaisesRegex(RiverError, r"cancelled .*\(the session ended \(unregister\)\).*Stop here"):
+            core.token_session(self.c, second, None)
+        # Its hooks still report its state; every other command is refused.
+        with mock.patch.dict(os.environ, {core.TOKEN_ENV: second}), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RiverError, "cancelled"):
+                cli.run(["who"])
+            args = cli.parse_args(["report", "--state", "idle"])
+            cli._token_self(self.c, args)  # no refusal
+        # A kill and a takeover of the manager end the token.
+        core.register(self.c, "w1")
+        tok = core.token_new(self.c, "w1")
+        with mock.patch.object(core, "pid_alive", return_value=False):
+            core._killed(self.c, "w1", "test", "mark", None, False)
+        with self.assertRaisesRegex(RiverError, "killed by mark"):
+            core.token_session(self.c, tok, None)
+        m1 = server.start_manager(self.c)["session_name"]
+        mtok = self._token_of()
+        core.manage(self.c, self.dir.name, m1)
+        core.manage(self.c, self.dir.name, "manager-new", takeover="the old one hangs")
+        with self.assertRaisesRegex(RiverError, "manager-new took over as manager"):
+            core.token_session(self.c, mtok, None)
+        # The run log masks a token that a command names by mistake.
+        self.assertEqual(core.mask_words(["note", f"my token {mtok}"])[-1], "my token ***")
 
     def test_a_long_command_line_goes_through_a_file_and_the_pane_gets_a_short_line(self):
         """#5884: keys typed while the login shell starts meet a terminal in line mode, which keeps 1024 bytes of a

@@ -271,6 +271,7 @@ def _sessions(conn, cutoff, n):
         conn.execute("DELETE FROM session_pins WHERE agent=?", (name,))  # its cascade, with the key checks off
         # A short copy (#5969): the name stays traceable, and the space of the full row (shells, settings) goes.
         core._keep_gone(conn, name, core.COMMAND, "space", keys=core.GONE_SHORT)
+        core.token_cancel(conn, name, "the session ended (space cleanup)")
         conn.execute("DELETE FROM agents WHERE name=?", (name,))
         conn.execute("DELETE FROM settings WHERE scope=?", (f"agent:{name}",))
     return len(names), len(names) * 400
