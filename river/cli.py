@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -846,9 +847,98 @@ def _command_word(words):
     return None
 
 
+GLOBAL_FLAGS = ("-q", "--quiet", "--json")
+
+
+def tolerant_words(words):
+    """The words as the parser takes them (#5970; measured 2026-10-16..11-16: 563 argument mistakes): a global flag
+    after the command (-q, --json, --as <name>) moves before it; a priority P0..P4 is 0..4; maxpm help [command] is the
+    help; maxpm db and maxpm config alone are db path and config get. Words after -- stay as they are."""
+    words = list(words)
+    i = next((n for n, w in enumerate(words) if not w.startswith("-") and (n == 0 or words[n - 1] != "--as")), None)
+    if i is None:
+        return words
+    cmd, head, tail = words[i], words[:i], words[i + 1:]
+    if cmd == "help":
+        rest = [w for w in tail if not w.startswith("-")]
+        return head + rest[:1] + ["-h"]
+    moved, out, k = [], [], 0
+    while k < len(tail):
+        w = tail[k]
+        if w == "--":
+            out += tail[k:]
+            break
+        if w in GLOBAL_FLAGS:
+            moved.append(w)
+        elif w == "--as" and k + 1 < len(tail):
+            moved += [w, tail[k + 1]]
+            k += 1
+        elif w.startswith("--as="):
+            moved.append(w)
+        else:
+            out.append(w)
+        k += 1
+    positional = 0
+    for j, w in enumerate(out):
+        if w == "--":
+            break
+        p = re.fullmatch(r"[Pp]([0-4])", w)
+        if p and ((j and out[j - 1] in ("-p", "--priority")) or (cmd == "prio" and positional == 1)):
+            out[j] = p.group(1)
+        out[j] = re.sub(r"^(--priority=)[Pp]([0-4])$", r"\1\2", out[j])
+        if not w.startswith("-"):
+            positional += 1
+    if cmd in ("db", "config") and (not out or (out[0].startswith("-") and out[0] not in ("-h", "--help"))):
+        out = ["path" if cmd == "db" else "get"] + out
+    return moved + head + [cmd] + out
+
+
+class _Parser(argparse.ArgumentParser):
+    """The whole parser: its error names the nearest command, subcommand or option ('did you mean', #5970)."""
+    words = ()
+
+    def error(self, message):
+        import difflib
+        m = re.search(r"invalid choice: '([^']*)' \(choose from (.*)\)", message)
+        if m:
+            choices = re.findall(r"'([^']*)'", m.group(2))
+            near = difflib.get_close_matches(m.group(1), choices, 3, 0.6)
+            message = (message[:m.start()] + f"invalid choice: '{m.group(1)}'"
+                       + (f". Did you mean: {', '.join(near)}?" if near else "") + " (maxpm help lists them)")
+        m = re.search(r"unrecognized arguments: (.*)", message)
+        if m:
+            opts = _options_of(_command_word(list(_Parser.words)))
+            near = []
+            for w in m.group(1).split():
+                if w.startswith("-"):
+                    near += difflib.get_close_matches(w.split("=")[0], opts, 1, 0.6)
+            if near:
+                message += f". Did you mean: {', '.join(dict.fromkeys(near))}?"
+        super().error(message)
+
+
+def _options_of(cmd):
+    """Every option of one command and its subcommands."""
+    if not cmd:
+        return []
+    try:
+        p = build_parser(only=cmd)
+    except Exception:  # noqa: BLE001 - no suggestion is better than a crash in an error
+        return []
+    out, todo = set(), [p]
+    while todo:
+        q = todo.pop()
+        for a in q._actions:
+            out |= {o for o in a.option_strings if o.startswith("--")}
+            if isinstance(a, argparse._SubParsersAction):
+                todo += [c for c in a.choices.values() if c is not None]
+    return sorted(out)
+
+
 def parse_args(argv=None):
     """The parsed words: with the parser of their command alone, else (help, a mistake) with the whole one."""
-    words = sys.argv[1:] if argv is None else list(argv)
+    words = tolerant_words(sys.argv[1:] if argv is None else list(argv))
+    _Parser.words = words
     cmd = _command_word(words)
     if cmd:
         try:
@@ -898,7 +988,7 @@ BROWSER_ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", 
 
 def build_parser(only=None):
     """The parser of every command; only: the name of the one command that gets its arguments (parse_args)."""
-    p = (_QuietParser if only else argparse.ArgumentParser)(
+    p = (_QuietParser if only else _Parser)(
         prog=core.COMMAND, description="MaximizePM: a dependency-ordered work queue for agents and people.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1688,6 +1778,8 @@ def build_parser(only=None):
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
+    x.add_argument("--project", dest="project_opt", help="the project (the same as the first word)")
+    x.add_argument("--title", dest="title_opt", help="the title (the same as the last word)")
     x.add_argument("--short", help="the short title every page shows: about 6 plain words, no ids, no file names, no "
                    "quotes (the title stays the full text, on the item page and in a hover)")
     x.add_argument("--from", dest="plan_file", metavar="FILE",
@@ -1784,6 +1876,7 @@ def build_parser(only=None):
 
     x = sub.add_parser("list", help="list items (open by default)")
     x.add_argument("--project"); x.add_argument("--status"); x.add_argument("--all", action="store_true")
+    x.add_argument("-n", "--limit", type=int, help="at most this many items")
     x.add_argument("--goal", help="only items tagged with this goal")
 
     x = sub.add_parser("show", help="one item with its links and history"); x.add_argument("id", type=int)
@@ -2186,7 +2279,8 @@ def build_parser(only=None):
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
     x.add_argument("--move", metavar="SESSION_ID", help="a person or the manager: the session id belongs to --to only")
     x.add_argument("--to", metavar="AGENT", help="with --move: the agent whose session it is")
-    x = sub.add_parser("unregister", help="remove an agent that holds nothing"); x.add_argument("name")
+    x = sub.add_parser("unregister", help="remove an agent that holds nothing (default: you)")
+    x.add_argument("name", nargs="?")
     x = sub.add_parser("now", help="what you do now, in about 10 plain words, for your row on the Sessions tab: "
                        "run it when you start an item and at each new step")
     x.add_argument("words", nargs="*", metavar="text", help="what you do now, for example: Runs the tests after the fix")
@@ -4264,6 +4358,11 @@ def dispatch(conn, a, actor):
     if c == "add":
         if a.mode and a.blocks is None:
             raise RiverError("--keep and --release go with --blocks <id>")
+        # The named forms (#5970): --project and --title stand for the positional words.
+        if a.title_opt:
+            a.words = list(a.words) + [a.title_opt]
+        if a.project_opt:
+            a.words = [a.project_opt] + list(a.words)
         if a.plan_file:
             if len(a.words) > 1:
                 raise RiverError("with --from, give at most a project: maxpm add [project] --from plan.md")
@@ -4301,7 +4400,8 @@ def dispatch(conn, a, actor):
                               a.due, a.goal, a.untag, _models(a),
                               tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
     if c == "list":
-        return core.item_list(conn, a.project, a.status, a.all, a.goal)
+        rows = core.item_list(conn, a.project, a.status, a.all, a.goal)
+        return rows[:a.limit] if a.limit and a.limit > 0 else rows
     if c == "show":
         def show():
             res = core.item_show(conn, a.id)
@@ -4572,7 +4672,9 @@ def dispatch(conn, a, actor):
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.set_session(conn, actor, " ".join(a.name), a.ref)
     if c == "unregister":
-        return core.unregister(conn, a.name, actor)
+        if not (a.name or actor):
+            raise RiverError("name the agent: maxpm unregister <name>   (or run it as the agent: maxpm --as <name> unregister)")
+        return core.unregister(conn, a.name or actor, actor)
     if c == "now":
         if not actor:
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
