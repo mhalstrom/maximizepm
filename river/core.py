@@ -1235,6 +1235,13 @@ CREATE TABLE IF NOT EXISTS canvas_versions (
   created_at  TEXT NOT NULL,
   UNIQUE (canvas_id, version)
 );
+CREATE TABLE IF NOT EXISTS canvas_seen (       -- the last version of a canvas that a session read or wrote (#5986)
+  canvas_id   INTEGER NOT NULL,
+  agent       TEXT NOT NULL,
+  version     INTEGER NOT NULL,
+  at          TEXT NOT NULL,
+  PRIMARY KEY (canvas_id, agent)
+);
 CREATE TABLE IF NOT EXISTS canvas_comments (
   id          INTEGER PRIMARY KEY,
   canvas_id   INTEGER NOT NULL REFERENCES canvases(id),
@@ -18206,11 +18213,41 @@ def _canvas_info(conn, c):
     return d
 
 
+def canvas_seen(conn, canvas_id, agent, version):
+    """Record that a session read or wrote this version of a canvas (#5986). Inside or outside a tx."""
+    if agent and version:
+        conn.execute("INSERT INTO canvas_seen (canvas_id, agent, version, at) VALUES (?,?,?,?) ON CONFLICT "
+                     "(canvas_id, agent) DO UPDATE SET version=MAX(version, excluded.version), at=excluded.at",
+                     (canvas_id, agent, version, iso(now())))
+
+
+def _canvas_guard(conn, c, actor, base):
+    """The overwrite guard (#5986, mark 2026-11-15: the person edits the documents): a session's whole new page that
+    is based on a version older than a person's edit would drop the edit. base: the version the page was made from
+    (--base), else the last version this session read or wrote. Inside a tx; raises RiverError."""
+    if _is_person(conn, actor):
+        return
+    if base is None:
+        r = conn.execute("SELECT version FROM canvas_seen WHERE canvas_id=? AND agent=?", (c["id"], actor)).fetchone()
+        base = r["version"] if r else 0
+    p = conn.execute("SELECT v.version, v.author FROM canvas_versions v JOIN agents a ON a.name=v.author WHERE "
+                     "v.canvas_id=? AND a.kind='human' AND v.version>? ORDER BY v.version DESC LIMIT 1",
+                     (c["id"], int(base))).fetchone()
+    if p:
+        raise RiverError(f"refused: {p['author']} edited canvas {c['name']} in version {p['version']}, after the "
+                         f"version your page is based on ({base or 'none read'}); nothing is stored, so the edit is "
+                         f"not lost. Read it (maxpm canvas show {c['name']}), merge the edit into your page, then put "
+                         f"again")
+
+
 def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, project=None, note=None,
-               filename=None):
+               filename=None, guard=False, base=None):
     """Store a new version of a canvas (a new canvas when the name is new in its project). The project comes
     from the item, else the one named. The item is the one named, else the canvas's own, else the one item the
-    actor holds in that project. The same text as the latest version stores nothing new."""
+    actor holds in that project. The same text as the latest version stores nothing new. guard: the caller sends a
+    whole page (canvas put, expert notes): refused when a person edited it after the version it is based on (base,
+    else the last version this session read or wrote; #5986). The callers that change part of the latest version
+    (a section, a suggestion, an answer) merge by themselves."""
     if not actor:
         raise RiverError("putting a canvas needs an agent name: set MAXPM_AGENT or pass --as <name>")
     name = (name or "").strip().lower()
@@ -18257,6 +18294,8 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
         else:
             cid = c["id"]
             last = _canvas_latest(conn, cid)
+            if guard and not c["deleted_at"]:
+                _canvas_guard(conn, c, actor, base)
             if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
                 if item is not None and it["id"] != c["item_id"]:
                     # The same text for another item: no new version, but the canvas moves to it (#4841).
@@ -18270,6 +18309,8 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
         n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM canvas_versions WHERE canvas_id=?", (cid,)).fetchone()[0]
         conn.execute("INSERT INTO canvas_versions (canvas_id, version, body, author, note, created_at) VALUES (?,?,?,?,?,?)",
                      (cid, n, body, actor, (note or "").strip() or None, t))
+        if guard:  # a whole page: its writer knows this version (#5986). A section merge does not tell it the page.
+            canvas_seen(conn, cid, actor, n)
         keep = int(setting(conn, "canvas_versions", project_id=pid))
         conn.execute("DELETE FROM canvas_versions WHERE canvas_id=? AND version>1 AND version<=? ",
                      (cid, n - max(keep, 2) + 1))

@@ -5427,7 +5427,8 @@ OPS = {
     # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
     # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
     "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),
-                                                    a.get("item"), a.get("project"), a.get("note")),
+                                                    a.get("item"), a.get("project"), a.get("note"), guard=True,
+                                                    base=a.get("base")),  # a whole page (#5986)
     "canvas_kit": lambda c, a, who: core.canvas_kit(),
     "canvas_list": lambda c, a, who: core.canvas_list(c, a.get("project"), a.get("item"),
                                                       who if a.get("mine") else None, bool(a.get("deleted"))),

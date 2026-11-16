@@ -1280,6 +1280,8 @@ def build_parser(only=None):
     x.add_argument("--title"); x.add_argument("--note", help="what changed in this version")
     x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
     x.add_argument("--project", help="default: the item's project, or this folder's")
+    x.add_argument("--base", type=int, help="the version your page is made from (default: the last one you read or "
+                   "put); refused when a person edited a later one (#5986)")
     x = cvs.add_parser("kit", help="the starter page of the canvas kit: a visual HTML page (task graph, cards, side by "
                        "side, bars, timeline, mockup, pictures with notes, decision cards) that you fill and put")
     x = cvs.add_parser("list", help="the canvases, newest change first")
@@ -3911,7 +3913,7 @@ def _expert_cmd(conn, a, actor):
             if not project:
                 raise RiverError(f"{a.name} has no project for its notes; adopt it again with --project <name>")
             core.canvas_put(conn, canvas, body, actor or a.name, kind="md", title=f"Notes of the expert {a.name}",
-                            project=project, note="the expert's notes")
+                            project=project, note="the expert's notes", guard=True)
         try:
             got = core.canvas_show(conn, canvas, project)
         except RiverError:
@@ -6345,14 +6347,19 @@ def _canvas_dispatch(conn, a, actor):
             names = core.projects_for_dir(conn, os.getcwd())
             project = names[0] if len(names) == 1 else None
         res = core.canvas_put(conn, a.name, body, actor, a.kind, a.title, a.item, project, a.note,
-                              core.CALLER_FILES.get(a.file, a.file) if a.file and a.file != "-" else None)
+                              core.CALLER_FILES.get(a.file, a.file) if a.file and a.file != "-" else None,
+                              guard=True, base=a.base)  # a whole page: the overwrite guard (#5986)
         return dict(res, pictures_inline=pictures[0], pictures_missing=pictures[1]) if any(pictures) else res
     if v == "kit":
         return core.canvas_kit()
     if v == "list":
         return core.canvas_list(conn, a.project, a.item, actor if a.mine else None, a.deleted)
     if v == "show":
-        return core.canvas_show(conn, a.name, a.project, a.version)
+        res = core.canvas_show(conn, a.name, a.project, a.version)
+        if actor and not core._is_person(conn, actor) and res.get("shown"):  # what this session read (#5986)
+            with core.unless_readonly(), core.tx(conn):
+                core.canvas_seen(conn, res["id"], actor, res["shown"]["version"])
+        return res
     if v == "comments":
         return core.canvas_comments(conn, a.name, actor, a.open, a.project)
     if v == "reply":

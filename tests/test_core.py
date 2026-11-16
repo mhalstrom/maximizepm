@@ -10213,6 +10213,31 @@ class Canvas(Base):
         self.it = self.add("web", "the plan")
         core.claim(self.c, self.it, "ag")
 
+    def test_canvas_put_of_a_whole_page_never_drops_a_persons_edit(self):
+        """#5986 (mark 2026-11-15: the person edits the documents): a session's whole page made from a version older
+        than a person's edit is refused until the session reads the edit; a section merge does not count as a read."""
+        from river import cli
+        put = lambda body, **kw: core.canvas_put(self.c, "plan", body, "ag", kind="md", guard=True, **kw)  # noqa: E731
+        put("# Plan\n\n## Steps\n\none\n")
+        core.canvas_edit(self.c, "plan", "# Plan\n\n## Steps\n\none, and mark's two\n", "mark", project="web")
+        with self.assertRaisesRegex(RiverError, r"mark edited canvas plan in version 2, after the version your page "
+                                                r"is based on \(1\); nothing is stored"):
+            put("# Plan\n\n## Steps\n\none, three\n")
+        core.canvas_section(self.c, "plan", "Risks", "none yet", "ag", project="web")  # merges: v3
+        with self.assertRaisesRegex(RiverError, "mark edited canvas plan in version 2"):
+            put("# Plan\n\n## Steps\n\none, three\n")
+        with self.assertRaisesRegex(RiverError, r"based on \(1\)"):
+            put("x\n", base=1)
+        # The session reads the page (maxpm canvas show): then its merged page goes in.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "ag", "canvas", "show", "plan", "--project", "web"])
+        self.assertEqual(put("# Plan\n\n## Steps\n\none, mark's two, three\n\n## Risks\n\nnone yet\n")["version"], 4)
+        put("# Plan\n\n## Steps\n\nfour\n", base=4)  # an explicit base, newer than the edit
+        # A person's own put and a page with no guard (a section, a suggestion) are never refused.
+        core.canvas_put(self.c, "plan", "# Plan by mark\n", "mark", kind="md", project="web", guard=True)
+        core.canvas_section(self.c, "plan", "Risks", "one", "ag", project="web")
+
     def test_put_makes_versions_of_one_canvas_in_the_held_items_project(self):
         a = core.canvas_put(self.c, "Release-Plan", "<h1>Plan</h1>", "ag", filename="plan.html", title="Release plan")
         self.assertEqual((a["name"], a["kind"], a["project"], a["item_id"], a["version"]), ("release-plan", "html", "web", self.it, 1))
