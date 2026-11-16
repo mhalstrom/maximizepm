@@ -13,8 +13,8 @@
     },
     {
       "id": "g2",
-      "text": "Before you put a decision to the person (or add a person item with a decision), run maxpm search on the subject with --status done and read the recent decisions. When an earlier answer covers it, close the item and quote that answer; otherwise ask only what it leaves open, and name the earlier answer.",
-      "reason": "A question the person already answered costs their time and their trust in the queue.",
+      "text": "Read the earlier decisions that MaximizePM shows with your question or person item: when one covers it, close it and quote that answer; otherwise ask only what it leaves open.",
+      "reason": "A question the person already answered costs their time and their trust in the queue. maxpm add, ask and send find the earlier answers and show them (#5955).",
       "source": "mark 2026-11-11",
       "role": [
         "manager",
@@ -23,8 +23,8 @@
     },
     {
       "id": "g3",
-      "text": "When the person must approve or decide, put the thing itself in the message: the exact text, a screenshot, the old and the new code, what each option does. A link with 'yes?' is not enough.",
-      "reason": "The person can answer at once only when they see what they approve.",
+      "text": "When the person must approve or decide, name the page, the picture or the commit, or quote the exact text, and say what each option does: MaximizePM puts the screenshot or the diff on the card.",
+      "reason": "The person can answer at once only when they see what they approve. maxpm add, ask and send refuse a Look or Approve request that names none of them (#5956).",
       "source": "mark 2026-11-11"
     },
     {
@@ -35,8 +35,8 @@
     },
     {
       "id": "g5",
-      "text": "Try a vendor sign-in or sign-up once. On any failure (an error, a CAPTCHA, a check, a wrong page), stop and ask the person with maxpm ask --blocked; never retry.",
-      "reason": "Retries hammer the vendor's site, can lock the account, and change the person's browser tab.",
+      "text": "Try a vendor sign-in or sign-up once. On a failure MaximizePM asks for you and refuses another try: wait for the answer.",
+      "reason": "Retries hammer the vendor's site, can lock the account, and change the person's browser tab. MaximizePM sees the failure, sends the question with a screenshot, and blocks the next try on that site (#5958).",
       "source": "mark 2026-11-11"
     },
     {
