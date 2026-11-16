@@ -567,6 +567,10 @@ DEFAULT_SETTINGS = {
     # maxpm health (#5353): the person's minutes that one needs-you row stands for. The headline 'person minutes per
     # done item' is needs-you rows x this / items done: a proxy, since MaximizePM cannot see the person's real time.
     "health_person_minutes": "3",
+    # maxpm health (#5990): the person's minutes that one typed prompt, one message or one stop by the person stands
+    # for. The headline adds them to the needs-you part (mark typed about one prompt per done task in a week that the
+    # needs-you rows alone gave 0.74 minutes per task). Answers are not counted again: their rows are needs-you rows.
+    "health_prompt_minutes": "1",
     # The async manager (#5977, mark 2026-11-15: 'less sync and more async except to keep its cache active'): its
     # watch returns at once only for an escalation (a blocked message, a person's message, a notice of level now, a
     # stop, an URGENT finding after manage_settle). Everything else waits for the beat, manage_every after the last
@@ -1429,6 +1433,17 @@ CREATE TABLE IF NOT EXISTS sent_prompts (
 );
 CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
 
+-- Each prompt that a person typed into a session, from the prompt hook (#5990): maxpm health counts them in the person
+-- minutes per done task. Not the text: the time, the session, the project of the item it held, and the length.
+CREATE TABLE IF NOT EXISTS person_prompts (
+  id          INTEGER PRIMARY KEY,
+  at          TEXT NOT NULL,
+  agent       TEXT,
+  project_id  INTEGER,
+  chars       INTEGER
+);
+CREATE INDEX IF NOT EXISTS person_prompts_at ON person_prompts(at);
+
 -- A message that a person sent from the Sessions tab while the session ran a turn (#5587, mark 2026-11-12): maxpm
 -- serve holds it and types it into the session's pane when the turn has ended, oldest first (server.paste_pending),
 -- or at once with its Send now (server.pending_send_now). Readers: the chat of the Sessions tab (GET /api/session:
@@ -2149,6 +2164,7 @@ def _upgrade(conn):
         _migrate_launch_agents(conn)
         _migrate_levels(conn)
         _migrate_big_file_conflicts(conn)
+        _migrate_person_prompts(conn)
         with tx(conn):
             conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
     except sqlite3.OperationalError as e:
@@ -3092,7 +3108,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "conflict_max_lines", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes",
+                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes", "health_prompt_minutes",
                  "manage_wake_count"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
@@ -16917,6 +16933,11 @@ def hook_report(conn, agent_id, payload, env=None):
             if not typed.strip().startswith("<"):  # tags: a message of another session, not a person
                 answered = answered_in_chat(conn, agent, typed.strip(), t)
                 conn.execute("UPDATE agents SET person_said_at=? WHERE name=?", (t, agent))
+                if not typed.strip().startswith(FIRST_PROMPT):  # a launch's own first prompt is not the person's
+                    held = conn.execute("SELECT project_id FROM items WHERE assignee=? AND status IN ('in_progress',"
+                                        "'held') ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+                    conn.execute("INSERT INTO person_prompts (at, agent, project_id, chars) VALUES (?,?,?,?)",
+                                 (t, agent, held["project_id"] if held else None, len(typed.strip())))  # #5990
             # A person (or another session) talks with a session that waits for work: wait_max counts from the
             # talk, so maxpm wait does not end the session during it or soon after (#4948).
             conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))
@@ -19941,8 +19962,47 @@ def _pct(values, q):
     return v[min(len(v) - 1, max(0, math.ceil(q * len(v)) - 1))]
 
 
-def _health_range(conn, t0, t1, pid, minutes):
-    """The measures of maxpm health for the time from t0 to t1 (pid: one project's id, or None)."""
+def _migrate_person_prompts(conn):
+    """Once (#5990): the prompts a person sent from the page's message box before the prompt hook counted them
+    (sent_prompts keeps the last 100 of each session) become person_prompts rows, so maxpm health has the weeks
+    before. Later page prompts reach the hook, which records them; they are not copied again."""
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='person_prompts_from_page'").fetchone():
+            return
+        conn.execute("INSERT INTO person_prompts (at, agent, project_id, chars) SELECT s.sent_at, s.agent, NULL, "
+                     "length(s.body) FROM sent_prompts s JOIN agents p ON p.name=s.author AND p.kind='human' "
+                     "WHERE s.sent_at < COALESCE((SELECT MIN(at) FROM person_prompts), '9999') ORDER BY s.sent_at")
+        conn.execute("INSERT INTO meta (key, value) VALUES ('person_prompts_from_page', ?)", (iso(now()),))
+
+
+def _person_acts(conn, a, b, pid, by_day=False):
+    """The person's own acts from a to b (#5990): prompts typed into sessions (person_prompts), messages that a
+    person sent (a note, an alert, a question: answers are needs-you rows already), and stops a person asked for.
+    pid: the project of the prompt's held item, or of the message's item; stops have no project. by_day: counts
+    per UTC day."""
+    pw, pa = (" AND project_id=?", [pid]) if pid is not None else ("", [])
+    day = "substr(at, 1, 10)" if by_day else "''"
+    out = {}
+
+    def add(sql, args, key):
+        for r in conn.execute(sql, args):
+            out.setdefault(r["d"], {"prompts": 0, "messages": 0, "stops": 0})[key] += r["n"]
+    add(f"SELECT {day} AS d, COUNT(*) AS n FROM person_prompts WHERE at>=? AND at<?{pw} GROUP BY d", [a, b] + pa,
+        "prompts")
+    mw = " AND i.project_id=?" if pid is not None else ""
+    add(f"SELECT {day.replace('at', 'm.created_at')} AS d, COUNT(*) AS n FROM messages m JOIN agents p "
+        f"ON p.name=m.from_agent AND p.kind='human' LEFT JOIN items i ON i.id=m.item_id WHERE m.kind IN "
+        f"('note','alert','question') AND m.created_at>=? AND m.created_at<?{mw} GROUP BY d", [a, b] + pa, "messages")
+    if pid is None:
+        add(f"SELECT {day.replace('at', 'e.created_at')} AS d, COUNT(*) AS n FROM queue_entries e JOIN agents p "
+            f"ON p.name=e.added_by AND p.kind='human' WHERE e.kind='stop' AND e.created_at>=? AND e.created_at<? "
+            f"GROUP BY d", [a, b], "stops")
+    return out if by_day else out.get("", {"prompts": 0, "messages": 0, "stops": 0})
+
+
+def _health_range(conn, t0, t1, pid, minutes, pminutes=0):
+    """The measures of maxpm health for the time from t0 to t1 (pid: one project's id, or None). minutes: per
+    needs-you row; pminutes: per prompt, message or stop of the person (#5990)."""
     a, b = iso(t0), iso(t1)
     pw = " AND i.project_id=?" if pid is not None else ""
     pa = [pid] if pid is not None else []
@@ -19978,14 +20038,19 @@ def _health_range(conn, t0, t1, pid, minutes):
             cost.append(u["eq"])
             cost_kind.setdefault(r["kind"] or "work", []).append(u["eq"])
     med = (lambda xs: statistics.median(xs) if xs else None)
+    acts = _person_acts(conn, a, b, pid)
+    said = acts["prompts"] + acts["messages"] + acts["stops"]
     return {
+        "person_acts": acts,
+        "needs_you_minutes_per_item": opened * minutes / n if n else None,
+        "prompt_minutes_per_item": said * pminutes / n if n else None,
         "since": a, "until": b, "days": round(days, 2), "done": n,
         "per_day": n / days, "by_kind": by_kind, "by_project": by_project,
         "reopens": reopens, "lost_claims": lost, "review_fixes": fixes,
         "rework_rate": (reopens + lost + fixes) / n if n else None,
         "needs_you_opened": opened,
         "person_load": opened * 100 / n if n else None,
-        "person_minutes_per_item": opened * minutes / n if n else None,
+        "person_minutes_per_item": (opened * minutes + said * pminutes) / n if n else None,
         "wait_closed": len(waits),
         "wait_mean_h": statistics.fmean(waits) if waits else None, "wait_p90_h": _pct(waits, 0.9),
         "open_now": len(open_ages), "open_mean_age_h": statistics.fmean(open_ages) if open_ages else None,
@@ -20055,7 +20120,7 @@ def _goal_split(conn, t0, t1, pid):
     return {"projects": projects, "total": total, "left_out": one_sided, "min_group": HEALTH_MIN_GROUP}
 
 
-def _health_days(conn, t0, t1, pid, minutes):
+def _health_days(conn, t0, t1, pid, minutes, pminutes=0):
     """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health view (#5356): done
     items, rework (reopens, lost claims, review fixes), needs-you rows opened, person minutes per done item, the
     idle share of the sampled session time, and the median cost of the items done that day."""
@@ -20098,13 +20163,15 @@ def _health_days(conn, t0, t1, pid, minutes):
         if r["d"] in day and r["total"]:
             day[r["d"]]["idle"] = r["idle"] / r["total"]
             day[r["d"]]["sampled_secs"] = r["total"]
+    acts = _person_acts(conn, a, b, pid, by_day=True)
     out = []
     for v in day.values():
         eqs = v.pop("eqs")
         n = v["done"]
         v["median_eq"] = statistics.median(eqs) if eqs else None
         v["rework_rate"] = v["rework"] / n if n else None
-        v["person_minutes_per_item"] = v["needs_you"] * minutes / n if n else None
+        v["said"] = sum(acts.get(v["day"], {}).values())  # prompts, messages and stops of the person (#5990)
+        v["person_minutes_per_item"] = (v["needs_you"] * minutes + v["said"] * pminutes) / n if n else None
         out.append(v)
     return out
 
@@ -20128,11 +20195,14 @@ def health(conn, since="7d", until=None, project=None, by=None, days=False):
         raise RiverError("maxpm health: since must be before until (for example --since 7d, or --since 30d)")
     pid = _project(conn, project)["id"] if project else None
     minutes = int(setting(conn, "health_person_minutes", project_id=pid))
-    now_r = _health_range(conn, t0, t1, pid, minutes)
-    before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes)
-    res = {"project": project, "person_minutes": minutes, "now": now_r, "before": before}
+    pminutes = int(setting(conn, "health_prompt_minutes", project_id=pid))
+    now_r = _health_range(conn, t0, t1, pid, minutes, pminutes)
+    before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes, pminutes)
+    first = conn.execute("SELECT MIN(at) AS t FROM person_prompts").fetchone()["t"]
+    res = {"project": project, "person_minutes": minutes, "prompt_minutes": pminutes, "now": now_r, "before": before,
+           "prompts_since": first}
     if days:
-        res["days"] = _health_days(conn, t0, t1, pid, minutes)
+        res["days"] = _health_days(conn, t0, t1, pid, minutes, pminutes)
     if by == "goal":
         res["by_goal"] = _goal_split(conn, t0, t1, pid)
     elif by:

@@ -11320,6 +11320,56 @@ class Health(Base):
         with self.assertRaises(core.RiverError):
             core.health(self.c, "7d", until=self.end, project="nope")
 
+    def test_health_counts_the_persons_typed_prompts_messages_and_stops(self):
+        """#5990: mark typed about one prompt per done task, which the needs-you rows alone left out."""
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+        # The prompt hook records what a person typed: not a launch's first prompt, nor what MaximizePM delivered.
+        x = self.add("b", "held")
+        core.claim(self.c, x, "w")
+        for text in ("why does the cart break?", core.FIRST_PROMPT + " (#12)", "[maxpm alert from boss] read #3",
+                     "<task-notification>done</task-notification>"):
+            core.activity_event(self.c, {"hook_event_name": "UserPromptSubmit", "prompt": text}, {"MAXPM_AGENT": "w"})
+        rows = self.c.execute("SELECT agent, project_id, chars FROM person_prompts").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("w", core._item(self.c, x)["project_id"], 24)])
+        self.c.execute("DELETE FROM person_prompts")
+        self.seed()
+        a_id = core._project(self.c, "a")["id"]
+        for d in (1, 2, 3, 6):
+            self.c.execute("INSERT INTO person_prompts (at, agent, project_id, chars) VALUES (?, 'w', ?, 10)",
+                           (self.at(d), a_id))
+        m = core.send(self.c, "note", "use the blue one", to="w", actor="mark")["id"]
+        self.c.execute("UPDATE messages SET created_at=? WHERE id=?", (self.at(2), m))
+        self.c.execute("INSERT INTO queue_entries (agent, pos, body, kind, added_by, created_at) "
+                       "VALUES ('w', 1, 'stop', 'stop', 'mark', ?)", (self.at(1),))
+        h = core.health(self.c, "7d", until=self.end, days=True)
+        n = h["now"]
+        self.assertEqual(n["person_acts"], {"prompts": 4, "messages": 1, "stops": 1})
+        self.assertAlmostEqual(n["needs_you_minutes_per_item"], 3 * 3 / 6)
+        self.assertAlmostEqual(n["prompt_minutes_per_item"], 6 * 1 / 6)
+        self.assertAlmostEqual(n["person_minutes_per_item"], (9 + 6) / 6)
+        self.assertEqual(sum(d["said"] for d in h["days"]), 6)
+        # One project: its prompts (by the held item) and its messages; stops have no project.
+        self.assertEqual(core.health(self.c, "7d", until=self.end, project="a")["now"]["person_acts"],
+                         {"prompts": 4, "messages": 0, "stops": 0})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_health(h)
+        self.assertIn("4 prompts typed, 1 messages and 1 stops by a person x 1 min (health_prompt_minutes)",
+                      out.getvalue())
+
+    def test_health_prompts_from_the_page_box_are_copied_once(self):
+        """#5990: the page's message box kept a person's prompts (sent_prompts) before the hook counted them."""
+        core.register(self.c, "mark", human=True)
+        for at, who in ((self.at(3), "mark"), (self.at(2), "mark"), (self.at(2), "boss")):
+            self.c.execute("INSERT INTO sent_prompts (agent, author, body, sent_at) VALUES ('w', ?, 'do it', ?)",
+                           (who, at))
+        self.c.execute("DELETE FROM meta WHERE key='person_prompts_from_page'")
+        core._migrate_person_prompts(self.c)
+        core._migrate_person_prompts(self.c)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM person_prompts").fetchone()[0], 2)  # a person's, once
+
     def test_by_goal_compares_inside_each_project(self):
         g = core.goal_add(self.c, "a", "g1", "an outcome", "done when")
         gb = core.goal_add(self.c, "b", "g2", "an outcome", "done when")
@@ -11383,7 +11433,8 @@ class Health(Base):
             cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--since", "7d"])
         text = out.getvalue()
         self.assertIn("HEADLINE  person minutes per done item: 1.50  (before 1.50)", text)
-        self.assertIn("a proxy: 3 min per needs-you row", text)
+        self.assertIn("3 needs-you rows x 3 min (health_person_minutes)", text)
+        self.assertIn("a proxy, not measured time", text)
         self.assertIn("rework rate          50.0%", text)
         self.assertIn("session idle         no samples", text)
         out = io.StringIO()

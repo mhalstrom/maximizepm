@@ -673,7 +673,15 @@ def render_health(res):
     print(f"Does MaximizePM work?{' Project ' + res['project'] + ',' if res['project'] else ''} "
           f"{n['since'][:16]} to {n['until'][:16]} UTC ({days}), against the {days} before")
     print(f"HEADLINE  person minutes per done item: {pair('person_minutes_per_item', '{:.2f}')}")
-    print(f"          a proxy: {res['person_minutes']} min per needs-you row (health_person_minutes), not measured time")
+    acts = n.get("person_acts") or {"prompts": 0, "messages": 0, "stops": 0}
+    print(f"          = needs-you rows {_num(n.get('needs_you_minutes_per_item'), '{:.2f}')} + prompts and messages "
+          f"{_num(n.get('prompt_minutes_per_item'), '{:.2f}')}: {n['needs_you_opened']} needs-you rows x "
+          f"{res['person_minutes']} min (health_person_minutes); {acts['prompts']} prompts typed, {acts['messages']} "
+          f"messages and {acts['stops']} stops by a person x {res.get('prompt_minutes', 0)} min (health_prompt_minutes)")
+    print("          a proxy, not measured time"
+          + (f"; prompts are counted from {res['prompts_since'][:16]} UTC" if res.get("prompts_since")
+             and res["prompts_since"] > n["since"] else "")
+          + ("; no prompt counted yet (the prompt hook records them)" if not res.get("prompts_since") else ""))
     print(f"  items done per day   {pair('per_day')}   {n['done']} done")
     print(f"  rework rate          {pair('rework_rate', '{:.1%}')}   reopens {n['reopens']}, lost claims "
           f"(lease ran out) {n['lost_claims']}, review fixes {n['review_fixes']}")
