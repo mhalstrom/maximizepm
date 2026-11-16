@@ -37,7 +37,7 @@ COMMANDS = {
     "manage": ANY,  # becoming the manager: may_manage (serve made this session the manager, or a person)
     "plan": ANY, "launch": ANY, "workspace": ANY,
     "expert": {"start": LEAD, "request": ANY, "adopt": ANY, "end": LEAD, "list": ANY, "fresh": LEAD, "notes": ANY},
-    "view": ANY, "stop": LEAD, "interrupt": LEAD,
+    "view": ANY, "stop": LEAD, "interrupt": LEAD, "pause": LEAD, "resume": LEAD,
     "scope": {"*": LEAD, "show": ANY},
     "queue": {"add": LEAD, "list": ANY, "remove": ANY, "move": LEAD},
     "claim": ANY, "done": ANY, "wait": ANY, "cleanup": ANY, "check": ANY, "ship": ANY, "review": ANY,
@@ -78,7 +78,8 @@ OPS.update({op: LEAD for op in (
     "agent_interrupt", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
-    "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add")})
+    "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",
+    "resume")})
 OPS.update({op: ONLY_PERSON for op in (
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
     "relay_disconnect", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",

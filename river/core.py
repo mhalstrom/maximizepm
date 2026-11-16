@@ -13041,6 +13041,113 @@ def stop_agent(conn, agent, reason, actor=None):
             else "after its next maxpm command, once it commits and releases its item"}
 
 
+# ---------------------------------------------------------------- pause (#5962, policies p79 and p136)
+# maxpm pause: every working session gets a stop request (it commits, releases its task with a note, and ends), no
+# setting changes, and no new session starts (Start, Dispatch, launch, fresh sessions, reviewers, deployers,
+# operational tasks) until --until or maxpm resume. --restart: maxpm serve starts again once nothing is held, and the
+# pause ends then unless it has an --until. The manager and experts keep running. The state is one meta row.
+PAUSE_KEY = "pause"
+
+
+def paused(conn):
+    """The pause in force ({at, by, until, restart, reason, restarted}), or None. A pause whose --until passed is over
+    (serve's pause pass deletes its row)."""
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (PAUSE_KEY,)).fetchone()
+    if not r:
+        return None
+    try:
+        p = json.loads(r["value"])
+    except ValueError:
+        return None
+    return None if p.get("until") and p["until"] <= iso(now()) else p
+
+
+def pause_refusal(conn):
+    """Why a new session may not start now (a pause), or None."""
+    p = paused(conn)
+    if not p:
+        return None
+    return (f"refused: MaximizePM is paused by {p.get('by') or 'a person'}"
+            + (f" until {show_time(p['until'], setting(conn, 'timezone'))}" if p.get("until") else "")
+            + ": no new session starts. To start again: maxpm resume")
+
+
+def pause_status(conn):
+    """The pause and what the working sessions still hold: {"paused", ..., "held": [{agent, holds}], "clear"}."""
+    p = paused(conn) or {}
+    held = []
+    for r in conn.execute("SELECT DISTINCT i.assignee FROM items i JOIN agents a ON a.name=i.assignee "
+                          "WHERE a.kind='ai' AND COALESCE(a.role,'') NOT IN ('manager','expert') "
+                          "AND i.status IN ('in_progress','held') ORDER BY i.assignee"):
+        held.append({"agent": r["assignee"], "holds": holdings_text(holdings(conn, r["assignee"]))})
+    return {"paused": bool(p), **{k: p.get(k) for k in ("at", "by", "until", "restart", "reason")},
+            "held": held, "clear": not held}
+
+
+def pause(conn, until=None, restart=False, reason=None, actor=None):
+    """maxpm pause: see the section head. Returns pause_status with "stopped": the sessions asked to stop."""
+    why = may_change_queue(conn, actor, None)
+    if why:
+        raise RiverError(f"refused: a person or the manager pauses the sessions ({why})")
+    zone = setting(conn, "timezone")
+    t = iso(parse_when(until, zone)) if until else None
+    if t and t <= iso(now()):
+        raise RiverError(f"--until {until!r} is not in the future ({show_time(t, zone)})")
+    p = {"at": iso(now()), "by": actor, "until": t, "restart": bool(restart), "reason": (reason or "").strip() or None}
+    with tx(conn):
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (PAUSE_KEY, json.dumps(p)))
+        _event(conn, None, actor, "paused the sessions" + (f" until {show_time(t, zone)}" if t else "")
+               + (", then maxpm serve restarts" if restart else "") + (f": {p['reason']}" if p["reason"] else ""))
+    stopped = []
+    for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND stop_at IS NULL "
+                          "AND COALESCE(role,'') NOT IN ('manager','expert') AND name<>? ORDER BY name",
+                          (actor or "",)).fetchall():
+        if _live_state(conn, r) == "gone":
+            continue
+        try:
+            stop_agent(conn, r["name"], f"paused by {actor}" + (f": {p['reason']}" if p["reason"] else ""), actor)
+            stopped.append(r["name"])
+        except RiverError:
+            continue  # a person's row, or one that another stop reached first
+    return {**pause_status(conn), "stopped": stopped}
+
+
+def resume(conn, actor=None):
+    """maxpm resume: new sessions start again. The sessions that the pause stopped stay ended."""
+    why = may_change_queue(conn, actor, None)
+    if why:
+        raise RiverError(f"refused: a person or the manager ends a pause ({why})")
+    with tx(conn):
+        n = conn.execute("DELETE FROM meta WHERE key=?", (PAUSE_KEY,)).rowcount
+        if n:
+            _event(conn, None, actor, "ended the pause: new sessions start again")
+    return {"resumed": bool(n)}
+
+
+def pause_pass(conn, can_restart=True):
+    """maxpm serve, each pass: a pause whose --until passed ends; a --restart pause with nothing held returns True
+    once (the loop then restarts serve), and the pause ends unless it has an --until. can_restart False (a hook runs,
+    the desktop app, no serve): the restart waits for a later pass."""
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (PAUSE_KEY,)).fetchone()
+    if not r:
+        return False
+    p = paused(conn)
+    if p is None:
+        with tx(conn):
+            conn.execute("DELETE FROM meta WHERE key=?", (PAUSE_KEY,))
+            _event(conn, None, "maxpm", "the pause ended at its time: new sessions start again")
+        return False
+    if not can_restart or not p.get("restart") or p.get("restarted") or not pause_status(conn)["clear"]:
+        return False
+    with tx(conn):
+        if p.get("until"):
+            conn.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps({**p, "restarted": iso(now())}), PAUSE_KEY))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (PAUSE_KEY,))
+        _event(conn, None, "maxpm", "paused and nothing is held: maxpm serve restarts")
+    return True
+
+
 def stop_request(conn, name):
     """The stop asked for this agent, or None."""
     r = conn.execute("SELECT stop_at, stop_by, stop_reason FROM agents WHERE name=?", (name,)).fetchone() if name else None
@@ -19933,6 +20040,9 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     session gets it. prompt: maxpm launch --prompt, after the profile's first prompt. folder: the folder the person
     picked for a project with none (start_folder). preview (the page's Next line): the item and project only, also
     for a project with no folder yet."""
+    why = None if preview else pause_refusal(conn)  # #5962: maxpm pause holds every new session
+    if why:
+        raise RiverError(why)
     ann = annotate(conn, closed=False)
     project = _project(conn, project)["name"] if project else None
     own = conn.execute("SELECT 1 FROM items WHERE id=? AND reserved_for=? AND status='open'",
@@ -20468,6 +20578,7 @@ def state(conn, closed=True):
             closed_counts[a["project"]] = closed_counts.get(a["project"], 0) + 1
     return {
         "now": iso(now()),
+        "pause": paused(conn),  # maxpm pause (#5962): the top bar shows it, with Resume
         "notifications": setting(conn, "notifications"),  # the bell of the top bar (#6001)
         "projects": project_list(conn),
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)

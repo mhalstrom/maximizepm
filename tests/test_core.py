@@ -5834,6 +5834,65 @@ class AgentQueue(Base):
         self.assertIsNone(core.annotate(self.c)[y]["reserved_for"])
 
 
+class Pause(Base):
+    """#5962 (policies p79 and p136): maxpm pause stops every working session, holds every new session, changes no
+    setting, says what is still held, and restarts serve once nothing is; maxpm resume ends it."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        for n in ("w1", "w2", "x1"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        self.c.execute("UPDATE agents SET role='expert' WHERE name='x1'")
+        self.x = self.add("a", "x")
+        self.y = self.add("a", "y")
+        core.claim(self.c, self.x, "w1")
+
+    def test_pause_stops_the_workers_holds_launches_and_reports_what_is_held(self):
+        before = core.config_list(self.c)
+        r = core.pause(self.c, reason="the night", actor="mark")
+        self.assertEqual(sorted(r["stopped"]), ["w1", "w2"])  # not the expert
+        self.assertEqual([h["agent"] for h in r["held"]], ["w1"])
+        self.assertFalse(r["clear"])
+        self.assertIn("paused by mark: the night", core.stop_request(self.c, "w1")["stop_reason"])
+        self.assertEqual(core.config_list(self.c), before)  # no setting changed
+        with self.assertRaisesRegex(RiverError, "paused by mark.*maxpm resume"):
+            core.launch_target(self.c, item=self.y, actor="mark")
+        self.assertTrue(core.state(self.c)["pause"]["by"] == "mark")
+        core.release(self.c, self.x, "paused", "w1")
+        self.assertTrue(core.pause_status(self.c)["clear"])
+        self.assertFalse(core.pause_pass(self.c))  # no --restart: serve keeps running
+        with self.assertRaisesRegex(RiverError, "a person or the manager"):
+            core.resume(self.c, actor="w2")
+        self.assertEqual(core.resume(self.c, actor="mark"), {"resumed": True})
+        self.assertIsNone(core.paused(self.c))
+        self.assertIsNone(core.pause_refusal(self.c))
+
+    def test_pause_restart_restarts_serve_once_nothing_is_held(self):
+        core.pause(self.c, restart=True, actor="mark")
+        self.assertFalse(core.pause_pass(self.c))  # w1 still holds #x
+        core.release(self.c, self.x, "paused", "w1")
+        self.assertFalse(core.pause_pass(self.c, can_restart=False))  # a hook runs: later
+        self.assertTrue(core.pause_pass(self.c))
+        self.assertIsNone(core.paused(self.c))  # no --until: the pause ends with the restart
+        self.assertFalse(core.pause_pass(self.c))
+
+    def test_pause_until_ends_by_itself(self):
+        core.pause(self.c, until="2h", actor="mark")
+        self.assertIsNotNone(core.paused(self.c))
+        row = json.loads(self.c.execute("SELECT value FROM meta WHERE key='pause'").fetchone()[0])
+        row["until"] = core.iso(core.now() - timedelta(seconds=1))
+        self.c.execute("UPDATE meta SET value=? WHERE key='pause'", (json.dumps(row),))
+        self.assertIsNone(core.paused(self.c))
+        core.pause_pass(self.c)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM meta WHERE key='pause'").fetchone())
+        with self.assertRaisesRegex(RiverError, "not in the future"):
+            core.pause(self.c, until="2020-01-01", actor="mark")
+        with self.assertRaisesRegex(RiverError, "a person or the manager pauses"):
+            core.pause(self.c, actor="w2")
+
+
 class Stop(Base):
     """maxpm stop: a request at the front of the agent's queue; the agent commits, releases, and ends (#427)."""
 

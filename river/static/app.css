@@ -168,8 +168,9 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
 .c-ai::before, .c-p::before { content: none; }
 .iconbtn { background: none; border: 0; border-radius: var(--r-xs); cursor: pointer; padding: 0 6px; color: var(--muted); }
 /* The bell of the top bar (#6001): the warn color while notices are off, so it shows at a glance. */
-#notifyBtn { display: inline-flex; align-items: center; }
+#notifyBtn, #pauseBtn { display: inline-flex; align-items: center; }
 #notifyBtn.bell-off { color: var(--warn); }
+#pauseBtn.paused { color: var(--warn); }  /* the sessions are paused: the button resumes them (#5962) */
 details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 6px; }
 .row[draggable="true"] { cursor: grab; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }

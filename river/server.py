@@ -3190,6 +3190,8 @@ def fresh_sessions(conn, runner=None):
     end = core.parse_duration(core.setting(conn, "idle_end"))
 
     def start(ids, why):
+        if core.paused(conn):
+            return  # #5962: the items wait in the queue until the pause ends
         for i in ids:
             try:
                 out["started"][i] = start_fresh(conn, i, why, runner)["session_name"]
@@ -3307,6 +3309,8 @@ def auto_operational(conn, runner=None):
     max_sessions are live, but at most ops_max_investigations at the same time. Returns {"added": [ids], "pushed":
     {item: agent}, "started": {item: session}, "failed": {}}."""
     out = {"added": core.cleanup_trigger(conn), "pushed": {}, "started": {}, "failed": {}}
+    if core.paused(conn):
+        return out  # #5962: no session starts while paused
     rows = conn.execute("SELECT id, title, kind FROM items WHERE kind='operational' AND status='open' AND assignee IS NULL "
                         "AND (reserved_for IS NULL OR reserved_until < ?) ORDER BY title NOT LIKE 'ops:%', id",
                         (core.iso(core.now()),)).fetchall()
@@ -3357,6 +3361,9 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy
     item's model and effort. Its maxpm go claims the deploy item when it is ready, else it waits for it."""
     import secrets
+    why = core.pause_refusal(conn)  # #5962
+    if why:
+        raise RiverError(why)
     it = core.annotate(conn)[dep_id]
     p = _target_folder(conn, target)
     label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
@@ -3397,6 +3404,8 @@ def auto_release(conn, runner=None):
     "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}, "deploying": {item: hook run},
     "lost": [deploy items whose hook run never ended], "cut" (only when there are): [hook runs whose process ended (core.hook_runs_cut)]}."""
     out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []}
+    if core.paused(conn):
+        return out  # #5962: no reviewer, deployer or deploy hook starts while paused
     ann = None
     cap = int(core.setting(conn, "max_sessions") or 0)
     # A hook run whose process ended (a stop or a crash of serve) ends at once; a cut deploy runs again below (#5654).
@@ -5246,6 +5255,9 @@ OPS = {
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops a session that holds nothing from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _stop_reason(c, a, who), who),
+    # #5962: pause every working session (no new session starts), and start again
+    "pause": lambda c, a, who: core.pause(c, a.get("until") or None, bool(a.get("restart")), a.get("reason"), who),
+    "resume": lambda c, a, who: core.resume(c, who),
     "kill_agent": lambda c, a, who: kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),

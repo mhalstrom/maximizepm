@@ -1970,6 +1970,13 @@ def build_parser(only=None):
     x.add_argument("agent"); x.add_argument("--reason", required=True, help="why; the agent sees it")
     x.add_argument("--kill", action="store_true",
                    help="emergency only: end its process on this host now and release what it holds (uncommitted work is lost)")
+    x = sub.add_parser("pause", help="stop every working session (each commits, releases its task and ends) and start "
+                       "no new one until --until or maxpm resume; settings stay as they are")
+    x.add_argument("--until", help="when new sessions start again: tomorrow 8:00, 2026-12-01, 12h")
+    x.add_argument("--restart", action="store_true", help="restart maxpm serve once no session holds work")
+    x.add_argument("--reason", help="why; each session sees it")
+    x.add_argument("--status", action="store_true", help="only show the pause and what the sessions still hold")
+    sub.add_parser("resume", help="end a pause: new sessions start again")
     x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
                                          "and item); --message then types a message into it at once (a person, or the manager)")
     x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
@@ -4203,6 +4210,12 @@ def dispatch(conn, a, actor):
             from . import server
             return server.kill_agent(conn, a.agent, a.reason, actor)  # also an agent with only a tmux pane (#5278)
         return core.stop_agent(conn, a.agent, a.reason, actor)
+    if c == "pause":  # #5962
+        if a.status:
+            return core.pause_status(conn)
+        return core.pause(conn, a.until, a.restart, a.reason, actor)
+    if c == "resume":
+        return core.resume(conn, actor)
     if c == "scope":
         if a.scmd == "show":
             return {"scopes": core.scope_show(conn, a.agent)}
@@ -7238,6 +7251,23 @@ def render(a, res):
               + (", ".join(f"#{h['id']}" for h in res["released"]) or "no items")
               + (f"; queued items back: {', '.join('#' + str(i) for i in res['queued_back'])}" if res["queued_back"] else "")
               + f". {res['warning']}")
+        return
+    if c == "resume":
+        print("the pause ended: new sessions start again" if res["resumed"] else "nothing was paused")
+        return
+    if c == "pause":
+        if not res["paused"]:
+            print("not paused (maxpm pause stops the sessions)")
+        else:
+            print(f"paused by {res['by'] or 'a person'}" + (f" until {core.show_time(res['until'])}" if res["until"]
+                                                          else " until maxpm resume")
+                  + (": maxpm serve restarts once nothing is held" if res["restart"] else "")
+                  + (f" ({res['reason']})" if res["reason"] else ""))
+        if res.get("stopped"):
+            print("  asked to stop: " + ", ".join(res["stopped"]))
+        for h in res["held"]:
+            print(f"  still holds: {h['agent']}: {h['holds']}")
+        print("  nothing is held" if res["clear"] else "  check again: maxpm pause --status")
         return
     if c == "stop":
         print(f"asked {res['agent']} to stop ({res['reason']}); it ends {res['ends']}"

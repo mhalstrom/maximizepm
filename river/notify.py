@@ -592,13 +592,17 @@ def loop(stop, interval_s=None):
                 error = "; ".join(failed)
             # maxpm serve only: run the new code, but not while a hook or a check runs, in this process or in another
             # process of serve (restart_blocked, #5654)
-            if SERVE_PORT.get("port") and not server.restart_blocked(conn) and server.reload_ready(conn):
+            serving = bool(SERVE_PORT.get("port")) and not server.restart_blocked(conn)
+            # maxpm pause --restart (#5962): once nothing is held, serve starts again
+            paused_restart = core.pause_pass(conn, can_restart=serving and not server.DESKTOP)
+            if serving and (paused_restart or server.reload_ready(conn)):
+                why = "paused, and no session holds work" if paused_restart else "the MaximizePM code changed"
                 if CHILD["on"]:  # a process of its own (river/loop.py, #5569): it ends, and serve restarts
                     CHILD["restart"] = True
                     stop.set()
                 else:
                     conn.close()
-                    server.restart_now("the MaximizePM code changed")
+                    server.restart_now(why)
         except Exception as e:  # keep the loop alive; the next pass retries
             error = f"{type(e).__name__}: {e}"
             _say(f"maxpm notify: {e}")
