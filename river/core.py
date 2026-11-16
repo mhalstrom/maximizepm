@@ -17927,10 +17927,13 @@ def asked_line(agent, qs):
     if not qs:
         return ""
     who = ", ".join(sorted({q["to_agent"] for q in qs}))
-    ids = ", ".join(f"#{q['id']}" for q in qs)
-    return (f"you have {len(qs)} open question(s) to {who} ({ids}): close each that is answered, from any channel: "
+    # #5987 (manager note #16963): a session wrote only 'Question #16956 has no answer yet' to mark, who had to ask
+    # what it was. The reminder carries each question whole, and says to quote it, never the number alone.
+    each = "; ".join(f"#{q['id']} to {q['to_agent']}: \"{full_text(q.get('body'))}\"" for q in qs)
+    return (f"you have {len(qs)} open question(s) to {who} ({each}): close each that is answered, from any channel: "
             f"maxpm --as {agent} answer <id> --self \"<the answer>\"; or that is moot: maxpm --as {agent} withdraw <id> "
-            f"--note \"<why>\"")
+            f"--note \"<why>\". When you tell the person that one still waits, give its whole text, not only its "
+            f"number")
 
 
 # The Stop hook reminds an asker once for each question older than this (#5001): a turn that ends at once after

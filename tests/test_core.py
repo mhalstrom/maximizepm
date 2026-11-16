@@ -10019,7 +10019,8 @@ class Activity(Base):
         self.clock[0] += core.timedelta(minutes=3)
         self.assertIsNone(self.event("Stop", stop_hook_active=True)["remind"])
         got = self.event("Stop")["remind"]
-        self.assertIn(f"you have 1 open question(s) to mark (#{q1}): close each that is answered", got)
+        self.assertIn(f"you have 1 open question(s) to mark (#{q1} to mark: \"Which plan?\"): close each that is "
+                      f"answered", got)  # the whole question (#5987)
         self.assertIn("maxpm --as w answer <id> --self", got)
         self.assertIsNone(self.event("Stop")["remind"])  # once for each question
         # The hook command prints the block decision for Claude Code.
@@ -10031,14 +10032,15 @@ class Activity(Base):
             cli.activity_command(io.StringIO(json.dumps({"hook_event_name": "Stop", "session_id": self.SID})))
         hook = json.loads(out.getvalue())
         self.assertEqual(hook["decision"], "block")
-        self.assertIn(f"(#{q2})", hook["reason"])
+        self.assertIn(f"(#{q2} to mark: \"Push?\")", hook["reason"])
         # go and the footer name both.
         brief = core.go(self.c, self.dir.name, "w", project="shop")
         self.assertEqual([q["id"] for q in brief["asked_open"]], [q1, q2])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render_go(brief)
-        self.assertIn(f"OPEN QUESTIONS YOU ASKED: you have 2 open question(s) to mark (#{q1}, #{q2})", out.getvalue())
+        self.assertIn(f"OPEN QUESTIONS YOU ASKED: you have 2 open question(s) to mark (#{q1} to mark: \"Which plan?\"; "
+                      f"#{q2} to mark: \"Push?\")", out.getvalue())
         with contextlib.redirect_stderr(err):
             cli._footer(self.c, "w")
         self.assertIn(f"2 open question(s) you asked (#{q1}, #{q2})", err.getvalue())
@@ -14816,3 +14818,7 @@ class FullQuestion(Base):
         self.assertIn("Two options in docs/coupon.md; answer A or B", row["summary"])
         self.assertEqual(core.person_item_text(self.c, h),
                          f"#{h} Decide the coupon field\n  Two options in docs/coupon.md; answer A or B")
+        # The end-of-turn reminder of the asker (manager note #16963): each open question whole, and quote it.
+        line = core.asked_line("w1", core.asked_open(self.c, "w1"))
+        self.assertIn(f"#{q} to mark: \"{core.full_text(long)}\"", line)
+        self.assertIn("give its whole text, not only its number", line)
