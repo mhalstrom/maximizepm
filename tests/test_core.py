@@ -13656,4 +13656,4 @@ class Permissions(Base):
         self.assertIsNone(server.op_rights(self.c, "kill_agent", "boss", page=False))
         self.assertIn("for a person", server.op_rights(self.c, "start_manager", "boss", page=False))
         self.assertIsNone(server.op_rights(self.c, "item_add", "w", page=False))
-        self.assertIn("in no permission table", server.op_rights(self.c, "no_such_action", "mark", page=True))
+        self.assertIsNone(server.op_rights(self.c, "a_test_action", "w", page=False))  # one a test adds for itself

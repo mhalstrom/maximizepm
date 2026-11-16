@@ -669,6 +669,7 @@ class PageRelay(Base):
         conn = core.connect()
         self.addCleanup(conn.close)
         self.assertEqual(conn.execute("SELECT actor FROM events").fetchone()[0], "mark@relay")
+        core.register(conn, "mark", human=True)  # a request that is not the page's: a person's rights need a person (#5974)
         import urllib.request
         req = urllib.request.Request(f"http://127.0.0.1:{self.httpd.server_port}/api/action", method="POST",
                                      data=json.dumps({"op": "project_add", "args": {"name": "app"}, "actor": "mark"}).encode(),

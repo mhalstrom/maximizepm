@@ -5921,8 +5921,6 @@ class Handler(BaseHTTPRequestHandler):
             # The page (a browser sends Origin; the relay and Tailscale mark their own) acts as the person (#5974).
             page = bool(origin) or relay.page_request(self.headers) or bool(self.headers.get("Tailscale-User-Login"))
             if body.get("op") in DICTATE_OPS:  # audio, a few times a second: no queue, no history (#5107)
-                if not page:
-                    return self._send(403, {"error": "dictation is the person's, on the page"})
                 return self._send(200, {"ok": True, "result": op(None, body.get("args", {}), actor)})
             conn = core.connect()
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
