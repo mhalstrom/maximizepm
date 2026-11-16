@@ -10,11 +10,13 @@ import { $, esc, act, toast, typeAction, actor, getJson } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
-import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText, loadDiffs } from "./askCard.js";
+import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, fromEvent, typeChip, discussText, loadDiffs } from "./askCard.js";
 import { S, nav } from "../page.js";
 import { openOnRqs } from "./rqsPublish.js";
+import { button } from "./button.js";
 
-const dlg = makeDialog($("#waitDlg"));
+let queue = [], qAt = 0;  // the new cards that open by themselves, and the one shown (#6017)
+const dlg = makeDialog($("#waitDlg"), { onClose: () => { queue = []; } });  // a close ends the queue of new cards (#6017)
 let agent = null, pane = false, onSent = null;
 const cards = new Map();  // "kind:id" -> the card, for its side column and Discuss
 
@@ -77,6 +79,7 @@ function fillSides() {
 export function closeWaiting() { dlg.close(); }
 
 export function openWaiting(s, opts = {}) {
+  queue = [];
   agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null;
   $("#waitTitle").textContent = `Waits for you: ${s.name}`;
   // With no pane, one note under the heading for every question, not the same note under each one (#5359).
@@ -93,7 +96,8 @@ export function openWaiting(s, opts = {}) {
 
 // One card, from a line of Needs you or a person task in Plan > Items (askCard.js fromEvent, fromItem). A question's
 // answer goes to the queue; the session reads it as it does today.
-export function openCard(c) {
+export function openCard(c) { queue = []; drawCard(c); }  // a card the person opened: no queue of new cards
+function drawCard(c) {
   agent = c.kind === "question" ? c.from : null; pane = false; onSent = null;
   $("#waitTitle").textContent = c.kind === "item" ? "Waits for you" : `Waits for you: ${c.from === "maxpm" ? "MaximizePM" : c.from}`;
   cards.clear();
@@ -110,6 +114,33 @@ export async function openItemCard(id) {
   catch (e) { toast(e.message, true); }
 }
 
+// New cards that open by themselves (#6017, you-needs.js autoCards): one card at a time, with "1 of N" and Next;
+// after an answer or a Done the next one shows. Each entry: a Needs you event. Close ends the queue; the cards stay in
+// Needs you.
+export function isOpen() { return !$("#waitDlg").classList.contains("hidden"); }
+export async function openCardQueue(events) {
+  queue = events.slice(); qAt = 0;
+  return showQueued();
+}
+async function showQueued() {
+  while (qAt < queue.length) {
+    const e = queue[qAt];
+    try {
+      const c = e.kind === "item" ? fromItem(await getJson(`api/item/${e.item_id}`)) : fromEvent(e);
+      drawCard(c);
+      if (queue.length > 1) {
+        const line = document.createElement("div");
+        line.className = "wqueue muted t-s";
+        line.innerHTML = `New for you: ${qAt + 1} of ${queue.length}` + (qAt + 1 < queue.length
+          ? button("Next", { data: { wnext: 1 }, title: "The next new card" }) : "");
+        $("#waitList").prepend(line);
+      }
+      return true;
+    } catch (err) { qAt++; }  // gone meanwhile: the next one
+  }
+  queue = []; return false;
+}
+
 function shown() {
   $("#waitDlg").classList.toggle("has-cards", cards.size > 0);
   fillSides();
@@ -121,7 +152,10 @@ function shown() {
 
 function done(form) {
   form.remove();
-  if (!$("#waitList").querySelector(".wblock")) dlg.close();
+  if ($("#waitList").querySelector(".wblock")) return;
+  if (queue.length && qAt + 1 < queue.length) { qAt++; return showQueued(); }  // the next new card (#6017)
+  queue = [];
+  dlg.close();
 }
 
 $("#waitList").addEventListener("input", (e) => {  // a word in Other picks Other
@@ -167,6 +201,7 @@ $("#waitList").addEventListener("submit", async (e) => {
   finally { btn.disabled = false; }
 });
 $("#waitList").addEventListener("click", async (e) => {
+  if (e.target.closest("[data-wnext]")) { qAt++; return showQueued(); }
   if (e.target.closest("[data-open]")) dlg.close();
   const opt = e.target.closest("[data-opt]");  // an option of the decision form: it is the answer
   if (opt) {

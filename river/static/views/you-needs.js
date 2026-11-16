@@ -9,7 +9,7 @@ import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
-import { openCard, openItemCard } from "../components/waitDialog.js";
+import { openCard, openItemCard, openCardQueue, isOpen as waitOpen } from "../components/waitDialog.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
 import { fromEvent, typeChip } from "../components/askCard.js";
 import { openSignin } from "./signinAsk.js";
@@ -30,7 +30,34 @@ export async function pollNeedsYou() {
   const h = humanActor();
   const r = await fetch("api/needs-you" + (h ? "?human=" + encodeURIComponent(h) : "")); if (!r.ok) return;
   NY = (await r.json()).events;
-  renderNeedsYou(); notifyNew();
+  renderNeedsYou(); notifyNew(); autoCards();
+}
+
+// #6017 (mark 2026-11-15: 'This question should pop up as a modal, with all of the information that is relevant'): a
+// question or a person item that reaches the person opens its card by itself, once, over any tab, as Allow sign-ins
+// does. This browser keeps the ids it showed; the first time it only records what is open, so old cards do not all
+// open. It waits while another dialog is open, the page is hidden, or the person types in a box. Several new ones:
+// one card with "1 of N" and Next (waitDialog.js). The bell (#6001) is for the phone and Mac notices; this opens on
+// the page also with the bell off.
+const AUTO_KEEP = 500;
+export function newCards(list, seen) {
+  const cards = list.filter(e => e.kind === "item" || e.message_kind === "question");
+  if (!Array.isArray(seen)) return { show: [], seen: cards.map(e => e.id).slice(-AUTO_KEEP) };
+  const s = new Set(seen), show = cards.filter(e => !s.has(e.id));
+  return { show, seen: show.length ? [...seen, ...show.map(e => e.id)].slice(-AUTO_KEEP) : seen };
+}
+function autoCards() {
+  const h = humanActor(); if (!h) return;
+  const key = "river.card.auto." + h;
+  let seen = null;
+  try { seen = JSON.parse(store(key) || "null"); } catch (e) { seen = null; }
+  const got = newCards(NY, seen);
+  if (!got.show.length) { if (!Array.isArray(seen)) store(key, JSON.stringify(got.seen)); return; }
+  const typing = document.activeElement && document.activeElement.matches("input, textarea, [contenteditable]")
+    && (document.activeElement.value || document.activeElement.textContent || "").trim();
+  if (document.hidden || typing || waitOpen() || document.querySelector(".dlg:not(.hidden)")) return;  // later
+  store(key, JSON.stringify(got.seen));
+  openCardQueue(got.show);
 }
 
 // An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE), or for a manager that
