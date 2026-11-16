@@ -334,6 +334,24 @@ def _related_lines(rows, indent="  "):
     return out
 
 
+def _thing_check(conn, atype, text, project=None, item=None):
+    """#5956 (policy g3): a Look or Approve request to a person names the page, picture or commit, or quotes the
+    text; refused otherwise. A relative path is read from the project's folder, else from the current folder."""
+    root = None
+    try:
+        if project:
+            root = core._project(conn, project)["path"]
+        elif item is not None:
+            r = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+                             (int(item),)).fetchone()
+            root = r["path"] if r else None
+    except RiverError:
+        root = None
+    why = core.thing_refusal(atype, text, root or os.getcwd())
+    if why:
+        raise RiverError(why)
+
+
 def _earlier_lines(rows, indent="  "):
     """The earlier decisions of a person item or a question (#5955, policy g2), or no lines."""
     if not rows:
@@ -4483,7 +4501,9 @@ def dispatch(conn, a, actor):
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True, approve_once=a.once,
-                            approve_on=a.approve_on)
+                            approve_on=a.approve_on,
+                            # a Look or Approve item carries the thing itself (#5956, policy g3)
+                            thing_type=(a.atype or core.action_type(title)) if a.doer == "human" else None)
         if a.atype and res.get("id"):
             core.config_set(conn, "action_type", a.atype, item=res["id"], actor=actor)
         return res
@@ -4714,6 +4734,8 @@ def dispatch(conn, a, actor):
         to, text = (a.words[0], a.words[1]) if len(a.words) == 2 else (None, a.words[0])
         kind = {"ask": "question", "alert": "alert", "note": "note"}[c]
         text = core.typed_body(text, getattr(a, "atype", None), kind)
+        if kind == "question" and to and core._is_person(conn, to):  # #5956, policy g3
+            _thing_check(conn, core.action_type(text, "decide"), text, item=a.item)
         return core.message(conn, kind, text, to, a.holder_of, a.item, getattr(a, "file", None), os.getcwd(), actor,
                             a.goal, a.level, a.blocked)
     if c == "decline":
@@ -4737,6 +4759,9 @@ def dispatch(conn, a, actor):
     if c == "blockers":
         return core.blockers(conn, a.id)
     if c == "send":
+        if a.kind == "question" and a.to and core._is_person(conn, a.to):  # #5956, policy g3
+            body = core.typed_body(a.text, a.atype, a.kind)
+            _thing_check(conn, core.action_type(body, "decide"), body, item=a.item)
         return core.send(conn, a.kind, core.typed_body(a.text, a.atype, a.kind), a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
                          a.item, a.reply, actor, a.level, a.blocked)
     if c == "answer":

@@ -6136,3 +6136,88 @@ class StartThatStops(unittest.TestCase):
             cli.print_trust({"trust": str(work)})
         self.assertIn(f"Claude Code asks first whether it may trust {work}: answer 'Yes, I trust this folder'",
                       out.getvalue())
+
+
+class Exhibits(unittest.TestCase):
+    """#5956 (policy g3): a person's Look or Approve card carries the thing itself: the screenshot of a page it names
+    (serve takes it), a picture file, or a commit's diff; a request with none of them and no quoted text is refused."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        self.repo = Path(self.dir.name) / "web"
+        self.repo.mkdir()
+        core.project_add(self.c, "web", path=str(self.repo))
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        shots = []
+        self.shots = shots
+        old = server.SHOT_RUNNER
+        server.SHOT_RUNNER = lambda project, url: (shots.append((project, url)), b"\x89PNG fake")[1]
+        self.addCleanup(setattr, server, "SHOT_RUNNER", old)
+
+    def get(self, path):
+        h, out = server.Handler.__new__(server.Handler), {}
+        h.path = path
+        h._refuse = lambda: False
+        h._send = lambda code, body, ctype="application/json", headers=None: out.update(code=code, body=body,
+                                                                                        ctype=ctype)
+        h.do_GET()
+        return out
+
+    def test_a_picture_card_gets_the_screenshot_of_the_page_it_names(self):
+        (self.repo / "mock.png").write_bytes(b"\x89PNG mock")
+        (self.repo / "draft.html").write_text("<h1>Draft</h1>")
+        found = core.exhibit_sources("Look at https://example.com/pricing. and mock.png and draft.html", self.repo)
+        self.assertEqual([w for w, _ in found], ["shot", "image", "shot"])
+        self.assertTrue(found[2][1].startswith("file://") and found[2][1].endswith("draft.html"))
+        i = core.item_add(self.c, "web", "Look at the pricing page https://example.com/pricing", doer="human",
+                          actor="w1")["id"]
+        (x,) = core.item_show(self.c, i)["exhibits"]
+        self.assertEqual((x["what"], x["ready"]), ("shot", False))
+        self.assertEqual(self.get(f"/api/exhibit/{x['id']}")["code"], 404)  # not made yet
+        server.exhibits_pass(self.c, wait=True)
+        self.assertEqual(self.shots, [("web", "https://example.com/pricing")])
+        (x,) = core.item_show(self.c, i)["exhibits"]
+        self.assertTrue(x["ready"])
+        got = self.get(f"/api/exhibit/{x['id']}")
+        self.assertEqual((got["code"], got["ctype"], got["body"]), (200, "image/png", b"\x89PNG fake"))
+        row = next(n for n in core.needs_you(self.c, "mark") if n["item_id"] == i)
+        self.assertEqual([e["id"] for e in row["exhibits"]], [x["id"]])
+
+    def test_a_picture_card_of_a_commit_gets_its_diff_and_another_hex_is_dropped(self):
+        run = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True, text=True)
+        run("init", "-q")
+        run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "first")
+        (self.repo / "a.txt").write_text("new line\n")
+        run("add", "a.txt")
+        run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "add a.txt")
+        sha = run("rev-parse", "--short=9", "HEAD").stdout.strip()
+        if not (re.search(r"\d", sha) and re.search(r"[a-f]", sha)):
+            self.skipTest("this commit id has no letter or no digit")
+        i = core.item_add(self.c, "web", f"Approve the change {sha} (not deadbeef1)", doer="human", actor="w1")["id"]
+        server.exhibits_pass(self.c, wait=True)
+        (x,) = core.item_show(self.c, i)["exhibits"]  # deadbeef1 is no commit here: dropped
+        self.assertEqual((x["what"], x["source"], x["ready"]), ("diff", sha, True))
+        got = self.get(f"/api/exhibit/{x['id']}")
+        self.assertIn("+new line", got["body"].decode())
+
+    def test_a_picture_or_quote_is_needed_for_look_and_approve(self):
+        from river import cli
+        why = core.thing_refusal("look", "Look at the new header, yes?")
+        self.assertIn("carries the thing itself", why)
+        self.assertIsNone(core.thing_refusal("look", "Look at https://example.com/new"))
+        self.assertIsNone(core.thing_refusal("approve", 'Approve this line: "MaximizePM runs your agents for you"'))
+        self.assertIsNone(core.thing_refusal("decide", "Decide the price"))
+        with self.assertRaisesRegex(RiverError, "policy g3"):
+            cli._thing_check(self.c, "approve", "Approve the release", project="web")
+        (self.repo / "notes.png").write_bytes(b"x")
+        cli._thing_check(self.c, "approve", "Approve the release notes in notes.png", project="web")
+        # A question to a person names the thing the same way; serve takes its screenshot too.
+        m = core.send(self.c, "question", "Look at https://example.com/a and say yes", to="mark", actor="w1")
+        self.assertEqual([e["what"] for e in m["exhibits"]], ["shot"])

@@ -727,6 +727,7 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
     limit = core.parse_duration(core.setting(conn, "question_popup_max", agent=a["name"]))
     qs = _open_questions(conn, a["name"])
     early = core.earlier_for(conn, "message", [r["id"] for r in qs]) if qs else {}  # g2 (#5955)
+    shown = core.exhibits_for(conn, "message", [r["id"] for r in qs]) if qs else {}  # g3 (#5956)
     for r in qs:
         if said and (core._ts(r["created_at"]) or said) <= said:
             continue
@@ -734,7 +735,7 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
         old = bool(limit.total_seconds()) and core.now() - core.parse_iso(r["created_at"]) > limit
         out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"],
                     "asked_at": r["created_at"], "old": old, "note": core.forward_note(conn, r),
-                    "earlier": early.get(r["id"], []), "from": a["name"],
+                    "earlier": early.get(r["id"], []), "exhibits": shown.get(r["id"], []), "from": a["name"],
                     # the card's tag and level (#5998, #6002)
                     "type": core.action_type(r["body"], "decide"), "level": r["level"], "blocked": r["blocked"]})
     return out

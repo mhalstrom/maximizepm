@@ -250,6 +250,11 @@ button.srow-it { cursor: pointer; }
 .acard-main { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
 .acard-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-3); }
 .acard-d { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-s); color: var(--muted); }
+/* the thing itself (#5956): screenshots, pictures and diffs in line */
+.acard-things { display: flex; flex-direction: column; gap: var(--sp-3); }
+.acard-thing { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.acard-shot { display: block; max-width: 100%; height: auto; border: var(--hair) solid var(--line); border-radius: var(--r-s); }
+.acard-diff { max-height: 50vh; overflow: auto; font-size: var(--fs-xs); white-space: pre; margin: 0; }
 .acard-opts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .acard-opts .acard-opt { border: var(--hair) solid var(--line); }
 .acard-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }

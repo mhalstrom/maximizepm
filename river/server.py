@@ -1280,6 +1280,77 @@ def tmux_tidy(conn):
 TIDY = {"at": None, "screens": {}}
 
 
+SHOT_RUNNER = None   # tests: fn(project, url) -> PNG bytes, instead of the project's browser
+DIFF_MAX = 40000     # characters of a commit's diff on a card
+_SHOTS = {"busy": False}
+
+
+def _shot(project, url):
+    from . import browser
+    if SHOT_RUNNER:
+        return SHOT_RUNNER(project, url)
+    conn = core.connect()
+    try:
+        b = browser.get(project, None, conn)
+    finally:
+        conn.close()
+    return browser.page_shot(b, url)
+
+
+def exhibits_pass(conn, wait=False):
+    """One pass of the loop of maxpm serve (#5956, policy g3): the diff of each commit that a new card names (git show
+    in the card's project folder; a hex id that is no commit there is dropped), and the screenshot of each page it
+    names (the project's browser, a background tab), in a thread of its own, one at a time. wait: the shots in this
+    pass (tests). Returns {"diffs": n, "shots": n}."""
+    import subprocess
+    rows = core.exhibits_pending(conn)
+    out = {"diffs": 0, "shots": 0}
+    for r in [x for x in rows if x["what"] == "diff"]:
+        folder = r["folder"]
+        if not folder or not Path(folder).expanduser().is_dir():
+            core.exhibit_made(conn, r["id"], drop=True)  # no repository to read it from: not a commit we can show
+            continue
+        p = subprocess.run(["git", "-C", str(Path(folder).expanduser()), "show", "--stat", "--patch", "--format=fuller",
+                            "--no-color", r["source"] + "^{commit}", "--"], capture_output=True, text=True, timeout=15)
+        if p.returncode != 0:
+            core.exhibit_made(conn, r["id"], drop=True)
+            continue
+        text = p.stdout if len(p.stdout) <= DIFF_MAX else p.stdout[:DIFF_MAX] + "\n... (cut: git show " + r["source"] + ")"
+        core.exhibit_made(conn, r["id"], body=text)
+        out["diffs"] += 1
+    shots = [x for x in rows if x["what"] == "shot"]
+    if not shots or _SHOTS["busy"]:
+        return out
+
+    def run():
+        try:
+            for r in shots:
+                c2 = core.connect()
+                try:
+                    if not r["project"]:
+                        core.exhibit_made(c2, r["id"], error="no project: nobody's browser can open it")
+                        continue
+                    png = _shot(r["project"], r["source"])
+                    folder = core.db_path().parent / "exhibits"
+                    folder.mkdir(exist_ok=True)
+                    f = folder / f"{r['id']}.png"
+                    f.write_bytes(png)
+                    core.exhibit_made(c2, r["id"], path=str(f))
+                    out["shots"] += 1
+                except Exception as e:  # noqa: BLE001 - a page that does not load, no Chrome: the card says so
+                    core.exhibit_made(c2, r["id"], error=f"{type(e).__name__}: {e}"[:300])
+                finally:
+                    c2.close()
+        finally:
+            _SHOTS["busy"] = False
+    _SHOTS["busy"] = True
+    if wait:
+        run()
+    else:
+        threading.Thread(target=run, daemon=True, name="maxpm-exhibits").start()
+    return out
+
+
 def auto_tidy(conn):
     """One pass of the loop of maxpm serve (every notify_interval): every tidy_every (0s: never) it closes the panes
     that maxpm view --tidy closes (_done_panes). A pane where the agent CLI still runs closes only when its screen
@@ -5802,6 +5873,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, setup_status(conn))
             finally:
                 conn.close()
+        if path.startswith("/api/exhibit/"):  # a card's picture or diff (#5956, policy g3)
+            conn = core.connect()
+            try:
+                r = conn.execute("SELECT what, path, body FROM exhibits WHERE id=?",
+                                 (int(path.rsplit("/", 1)[1]),)).fetchone()
+            except ValueError:
+                r = None
+            finally:
+                conn.close()
+            if r is None or not (r["path"] or r["body"]):
+                return self._send(404, {"error": "no such picture or diff (yet)"})
+            if r["body"] is not None:
+                return self._send(200, r["body"].encode(), "text/plain; charset=utf-8")
+            f = Path(r["path"])
+            types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                     ".webp": "image/webp", ".svg": "image/svg+xml"}
+            if f.suffix.lower() not in types or not f.is_file():
+                return self._send(404, {"error": "the picture is gone"})
+            return self._send(200, f.read_bytes(), types[f.suffix.lower()])
         if path.startswith("/api/item/") and path.endswith("/context"):
             # The clicked task in the work of the session that owns it (#5571).
             conn = core.connect()

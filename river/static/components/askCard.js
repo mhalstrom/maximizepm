@@ -20,18 +20,46 @@ export const typeChip = (t) => t ? chip("c-type-" + t, t[0].toUpperCase() + t.sl
 export function fromEvent(e) {
   return e.kind === "item"
     ? { kind: "item", id: e.item_id, item_id: e.item_id, title: e.item_title || "", detail: e.item_context || e.item_notes || "",
-        type: e.type, priority: e.priority, project: e.project, at: e.opened_at, earlier: e.earlier || [] }
+        type: e.type, priority: e.priority, project: e.project, at: e.opened_at, earlier: e.earlier || [],
+        exhibits: e.exhibits || [] }
     : { kind: "question", id: e.message_id, item_id: e.item_id, title: e.body || "", type: e.type, level: e.message_level,
-        blocked: e.message_blocked, project: e.project, from: e.from_agent, at: e.opened_at, earlier: e.earlier || [] };
+        blocked: e.message_blocked, project: e.project, from: e.from_agent, at: e.opened_at, earlier: e.earlier || [],
+        exhibits: e.exhibits || [] };
 }
 export function fromWaiting(w, session) {
   return { kind: "question", id: w.id, item_id: w.item_id, title: w.body || "", type: w.type || "decide", level: w.level,
-    blocked: w.blocked, from: w.from || session, at: w.asked_at, note: w.note, earlier: w.earlier || [] };
+    blocked: w.blocked, from: w.from || session, at: w.asked_at, note: w.note, earlier: w.earlier || [],
+    exhibits: w.exhibits || [] };
 }
 export function fromItem(it) {
   return { kind: "item", id: it.id, item_id: it.id, title: it.title || "", detail: it.context || it.notes || "",
     type: it.type, priority: it.effective_priority != null ? it.effective_priority : it.priority, project: it.project,
-    at: it.created_at, earlier: it.earlier || [], tries: it.tries || null };
+    at: it.created_at, earlier: it.earlier || [], tries: it.tries || null, exhibits: it.exhibits || [] };
+}
+
+// The thing itself (#5956, policy g3): the screenshot of a page the card names, a picture file, or a commit's diff,
+// in line. One that serve has not made yet says so; one it could not make says why, with the source.
+export function exhibitsHtml(c) {
+  const xs = c.exhibits || [];
+  if (!xs.length) return "";
+  return `<div class="acard-things">${xs.map(x => {
+    const src = `<div class="muted t-s">${esc(x.what === "diff" ? "commit " + x.source : x.source)}</div>`;
+    if (x.error) return `<div class="acard-thing">${src}<div class="muted t-s">No picture: ${esc(x.error)}</div></div>`;
+    if (!x.ready) return `<div class="acard-thing">${src}<div class="muted t-s">MaximizePM makes the ${x.what === "diff" ? "diff" : "screenshot"} now…</div></div>`;
+    return x.what === "diff"
+      ? `<details class="acard-thing" open><summary>${esc("commit " + x.source)}</summary><pre class="acard-diff" data-exhibit="${x.id}">…</pre></details>`
+      : `<div class="acard-thing">${src}<a href="api/exhibit/${x.id}" target="_blank" rel="noopener"><img class="acard-shot" src="api/exhibit/${x.id}" alt="${esc(x.source)}" loading="lazy"></a></div>`;
+  }).join("")}</div>`;
+}
+
+// The text of each diff on the cards in box (read once per card draw).
+export function loadDiffs(box) {
+  box.querySelectorAll("pre[data-exhibit]").forEach(async (pre) => {
+    try {
+      const r = await fetch(`api/exhibit/${pre.dataset.exhibit}`);
+      pre.textContent = r.ok ? await r.text() : "The diff is gone.";
+    } catch (_) { pre.textContent = "The diff did not load."; }
+  });
 }
 
 // The tries of one task side by side (#5996): each try's state and what its session said to look at, and a button
@@ -74,6 +102,7 @@ export function cardHtml(c, { pane = false } = {}) {
     <div class="acard-main">${head}
       <div class="wq">${esc(c.title)}</div>
       ${c.detail ? `<div class="acard-d">${esc(clip(c.detail, 1200))}</div>` : ""}
+      ${exhibitsHtml(c)}
       ${c.note ? `<div class="muted">The manager: ${esc(c.note)}</div>` : ""}
       ${c.tries && c.tries.length ? triesHtml(c) : optionsHtml(c)}
       ${earlierHtml(c.earlier)}

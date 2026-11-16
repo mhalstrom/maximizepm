@@ -566,6 +566,7 @@ def loop(stop, interval_s=None):
                 server.auto_release,  # a ready review gets a reviewer, a ready deploy its deployer
                 server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
+                server.exhibits_pass,  # the screenshot or diff that a new card names (#5956)
                 server.workspace_sweep,  # the worktree of an ended session goes when its branch is merged (#5856)
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.browser_sweep,  # a session's Chrome whose session ended or that idled browser_idle_end (#5636)

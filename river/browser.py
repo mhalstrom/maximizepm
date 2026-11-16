@@ -6018,6 +6018,36 @@ class PersonSteps:
             return [shlex.join(step_words(s)) for s in self.steps]
 
 
+def page_shot(b, url, settle=1.5, timeout=30.0, width=1280, height=900):
+    """A PNG (bytes) of one page, opened in a background tab of the project's browser b (not the tab the person
+    sees), for a person's card (#5956, policy g3: the thing itself, not a link). The tab closes at the end."""
+    b.start()
+    end = time.monotonic() + timeout
+    target = b.call("Target.createTarget", {"url": "about:blank", "background": True})["targetId"]
+    if b.attached:
+        b.mine.add(target)
+    try:
+        session = b.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+        b.call("Page.enable", session=session)
+        b.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 1,
+                                                     "mobile": False}, session=session)
+        b.call("Page.navigate", {"url": url}, session=session, timeout=min(CALL_WAIT, timeout))
+        while time.monotonic() < end:
+            state = b.call("Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True},
+                           session=session, timeout=5).get("result", {}).get("value")
+            if state == "complete":
+                break
+            time.sleep(0.25)
+        time.sleep(max(0.0, min(settle, end - time.monotonic())))
+        data = b.call("Page.captureScreenshot", {"format": "png"}, session=session, timeout=30)["data"]
+        return base64.b64decode(data)
+    finally:
+        try:
+            b.call("Target.closeTarget", {"targetId": target}, timeout=5)
+        except Exception:  # noqa: BLE001 - Chrome ended: the tab is gone with it
+            pass
+
+
 def walk(b, pages, settle=3.0, timeout=60.0):
     """Open each address of pages in a background tab of the project's browser b (not the tab the person sees) and
     record, for each page: the uncaught exceptions, console.error calls and error log entries with their stack

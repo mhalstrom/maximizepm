@@ -10,7 +10,7 @@ import { $, esc, act, toast, typeAction, actor, getJson } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
-import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText } from "./askCard.js";
+import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText, loadDiffs } from "./askCard.js";
 import { S, nav } from "../page.js";
 import { openOnRqs } from "./rqsPublish.js";
 
@@ -113,6 +113,7 @@ export async function openItemCard(id) {
 function shown() {
   $("#waitDlg").classList.toggle("has-cards", cards.size > 0);
   fillSides();
+  loadDiffs($("#waitList"));  // a commit's diff on a card (#5956)
   dlg.open();
   const first = $("#waitList").querySelector("input:checked, textarea");
   if (first) first.focus();

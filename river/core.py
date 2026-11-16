@@ -1019,6 +1019,23 @@ CREATE TABLE IF NOT EXISTS earlier_decisions (
   PRIMARY KEY (kind, ref_id, match_kind, match_id)
 );
 
+-- Exhibits (#5956, global policy g3: the thing itself, not a link): what a person item or a question to a person
+-- names, for its card: a screenshot of a URL or local page (what shot; maxpm serve takes it), an image file (image),
+-- or the diff of a commit (diff; serve reads it). Pending while path, body and error are NULL. Readers: exhibits_for
+-- (item_show, needs_you, sessions.waiting_for), GET /api/exhibit/<id>, server.exhibits_pass.
+CREATE TABLE IF NOT EXISTS exhibits (
+  id        INTEGER PRIMARY KEY,
+  kind      TEXT NOT NULL CHECK (kind IN ('item','message')),
+  ref_id    INTEGER NOT NULL,
+  what      TEXT NOT NULL CHECK (what IN ('shot','image','diff')),
+  source    TEXT NOT NULL,
+  path      TEXT,
+  body      TEXT,
+  made_at   TEXT,
+  error     TEXT
+);
+CREATE INDEX IF NOT EXISTS exhibits_ref ON exhibits(kind, ref_id);
+
 -- Approvals (#5957; policies p4 and p109): a person's item whose yes (a person marks it
 -- done) counts for one action (once) and/or only on one day (on_day, YYYY-MM-DD in the timezone setting; the item is
 -- blocked until 08:00 that day). The acting session runs maxpm approval use <id> --for "<action>" right before the
@@ -9635,7 +9652,8 @@ def agent_now(conn, name, doing, headline=None):
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
-             kind=None, short=None, start=None, start_check=False, approve_once=False, approve_on=None):
+             kind=None, short=None, start=None, start_check=False, approve_once=False, approve_on=None,
+             thing_type=None):
     """Add an item. `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
     yes counts for one action, and/or only on that day (approvals, #5957). `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
@@ -9698,6 +9716,11 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
                          actor, doer=doer) if check_similar or new else []
     if like and check_similar and new is None:
         raise SimilarWork(like)
+    if thing_type and doer == "human":  # maxpm add: a Look or Approve item carries the thing (#5956, policy g3)
+        why = thing_refusal(thing_type, f"{title}\n{context or ''}\n{notes or ''}",
+                            _project(conn, project)["path"] or os.getcwd())
+        if why:
+            raise RiverError(why)
     why = _ops_fix_refusal(conn, actor, doer, found_during, blocks)
     if why:
         raise RiverError(why)
@@ -9718,6 +9741,8 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             conn.execute("UPDATE items SET short=? WHERE id=?", (short, iid))
         if earlier:
             _earlier_store(conn, "item", iid, earlier)
+        if doer == "human":  # the page, picture or commit it names goes on its card (#5956)
+            _exhibits_store(conn, "item", iid, exhibit_sources(f"{title}\n{context or ''}\n{notes or ''}", p["path"]))
         if approve_once or approve_on:
             conn.execute("INSERT INTO approvals(item_id, once, on_day) VALUES (?,?,?)", (iid, int(bool(approve_once)), day))
             _event(conn, iid, actor, "approval: " + ", ".join(
@@ -11352,6 +11377,95 @@ def earlier_text(rows, width=240):
 
 EARLIER_HINT = ("Earlier decisions on this subject (policy g2): when one covers this ask, close it and quote that "
                 "decision; else ask only what it leaves open, and name it.")
+
+
+# Exhibits (#5956, global policy g3): the thing a person looks at or approves goes on the card itself.
+EXHIBIT_IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+EXHIBIT_PAGES = (".html", ".htm")
+EXHIBIT_MAX = 4  # things of one card
+_QUOTED = re.compile(r'"[^"\n]{20,}"|“[^”]{20,}”|```|^\s*>\s+\S', re.M)  # the exact text, quoted or as a block
+THING_TYPES = ("look", "approve")
+# A bare file name with a picture or page ending ("mock.png"), which _PATH_RE (a path with a slash) does not take.
+_FILE_NAME = re.compile(r"(?<![\w/~.-])[\w-][\w.-]*\.(?:png|jpe?g|gif|webp|svg|html?)(?![\w.])", re.I)
+
+
+def exhibit_sources(text, root=None):
+    """[(what, source)] that a text names: a URL (shot), an existing local page (shot, as a file: URL), an existing
+    image file (image), a hex id with a digit and a letter (diff, a commit when serve finds it). root: the folder a
+    relative path is read from (the project's folder)."""
+    out = []
+    for u in _URL_RE.findall(text or ""):
+        out.append(("shot", u.rstrip(".,;:")))
+    rest = _URL_RE.sub(" ", text or "")
+    for p in _PATH_RE.findall(rest) + _FILE_NAME.findall(rest):
+        p = p.rstrip(".,;:")
+        f = Path(p).expanduser()
+        if not f.is_absolute() and root:
+            f = Path(root).expanduser() / f
+        low = f.name.lower()
+        if low.endswith(EXHIBIT_IMAGES + EXHIBIT_PAGES) and f.is_file():
+            out.append(("image", str(f.resolve())) if low.endswith(EXHIBIT_IMAGES)
+                       else ("shot", f.resolve().as_uri()))
+    for h in _HEX_RE.findall(rest):
+        if re.search(r"\d", h) and re.search(r"[a-f]", h) and len(h) <= 40:
+            out.append(("diff", h))
+    seen, uniq = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq[:EXHIBIT_MAX]
+
+
+def thing_refusal(atype, text, root=None):
+    """Why a Look or Approve request is refused (#5956, policy g3): it names no page, picture or commit and quotes no
+    text. None for another type, or when it has the thing."""
+    if atype not in THING_TYPES or exhibit_sources(text, root) or _QUOTED.search(text or ""):
+        return None
+    return (f"refused: {'an' if atype == 'approve' else 'a'} {atype.capitalize()} request carries the thing itself "
+            f"(policy g3): name the page (a URL or a "
+            f".html file: MaximizePM takes the screenshot), a picture file, or the commit (its diff goes on the card), "
+            f"or quote the exact text in \"...\". A link with 'yes?' alone is not enough")
+
+
+def _exhibits_store(conn, kind, ref_id, sources):
+    """Inside a tx: the things a new person item or question names; an image is ready at once."""
+    for what, src in sources:
+        conn.execute("INSERT INTO exhibits(kind, ref_id, what, source, path, made_at) VALUES (?,?,?,?,?,?)",
+                     (kind, ref_id, what, src, src if what == "image" else None, iso(now()) if what == "image" else None))
+
+
+def exhibits_for(conn, kind, ref_ids):
+    """{ref_id: [{id, what, source, ready, error}]} for the cards; the picture or diff itself: GET /api/exhibit/<id>."""
+    ids = [int(x) for x in ref_ids if x is not None]
+    if not ids:
+        return {}
+    out = {}
+    for r in conn.execute(f"SELECT id, ref_id, what, source, path, body IS NOT NULL has_body, error FROM exhibits "
+                          f"WHERE kind=? AND ref_id IN ({','.join('?' * len(ids))}) ORDER BY id", [kind, *ids]):
+        out.setdefault(r["ref_id"], []).append({"id": r["id"], "what": r["what"], "source": r["source"],
+                                                "ready": bool(r["path"] or r["has_body"]), "error": r["error"]})
+    return out
+
+
+def exhibits_pending(conn, limit=4):
+    """Shots and diffs that serve has not made yet, with the project folder of their card."""
+    return [dict(r) for r in conn.execute(
+        "SELECT e.*, COALESCE(pi.path, pm.path) folder, COALESCE(pi.name, pm.name) project FROM exhibits e "
+        "LEFT JOIN items i ON e.kind='item' AND i.id=e.ref_id LEFT JOIN projects pi ON pi.id=i.project_id "
+        "LEFT JOIN messages m ON e.kind='message' AND m.id=e.ref_id LEFT JOIN items mi ON mi.id=m.item_id "
+        "LEFT JOIN projects pm ON pm.id=mi.project_id "
+        "WHERE e.path IS NULL AND e.body IS NULL AND e.error IS NULL ORDER BY e.id LIMIT ?", (limit,))]
+
+
+def exhibit_made(conn, exhibit_id, path=None, body=None, error=None, drop=False):
+    """serve made a shot or a diff (or could not: error); drop: the hex id was no commit, so the row goes."""
+    with tx(conn):
+        if drop:
+            conn.execute("DELETE FROM exhibits WHERE id=?", (exhibit_id,))
+        else:
+            conn.execute("UPDATE exhibits SET path=?, body=?, error=?, made_at=? WHERE id=?",
+                         (path, body, error, iso(now()), exhibit_id))
 
 
 def _earlier_note(conn, kind, ref_id):
@@ -14212,8 +14326,12 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     rows = rows[:limit]
     early = {"item": earlier_for(conn, "item", [r["item_id"] for r in rows if r["kind"] == "item"]),
              "message": earlier_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
+    shown = {"item": exhibits_for(conn, "item", [r["item_id"] for r in rows if r["kind"] == "item"]),
+             "message": exhibits_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
     for r in rows:
-        r["earlier"] = early[r["kind"]].get(r["item_id"] if r["kind"] == "item" else r["message_id"], [])
+        ref = r["item_id"] if r["kind"] == "item" else r["message_id"]
+        r["earlier"] = early[r["kind"]].get(ref, [])
+        r["exhibits"] = shown[r["kind"]].get(ref, [])  # #5956
         del r["_key"]
         r["notifications"] = [dict(x) for x in conn.execute(
             "SELECT channel, state, attempts, last_error, sent_at FROM notifications WHERE event_id=? ORDER BY channel",
@@ -16823,6 +16941,7 @@ def item_show(conn, item_id, ann=None):
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
             a["tries"] = [{"k": k, **t} for k, t in sorted(tries_of(conn, iid).items())]
         a["approval"] = approval(conn, iid)  # #5957
+        a["exhibits"] = exhibits_for(conn, "item", [iid]).get(iid, [])  # #5956
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
     return a
 
@@ -17036,6 +17155,10 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             # g2 (#5955): the decisions the person made on the same subject go with the question, so the manager
             # (which sees it first) and the person read them before they answer.
             _earlier_store(conn, "message", mid, earlier_find(conn, body, skip_message=mid))
+            # g3 (#5956): the page, picture or commit it names goes on its card
+            root = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+                                (item,)).fetchone() if item is not None else None
+            _exhibits_store(conn, "message", mid, exhibit_sources(body, root["path"] if root else None))
         held = _hold_question(conn, mid) if kind in ("question", "alert") else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
@@ -17591,6 +17714,7 @@ def message_show(conn, msg_id):
     m = _msg_dict(r)
     if m["kind"] == "question":
         m["earlier"] = earlier_for(conn, "message", [m["id"]]).get(m["id"], [])
+        m["exhibits"] = exhibits_for(conn, "message", [m["id"]]).get(m["id"], [])  # #5956
     return m
 
 

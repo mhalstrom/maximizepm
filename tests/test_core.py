@@ -5901,8 +5901,8 @@ class Approvals(Base):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
                 mock.patch.dict(os.environ, {"MAXPM_DB": db}):
             from river import cli
-            cli.run(["--as", "w1", "add", "a", "Approve the refund of order 7", "--doer", "human", "--once",
-                     "--new", "test"])
+            cli.run(["--as", "w1", "add", "a", 'Approve the refund of order 7: "refund 40 dollars to the buyer of order 7"',
+                     "--doer", "human", "--once", "--new", "test"])
         i = self.c.execute("SELECT MAX(id) FROM items").fetchone()[0]
         self.assertEqual(core.approval(self.c, i)["once"], 1)
 
