@@ -209,13 +209,12 @@ maxpm init --description "what this project covers and what context helps"
 This creates the project (named after the folder, in lower case; a project
 already linked to the folder stays, and `--project <name>` picks one), links
 it to the folder, and adds a short block that tells agents to run `maxpm go`
-when you say "go". Every agent reads one file: `AGENTS.md` (Codex, OpenCode,
-and other agents) holds the project rules and the block, and `CLAUDE.md` is
-the one line `@AGENTS.md`, which Claude Code reads as an import. When only
-`CLAUDE.md` holds your rules, `maxpm init` asks in a terminal whether to move
-them to `AGENTS.md` (`maxpm init --move` or `--no-move` answers in advance).
-When both files hold their own rules, MaximizePM adds the block to both and
-says that they differ. `--file <path>` adds the block to that file instead.
+when you say "go". Every agent reads one file, `AGENTS.md`: Claude Code,
+Codex, OpenCode and the others all read it, so it holds your project rules and
+the block. If the folder has a `CLAUDE.md` with rules in it, `maxpm init` asks
+whether to move them into `AGENTS.md` and delete `CLAUDE.md` (`--move` or
+`--no-move` answers in advance; with no terminal it moves them). `--file <path>`
+adds the block to that file instead.
 Running `maxpm init` again adds the block where it is missing and leaves an
 existing block as it is. Then add work and start agents:
 
