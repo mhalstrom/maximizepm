@@ -546,17 +546,15 @@ done|drop <id> --note "<why>"`), and the user gets one notice with an undo.
 ## Repeating checks: schedules
 
 A check that must come back on fixed days is a schedule: `maxpm serve` adds
-its task at each due time, and a session takes it like any task. Add one when
-a project needs a check that nobody runs: the health of the system, or the
-security issues of the libraries that a project uses. For example:
+its task at each due time. Add one when a project needs a check that nobody
+runs, such as:
 
 ```
 maxpm schedule add <project> "Audit the libraries for known security issues" --cron "0 9 * * 1" \
-  --context "Run the project's audit (cargo audit, npm audit, pip-audit). Add a fix task for each finding, with its advisory id."
+  --context "Run the project's audit (cargo audit, npm audit, pip-audit). Add a fix task for each finding."
 maxpm schedule add <project> "Review the system health" --cron "0 8 * * *" \
-  --context "Read maxpm health and maxpm ops list. Add a task for each fault or trend that needs work."
-maxpm schedule list                                     # each schedule and its next task
-maxpm schedule rm s<n>                                  # the tasks it added stay
+  --context "Read maxpm health and maxpm ops list. Add a task for each fault that needs work."
+maxpm schedule list; maxpm schedule rm s<n>
 ```
 
 ## Hand a long talk to an expert
