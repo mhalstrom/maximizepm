@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -1744,6 +1745,15 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
     x.add_argument("--reason", help="why this cadence fits the project's needs (a service with users: short, so a fix "
                    "is live soon; a public tool repository: off, each push), shown in maxpm target show")
+    x = tgs.add_parser("report", help="the review report of a release: the summary and numbers, the groups (risks "
+                       "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
+                       "Plan > Releases")
+    x.add_argument("id", type=int, help="the release's deploy item, or its review")
+    x = tgs.add_parser("summary", help="the person or the manager: write the paragraph at the top of a release's "
+                       "report, risks first; the first one sends the person a Read card")
+    x.add_argument("id", type=int, help="the release's deploy item, or its review")
+    x.add_argument("text", nargs="?", help="one paragraph (or --file)")
+    x.add_argument("--file", help="read the paragraph from a file (- for stdin)")
     x = tgs.add_parser("cut", help="fix the list of items of the collected release now (the target owner, the "
                        "manager, or a person): later ship requests join the next deploy item, which waits until this "
                        "release is done. The cut also comes by itself when a reviewer takes the review of the release")
@@ -4367,6 +4377,15 @@ def dispatch(conn, a, actor):
             return core.release_now(conn, a.name, a.reason, actor)
         if a.tcmd == "cut":
             return core.target_cut(conn, a.name, a.rev, actor)
+        if a.tcmd == "report":
+            from . import report
+            return report.report(conn, a.id)
+        if a.tcmd == "summary":
+            from . import report
+            text = a.text if a.text is not None else (
+                sys.stdin.read() if a.file == "-" else Path(a.file).expanduser().read_text(encoding="utf-8") if a.file
+                else "")
+            return report.summary_set(conn, a.id, text, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
         if a.tcmd == "release":
@@ -5276,6 +5295,37 @@ def _fault_lines(f, r):
     if not f["checks"]:
         out.append("    no check of this key now (removed, or healthy again): read the item's context")
     return out
+
+
+def render_release_report(r):
+    """maxpm target report: the levels of the review report as text (#6003)."""
+    rel, n = r["release"], r["numbers"]
+    state = rel["status"] if rel["status"] != "open" else ("cut " + core.show_time(rel["cut_at"]) if rel["cut_at"]
+                                                           else "collecting")
+    print(f"RELEASE #{rel['id']} of {rel['target']} ({state})"
+          + (f"; review #{rel['review']['id']} {rel['review']['status'].replace('_', ' ')}" if rel["review"] else ""))
+    print(f"  {n['tasks']} tasks: {n['done']} done, {n['dropped']} dropped, {n['open']} open; faults {n['faults']} "
+          f"({n['faults_open']} open); review fixes {n['fixes']}; your decisions {n['decisions']}"
+          + (f"; cost ${n['usd']:.2f}" if n["usd"] is not None else ""))
+    print()
+    print(textwrap.fill(r["summary"]["text"], 100, initial_indent="  ", subsequent_indent="  "))
+    for g in r["groups"]:
+        print()
+        print(("RISKS" if g["risk"] else g["name"].upper()) + (f": {g['line']}" if g["line"] and not g["risk"] else ""))
+        for i in g["items"]:
+            t = r["tasks"][i]
+            print(f"  #{t['id']} {t['short'] or t['title'][:80]}" + ("" if t["status"] == "done" else f" ({t['status']})")
+                  + (f"  [{t['risk']}]" if t["risk"] else ""))
+            if t["changed"]:
+                print(f"      changed: {t['changed']}")
+            if t["commits"]:
+                print(f"      proof: {', '.join(t['commits'][:4])}" + (f"; check: {t['check']}" if t["check"] else ""))
+            for d in t["decisions"]:
+                if d["kind"] == "question":
+                    print(f"      asked {d['to']}: {d['body'][:100]}"
+                          + (f" -> {d['answer']['body'][:80]}" if d["answer"] else " (no answer)"))
+    print()
+    print(f"The page: Plan > Releases, Report of #{rel['id']}. The code of a task: maxpm show <id>, or its Code tab there.")
 
 
 def render_go(b):
@@ -7407,6 +7457,12 @@ def render(a, res):
         has = core.holdings_text({"items": res["holds"], "goals": res.get("goals") or [],
                                   "targets": res.get("targets") or []})
         print(f"  it holds: {has} (it releases them when it ends)" if has else "  it holds nothing")
+        return
+    if c == "target" and getattr(a, "tcmd", None) == "report":
+        return render_release_report(res)
+    if c == "target" and getattr(a, "tcmd", None) == "summary":
+        print(f"The summary of release #{res['id']} is saved."
+              + (f" The person got a Read card." if res["read_cards"] else ""))
         return
     if c == "target":
         if isinstance(res, list):

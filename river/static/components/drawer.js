@@ -100,6 +100,7 @@ export function itemDrawerHtml(it, { S, me }) {
       ${!closed ? `<button class="btn" data-do="drop">Drop</button>` : `<button class="btn" data-do="reopen">Reopen</button>`}
       <button class="btn" data-do="save">Save details</button>
       <button class="btn" data-do="changes" title="${it.kind === "deploy" ? "The commits this release ships" : "The commits that name #" + it.id}">Changes</button>
+      ${["deploy", "review"].includes(it.kind) ? `<button class="btn" data-do="report" title="What this release ships, to read first">Report</button>` : ""}
       ${agentButton(it, S)}
     </div>
     <div class="sec"><h4>Details</h4><div class="form">

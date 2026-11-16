@@ -169,6 +169,7 @@ async function drawerAction(what) {
     }
     if (what === "unblock") await act("unblock", { id });
     if (what === "changes") return import("./components/changesView.js").then(m => m.openItemChanges(id));  // #5855
+    if (what === "report") return import("./components/reportDialog.js").then(m => m.openReport(id));  // #6003
     if (what === "replanned") await act("replanned", { id });
     if (what === "msg") { const body = $("#dMsgBody").value.trim(); if (!body) return; if (!actor()) return toast("Choose your name in 'You are' first", true); await act("send", { kind: $("#dMsgKind").value, body, item: id }); toast("Sent"); }
     if (what === "agent") {
@@ -340,6 +341,8 @@ document.addEventListener("click", async (e) => {
   // the Sessions tab on that session (#4615).
   const sgo = t.closest("[data-session-go]");
   if (sgo) { closeDrawer(); await setTab("sessions"); sessionsTab.pick(sgo.dataset.sessionGo); return; }
+  const rep = t.closest("[data-report]");  // the review report of a release (#6003)
+  if (rep) return import("./components/reportDialog.js").then(m => m.openReport(+rep.dataset.report));
   const open = t.closest("[data-open]"); if (open) return openDrawer(+open.dataset.open);
   const row = t.closest(".row"); if (row) return openDrawer(+row.dataset.id);
   if (t.id === "dClose") return closeDrawer();

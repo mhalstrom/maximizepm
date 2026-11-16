@@ -127,6 +127,10 @@ export function onClick(t) {
     // alert opens in the list, as before.
     if (e && e.kind === "item") return openItemCard(e.item_id);  // the whole item: its tries too (#5996)
     if (e && e.message_kind === "question") return openCard(fromEvent(e));
+    if (e && e.message_kind === "alert" && e.item_id && /^Read the report/.test(e.body || "")) {  // its Read card (#6003)
+      act("message_read", { msg: e.message_id }).catch(() => {});
+      return import("../components/reportDialog.js").then(m => m.openReport(e.item_id));
+    }
     const req = e && e.message_kind === "alert" && signinRequest(e.body);
     if (req && (S.signin_asks || []).includes(req)) return openSignin(req);
     nyOpen.has(id) ? nyOpen.delete(id) : nyOpen.add(id); return renderNeedsYou();

@@ -1029,6 +1029,14 @@ CREATE TABLE IF NOT EXISTS close_checks (
 
 -- The git worktree of a session (setting workspace, #5856). Read by maxpm serve's workspace_sweep (it removes a worktree
 -- whose session ended and whose branch is merged) and by maxpm workspace list.
+-- The review report of a release (#6003): the manager's paragraph (maxpm target summary); the rest comes from records.
+CREATE TABLE IF NOT EXISTS release_reports (
+  deploy_id   INTEGER PRIMARY KEY REFERENCES items(id),
+  summary     TEXT NOT NULL,
+  by          TEXT NOT NULL,
+  at          TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
   id          INTEGER PRIMARY KEY,
   agent       TEXT NOT NULL,
@@ -8772,6 +8780,13 @@ def _release_cut(conn, dep_id, actor, why, rev=None):
         _add_note(conn, dep_id, f"[maxpm] release cut at {iso(now())}: {rev}")
     _review_wait(conn, dep_id)
     _hook(conn, "release-cut", dep["target"], dep_id, actor)
+    # The manager offers the review report of the release (#6003): it reads it and writes its summary, which sends the
+    # person a Read card.
+    if n:
+        _wake_manager(conn, actor, f"release #{dep_id} of {dep['target']} is cut with {n} task{'' if n == 1 else 's'}: "
+                                   f"read its report (maxpm target report {dep_id}) and write its summary, risks first "
+                                   f"(maxpm target summary {dep_id} \"<one paragraph>\"): the person then gets it as "
+                                   f"a Read card", dep_id, level="low")
     return True
 
 

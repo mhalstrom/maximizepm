@@ -9939,6 +9939,10 @@ class ManagerWake(Base):
             "SELECT level, body FROM messages WHERE to_agent='boss' ORDER BY id")]
         self.assertEqual(got, [
             ("now", f"ship request: #{x} page joins deploy #{dep} for web"),
+            # The cut offers the review report (#6003): a low notice, read at the next wake.
+            ("low", f"release #{dep} of web is cut with 1 task: read its report (maxpm target report {dep}) and write "
+                    f"its summary, risks first (maxpm target summary {dep} \"<one paragraph>\"): the person then gets "
+                    f"it as a Read card"),
             ("now", f"review #{rv} of web passed: its deploy can start (checked the page)"),
             ("now", f"deploy #{dep} to web is done (release-1)")])
         # The watch returns for them at once.
@@ -13579,6 +13583,91 @@ class Tries(Base):
         with self.assertRaisesRegex(RiverError, "--tries is for the person or the manager"):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 cli.run(["--as", "w", "add", "a", "Draw the menu", "--tries", "2"])
+
+
+class ReleaseReport(Base):
+    """#6003: the review report of a release: the summary and numbers, the groups (risks first), each task with what
+    changed, its proof and its decisions; the manager is told at the cut and writes the summary, which sends the person
+    a Read card."""
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "boss"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.config_set(self.c, "review", "on")
+        core.goal_add(self.c, "site", "checkout", outcome="People can pay")
+        self.a = core.item_add(self.c, "site", "Pay page", goals=["checkout"])["id"]
+        self.b = self.add("site", "Fix the footer")
+        self.r = self.add("site", "Revert the menu change")
+        q = core.send(self.c, "question", "Card or invoice first?", to="mark", item=self.a, actor="dev")
+        core.answer(self.c, q["id"], "Card first", "mark")
+        for i, changed in ((self.a, "You can pay by card"), (self.b, "The footer shows again"), (self.r, "The old menu is back")):
+            core.claim(self.c, i, "dev")
+            core.done(self.c, i, f"abc{i:04d}f: done, tests pass", "dev", ship_it=True, changed=changed)
+        ups = core.item_show(self.c, self.a)["unblocks"]
+        self.review = [i for i in ups if core.item_show(self.c, i)["kind"] == "review"][0]
+        self.deploy = [i for i in ups if i != self.review][0]
+
+    def test_the_report_of_a_release(self):
+        from river import report
+        r = report.report(self.c, self.review)  # the review names the same release as its deploy
+        self.assertEqual(r["release"]["id"], self.deploy)
+        self.assertEqual(r["release"]["review"]["id"], self.review)
+        self.assertEqual(set(r["tasks"]), {self.a, self.b, self.r})
+        self.assertEqual((r["numbers"]["tasks"], r["numbers"]["done"], r["numbers"]["decisions"]), (3, 3, 1))
+        names = [g["name"] for g in r["groups"]]
+        self.assertEqual(names[0], "Risks")  # risks first
+        self.assertEqual(r["groups"][0]["items"], [self.r])
+        self.assertEqual(r["tasks"][self.r]["risk"], "a revert")
+        self.assertIn("checkout", names)
+        self.assertEqual(next(g for g in r["groups"] if g["name"] == "checkout")["line"], "People can pay")
+        self.assertIn("site", names)
+        t = r["tasks"][self.a]
+        self.assertEqual((t["changed"], t["commits"], t["done_by"]), ("You can pay by card", [f"abc{self.a:04d}f"], "dev"))
+        self.assertEqual(t["decisions"][0]["answer"]["body"], "Card first")
+        self.assertEqual(r["summary"]["by"], "maxpm")
+        self.assertIn("Risks: #%d a revert" % self.r, r["summary"]["text"])
+        with self.assertRaisesRegex(RiverError, "is no release"):
+            report.report(self.c, self.a)
+
+    def test_the_cut_tells_the_manager_and_the_summary_sends_a_read_card(self):
+        from river import report
+        core.target_cut(self.c, "web", actor="mark")
+        note = self.c.execute("SELECT body FROM messages WHERE to_agent='boss' AND body LIKE 'release #%'").fetchone()
+        self.assertIn(f"maxpm target report {self.deploy}", note["body"])
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='mark'", (core.iso(core.now()),))
+        self.c.commit()
+        out = report.summary_set(self.c, self.deploy, "One revert of the menu; card payments are new.", "boss")
+        self.assertEqual(len(out["read_cards"]), 1)
+        card = self.c.execute("SELECT body, level FROM messages WHERE to_agent='mark' AND kind='alert'").fetchone()
+        self.assertTrue(card["body"].startswith("Read the report"))
+        self.assertEqual(card["level"], "low")
+        self.assertEqual(core.action_type(card["body"]), "read")
+        r = report.report(self.c, self.deploy)
+        self.assertEqual((r["summary"]["by"], r["summary"]["text"]), ("boss", "One revert of the menu; card payments are new."))
+        again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
+        self.assertEqual(again["read_cards"], [])  # one Read card only
+
+    def test_the_cli_report_and_who_may_write_the_summary(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "target", "report", str(self.deploy)])
+        text = out.getvalue()
+        self.assertIn(f"RELEASE #{self.deploy} of web", text)
+        self.assertIn("RISKS", text)
+        self.assertIn("changed: You can pay by card", text)
+        self.assertIn("asked mark: Card or invoice first? -> Card first", text)
+        old = cli.INSIDE_AGENT
+        cli.INSIDE_AGENT = lambda: True
+        self.addCleanup(setattr, cli, "INSIDE_AGENT", old)
+        with self.assertRaisesRegex(RiverError, "not allowed"):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(["--as", "dev", "target", "summary", str(self.deploy), "All good"])
 
 
 class ActionType(Base):

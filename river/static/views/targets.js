@@ -30,14 +30,17 @@ function pendingHtml(d) {
     : esc(d.status.replace("_", " ")) + (d.assignee ? " · " + esc(d.assignee) : "");
   const review = d.review ? ` · review <span class="link" data-open="${d.review.id}">#${d.review.id}</span>`
     + (d.review.status === "open" ? "" : ` (${esc(d.review.status.replace("_", " "))}${d.review.assignee ? " · " + esc(d.review.assignee) : ""})`) : "";
-  return `<div class="st"><span class="link" data-open="${d.id}">#${d.id}</span> ${state}${review}${d.ships.length ? ": " + shipList(d.ships) : ""}</div>`;
+  return `<div class="st"><span class="link" data-open="${d.id}">#${d.id}</span> ${state}${review}${d.ships.length ? ": " + shipList(d.ships) : ""}${reportLink(d)}</div>`;
 }
+
+// The review report of a release (#6003): what it ships, to read before it goes out.
+const reportLink = (d) => d.ships.length ? ` · <span class="link" data-report="${d.id}" title="What this release ships, to read first">Report</span>` : "";
 
 // The deploys that are done, folded: the summary says when the last one was.
 function historyHtml(t) {
   const H = t.history || [];
   if (!H.length) return "";
-  const rows = H.map(h => `<div class="st t-s"${h.output ? ` title="${esc(h.output)}"` : ""}><span class="link" data-open="${h.id}">#${h.id}</span> ${ago(h.closed_at)}${h.done_by ? " · " + esc(h.done_by) : ""}${h.ships.length ? ": " + h.ships.map(x => `<span class="link" data-open="${x.id}" title="${esc(x.title)}">#${x.id}</span>`).join(" ") : ""}</div>`).join("");
+  const rows = H.map(h => `<div class="st t-s"${h.output ? ` title="${esc(h.output)}"` : ""}><span class="link" data-open="${h.id}">#${h.id}</span> ${ago(h.closed_at)}${h.done_by ? " · " + esc(h.done_by) : ""}${h.ships.length ? ": " + h.ships.map(x => `<span class="link" data-open="${x.id}" title="${esc(x.title)}">#${x.id}</span>`).join(" ") : ""}${reportLink(h)}</div>`).join("");
   return `<details data-keep="deploys-${esc(t.name)}"><summary>Deploys · last ${ago(H[0].closed_at)}</summary>${rows}</details>`;
 }
 

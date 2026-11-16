@@ -1,1 +1,35 @@
 /* The Targets tab. Its cards are the shared .ny cards of app.css; rules of this tab only go here. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+
+/* The review report of a release (#6003, components/reportDialog.js): left the summary, numbers and groups (risks
+   first, in red); right the picked task with its Task and Code tabs. A phone shows one level at a time. */
+#reportDlg { --dlg-w: var(--w-dlg-l); }
+#reportDlg .dlg-head { display: flex; align-items: baseline; gap: var(--sp-3); }
+#reportDlg .dlg-head h2 { margin: 0; }
+.rep-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--sp-6); margin-top: var(--sp-3); }
+.rep-l, .rep-r { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.rep-r { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); }
+.rep-scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }
+.rep-sum p { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+.rep-nums { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.rep-g { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-2) var(--sp-3); }
+.rep-g.risk { border-color: var(--warn); background: var(--warn-bg); }
+.rep-g.risk > summary b { color: var(--warn); }
+.rep-g > summary { cursor: pointer; }
+.rep-t { padding: var(--sp-2); border-radius: var(--r-s); cursor: pointer; overflow-wrap: anywhere; }
+.rep-t:hover, .rep-t.on { background: var(--bg); }
+.rep-tabs { display: flex; gap: var(--sp-2); }
+.rep-tabs .on { font-weight: 600; border-bottom: var(--hair-2) solid var(--accent); }
+.rep-pane h3 { margin: var(--sp-2) 0; overflow-wrap: anywhere; }
+.rep-pane h4 { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-xs); text-transform: uppercase; color: var(--muted); }
+.rep-line { font-weight: 600; }
+.rep-out { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: var(--sp-1); }
+.rep-dec { margin-bottom: var(--sp-3); overflow-wrap: anywhere; }
+.rep-ans { margin-top: var(--sp-1); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--accent); }
+.rep-acts { display: flex; justify-content: flex-end; margin-top: var(--sp-3); }
+.rep-back { display: none; }
+@media (max-width: 759px) {
+  .rep-grid { grid-template-columns: 1fr; }
+  .rep-r { border-left: 0; padding-left: 0; }
+  .rep-grid.picked .rep-l, .rep-grid:not(.picked) .rep-r { display: none; }
+  .rep-back { display: block; }
+}

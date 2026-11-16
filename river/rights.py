@@ -30,7 +30,7 @@ COMMANDS = {
     "schedule": {"*": ANY},
     "ops": {"*": ANY, "setup": LEAD, "profile": LEAD},
     "target": {"add": LEAD, "describe": LEAD, "deployer": LEAD, "watch": LEAD, "cadence": LEAD, "cut": ANY,
-               "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
+               "report": ANY, "summary": LEAD, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -56,7 +56,7 @@ COMMANDS = {
 
 # The commands that change nothing: a command inside an agent with no name (no token, no --as) may run only these.
 READS = {"project show", "project list", "canvas list", "canvas show", "canvas comments", "goal list", "goal show",
-         "ops list", "ops show", "ops history", "target show", "target list", "artifacts", "search", "duplicates",
+         "ops list", "ops show", "ops history", "target show", "target list", "target report", "artifacts", "search", "duplicates",
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status"}
@@ -75,7 +75,7 @@ OPS = {op: ANY for op in (
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock")}
 OPS.update({op: LEAD for op in (
-    "agent_interrupt", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
+    "agent_interrupt", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
     "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",

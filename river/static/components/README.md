@@ -18,6 +18,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Page tabs | the header `nav` of `index.html` (app.js) | one per area (Sessions, Plan, Terminal); Settings opens from the header ⋯ (`#settingsBtn`, #5116) |
 | List row of an item | `itemRow.js` | the one order of items too |
 | Card | `card.js`: `nyCard`, `goalCard`, project cards | |
+| Review report of a release | `reportDialog.js`: `openReport(id)` (a deploy or review id); a `data-report="<id>"` link anywhere opens it (app.js) | #6003: summary, numbers and groups (risks first) on the left; the picked task with its Task and Code (changesView) tabs on the right; one level at a time on a phone. Styles in `views/targets.css` (`rep-`) |
 | Card of a question or a person item | `askCard.js`: `cardHtml(c)`, `fromEvent`, `fromWaiting`, `fromItem`; `waitDialog.js`: `openCard(c)`, `openItemCard(id)`, `openWaiting(s)` | the one card dialog is the dialog Waits for you (#6002): the type tag and level, the options of the decision form as buttons, the answer or Done, the earlier decisions, and on the right the comments, history and Discuss with the manager. A line of Needs you and a person task in Plan > Items open it with one card; a session with all its cards. The sign-in dialog stays as it is (`views/signinAsk.js` `openSignin(id)`) |
 | Progress | `bar.js` | |
 | Dialog | `dialog.js`: `makeDialog(el, {onClose, draft})` | adds the class `dlg`: overlay, box, Escape, outside click, focus back (#5027). Set only `--dlg-w`, `--dlg-z` |

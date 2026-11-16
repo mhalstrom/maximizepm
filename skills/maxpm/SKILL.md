@@ -154,7 +154,8 @@ your type from your CLI's environment.
    pin, or wrote a commit of it (its session link in the commit), and never to a session that
    held a task before: a review starts in a new session, with a clean context
    (`maxpm serve` starts one). After its review, a session takes any work.
-   Follow the review process in
+   Read the release's report first (`maxpm target report <id>`: what it
+   ships, risks first, with each task's proof and decisions). Follow the review process in
    its context, then
    `maxpm review pass <id> --output "<what you checked>"`
    (runs `review_cmd`, which

@@ -132,6 +132,13 @@ Stop when the user tells you to, and tell the user what you did.
   its review, cut it then: `maxpm target cut <target> --rev <commit>`; the commit
   goes into the history and the notes of the deploy item. A fix that the review of
   the cut release asks for still goes out with that release.
+- **Offer the report of a cut release**: at the cut you get a notice. Read the
+  release's review report (`maxpm target report <deploy id>`: the groups, risks
+  first, each task with what changed, its proof and its decisions), then write
+  its summary for the person: one paragraph, risks first (a revert, a review
+  fix, an open fault), in plain words: `maxpm target summary <deploy id>
+  "<paragraph>"`. The first summary sends the person one Read card; the page
+  shows the report from Plan > Releases (Report) and from the deploy item.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
   review-passed, review-failed, deployed, deploy; `--clear` removes one; no event lists
