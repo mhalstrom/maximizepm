@@ -5,7 +5,22 @@
 // a few seconds closes it (draft: false for a dialog whose text is not worth keeping, such as a search). Focus goes
 // back to where it was before it opened.
 
+import { store } from "../lib.js";
+import { button } from "./button.js";
+
 export const ASK_AGAIN_MS = 6000;
+
+// The button that makes a dialog the whole width of the window and back (#6069: the code of a release was cut at the
+// right edge). makeDialog(el, {wide: "<store key>"}) wires it and keeps the choice in this browser; a phone hides it,
+// because there every dialog has the whole width already.
+const WIDE_LABEL = { true: "Normal width", false: "Full width" };
+export function wideButton() {
+  return button(WIDE_LABEL.false, { cls: "dlg-wide", data: { "dlg-wide": 1 } });
+}
+function setWide(el, on) {
+  el.classList.toggle("wide", on);
+  el.querySelectorAll("[data-dlg-wide]").forEach(b => { b.textContent = WIDE_LABEL[on]; });
+}
 
 // A line in the box that says what the next Escape or outside click does; it goes away when the dialog closes.
 export function draftNote(box, text) {
@@ -15,7 +30,7 @@ export function draftNote(box, text) {
   n.textContent = text;
 }
 
-export function makeDialog(el, { onClose, draft = true } = {}) {
+export function makeDialog(el, { onClose, draft = true, wide } = {}) {
   el.classList.add("dlg");  // the one look of a dialog (app.css .dlg): overlay, box, width --dlg-w (#5028)
   // A dialog to screen readers, and to the page: its keys and refreshes wait while a [role=dialog] shows (#5403: the
   // End dialog had no role).
@@ -27,6 +42,7 @@ export function makeDialog(el, { onClose, draft = true } = {}) {
   const clearNote = () => el.querySelectorAll(".dlg-draft").forEach(n => n.remove());
   function open() {
     if (!isOpen()) { before = document.activeElement; typed = new Set(); warned = 0; clearNote(); }
+    if (wide) setWide(el, store(wide) === "1");
     el.classList.remove("hidden");
   }
   function close() {
@@ -53,6 +69,12 @@ export function makeDialog(el, { onClose, draft = true } = {}) {
   }
   el.addEventListener("input", (e) => {
     if (e.target.matches && e.target.matches("input:not([type=checkbox]):not([type=radio]), textarea, [contenteditable]")) typed.add(e.target);
+  });
+  if (wide) el.addEventListener("click", (e) => {
+    if (!e.target.closest("[data-dlg-wide]")) return;
+    const on = !el.classList.contains("wide");
+    store(wide, on ? "1" : "0");
+    setWide(el, on);
   });
   el.addEventListener("pointerdown", (e) => { down = e.target === el; });
   el.addEventListener("click", (e) => { if (e.target === el && down) requestClose(); down = false; });

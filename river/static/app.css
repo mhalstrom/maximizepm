@@ -213,6 +213,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .dlg { position: fixed; inset: 0; z-index: var(--dlg-z, 15); background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 6vh var(--sp-6); overflow-y: auto; }
 .dlg.hidden { display: none; }
 .dlg > .box { background: var(--panel); border: 0; border-radius: var(--r-m); box-shadow: var(--shadow-dlg); width: min(var(--dlg-w, 640px), 100%); padding: 18px 20px; }
+/* Full width (dialog.js wideButton, #6069): the box takes the window's width inside the overlay's padding. */
+.dlg.wide > .box { width: 100%; }
+.dlg-head .dlg-wide { margin-left: auto; }  /* beside the close button, at the right */
 #setup { --dlg-w: 680px; }
 #setup .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 #setup .mark { font-weight: 700; }

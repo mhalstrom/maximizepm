@@ -31,6 +31,7 @@
 #reportDlg .dlg-head { display: flex; align-items: baseline; gap: var(--sp-3); }
 #reportDlg .dlg-head h2 { margin: 0; }
 .rep-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--sp-6); margin-top: var(--sp-3); }
+.rep-grid.diff { grid-template-columns: minmax(0, 1fr) minmax(0, 3fr); }  /* a diff shows: the code gets the width (#6069) */
 .rep-l, .rep-r { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
 .rep-r { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); }
 .rep-scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }

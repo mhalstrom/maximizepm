@@ -11,7 +11,7 @@
 import { esc, store, toast, act, getJson } from "../lib.js";
 import { button } from "./button.js";
 import { chip } from "./chip.js";
-import { makeDialog } from "./dialog.js";
+import { makeDialog, wideButton } from "./dialog.js";
 
 const LAYOUT = "river.changes.layout";
 const BASES = [["origin", "Against GitHub main"], ["uncommitted", "Not committed"], ["review", "Since my last review"]];
@@ -221,9 +221,9 @@ export function openItemChanges(id) {
     el = document.createElement("div");
     el.id = "changesDlg";
     el.className = "hidden";
-    el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Changes</h2>${button("✕", { kind: "icon", label: "Close", data: { "chg-close": 1 } })}</div><div class="chg-dbody"></div></div>`;
+    el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Changes</h2>${wideButton()}${button("✕", { kind: "icon", label: "Close", data: { "chg-close": 1 } })}</div><div class="chg-dbody"></div></div>`;
     document.body.append(el);
-    dlg = makeDialog(el);
+    dlg = makeDialog(el, { wide: "changesWide" });
     el.addEventListener("click", (e) => { if (e.target.closest("[data-chg-close]")) dlg.close(); });
   }
   dlg.open();

@@ -225,6 +225,7 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   /* Dialogs: the whole width, from the top (the dialog part, .dlg: every dialog, #5028). */
   .dlg { padding: var(--sp-5) var(--sp-3); }
   .dlg > .box { padding: 14px var(--sp-5); }
+  .dlg-head .dlg-wide { display: none; }  /* every dialog has the whole width here already (#6069) */
   /* A task in the work of its session (#5572): the line first, the earlier tasks folded; the task is a sheet at the
      bottom with Go to Session, where the thumb reaches it. */
   #taskDlg > .tc-box { padding: 0; height: calc(100dvh - 2 * var(--sp-5)); max-height: none; }

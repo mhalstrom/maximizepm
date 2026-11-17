@@ -9,7 +9,7 @@
 import { esc, ago, clip, getJson, toast, act } from "../lib.js";
 import { button } from "./button.js";
 import { chip } from "./chip.js";
-import { makeDialog } from "./dialog.js";
+import { makeDialog, wideButton } from "./dialog.js";
 import { renderChanges } from "./changesView.js";
 
 let dlg = null, el = null, data = null, picked = null, tab = "task";
@@ -91,7 +91,10 @@ function draw() {
   const right = el.querySelector(".rep-r");
   right.innerHTML = `<div class="rep-back">${button("‹ Back", { data: { "rep-back": 1 } })}</div>`
     + (picked === "code" && r.code ? codeHtml(r.code, r.tasks) : taskHtml(picked ? r.tasks[picked] : null));
+  // While a diff shows, the task list takes less of the width, so the code lines fit (#6069).
+  const diff = picked === "code" ? tab === "changes" : !!picked && tab === "code";
   el.querySelector(".rep-grid").classList.toggle("picked", !!picked);
+  el.querySelector(".rep-grid").classList.toggle("diff", diff);
   if (picked === "code" && tab === "changes") renderChanges(right.querySelector(".rep-code"), { item: rel.id, range: true });
   else if (picked && picked !== "code" && tab === "code") renderChanges(right.querySelector(".rep-code"), { item: picked });
 }
@@ -103,10 +106,10 @@ export async function openReport(id) {
     el.className = "hidden";
     el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Release</h2><span class="spacer"></span>
       ${button("Discuss with the manager", { data: { "rep-discuss": 1 }, title: "Send to the manager" })}
-      ${button("✕", { kind: "icon", label: "Close", data: { "rep-close": 1 } })}</div>
+      ${wideButton()}${button("✕", { kind: "icon", label: "Close", data: { "rep-close": 1 } })}</div>
       <div class="rep-grid"><div class="rep-l"></div><div class="rep-r"></div></div></div>`;
     document.body.append(el);
-    dlg = makeDialog(el, { draft: false });
+    dlg = makeDialog(el, { draft: false, wide: "reportWide" });
     el.addEventListener("click", onClick);
     el.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.target.dataset.repTask || e.target.dataset.repCode)) onClick(e); });
   }
