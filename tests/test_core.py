@@ -14436,6 +14436,49 @@ class ReleaseReport(Base):
         c = review.release_code(self.c, self.deploy)
         self.assertEqual((c["base_label"], c["files"], c["commits"]), (f"the pin of release #{old}", 1, 1))
 
+    def test_a_release_with_no_pin_ends_at_the_newer_of_local_main_and_origin_main(self):
+        # #6070: a folder whose rules forbid a pull keeps local main behind; workers push from worktrees, which moves
+        # origin/main. The range then ends at origin/main; a target that keeps local main ahead (#6045) at local main.
+        import subprocess
+        from river import review
+        def git(*a):
+            return subprocess.run(["git", "-C", self.dir.name, "-c", "user.name=t", "-c", "user.email=t@example.test",
+                                   *a], capture_output=True, check=True, text=True).stdout.strip()
+        def commit(path, text, msg):
+            with open(os.path.join(self.dir.name, path), "w") as f:
+                f.write(text)
+            git("add", path)
+            git("commit", "-q", "-m", msg)
+        git("init", "-q", "-b", "main")
+        commit("a.txt", "one\n", "start")
+        git("tag", "v1.0.0")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        rng = review.release_range(self.c, self.deploy)
+        self.assertEqual((rng["head"], rng["head_label"]), ("origin/main", "origin/main"))  # the same commit
+        # Workers pushed two commits from their worktrees; local main stays at the tag.
+        git("checkout", "-q", "-b", "work")
+        commit("a.txt", "one\ntwo\n", f"Pay page (#{self.a})")
+        commit("b.txt", "x\n", f"Footer (#{self.b})")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        git("checkout", "-q", "main")
+        c = review.release_code(self.c, self.deploy)
+        self.assertEqual((c["head_label"], c["base"], c["files"], c["commits"]), ("origin/main", "v1.0.0", 2, 2))
+        # Local main ahead of origin/main (a release cadence keeps the commits local until the release).
+        git("merge", "-q", "--ff-only", "work")
+        commit("c.txt", "z\n", "One more, not pushed")
+        c = review.release_code(self.c, self.deploy)
+        self.assertEqual((c["head_label"], c["files"], c["commits"]), ("local main", 3, 3))
+        # Diverged: the pushed code is the code that deploys.
+        git("checkout", "-q", "work")
+        commit("d.txt", "w\n", "Pushed from a worktree")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        git("checkout", "-q", "main")
+        self.assertEqual(review.release_range(self.c, self.deploy)["head_label"], "origin/main")
+        # The release pin wins over both.
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET cut_rev=? WHERE id=?", (git("rev-parse", "v1.0.0"), self.deploy))
+        self.assertEqual(review.release_range(self.c, self.deploy)["head_label"], "the release pin")
+
     def test_the_report_blocks_of_a_chat(self):
         # #6031: the session that cut a release and the one that started its deploy get its report block in their
         # chat; the manager gets every cut; another session gets none.

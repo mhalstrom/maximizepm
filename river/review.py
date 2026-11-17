@@ -310,7 +310,7 @@ _RANGES = {}  # (root, base sha, head sha) -> the release code, so a second read
 
 def release_range(conn, dep_id):
     """Where the code of a release starts and ends: {root, base, base_label, head, head_label}, or None (no repository).
-    head: the release pin (cut_rev), else local main. base: the newer of the pin of the target's last done deploy and
+    head: the release pin (cut_rev), else the newer of local main and origin/main (_branch_head). base: the newer of the pin of the target's last done deploy and
     the last version tag before head (mark 2026-11-16: 'surely there are more code changes than that')."""
     dep = core._item(conn, dep_id)
     # A deploy item lives in the target's own project, often with no folder: then the folder of a project it ships, or
@@ -323,7 +323,9 @@ def release_range(conn, dep_id):
     root = next((r for r in (repo_root(p["path"]) for p in paths if p["path"] and os.path.isdir(p["path"])) if r), None)
     if not root:
         return None
-    head = dep["cut_rev"] or next((r for r in ("main", "master") if git(root, "rev-parse", "--verify", "--quiet", r)), None)
+    head, head_label = dep["cut_rev"], "the release pin"
+    if not head:
+        head, head_label = _branch_head(root)
     if not head or git(root, "rev-parse", "--verify", "--quiet", head + "^{commit}") is None:
         return None
     cands = []
@@ -340,8 +342,28 @@ def release_range(conn, dep_id):
             base = (ref, label)
     if not base:
         return None
-    return {"root": root, "base": base[0], "base_label": base[1], "head": head,
-            "head_label": "the release pin" if dep["cut_rev"] else "local main"}
+    return {"root": root, "base": base[0], "base_label": base[1], "head": head, "head_label": head_label}
+
+
+def _branch_head(root):
+    """The end of a release with no pin: the newer of local main and origin/main (or master), with its label. A folder
+    whose rules forbid a pull in its main tree keeps local main behind; its workers push from worktrees, and each push
+    moves origin/main of the same repository, so no fetch is needed (#6070: release #6066 of toolscaled-prod showed 0
+    commits, while origin/main held its 11). A target with a release cadence keeps local main ahead of origin/main
+    (#6045): then local main. When the two diverged, origin/main: the pushed code is the code that deploys."""
+    for name in ("main", "master"):
+        local = git(root, "rev-parse", "--verify", "--quiet", name) and name
+        remote = git(root, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + name) and "origin/" + name
+        if not (local or remote):
+            continue
+        if not remote:
+            return local, "local " + name
+        if not local or git(root, "merge-base", "--is-ancestor", local, remote, ok=(0,)) is not None:
+            return remote, remote
+        if git(root, "merge-base", "--is-ancestor", remote, local, ok=(0,)) is not None:
+            return local, "local " + name
+        return remote, remote
+    return None, None
 
 
 def release_code(conn, dep_id):
