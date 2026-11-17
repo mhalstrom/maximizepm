@@ -23,8 +23,10 @@ Never removed: items (open or closed: title, notes, output, changed line), open 
 other than read notices, needs-you rows, goals and their handoffs, settings of live agents.
 
 The folder, in this order: the caches of browsers that do not run (Cache, Code Cache, GPU caches, Safe Browsing
-lists: Chrome builds or downloads them again; the sign-ins stay), uploads older than space_files_after, and backups older than it except the newest.
-Browser profiles are sign-ins, not data to delete: the report counts them.
+lists: Chrome builds or downloads them again; the sign-ins stay), the browser profiles of sessions that ended
+before space_sessions_after (#6062 answer A: a new session copies the project's sign-ins again; a download stays),
+uploads older than space_files_after, and backups older than it except the newest. The project's own profile and a
+live session's profile stay: the report counts them.
 
 A real run writes one event (no item) and sends the active manager one note. --dry-run removes nothing: it runs the
 database part inside a transaction that it rolls back, so its counts are exact."""
@@ -356,7 +358,28 @@ def _db_part(conn, dry_run, t, s="main"):
 
 # ---------------------------------------------------------------- the folder, oldest first
 
-def _candidates(root, cutoff):
+def _ended_profiles(conn, root, cutoff):
+    """The browser profiles of sessions that ended before cutoff (#6063, #6062 answer A): under
+    browsers/<project>/sessions/<session>/, Chrome does not run on it, nobody used it since cutoff, and its session is
+    gone or was not seen since cutoff and holds nothing. Oldest use first. A new session copies the sign-ins of the
+    project's profile again, so only a sign-in made in that one session's panel goes."""
+    live = {r[0]: r[1] for r in conn.execute(
+        "SELECT name, last_seen FROM agents a WHERE last_seen>=? "
+        "OR EXISTS (SELECT 1 FROM items i WHERE i.assignee=a.name AND i.status IN ('in_progress','held')) "
+        "OR EXISTS (SELECT 1 FROM targets t WHERE t.owner=a.name) OR EXISTS (SELECT 1 FROM goals g WHERE g.owner=a.name)",
+        (iso(cutoff),))}
+    out = []
+    for prof in root.glob("browsers/*/sessions/*/profile"):
+        if prof.parent.name in live or not prof.is_dir() or prof.is_symlink() or _running(prof):
+            continue
+        used = max((os.lstat(p).st_mtime for p in (prof, prof / "Default", prof / "Local State",
+                                                    prof.parent / "state.json") if os.path.lexists(p)), default=0)
+        if used < cutoff.timestamp():
+            out.append((used, prof))
+    return [p for _, p in sorted(out)]
+
+
+def _candidates(conn, root, cutoff, t):
     """What the folder part may remove, in its order: (what, path, bytes)."""
     caches = []
     for prof in _profiles(root):
@@ -364,6 +387,8 @@ def _candidates(root, cutoff):
             caches += [(p.stat().st_mtime, p) for p in _caches(prof)]
     for _, p in sorted(caches, key=lambda x: x[0]):
         yield "browser caches", p, tree_bytes(p)
+    for p in _ended_profiles(conn, root, t - parse_duration(setting(conn, "space_sessions_after"))):
+        yield "browser profiles of ended sessions", p, tree_bytes(p)
     ups = []
     for r, _, files in os.walk(root / "uploads"):
         for name in files:
@@ -409,7 +434,7 @@ def _folder_part(conn, dry_run, t):
     target, left = int(limit * LOW_WATER), size
     cutoff = (t - parse_duration(setting(conn, "space_files_after"))).timestamp()
     groups = {}
-    for what, p, b in _candidates(root, cutoff):
+    for what, p, b in _candidates(conn, root, cutoff, t):
         if left <= target:
             break
         if not dry_run:
@@ -422,6 +447,12 @@ def _folder_part(conn, dry_run, t):
         for d in (root / "uploads").glob("*"):
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
+    if not dry_run and "browser profiles of ended sessions" in groups:
+        # The session's folder goes with its profile when its downloads folder is empty: a download stays.
+        for d in root.glob("browsers/*/sessions/*"):
+            dl = d / "downloads"
+            if d.is_dir() and not (d / "profile").exists() and not (dl.is_dir() and any(dl.iterdir())):
+                shutil.rmtree(d, ignore_errors=True)
     out["removed"] = list(groups.values())
     out["size_after"] = tree_bytes(root) if groups and not dry_run else left
     out["over"] = out["size_after"] > limit

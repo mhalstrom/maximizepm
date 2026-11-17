@@ -5989,7 +5989,7 @@ def render_space(res):
     k = f.get("kept")
     if k and k["browser_profiles"]:
         print(f"  kept: {k['browser_profiles']} browser profiles ({sz(k['bytes'])} without their caches; "
-              f"{k['running']} running): sign-ins, never removed")
+              f"{k['running']} running): sign-ins; a session's profile goes space_sessions_after after its end")
     if d.get("vacuum_error"):
         print(f"  the database file did not shrink (VACUUM: {d['vacuum_error']}); the next run tries again")
 

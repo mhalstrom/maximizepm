@@ -246,6 +246,33 @@ class Folder(SpaceBase):
             self.assertFalse((prof / name).exists(), name)
         self.assertTrue(cookies.exists())
 
+    def test_profiles_of_ended_sessions_go_after_the_caches(self):
+        # #6063 (#6062 answer A): a session's profile goes when its session ended before space_sessions_after.
+        def session(name, age_days, download=False):
+            self.file(f"browsers/p/sessions/{name}/profile/Default/Cookies", 100_000, age_days=age_days)
+            self.file(f"browsers/p/sessions/{name}/state.json", 10, age_days=age_days)
+            for p in (f"sessions/{name}/profile/Default", f"sessions/{name}/profile"):
+                t = time.time() - age_days * 86400
+                os.utime(self.root / "browsers" / "p" / p, (t, t))
+            if download:
+                self.file(f"browsers/p/sessions/{name}/downloads/report.pdf", 1_000, age_days=age_days)
+            return self.root / "browsers" / "p" / "sessions" / name
+        gone = session("gone-1", 40)
+        with_dl = session("gone-2", 40, download=True)
+        recent = session("gone-3", 2)  # ended 2 days ago: younger than space_sessions_after (30d)
+        quiet = session("quiet-1", 40)  # its agent was seen yesterday
+        core.register(self.c, "quiet-1")
+        project = self.file("browsers/p/profile/Default/Cookies", 100_000, age_days=40)
+        core.config_set(self.c, "folder_max_size", "1KB")
+        res = space.run(self.c)
+        self.assertIn("browser profiles of ended sessions", [r["what"] for r in res["folder"]["removed"]])
+        self.assertFalse(gone.exists())
+        self.assertFalse((with_dl / "profile").exists())
+        self.assertTrue((with_dl / "downloads" / "report.pdf").exists())  # a download stays
+        self.assertTrue(recent.exists())
+        self.assertTrue(quiet.exists())
+        self.assertTrue(project.exists())  # the project's own profile is never removed
+
     def test_stale_lock_is_a_stopped_browser(self):
         self.file("browsers/p/profile/Default/Cache/data_1", 300_000)
         os.symlink("host-999999999", self.root / "browsers" / "p" / "profile" / "SingletonLock")
