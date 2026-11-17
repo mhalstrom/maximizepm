@@ -22,8 +22,8 @@ The database, in this order:
 Never removed: items (open or closed: title, notes, output, changed line), open items' history, policies, messages
 other than read notices, needs-you rows, goals and their handoffs, settings of live agents.
 
-The folder, in this order: the caches of browsers that do not run (Cache, Code Cache, GPU caches: Chrome builds
-them again; the sign-ins stay), uploads older than space_files_after, and backups older than it except the newest.
+The folder, in this order: the caches of browsers that do not run (Cache, Code Cache, GPU caches, Safe Browsing
+lists: Chrome builds or downloads them again; the sign-ins stay), uploads older than space_files_after, and backups older than it except the newest.
 Browser profiles are sign-ins, not data to delete: the report counts them.
 
 A real run writes one event (no item) and sends the active manager one note. --dry-run removes nothing: it runs the
@@ -51,9 +51,12 @@ META = "space"
 # Chrome's caches: folders that it fills from the network and builds again when they are gone (no sign-in, no
 # history, no page storage). The last four are components that Chrome downloads into each profile (its model
 # files, a speech engine, the download cache of components): about 125 MB in each of 9 profiles on mark's Mac.
+# The next four are lists that Chrome downloads again at its next start (#6061, 2026-11-17: Safe Browsing 19 MB in
+# each session's profile, 630 MB of the 1.6 GB of browsers; certificate revocation lists 84 MB; GPU shaders 42 MB).
 BROWSER_CACHES = ("Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache", "GrShaderCache",
                   "GraphiteDawnCache", "ShaderCache", "component_crx_cache", "optimization_guide_model_store",
-                  "WasmTtsEngine", "OnDeviceHeadSuggestModel")
+                  "WasmTtsEngine", "OnDeviceHeadSuggestModel", "Safe Browsing", "CertificateRevocation",
+                  "GPUPersistentCache", "ActorSafetyLists")
 
 
 def parse_size(value):

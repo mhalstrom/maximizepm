@@ -232,6 +232,20 @@ class Folder(SpaceBase):
         self.assertTrue(b2.exists())  # the newest backup always stays
         self.assertTrue(res["folder"]["over"])
 
+    def test_downloaded_lists_go_with_the_caches(self):
+        # Safe Browsing and the other lists that Chrome downloads again sit in the profile itself, not in Default
+        # (#6061: 19 MB in each session's profile).
+        prof = self.root / "browsers" / "p" / "sessions" / "s1" / "profile"
+        for name in ("Safe Browsing/UrlMalware.store", "CertificateRevocation/9999/crl-set", "GPUPersistentCache/a",
+                     "ActorSafetyLists/1/list"):
+            self.file(f"browsers/p/sessions/s1/profile/{name}", 100_000)
+        cookies = self.file("browsers/p/sessions/s1/profile/Default/Cookies", 50_000)
+        core.config_set(self.c, "folder_max_size", "1KB")
+        space.run(self.c)
+        for name in ("Safe Browsing", "CertificateRevocation", "GPUPersistentCache", "ActorSafetyLists"):
+            self.assertFalse((prof / name).exists(), name)
+        self.assertTrue(cookies.exists())
+
     def test_stale_lock_is_a_stopped_browser(self):
         self.file("browsers/p/profile/Default/Cache/data_1", 300_000)
         os.symlink("host-999999999", self.root / "browsers" / "p" / "profile" / "SingletonLock")
