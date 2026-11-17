@@ -5999,6 +5999,30 @@ class Ops(unittest.TestCase):
         from river import notify
         return [getattr(server, n) for n in ("ops_watch",) if f"server.{n}," in inspect.getsource(notify.loop)]
 
+    def test_while_this_computer_is_offline_no_check_runs_and_no_session_starts(self):
+        """#6099: serve's pass net_watch records the outage before the checks and the starts of its loop; while it
+        lasts, ops_watch starts no check and auto_operational, fresh_sessions and auto_release start no session."""
+        import inspect
+        from river import notify
+        src = inspect.getsource(notify.loop)
+        self.assertLess(src.index("core.net_watch,"), min(src.index(f"server.{n},") for n in
+                                                          ("fresh_sessions", "auto_release", "auto_operational",
+                                                           "ops_watch")))
+        core.ops_add(self.c, "site", "nightly", "beat", {"period": "1h"}, actor="boss")
+        op = core.item_add(self.c, "site", "ops:site:home down", kind="operational", doer="ai", actor="maxpm")["id"]
+        with mock.patch.object(core, "NET_PROBE", lambda hosts, dns: "no route to the internet (Network is unreachable)"):
+            self.assertEqual(core.net_watch(self.c)["reason"], "no route to the internet (Network is unreachable)")
+            sent = []
+            self.assertEqual(server.ops_watch(self.c), [])
+            self.assertEqual(server.auto_operational(self.c, runner=sent.append)["started"], {})
+            self.assertEqual(server.auto_release(self.c, runner=sent.append)["started"], {})
+            self.assertEqual(server.fresh_sessions(self.c, runner=sent.append)["started"], {})
+            self.assertEqual(sent, [])
+            with self.assertRaisesRegex(RiverError, "network of this computer is down since"):
+                core.launch_target(self.c, item=op)
+        self.assertIsNone(core.net_watch(self.c))  # back
+        self.assertEqual(len(server.ops_watch(self.c)), 1)
+
     def test_ops_run_runs_a_check_now_and_ops_beat_records_a_beat(self):
         core.ops_add(self.c, "site", "nightly", "beat", {"period": "1h", "every": "1h"}, actor="boss")
         r = server.OPS["ops_run"](self.c, {"scope": "nightly"}, "boss")

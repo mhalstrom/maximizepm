@@ -67,6 +67,16 @@ function renderLoop() {
   b.title = "Restart maxpm serve" + (l.error ? `\nLast error: ${l.error}` : "");
 }
 
+// This computer is offline (S.net_down, #6099): maxpm serve runs no check and starts no session until it is back.
+function renderNet() {
+  const d = S.net_down, b = $("#netDown");
+  b.classList.toggle("hidden", !d);
+  if (!d) return;
+  // A phone's bar shows only "Offline" (phone.css hides the time).
+  b.innerHTML = `Offline<span class="net-at"> since ${esc(new Date(d.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>`;
+  b.title = "Network down";
+}
+
 function renderSelects() {
   const names = S.projects.map(p => p.name);
   fillSelect("#addProject", names, false);
@@ -261,7 +271,7 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderEvents(); settings.renderSettings(); settings.renderPolicies(); settings.renderPeople(); renderCredentials(); goals.renderGoals(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
+  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderNet(); renderEvents(); settings.renderSettings(); settings.renderPolicies(); settings.renderPeople(); renderCredentials(); goals.renderGoals(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
   renderRelay();
   drawBell($("#notifyBtn"), S.notifications);
   drawPause($("#pauseBtn"), S.pause);

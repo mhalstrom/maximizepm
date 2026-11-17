@@ -91,6 +91,8 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   header.tabs-open #tabBtn .caret { transform: rotate(180deg); }
   header > .spacer { display: block; flex: 1 1 0; }
   #search { display: none; }
+  #netDown { flex: none; }  /* offline (#6099): the word only, so the tab name keeps its room */
+  #netDown .net-at { display: none; }
   #searchBtn, #hdrMore, #notifyBtn, #pauseBtn { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
     border: 0; background: none; color: var(--ink); font-size: 20px; }
   /* The card (#6002): its comments, history and Discuss under it. */

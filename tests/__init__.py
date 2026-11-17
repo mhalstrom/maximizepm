@@ -59,6 +59,9 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
         os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
+# The tests never probe the network (#6099): this computer is online for every test, offline or in a sandbox. A test
+# of an outage sets core.NET_PROBE itself.
+core.NET_PROBE = lambda hosts, dns: None
 from river import cli as _cli  # noqa: E402
 # The tests run inside an agent CLI (its variables are in their environment), but a test's command is a person's
 # terminal unless the test says otherwise: the permission table (#5974) reads this hook. Its tests set their own.

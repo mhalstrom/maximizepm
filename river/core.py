@@ -372,6 +372,11 @@ DEFAULT_SETTINGS = {
     # Before a new fault opens an item, maxpm serve runs the check once again at once (#5505): the fault comes only
     # when that run fails too. off: the run that makes the fault opens the item.
     "ops_confirm": "on",
+    # A local network outage (#6099): when a check of the network fails, MaximizePM looks up these host names. When
+    # this computer has no route to the internet, or none of them resolves, the network of this computer is down:
+    # the failed run opens no fault item, and maxpm serve runs no check and starts no session until the network is
+    # back; then the checks run again. off: no outage is ever detected, and every failed run counts.
+    "net_probe_hosts": "dns.google,one.one.one.one",
     # The time limit of a command that proves the cause of a fault (maxpm ops cause --proof "<command>", #5513).
     "ops_proof_timeout": "60s",
     # The time limit of the command that builds the source maps of a released commit for a page walk check
@@ -3128,6 +3133,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
         canvas_hosts(value)
+    elif key == "net_probe_hosts":
+        net_hosts(value)
     elif key in ("ops_lease_loop", "ops_release_loop"):
         count_window(value, key)
     elif key == "browser_source":
@@ -6474,8 +6481,12 @@ def ops_finish(conn, run, at=None):
     Never an error: a failure to record leaves the run open, and ops_close_lost closes it later as unknown.
     Before a new fault of a url, cmd or plugin check opens an item, the check runs once again at once (setting
     ops_confirm, #5505): the fault and its item come only when that run fails too, and nothing opens when it
-    passes."""
+    passes. A failed run of a check of the network while this computer is offline records nothing (#6099,
+    _ops_offline): the result has status offline, and the check runs again when the network is back."""
     res = ops_execute(run, at)
+    why = _ops_offline(conn, run, res)
+    if why:
+        return _ops_offline_rec(run, why)
     # A log check's window already holds the earlier runs, and a beat check reads a time, so a second run of
     # either at once gives the same answer: only url, cmd and plugin checks run again.
     confirm = run["check"]["form"] in ("url", "cmd", "plugin") and \
@@ -6488,6 +6499,9 @@ def ops_finish(conn, run, at=None):
                 conn.execute("UPDATE ops_runs SET confirms=? WHERE id=?", (run["id"], again["id"]))
             first, found, first_res = rec, run, res
             run, res = again, ops_execute(again, at)
+            why = _ops_offline(conn, again, res)
+            if why:  # the first run stays failing, with no item: the check runs again when the network is back
+                return dict(_ops_offline_rec(again, why), changes=first["changes"], confirms=first["run"])
             rec = ops_record(conn, again, res, at)
             rec["confirms"] = first["run"]
             ops_detect(conn, found, first_res, {}, at)  # the first run found it too
@@ -6512,6 +6526,12 @@ def ops_finish(conn, run, at=None):
         rec["watch"] = _ops_watch_end(conn, run, rec, watch, rec["items"])
     ops_detect(conn, run, res, rec, at)
     return rec
+
+
+def _ops_offline_rec(run, why):
+    c = run["check"]
+    return {"run": run["id"], "check": f"{c['scope']}/{c['name']}", "status": "offline", "offline": why,
+            "summary": f"not counted: the network of this computer is down ({why})", "changes": [], "items": []}
 
 
 def ops_detect(conn, run, res, rec, at=None):
@@ -14019,6 +14039,152 @@ def pause_pass(conn, can_restart=True):
             conn.execute("DELETE FROM meta WHERE key=?", (PAUSE_KEY,))
         _event(conn, None, "maxpm", "paused and nothing is held: maxpm serve restarts")
     return True
+
+
+# ---------------------------------------------------------------- local network outage (#6099)
+# On 2026-11-17 this computer lost its network three times. Each time every check of a remote host failed, about 10
+# fault items opened, and maxpm serve started a session for each, which could not reach its model either. Now a failed
+# run of a check of the network first asks whether this computer is online (net_probe). When it is not, the run is
+# dropped (no state change, no detection, no item), and one outage row in meta records the time and the cause. While
+# it lasts, maxpm serve runs no check and starts no session (net_refusal; the automatic starts skip their pass). Each
+# pass of serve probes again (net_watch); when the network is back, the row goes, and the checks run at once, before
+# any of them can open an item. A check that still fails then opens its item as before.
+NET_KEY = "net_down"
+NET_PROBE = None  # a test hook: (hosts, dns) -> None when the network works, else the reason
+NET_ROUTE_IPS = ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111")  # a route to any of them: this computer has one
+NET_DNS_TIMEOUT = 3.0  # seconds for all the lookups together
+NET_FORMS = ("url", "cmd", "plugin", "beat")  # a log check reads local files: its failure is never the network's
+_NET_HOST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$")
+
+
+def net_hosts(value):
+    """The host names of the setting net_probe_hosts, or [] for off. Raises RiverError for a name that is not one."""
+    v = (value or "").strip()
+    if v.lower() == "off":
+        return []
+    hosts = [h.strip() for h in v.replace(" ", ",").split(",") if h.strip()]
+    bad = [h for h in hosts if not _NET_HOST.match(h)]
+    if bad or not hosts:
+        raise RiverError(f"net_probe_hosts takes host names separated by commas (dns.google,one.one.one.one), or off; "
+                         f"not a host name: {', '.join(bad) or repr(value)}")
+    return hosts
+
+
+def net_probe(conn, dns=True):
+    """None when this computer is online, else the reason it is not: no route to any of NET_ROUTE_IPS (a UDP connect
+    sends no packet: it only asks the routing table), or, with dns, no answer for any host of net_probe_hosts within
+    NET_DNS_TIMEOUT. Also None when net_probe_hosts is off. Never an error."""
+    import socket
+    import threading
+    try:
+        hosts = net_hosts(setting(conn, "net_probe_hosts"))
+    except RiverError:
+        hosts = net_hosts(DEFAULT_SETTINGS["net_probe_hosts"])
+    if not hosts:
+        return None
+    if NET_PROBE is not None:
+        return NET_PROBE(hosts, dns)
+    errors = []
+    for ip in NET_ROUTE_IPS:
+        try:
+            with socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((ip, 53))
+            break
+        except OSError as e:
+            errors.append(e.strerror or str(e))
+    else:
+        return f"no route to the internet ({errors[0]})"
+    if not dns:
+        return None
+    got = {}
+
+    def look(h):
+        try:
+            socket.getaddrinfo(h, 443, type=socket.SOCK_STREAM)
+            got[h] = None
+        except OSError as e:
+            got[h] = e.strerror or str(e)
+    threads = [threading.Thread(target=look, args=(h,), daemon=True) for h in hosts]
+    for t in threads:
+        t.start()
+    end = _monotonic() + NET_DNS_TIMEOUT
+    for t in threads:
+        t.join(max(0.0, end - _monotonic()))
+    if any(h in got and got[h] is None for h in hosts):
+        return None
+    why = next((got[h] for h in hosts if got.get(h)), f"no answer in {NET_DNS_TIMEOUT:g} s")
+    return f"no DNS answer for {', '.join(hosts)} ({why})"
+
+
+def net_down(conn):
+    """The local network outage that maxpm serve recorded ({since, reason, deferred: [check keys]}), or None."""
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (NET_KEY,)).fetchone()
+    if not r:
+        return None
+    try:
+        return json.loads(r["value"])
+    except ValueError:
+        return None
+
+
+def net_refusal(conn):
+    """Why a new session may not start now (a local network outage), or None."""
+    d = net_down(conn)
+    if not d:
+        return None
+    return (f"refused: the network of this computer is down since {show_time(d['since'], setting(conn, 'timezone'))} "
+            f"({d['reason']}), so a new session cannot reach its model; it starts when the network is back. A wrong "
+            f"detection: maxpm config set net_probe_hosts off")
+
+
+def _net_record_down(conn, why, key=None):
+    """Record the outage (one meta row and one line in the history), or add the check key to the one recorded."""
+    with tx(conn):
+        d = net_down(conn)
+        if d is None:
+            d = {"since": iso(now()), "reason": why, "deferred": []}
+            _event(conn, None, "maxpm", f"the network of this computer is down ({why}): maxpm serve runs no check, "
+                                        f"opens no fault item and starts no session until it is back (#6099)")
+        if key and key not in d["deferred"]:
+            d["deferred"].append(key)
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (NET_KEY, json.dumps(d)))
+    return d
+
+
+def net_watch(conn):
+    """A pass of maxpm serve (#6099): with no outage recorded, it asks the routing table only (no packet); with one,
+    it probes fully, and when the network is back, the outage ends and the checks are due at once (ops_due runs
+    each check whose last run is older than its every, and the outage held them all). Returns the outage, or None."""
+    d = net_down(conn)
+    if d is None:
+        why = net_probe(conn, dns=False)
+        return _net_record_down(conn, why) if why else None
+    why = net_probe(conn)
+    if why:
+        return d
+    with tx(conn):
+        if conn.execute("DELETE FROM meta WHERE key=?", (NET_KEY,)).rowcount:
+            n = len(d.get("deferred") or [])
+            _event(conn, None, "maxpm", f"the network of this computer is back after "
+                                        f"{_short(now() - parse_iso(d['since']))} (down since {show_time(d['since'])}): "
+                                        f"the checks run again now" + (f", the {n} that failed in it first" if n else "")
+                                        + "; a check that still fails opens its item as before (#6099)")
+    return None
+
+
+def _ops_offline(conn, run, res):
+    """A failed run of a check of the network while this computer is offline (#6099): the run row goes, the outage
+    is recorded, and the reason comes back; ops_finish then records nothing. None for any other run. The probe is
+    fresh, not the recorded outage: the watchdog of outside checks runs when serve does not."""
+    if res.get("status") not in OPS_FAILED or run["check"]["form"] not in NET_FORMS:
+        return None
+    why = net_probe(conn)
+    if why is None:
+        return None
+    _net_record_down(conn, why, run["check"]["key"])
+    with tx(conn):
+        conn.execute("DELETE FROM ops_runs WHERE id=? AND ended_at IS NULL", (run["id"],))
+    return why
 
 
 def stop_request(conn, name):
@@ -21588,7 +21754,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     session gets it. prompt: maxpm launch --prompt, after the profile's first prompt. folder: the folder the person
     picked for a project with none (start_folder). preview (the page's Next line): the item and project only, also
     for a project with no folder yet."""
-    why = None if preview else pause_refusal(conn)  # #5962: maxpm pause holds every new session
+    why = None if preview else (pause_refusal(conn) or net_refusal(conn))  # #5962: maxpm pause holds every new session
     if why:
         raise RiverError(why)
     ann = annotate(conn, closed=False)
@@ -22127,6 +22293,7 @@ def state(conn, closed=True):
     return {
         "now": iso(now()),
         "pause": paused(conn),  # maxpm pause (#5962): the top bar shows it, with Resume
+        "net_down": net_down(conn),  # #6099: the top bar says that this computer is offline
         "notifications": setting(conn, "notifications"),  # the bell of the top bar (#6001)
         "projects": project_list(conn),
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
@@ -24104,6 +24271,9 @@ def manager_findings(conn):
         f"SELECT id, from_agent, to_agent, body, item_id, held_for, held_until FROM messages WHERE kind='question' "
         f"AND state='open' AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", humans)] if humans else []
     loop = serve_loop(conn)
+    net = net_down(conn)
+    if net:
+        net = dict(net, age=_short(now() - parse_iso(net["since"])))
     unneeded = [{"id": e["id"], "title": e["title"], "doer": e["doer"], "project": e["project"],
                  "closes": [{"id": c["id"], "why": c["why"]} for c in e["closes"]]}
                 for e in close_open(conn) if not ann[e["id"]]["project_archived"]]
@@ -24127,6 +24297,7 @@ def manager_findings(conn):
             "unneeded": unneeded, "goal_checks": goal_checks, "unpushed": waits["unpushed"],
             "untagged": waits["untagged"],
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
+            "net_down": [net] if net else [],
             "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
             "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"],
                              "held_for": x["held_for"] or None, "held_until": x["held_until"]} for x in sorted(
@@ -24258,6 +24429,7 @@ def _finding_keys(f):
                   | {f"unconnected:{x['agent']}" for x in f.get("not_connected", [])} | {f"uncovered:{x['project']}" + (f":{x['agent_type']}" if x.get("agent_type") else "") for x in f["uncovered"]}
                   | {f"target:{x['target']}" for x in f["targets"]} | {f"question:{x['id']}" for x in f["questions"]}
                   | {"serve_loop" for x in f.get("serve_loop", [])}
+                  | {f"net_down:{x['since']}" for x in f.get("net_down", [])}
                   | {f"unneeded:{x['id']}" for x in f.get("unneeded", [])}
                   | {f"goal:{x['goal']}" for x in f.get("goal_checks", [])}
                   | {f"rule:{x['key']}" for x in f.get("broken_rules", [])}

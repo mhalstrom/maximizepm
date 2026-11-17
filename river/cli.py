@@ -5095,6 +5095,11 @@ def _findings_lines(f, r):
                    + (f" (last error: {_cut(x['error'], 80)})" if x["error"] else "")
                    + ", so it does none of its automatic work (tidy, notifications, fresh sessions, reload).  "
                    "maxpm serve --restart")
+    for x in f.get("net_down", []):
+        n = len(x.get("deferred") or [])
+        out.append(f"  OFFLINE: the network of this computer is down for {x['age']} ({_cut(x['reason'], 80)}). No check "
+                   f"runs and no session starts until it is back" + (f"; {n} failed check run(s) wait" if n else "")
+                   + ". Nothing to do: the checks run again then, and only a check that still fails opens an item")
     for x in f["uncovered"]:
         t = x.get("agent_type")
         out.append(f"  NO {t.upper() + ' ' if t else ''}AGENT in {x['project']}: {x['ready']} ready"

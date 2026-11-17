@@ -174,6 +174,8 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
 .c-human { color: var(--human); }
 .c-ai { color: var(--muted); }
 .c-p0 { color: var(--warn); font-weight: 600; }
+.c-warn { color: var(--warn); }
+#netDown { align-self: center; }  /* the top bar: this computer is offline (#6099) */
 .c-p { color: var(--muted); }
 .c-ai::before, .c-p::before { content: none; }
 .iconbtn { background: none; border: 0; border-radius: var(--r-xs); cursor: pointer; padding: 0 6px; color: var(--muted); }

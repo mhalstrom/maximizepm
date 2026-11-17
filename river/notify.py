@@ -547,6 +547,7 @@ def loop(stop, interval_s=None):
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
             steps = (
                 sweep,  # expired leases, holds and reservations, and needs-you, as every command does (#5597)
+                core.net_watch,  # is this computer online: while not, no check runs and no session starts (#6099)
                 server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
                 server.failed_starts,  # a session whose agent exited in its pane before it connected ends (#5892)
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)

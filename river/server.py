@@ -1698,6 +1698,8 @@ def _ops_thread(run):
             c = core.connect()
             try:
                 r = core.ops_finish(c, run)
+                if r.get("offline"):
+                    print(f"ops {run['check']['key']}: {r['summary']}; it runs again then", flush=True)
                 for ch in r["changes"]:
                     print(f"ops {ch['key']}: {ch['from']} -> {ch['to']}", flush=True)
             finally:
@@ -1739,6 +1741,8 @@ def ops_watch(conn):
         if r.get("status") == "cut":  # a restart of serve cut it (#5627): it runs again below, with no fault
             print(f"ops {r['key']}: a stop of maxpm serve cut run {r['run']}; it runs again now", flush=True)
     started = []
+    if core.net_down(conn):  # #6099: the checks wait until the network of this computer is back (core.net_watch)
+        return started
     for c in core.ops_due(conn):
         if c["form"] != "beat" and len(OPS_RUNNING) >= OPS_MAX_RUNNING:
             break
@@ -3395,8 +3399,8 @@ def fresh_sessions(conn, runner=None):
     end = core.parse_duration(core.setting(conn, "idle_end"))
 
     def start(ids, why):
-        if core.paused(conn):
-            return  # #5962: the items wait in the queue until the pause ends
+        if core.paused(conn) or core.net_down(conn):
+            return  # #5962: the items wait in the queue until the pause ends; #6099: or the network is back
         for i in ids:
             try:
                 out["started"][i] = start_fresh(conn, i, why, runner)["session_name"]
@@ -3514,8 +3518,8 @@ def auto_operational(conn, runner=None):
     max_sessions are live, but at most ops_max_investigations at the same time. Returns {"added": [ids], "pushed":
     {item: agent}, "started": {item: session}, "failed": {}}."""
     out = {"added": core.cleanup_trigger(conn), "pushed": {}, "started": {}, "failed": {}}
-    if core.paused(conn):
-        return out  # #5962: no session starts while paused
+    if core.paused(conn) or core.net_down(conn):
+        return out  # #5962: no session starts while paused; #6099: nor while the network of this computer is down
     rows = conn.execute("SELECT id, title, kind FROM items WHERE kind='operational' AND status='open' AND assignee IS NULL "
                         "AND (reserved_for IS NULL OR reserved_until < ?) ORDER BY title NOT LIKE 'ops:%', id",
                         (core.iso(core.now()),)).fetchall()
@@ -3566,7 +3570,7 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy
     item's model and effort. Its maxpm go claims the deploy item when it is ready, else it waits for it."""
     import secrets
-    why = core.pause_refusal(conn)  # #5962
+    why = core.pause_refusal(conn) or core.net_refusal(conn)  # #5962, #6099
     if why:
         raise RiverError(why)
     it = core.annotate(conn)[dep_id]
@@ -3610,8 +3614,8 @@ def auto_release(conn, runner=None):
     "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}, "deploying": {item: hook run},
     "lost": [deploy items whose hook run never ended], "cut" (only when there are): [hook runs whose process ended (core.hook_runs_cut)]}."""
     out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []}
-    if core.paused(conn):
-        return out  # #5962: no reviewer, deployer or deploy hook starts while paused
+    if core.paused(conn) or core.net_down(conn):
+        return out  # #5962: no reviewer, deployer or deploy hook starts while paused; #6099: or offline
     ann = None
     cap = int(core.setting(conn, "max_sessions") or 0)
     # A hook run whose process ended (a stop or a crash of serve) ends at once; a cut deploy runs again below (#5654).

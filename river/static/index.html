@@ -46,6 +46,8 @@
   <span class="spacer"></span>
   <input type="search" id="search" placeholder="Search items" title="Search items (/)" autocomplete="off">
   <button class="iconbtn" type="button" id="searchBtn" title="Search items" aria-label="Search items"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
+  <!-- This computer is offline (#6099): no check runs and no session starts until the network is back (app.js renderNet). -->
+  <span class="chip c-warn hidden" id="netDown" role="status"></span>
   <!-- All notices on or off in one click (#6001): a bell, crossed while off (components/notifyBell.js). -->
   <button class="iconbtn" type="button" id="notifyBtn" aria-pressed="true" aria-label="Notifications on" title="Notifications"></button>
   <!-- Pause all working sessions, or resume (#5962, components/pauseButton.js). -->

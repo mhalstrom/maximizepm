@@ -12183,6 +12183,108 @@ class Ops(Base):
             return r
         return runner
 
+    def test_while_this_computer_is_offline_a_failed_check_opens_no_item_and_runs_again_when_it_is_back(self):
+        """#6099: on 2026-11-17 every check of a remote host failed while this Mac had no network, and about 10
+        fault items and sessions started each time. A failed run of a check of the network first asks whether this
+        computer is online: when not, it records nothing, one outage is recorded, and no session starts. When the
+        network is back, the checks are due at once, and only a check that still fails opens its item."""
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "fail_after": 1}, actor="boss")
+        core.ops_add(self.c, "site", "api", "cmd", {"command": "ssh prod check", "fail_after": 1}, actor="boss")
+        core.ops_add(self.c, "site", "errs", "log", {"command": "tail_new", "pattern": "ERROR", "fail_after": 1},
+                     actor="boss")
+        probes = []
+
+        def offline(hosts, dns):
+            probes.append((tuple(hosts), dns))
+            return "no route to the internet (Network is unreachable)"
+
+        def nodns(url, limit):
+            raise OSError(8, "nodename nor servname provided, or not known")
+        t = core.now()
+        with mock.patch.object(core, "NET_PROBE", offline):
+            r = self.run_at("site", "home", t, http=nodns)
+            self.assertEqual((r["status"], r["items"], r["changes"]), ("offline", [], []))
+            self.assertIn("network of this computer is down (no route", r["summary"])
+            r = self.run_at("site", "api", t, self.proc(255, "ssh: connect to host prod: Network is unreachable"))
+            self.assertEqual(r["status"], "offline")
+            # A log check reads local files: its failure counts as before.
+            self.run_at("site", "errs", t, self.proc(0, "ERROR one\n"))
+        self.assertEqual(probes, [(("dns.google", "one.one.one.one"), True)] * 2)
+        self.assertEqual((self.state("site", "home"), self.state("site", "api"), self.state("site", "errs")),
+                         ("new", "new", "fault"))
+        self.assertEqual([x["title"].split()[0] for x in self.ops_items()], ["ops:site:errs"])
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM ops_runs WHERE key IN ('ops:site:home','ops:site:api')")
+                         .fetchone()[0], 0)  # the runs are dropped: the checks are due again
+        d = core.net_down(self.c)
+        self.assertEqual((d["reason"], d["deferred"]), ("no route to the internet (Network is unreachable)",
+                                                        ["ops:site:home", "ops:site:api"]))
+        down = [e for e in self.history_all() if "network of this computer is down" in e]
+        self.assertEqual(len(down), 1, down)  # one outage, not one line for each check
+        # No session starts, the page and the manager's watch show it.
+        self.assertIn("network of this computer is down since", core.net_refusal(self.c))
+        self.assertEqual(core.state(self.c)["net_down"]["since"], d["since"])
+        f = core.manager_findings(self.c)
+        self.assertEqual(len(f["net_down"]), 1)
+        self.assertIn(f"net_down:{d['since']}", core._finding_keys(f))
+        from river import cli
+        lines = cli._findings_lines(f, "maxpm --as boss")
+        self.assertTrue(any(x.startswith("  OFFLINE: the network of this computer is down for") and "2 failed check"
+                            in x for x in lines), lines)
+        # Still down: the pass of serve keeps the outage. Back: it ends, and the checks are due at once.
+        with mock.patch.object(core, "NET_PROBE", offline):
+            self.assertEqual(core.net_watch(self.c)["since"], d["since"])
+        self.assertIsNone(core.net_watch(self.c))
+        self.assertIsNone(core.net_down(self.c))
+        self.assertIsNone(core.net_refusal(self.c))
+        self.assertIn("is back after", self.history_all()[-1])
+        self.assertIn("the 2 that failed in it first", self.history_all()[-1])
+        self.assertEqual({c["name"] for c in core.ops_due(self.c, at=t)}, {"home", "api"})
+        # Online, a check that still fails opens its item as before.
+        r = self.run_at("site", "home", t, http=nodns)
+        self.assertEqual((self.state("site", "home"), r["items"][0]["action"]), ("fault", "opened"))
+
+    def test_an_outage_that_begins_between_a_failed_run_and_its_confirming_run_opens_no_item(self):
+        core.ops_add(self.c, "site", "api", "cmd", {"command": "check_api", "fail_after": 1}, actor="boss")
+        answers = [None, "no DNS answer for dns.google, one.one.one.one (no answer in 3 s)"]
+        with mock.patch.object(core, "NET_PROBE", lambda hosts, dns: answers.pop(0)):
+            r = self.run_at("site", "api", core.now(), self.seq((2, "down"), (2, "down")))
+        self.assertEqual((r["status"], r["items"]), ("offline", []))
+        self.assertEqual(self.state("site", "api"), "failing")  # the first run counts; the fault waits for a run online
+        self.assertEqual(self.ops_items(), [])
+        self.assertEqual(core.net_down(self.c)["deferred"], ["ops:site:api"])
+
+    def test_net_watch_asks_only_the_routes_while_online_and_net_probe_hosts_off_turns_it_off(self):
+        calls = []
+        with mock.patch.object(core, "NET_PROBE", lambda hosts, dns: calls.append(dns) or "no route to the internet"):
+            self.assertEqual(core.net_watch(self.c)["reason"], "no route to the internet")
+            self.assertEqual(calls, [False])  # online: no DNS lookup in each pass
+            core.net_watch(self.c)
+            self.assertEqual(calls, [False, True])  # offline: the full probe, to see it come back
+            with self.assertRaisesRegex(RiverError, "not a host name: bad_host!"):
+                core.config_set(self.c, "net_probe_hosts", "dns.google,bad_host!")
+            core.config_set(self.c, "net_probe_hosts", "off")
+            self.assertIsNone(core.net_probe(self.c))
+            self.assertIsNone(core.net_watch(self.c))  # off: the outage ends, and none is detected again
+            self.assertIsNone(core.net_down(self.c))
+
+    def test_net_probe_reads_the_routing_table_then_the_dns_of_its_hosts(self):
+        import socket
+        with mock.patch.object(core, "NET_PROBE", None):
+            with mock.patch.object(socket.socket, "connect", side_effect=OSError(51, "Network is unreachable")):
+                self.assertEqual(core.net_probe(self.c), "no route to the internet (Network is unreachable)")
+            with mock.patch.object(socket.socket, "connect", return_value=None), \
+                    mock.patch.object(socket, "getaddrinfo", side_effect=OSError(8, "nodename nor servname provided")):
+                self.assertEqual(core.net_probe(self.c), "no DNS answer for dns.google, one.one.one.one (nodename nor "
+                                                         "servname provided)")
+                self.assertIsNone(core.net_probe(self.c, dns=False))
+            ok = lambda h, *a, **k: [] if h == "one.one.one.one" else (_ for _ in ()).throw(OSError(8, "no"))
+            with mock.patch.object(socket.socket, "connect", return_value=None), \
+                    mock.patch.object(socket, "getaddrinfo", side_effect=ok):
+                self.assertIsNone(core.net_probe(self.c))  # one host answers: online
+
+    def history_all(self):
+        return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id IS NULL ORDER BY id")]
+
     def test_before_a_new_fault_opens_an_item_the_check_runs_once_again_and_a_pass_opens_nothing(self):
         core.ops_add(self.c, "site", "api", "cmd", {"command": "check_api", "fail_after": 1}, actor="boss")
         t = core.now()
