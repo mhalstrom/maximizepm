@@ -209,14 +209,17 @@ def summary_set(conn, item_id, text, actor=None):
                      (dep["id"], text, actor or "maxpm", t))
         core._event(conn, dep["id"], actor, f"the summary of the release report: {text[:200]}")
     sent = []
-    if first:
+    # A target that takes a person's yes for each release (release_approval person) shows the report on its approval
+    # card: a Read card as well asked the person twice (#6108). A Read card closes with its release (core._close).
+    on_approval = bool(dep["target"]) and core.release_approval(conn, dep["target"])["approval"] == "person"
+    if first and not on_approval and dep["status"] not in core.CLOSED_STATES:
         for p in [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' AND last_seen IS NOT NULL "
                                                     "ORDER BY name")]:
-            m = core.send(conn, "alert", f"Read the report of the release of {dep['target'] or 'a target'} "
+            m = core.send(conn, "alert", f"{core.REPORT_CARD} {dep['target'] or 'a target'} "
                           f"(#{dep['id']}) before it goes out: {text[:300]}", to=p, item=dep["id"], actor=actor,
                           level="low")
             sent.append(m["id"] if isinstance(m, dict) and "id" in m else p)
-    return {"id": dep["id"], "summary": text, "read_cards": sent}
+    return {"id": dep["id"], "summary": text, "read_cards": sent, "on_approval": on_approval}
 
 
 def release_marks(conn, agent, days=14, limit=20):

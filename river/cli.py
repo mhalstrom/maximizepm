@@ -2392,7 +2392,8 @@ def build_parser(only=None):
                                                "after a fix with these words (#6039)")
     x.add_argument("id", type=int, help="the 'Approve release' item")
     x.add_argument("note", help="what must change")
-    x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it)")
+    x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it), or an "
+                                        "unread alert to a person that is moot (its sender or the manager)")
     x.add_argument("id", type=int)
     x.add_argument("--note", required=True, help="why it is moot")
     x = sub.add_parser("inbox", help="your unread messages and questions waiting for your answer")
@@ -7727,7 +7728,9 @@ def render(a, res):
         return render_release_report(res)
     if c == "target" and getattr(a, "tcmd", None) == "summary":
         print(f"The summary of release #{res['id']} is saved."
-              + (f" The person got a Read card." if res["read_cards"] else ""))
+              + (f" The person got a Read card." if res["read_cards"] else "")
+              + (f" No Read card: the person reads it on the release's approval card." if res.get("on_approval")
+                 else ""))
         return
     if c == "target":
         if isinstance(res, list):
@@ -8015,7 +8018,7 @@ def render(a, res):
         print(f"answered: sent #{res['id']} to {res['to_agent']}; question #{res['reply_to']} is closed")
         return
     if c == "withdraw":
-        print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
+        print(f"{res.get('kind', 'question')} #{res['withdrawn']} is withdrawn: {res['note']}")
         return
     if c == "release-changes":
         print(f"changes asked: fix #{res['fix']}" + (f"; review #{res['review']} runs again after it" if res["review"]

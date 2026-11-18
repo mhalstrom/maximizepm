@@ -14501,6 +14501,59 @@ class ReleaseReport(Base):
         again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
         self.assertEqual(again["read_cards"], [])  # one Read card only
 
+    def _card(self):
+        from river import report
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='mark'", (core.iso(core.now()),))
+        self.c.commit()
+        return report.summary_set(self.c, self.deploy, "One revert of the menu.", "boss")
+
+    def _open_cards(self):
+        return self.c.execute("SELECT COUNT(*) FROM needs_you n JOIN messages m ON m.id=n.message_id "
+                              "WHERE n.closed_at IS NULL AND m.body LIKE 'Read the report%'").fetchone()[0]
+
+    def test_the_read_card_closes_when_its_release_is_dropped(self):
+        # #6108: three Read cards of releases that had gone out or were dropped stayed in mark's Needs you.
+        out = self._card()
+        core.sync_needs_you_now(self.c)
+        self.assertEqual(self._open_cards(), 1)
+        core.drop(self.c, self.deploy, "mark", note="not this one")
+        core.sync_needs_you_now(self.c)  # the CLI and maxpm serve sync after each command
+        self.assertEqual(self._open_cards(), 0)
+        card = self.c.execute("SELECT read_at, closed_at FROM messages WHERE id=?", (out["read_cards"][0],)).fetchone()
+        self.assertIsNotNone(card["read_at"])
+        self.assertIsNotNone(card["closed_at"])
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'closed the Read card%'",
+                                       (self.deploy,)).fetchone())
+        # Another alert to the person about the same deploy item stays.
+        core.send(self.c, "alert", "The menu revert needs your eyes", to="mark", item=self.deploy, actor="dev")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='mark' AND kind='alert' "
+                                        "AND read_at IS NULL").fetchone()[0], 1)
+
+    def test_a_target_with_a_persons_yes_gets_no_read_card(self):
+        core.config_set(self.c, "release_approval", "person", project="site")
+        out = self._card()
+        self.assertEqual(out["read_cards"], [])
+        self.assertTrue(out["on_approval"])
+
+    def test_the_manager_withdraws_a_stale_alert_to_a_person(self):
+        # #6108: maxpm withdraw refused an alert ('no open question'); the manager could not close a stale card.
+        out = self._card()
+        mid = out["read_cards"][0]
+        core.register(self.c, "other")
+        with self.assertRaisesRegex(RiverError, "only the sender"):
+            core.withdraw(self.c, mid, "moot", "other")
+        res = core.withdraw(self.c, mid, "the release went out", "boss")
+        self.assertEqual((res["kind"], res["withdrawn"]), ("alert", mid))
+        self.assertEqual(self._open_cards(), 0)
+        note = self.c.execute("SELECT read_at, body FROM messages WHERE reply_to=?", (mid,)).fetchone()
+        self.assertEqual(note["body"], "withdrawn: the release went out")
+        self.assertIsNotNone(note["read_at"])  # no new notice for the person
+        with self.assertRaisesRegex(RiverError, "read already"):
+            core.withdraw(self.c, mid, "again", "boss")
+        to_agent = core.send(self.c, "alert", "Look", to="dev", actor="boss")
+        with self.assertRaisesRegex(RiverError, "no person"):
+            core.withdraw(self.c, to_agent["id"], "moot", "boss")
+
     def test_the_code_of_the_whole_release(self):
         # #6038: from the last tag to local main: the files, their size and tasks, and the commits that name no task.
         import subprocess

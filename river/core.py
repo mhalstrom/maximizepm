@@ -8702,6 +8702,25 @@ def deploy_hook(conn, target):
 
 RELEASE_APPROVALS = ("review", "person")
 APPROVE_TITLE = "Approve release"
+# The start of the Read card of a release report (report.summary_set): a low alert to each person about the deploy item.
+REPORT_CARD = "Read the report of the release of"
+
+
+def _close_report_cards(conn, dep_id, status, actor):
+    """Inside a tx: the release of deploy dep_id went out or was dropped, so its Read cards to the people are moot
+    (#6108, mark 2026-11-18: three such cards of past releases stayed open in his Needs you). Each unread one is
+    read and closed, with no notice. Returns their ids."""
+    rows = conn.execute("SELECT m.id FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+                        "WHERE m.kind='alert' AND m.item_id=? AND m.read_at IS NULL AND m.body LIKE ?",
+                        (dep_id, REPORT_CARD + " %")).fetchall()
+    ids = [r["id"] for r in rows]
+    if ids:
+        t = iso(now())
+        conn.execute(f"UPDATE messages SET state='read', read_at=?, closed_at=COALESCE(closed_at, ?) "
+                     f"WHERE id IN ({','.join('?' * len(ids))})", (t, t, *ids))
+        _event(conn, dep_id, actor, f"closed the Read card(s) {', '.join(f'#{i}' for i in ids)} of this release: "
+                                    f"it is {status}")
+    return ids
 
 
 def release_approval(conn, target):
@@ -9330,6 +9349,7 @@ def _merge_later_deploys(conn, dep_id, target):
                      "blocked_until=NULL, blocked_set_by=NULL WHERE id=?", (iso(now()), o["id"]))
         _event(conn, o["id"], "maxpm", f"dropped: merged into release #{dep_id} of {target}, whose deploy hook failed "
                                        f"(one open release per target)")
+        _close_report_cards(conn, o["id"], f"merged into release #{dep_id}", "maxpm")
         merged.append(o["id"])
     return merged
 
@@ -12116,6 +12136,8 @@ def merge(conn, keep, other, note, actor=None):
                      (iso(now()), f"duplicate of #{k['id']}: {why}", o["id"]))
         _sync_conflicts(conn, o["id"], actor)
         _event(conn, o["id"], actor, f"merged into #{k['id']} (a duplicate): {why}")
+        if o["kind"] == "deploy":
+            _close_report_cards(conn, o["id"], f"merged into #{k['id']}", actor)
         _close_check(conn, _item(conn, o["id"]), "dropped", note=why, merged_into=k["id"])
         _event(conn, k["id"], actor, f"#{o['id']} {o['title']} merged into this item: {why}"
                + (f"; moved {', '.join(moved)}" if moved else ""))
@@ -15933,6 +15955,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
                      "WHERE id=?", (status, iso(now()), output, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
         unneeded = _close_check(conn, it, status, output, note) if it["kind"] == "work" else []
+        if it["kind"] == "deploy":
+            _close_report_cards(conn, it["id"], status, actor)
         if status == "done" and it["kind"] == "deploy":
             _hook(conn, "deployed", it["target"], it["id"], actor)
         elif status == "done" and it["kind"] == "review":
@@ -18329,17 +18353,41 @@ def _close_in_chat(conn, q, body, t, how="in the chat"):
     return mid
 
 
+def _withdraw_alert(conn, q, note, actor):
+    """Inside a tx: the sender or the manager closes an unread alert to a person that is moot now (#6108: the manager
+    could not close three Read cards of releases that had gone out). The alert is read and closed; a note in its
+    thread, read at once, says why, so the person gets no new notice for it (p95)."""
+    if q["read_at"] is not None:
+        raise RiverError(f"alert {q['id']} is read already: nothing waits on the person; see: maxpm thread {q['id']}")
+    if not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (q["to_agent"],)).fetchone():
+        raise RiverError(f"alert {q['id']} is to {q['to_agent']}, no person; withdraw closes an alert to a person")
+    if q["from_agent"] != actor and not _is_manager(conn, actor):
+        raise RiverError(f"only the sender ({q['from_agent']}) or the manager withdraws alert {q['id']}")
+    t = iso(now())
+    mid = _send(conn, "note", actor, f"withdrawn: {note}", to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+    conn.execute("UPDATE messages SET state='read', read_at=? WHERE id=?", (t, mid))
+    conn.execute("UPDATE messages SET state='read', read_at=?, closed_at=COALESCE(closed_at, ?) WHERE id=?",
+                 (t, t, q["id"]))
+    if q["item_id"] is not None:
+        _event(conn, q["item_id"], actor, f"withdrew alert #{q['id']} to {q['to_agent']}: {note}")
+
+
 def withdraw(conn, msg_id, note, actor=None):
     """The asker closes its open question without an answer: the work made it moot (#5001). The person's 'waits for
-    you' of it closes; a note in its thread says why."""
+    you' of it closes; a note in its thread says why. An unread alert to a person closes the same way, by its sender
+    or the manager (#6108)."""
     if not actor:
         raise RiverError("withdraw needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if not note or not note.strip():
         raise RiverError("say why the question is moot: maxpm withdraw <id> --note \"<why>\"")
     with tx(conn):
         q = _message(conn, msg_id)
+        if q["kind"] == "alert":
+            _withdraw_alert(conn, q, note.strip(), actor)
+            sync_needs_you(conn)
+            return {"withdrawn": q["id"], "kind": "alert", "note": note.strip(), "to": q["to_agent"]}
         if q["kind"] != "question" or q["state"] != "open":
-            raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
+            raise RiverError(f"message {msg_id} is no open question and no alert; see: maxpm thread {msg_id}")
         if q["from_agent"] != actor:
             raise RiverError(f"only the asker ({q['from_agent']}) withdraws question {msg_id}; to answer it: "
                              f"maxpm answer {msg_id} \"...\"")
