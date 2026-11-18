@@ -14529,6 +14529,15 @@ class ReleaseReport(Base):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='mark' AND kind='alert' "
                                         "AND read_at IS NULL").fetchone()[0], 1)
 
+    def test_old_read_cards_of_ended_releases_close_once(self):
+        out = self._card()
+        mid = out["read_cards"][0]
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(core.now()), self.deploy))
+        self.c.execute("DELETE FROM meta WHERE key='report_cards_closed'")
+        self.c.commit()
+        core._migrate_report_cards(self.c)
+        self.assertIsNotNone(self.c.execute("SELECT read_at FROM messages WHERE id=?", (mid,)).fetchone()["read_at"])
+
     def test_a_target_with_a_persons_yes_gets_no_read_card(self):
         core.config_set(self.c, "release_approval", "person", project="site")
         out = self._card()

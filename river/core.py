@@ -2152,7 +2152,8 @@ def schema_print():
     """One short id of the schema and of the migrations that this code runs. A change to SCHEMA or to a
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
-    for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts):
+    for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts,
+              _migrate_report_cards):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -2178,6 +2179,7 @@ def _upgrade(conn):
         _migrate_levels(conn)
         _migrate_big_file_conflicts(conn)
         _migrate_person_prompts(conn)
+        _migrate_report_cards(conn)
         with tx(conn):
             conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
     except sqlite3.OperationalError as e:
@@ -8721,6 +8723,18 @@ def _close_report_cards(conn, dep_id, status, actor):
         _event(conn, dep_id, actor, f"closed the Read card(s) {', '.join(f'#{i}' for i in ids)} of this release: "
                                     f"it is {status}")
     return ids
+
+
+def _migrate_report_cards(conn):
+    """Once (#6108): the Read cards of releases that went out or were dropped before _close_report_cards close now."""
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='report_cards_closed'").fetchone():
+            return
+        for r in conn.execute("SELECT DISTINCT m.item_id, i.status FROM messages m JOIN items i ON i.id=m.item_id "
+                              "WHERE m.kind='alert' AND m.read_at IS NULL AND i.kind='deploy' AND i.status IN "
+                              "('done','dropped') AND m.body LIKE ?", (REPORT_CARD + " %",)).fetchall():
+            _close_report_cards(conn, r["item_id"], r["status"], "maxpm")
+        conn.execute("INSERT INTO meta (key, value) VALUES ('report_cards_closed', ?)", (iso(now()),))
 
 
 def release_approval(conn, target):
