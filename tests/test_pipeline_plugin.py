@@ -403,5 +403,105 @@ class Jsonl(Base):
         self.assertEqual(store.show(self.c, "app")["envs"][0]["rev"], "3f2a9c1")  # a deploy stage records it
 
 
+SHIPYARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins", "shipyard")
+COMMIT = "3f2a9c1e5b7d4a20c8e6f1b3a5d7c9e1f2a4b6c8"
+
+
+class ShipyardProof(Base):
+    """The proof of the plugin guide (#6165): a fresh agent that had only maxpm guide pipelines, the jsonl example
+    and the API of an invented system (tests/plugins/shipyard/API.md) wrote tests/plugins/shipyard. Here MaximizePM
+    runs that plugin, as written, against the recorded answers: a pipeline of two stages with a person's yes before
+    the deploy, and the Deploy tab shows it."""
+
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("maxpm_plugin_shipyard_proof", os.path.join(SHIPYARD, "plugin.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.calls, self.started_tag = [], None
+
+        def fetch(method, url, headers, body):
+            self.calls.append((method, url, json.loads(body) if body else None))
+            assert headers["X-Shipyard-Key"] == "value-of-sy-key", headers
+            path = url.split("/api/projects/shop", 1)[1]
+            if method == "POST" and path == "/deploys":
+                self.started_tag = json.loads(body)["tag"]
+                return 200, self.answer("start-deploy.json")
+            if path == "/deploys?after=0":
+                return 200, self.answer("deploys-after-0.json")
+            if path == "/deploys?after=7":
+                if self.started_tag is None:
+                    return 200, self.answer("deploys-after-7.json")
+                return 200, self.answer("deploys-after-7-started.json").replace(b"maxpm-run-REPLACED",
+                                                                                 self.started_tag.encode())
+            if path == "/deploys/101/results":
+                return 200, self.answer("results-101.xml")
+            return 404, b'{"problem": "no such deploy"}'
+
+        def run(argv, folder, request, timeout):  # the plugin in this process, with fetch as its HTTP
+            return 0, json.dumps(mod.handle(json.loads(json.dumps(request)), fetch)).encode(), ""
+        old = (plugin.RUNNER, plugin.DIRS)
+        plugin.RUNNER, plugin.DIRS = run, [*plugin.DIRS, os.path.dirname(SHIPYARD)]
+        self.addCleanup(lambda: setattr(plugin, "RUNNER", old[0]) or setattr(plugin, "DIRS", old[1]))
+        define.stage_set(self.c, "app", "build", "build", workflow="build")
+        define.stage_set(self.c, "app", "deploy", "deploy", env="prod", workflow="deploy", gate="person mark")
+        define.forge_set(self.c, "app", "shipyard", settings={"url": "https://ci.example.com", "project": "shop"},
+                         secrets=["key=sy-key"])
+
+    def test_the_agent_test_passes(self):
+        import subprocess
+        import sys
+        out = subprocess.run([sys.executable, os.path.join(SHIPYARD, "test_shipyard.py")], capture_output=True,
+                             text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def answer(self, name):
+        with open(os.path.join(SHIPYARD, "answers", name), "rb") as f:
+            return f.read()
+
+    def test_the_agent_written_plugin_runs_a_pipeline(self):
+        runner.serve_pass(self.c)
+        self.assertIsNone(self.pipeline()["poll_error"])
+        build = self.c.execute("SELECT r.* FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+                               "WHERE s.name='build' AND r.key='101'").fetchone()
+        self.assertEqual(build["state"], "passed")
+        steps = [(s["name"], s["state"]) for s in self.c.execute(
+            "SELECT name, state FROM stage_steps WHERE run_id=? ORDER BY id", (build["id"],))]
+        self.assertEqual(steps, [("compile", "passed"), ("unit tests", "passed")])
+        self.assertEqual(sorted(t["state"] for t in store.tests(self.c, build["id"])), ["failed", "passed"])
+        deploy = self.runs()["deploy"]
+        self.assertEqual(deploy["state"], "queued")  # it waits for mark's yes
+        self.assertFalse([c for c in self.calls if c[0] == "POST"])
+        core.done(self.c, deploy["gate_item"], actor="mark")
+        self.due()
+        runner.serve_pass(self.c)
+        post = [c for c in self.calls if c[0] == "POST"]
+        self.assertEqual(post[0][2], {"job": "deploy", "commit": COMMIT, "tag": f"maxpm-run-{deploy['id']}"})
+        self.assertEqual(self.c.execute("SELECT key FROM stage_runs WHERE id=?", (deploy["id"],)).fetchone()[0], "103")
+        self.due()
+        runner.serve_pass(self.c)
+        self.assertEqual(self.c.execute("SELECT state FROM stage_runs WHERE id=?", (deploy["id"],)).fetchone()[0],
+                         "passed")
+        self.assertEqual(store.show(self.c, "app")["envs"][0]["rev"], COMMIT)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs WHERE stage_id=?", (deploy["stage_id"],))
+                         .fetchone()[0], 1)  # one deploy run: the plugin's deploy 103 is MaximizePM's run
+        # The Deploy tab: the pipeline, its source (the plugin, without roll back), and its stages' runs.
+        from river.routes import pipeline as routes
+        tab = next(x for x in routes.deploy(self.c, "/api/deploy")["pipelines"] if x["name"] == "app")
+        self.assertEqual((tab["source"]["label"], tab["source"]["actions"]), ("plugin shipyard",
+                                                                              ["start", "stop", "rerun"]))
+        self.assertEqual(tab["source"]["state"], "missing")  # its secret is not saved in this queue yet
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO secrets(name, created_at) VALUES ('sy-key', ?)", (core.iso(core.now()),))
+        tab = next(x for x in routes.deploy(self.c, "/api/deploy")["pipelines"] if x["name"] == "app")
+        self.assertEqual(tab["source"]["state"], "ok")
+        stages = {x["name"]: x for x in tab["stages"]}
+        self.assertEqual((stages["build"]["state"], stages["build"]["version"]),
+                         ("running", "9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c"))  # build 102 runs
+        self.assertEqual((stages["deploy"]["state"], stages["deploy"]["version"], stages["deploy"]["no_news"]),
+                         ("passed", COMMIT, False))
+
+
 if __name__ == "__main__":
     unittest.main()

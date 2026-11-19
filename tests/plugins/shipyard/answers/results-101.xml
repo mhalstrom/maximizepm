@@ -1,0 +1,4 @@
+<testsuite name="unit" tests="2" failures="1" time="1.5">
+  <testcase classname="shop.Cart" name="test_total" time="0.5"/>
+  <testcase classname="shop.Cart" name="test_tax" time="1.0"><failure message="19 != 20">AssertionError: 19 != 20</failure></testcase>
+</testsuite>

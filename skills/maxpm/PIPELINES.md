@@ -202,14 +202,25 @@ maxpm pipeline forge <name> <plugin> --set <key>=<value> --secret <its secret>=<
 maxpm pipeline plugin <plugin>        # its settings, its secrets, and a check that it answers
 ```
 
+- `--set` gives a setting that the manifest names (`--set url=https://...`);
+  each pipeline has its own settings.
+- `--secret` maps a secret that the manifest names to a maxpm secret
+  (`--secret token=jenkins-ci`). A plugin with one secret takes the maxpm
+  secret alone (`--secret jenkins-ci`). A person saves the value first:
+  `maxpm secret put jenkins-ci`.
+- Only a person or the manager connects a pipeline: an agent asks the
+  manager.
+
 Each stage then names the work in that system with `--workflow`. When a
 stage's gate opens, MaximizePM asks the plugin to start that work. The page
 shows an action that the plugin does not do (run again, roll back, stop) as
 "not available for this source", and the command for it is refused: do that
 step in the system itself.
 
-MaximizePM ships four plugins; every forge above is one of them. Read their
-code before you write a plugin:
+MaximizePM ships four plugins; every forge above is one of them. The contract
+in "Write a plugin" is enough to write one; their code shows it at work.
+`tests/plugins/shipyard/` is a plugin that an agent wrote from this guide and
+the jsonl example only, with its test against recorded answers (#6165):
 
 - `github` (`river/pipeline/plugins/github/`): the GitHub, Gitea and
   Forgejo source above, the full example. `maxpm pipeline forge <name>
@@ -344,7 +355,8 @@ A plugin is a folder with two parts: a manifest, `plugin.json`, and a program
 in any language. It imports nothing of MaximizePM's. Put the folder in
 `plugins/<name>/` beside the queue's database (`maxpm db` shows that folder;
 usually `~/.maximizepm/plugins/<name>/`). The folder's name is the plugin's
-name.
+name. A plugin that lives in a project's repository: copy its folder into
+that plugins folder, or put a link to it there.
 
 ### The manifest
 
@@ -374,13 +386,19 @@ name.
   MaximizePM's gates before it moves on; that call is not ready yet, so a gate
   plugin works as `act` now).
 - `run`: the command as a list of words, run in the plugin's folder.
-  `{python}` is the Python that runs MaximizePM.
+  `{python}` is the Python that runs MaximizePM. A test may load the program
+  from another folder: open `plugin.json` by the program's own path, not the
+  current folder.
 - `actions`: some of `start`, `stop`, `rerun`, `rollback`.
 - `settings` and `secrets`: each name with its `help`. A setting can be
-  `required` and have a `default`. A secret is required unless it says
-  `"required": false`.
+  `required` and have a `default` (MaximizePM fills it in when the pipeline is
+  connected). A secret is required unless it says `"required": false`.
+- `description`: one line for the person. Say there what the plugin cannot
+  do, such as "no roll back".
 - `poll_every`: seconds between two polls (60 when not given; at least 10).
-- `timeout`: seconds for one call (30 when not given; at most 300).
+- `timeout`: seconds for one call (30 when not given; at most 300). Keep the
+  plugin's own network time limits below it: a call that MaximizePM stops
+  keeps nothing of its answer.
 
 ### The calls
 
@@ -394,32 +412,57 @@ stdout. Every request has `contract` and `call`. The calls:
 - `poll`: read what changed in the system since the last poll, and answer with
   `events` (a list of CDEvents objects, below) and `state`. It can also answer
   `reports`: the JUnit XML files of finished runs, each as `{"run_key": <the
-  system's id of the run>, "xml": <the file's text>}`; MaximizePM reads them
-  with its own parser, once for each run, before it hands the version on. And
-  `counts`: numbers for the person, such as `{"runs": 10}`.
-- `start`, `rerun`, `rollback`: start the work of one stage run. `rerun` runs
-  a stage again; `rollback` puts an older version on an environment. The
-  answer can have `key` (the system's id of the run), `url` and `note`. When
-  another run of the pipeline has that key already (a retry of the same run in
-  the system), that run keeps its record under `<key>~<its id>`.
-- `stop`: stop the run. The run ends when a later poll reports its end.
+  system's id of the run, a string>, "xml": <the file's text>}`; MaximizePM
+  reads them with its own parser, once for each run (a second report of the
+  same run is skipped). Send a run's report in the same answer as its
+  `finished` event: MaximizePM reads the reports first, then hands the version
+  on. And `counts`: numbers of this poll for the person, such as
+  `{"runs": 10}`.
+- `start`: start the work of one stage run, the `run` of the request (its
+  stage's `work`, its `version`: the commit as MaximizePM has it, which a
+  person may have typed short). Answer with `key`, the system's id of the new
+  run as a string: from then on, events with that subject id are this run's,
+  and no `customData.maxpm.run` is needed. `url` and `note` are optional, and
+  the answer may also carry events.
+- `rerun` (run a stage again) and `rollback` (put an older version on an
+  environment): `run` is a new stage run that MaximizePM made for it, with no
+  key yet; the earlier run of that stage is in `runs` with its key. Start the
+  work again in the system, and answer with the key of the system's new run.
+  When the system's retry keeps the same id, answer that id: the acting run
+  takes the key, and the earlier run keeps its record under `<key>~<its id>`.
+  So a key in `runs` that ends in `~<id>` is an older record: use the part
+  before `~` to reach the system. A `rerun` of failed tests also has `tests`;
+  a system that cannot run only those runs every test and says so in `note`.
+- `stop`: stop the run. Answer `{}` or a `note`; the run ends when a later
+  poll reports its end. A run with no key has nothing in the system yet:
+  answer an `error` that says so.
+- MaximizePM never sends an action that the manifest's `actions` leave out.
 
 The request of `poll` and of each action also has:
 
 - `pipeline`: its `name`, `project`, `stages` (each with `name`, `kind`,
-  `pos`, `work` (the stage's `--workflow`), `env`, `transition` (the mode of
-  the arrow into it), `junit` (the stage's `--junit` name)) and `envs` (each
-  with `name`, `target`, and the `version` that runs there).
-- `settings`: the pipeline's settings for the plugin.
-- `secrets`: the value of each secret the manifest names.
-- `state`: the `state` of the plugin's last answer (null at first). Keep a
-  cursor here, such as the last build number read; the plugin keeps no file
-  of its own.
+  `pos`, `work` (the stage's `--workflow`: match the system's job to it),
+  `env`, `transition` (the mode of the arrow into it), `junit` (the stage's
+  `--junit` name)) and `envs` (each with `name`, `target`, and the `version`
+  that runs there).
+- `settings`: an object of the pipeline's settings, by the manifest's names
+  (`{"url": "https://...", "job": "shop"}`), defaults filled in.
+- `secrets`: an object of the secret values, by the manifest's names
+  (`{"token": "..."}`). A secret that the pipeline did not map is missing.
+- `state`: the `state` of the plugin's last answer that had one (null at
+  first). Keep a cursor here, such as the last build number read; the plugin
+  keeps no file of its own. An answer with no `state` keeps the one before.
 - `runs`: the stage runs that wait or run, and the newest 100 others. Each
-  has `id`, `stage`, `work`, `version`, `key`, `state`, `purpose`, `url`,
-  `runner` (`forge:<source>` when the plugin was asked to start it),
+  has `id` (a number), `stage`, `work`, `version`, `key` (the system's id of
+  the run, or null before a start or an event gave one), `state`, `purpose`,
+  `url`, `runner` (`forge:<source>` when the plugin was asked to start it),
   `started_at`, `approved_at` and `approved_by_person` (a person, not the
   manager or a rule, let it through its transition).
+  - `state`: `queued` (it waits at its transition, or for its system to
+    start it), `running`, `passed`, `failed`, `cancelled` or `skipped`.
+  - `purpose`: why MaximizePM made it: `rerun`, `failed:<run id>` (the failed
+    tests of that run again), `rollback`, or null for a version that moved on
+    by itself.
 - an action only: `run`, the stage run it acts on (the same fields). A
   `rerun` of failed tests also has `tests`: one `suite.name` for each test.
 
@@ -429,7 +472,33 @@ waits for.
 
 The answer can always have `error` (a message). Exit 0 when the call worked.
 On an error, exit 1 or more and say why in `error` or on stderr. Do not print
-anything else on stdout.
+anything else on stdout. An answer with `error` fails the call also with exit
+0, and MaximizePM keeps nothing of a failed answer (no events, no state): the
+next poll asks again from the same state. Name the cause in the error, such
+as "Shipyard refused the key (401): save a new one with maxpm secret put
+...": the Deploy tab shows it on the pipeline's source.
+
+One answer carries at most 2000 events, 50 reports and 64 KB of state. When
+more changed, answer what fits and keep the cursor there: the next poll goes
+on from it.
+
+A whole `poll` request, as the program reads it:
+
+```json
+{"contract": 1, "call": "poll",
+ "pipeline": {"name": "shop", "project": "shop",
+              "stages": [{"name": "build", "kind": "build", "pos": 1, "work": "build", "env": null,
+                          "transition": "auto", "junit": null},
+                         {"name": "deploy", "kind": "deploy", "pos": 2, "work": "deploy", "env": "prod",
+                          "transition": "yes", "junit": null}],
+              "envs": [{"name": "prod", "target": null, "version": "9b8c7d6"}]},
+ "settings": {"url": "https://ci.example.com", "project": "shop"},
+ "secrets": {"key": "..."},
+ "state": {"cursor": 7},
+ "runs": [{"id": 12, "stage": "deploy", "work": "deploy", "version": "3f2a9c1e5b7d...", "key": null,
+           "state": "queued", "purpose": null, "url": null, "runner": null, "started_at": null,
+           "approved_at": null, "approved_by_person": false}]}
+```
 
 ### The events
 
@@ -444,25 +513,59 @@ form that MaximizePM keeps for every source:
  "customData": {"maxpm": {"stage": "build", "version": "3f2a9c1", "run": 17}}}
 ```
 
-- A stage run: `pipelinerun.queued`, `.started`, `.finished` (`outcome`
-  success, failure, cancel; `errors` for the reason). The subject id is the
-  system's id of the run. A step: `taskrun.started` and `.finished`, with
-  `content.taskName`, and `customData.maxpm.run_key` set to the run's subject
-  id. A test: `testcaserun.finished` with `content.testCase.name` and
-  `content.outcome` (success, failure, error, skip), and
-  `customData.maxpm.run_key` and `suite`. A version that now runs in an
-  environment: `service.deployed` with `content.environment.id` (the
-  environment's name).
-- `customData.maxpm.stage` names the stage; `version` names the commit.
-- `customData.maxpm.run`: the id of a MaximizePM stage run (from `runs` of
-  the request, or the `run` of a start). It links the system's run to the run
-  that waits at MaximizePM's gate. A system that starts its runs itself
-  (a push, a timer) links them this way.
-- Give each event an id that is the same each time you read the same change:
+- Every event: `context.version` `"0.4.1"`, `context.type`
+  `dev.cdevents.<subject>.<predicate>.0.2.0`, `context.id`, and
+  `context.timestamp` (RFC 3339; when it is missing or null, the time
+  MaximizePM reads it). `customData.maxpm` holds MaximizePM's own fields.
+- A stage run: subject type `pipelineRun`, `pipelinerun.queued`, `.started`,
+  `.finished` (`outcome` success, failure, cancel or skip; `errors` for the
+  reason). The subject id is the system's id of the run, a string.
+  `content.pipelineName` is the stage's name. A run that the poll sees for the
+  first time after its end: send `started` (it gives the start time) and
+  `finished`; `finished` alone is accepted too.
+- `customData.maxpm.stage` names the stage (else `content.pipelineName`);
+  `version` names the commit (it may be null).
+- A step: subject type `taskRun`, `taskrun.started` and `.finished`. The
+  subject id names the step inside its run (such as `<run id>/<step name>`).
+  `content.taskName` is its name; `content.outcome` takes the run's words
+  (skip for a step that did not run); the times are the events' timestamps.
+  `customData.maxpm.run_key` (or `content.pipelineRun.id`) is the run's
+  subject id. `customData.maxpm` may also have `kind` (build, test, deploy,
+  check, wait), `where` (a host), `parallel` (true), `seconds` and `note`.
+- Tests: answer `reports` (above), and MaximizePM reads the JUnit itself. A
+  system with no JUnit sends `testcaserun.finished` events instead, with
+  `content.testCase.name`, `content.outcome` (success, failure, error, skip),
+  and `customData.maxpm.run_key` and `suite`. Use one way for each run.
+  Failed tests show on the run, but the system's outcome decides the run: a
+  run that the system calls passed stays passed. A stage whose command runs
+  on this computer is different: its failed test fails it.
+- A version that now runs in an environment: `service.deployed` with
+  `content.environment.id` (the environment's name). A deploy stage that
+  passes records its version by itself: send this only for a deploy that no
+  stage made.
+- Give each event an id that is the same each time you read the same change,
+  and different for every other change of the pipeline (any text):
   MaximizePM keeps each event once for each pipeline, so a change read twice
   changes nothing. MaximizePM sets the event's source to the plugin's name.
 - A run that ends passed hands its version to the next stage, as a run of a
   forge does.
+
+How MaximizePM finds the run of a `pipelinerun` event, in this order:
+
+1. The run whose key is the event's subject id (the key that a start, a
+   rerun or an earlier event gave it).
+2. `customData.maxpm.run`, the id (a number) of a MaximizePM stage run from
+   `runs` or the action's `run`: that run takes the subject id as its key.
+3. Else a new run of the stage. An event that names a stage the pipeline
+   lacks adds that stage at the end: skip the system's jobs that no stage's
+   `work` names.
+
+MaximizePM does not match a run by its version. A run that the system starts
+by itself (a push, a timer) for a version that waits at that stage: find that
+run in `runs` (the same stage, `state` `queued`, no `key`, the same commit;
+a person may have given a short commit id) and set `customData.maxpm.run`.
+Else the version has two runs of that stage. Give such a stage's transition
+the mode `forge`, so MaximizePM only reads it.
 
 ### What MaximizePM does for you
 
@@ -473,18 +576,35 @@ form that MaximizePM keeps for every source:
   started. A crash, a hang or an answer that is not JSON goes on the
   pipeline as its last error (`maxpm pipeline show`, and the Accounts list of
   the Deploy tab); the other pipelines go on.
-- A failed `start` fails that stage run with the plugin's message.
+- A failed `start` (an `error`, or an exit that is not 0) fails that stage
+  run with the plugin's message.
+- A plugin's secrets are its own: the hourly account check (Accounts and
+  tokens, above) covers the shipped forges only. A refused key shows as the
+  pipeline's last error, in the words of the plugin's `error`.
 
 ### Test a plugin
 
-1. Run each call by hand: `echo '{"contract": 1, "call": "describe"}' |
-   python3 plugin.py`, then a `poll` request with your settings.
-2. Keep the system's answers in files and test the plugin against them, not
-   against the live system.
-3. `maxpm pipeline plugin <name>` checks the manifest and `describe`.
-4. Connect a test pipeline (`maxpm pipeline forge <test pipeline> <name>
-   ...`), and follow it with `maxpm pipeline show <test pipeline>` and on the
-   Deploy tab.
+1. Shape the program so a test needs no network: a function `handle(request,
+   fetch)` that returns the answer, where `fetch(method, url, headers, body)`
+   returns `(status, bytes)`, and a `main()` that reads stdin, calls
+   `handle` with the real HTTP function, and prints the answer (exit 1 with
+   `{"error": ...}` on a failure).
+2. Keep the system's answers in files and test `handle` against them, not
+   against the live system: a first poll, a second poll with the `state` it
+   returned (nothing new), each action, and a refused key.
+   `tests/plugins/shipyard/test_shipyard.py` is such a test.
+3. Run each call by hand: `echo '{"contract": 1, "call": "describe"}' |
+   python3 plugin.py`, then a `poll` request (the whole request above).
+4. `maxpm pipeline plugin <name>` checks the manifest and `describe`. It
+   finds plugins only in the plugins folder beside the queue's database: try
+   it on a test queue (`MAXPM_DB=<new folder>/x.db`, with the plugin in
+   `<new folder>/plugins/<name>/`). A session that `maxpm serve` started
+   carries its token (`MAXPM_TOKEN`), which a test queue does not know:
+   unset it for the test queue.
+5. A person or the manager connects a test pipeline (`maxpm pipeline forge
+   <test pipeline> <name> ...`); follow it with `maxpm pipeline show <test
+   pipeline>` and on the Deploy tab. Test with recorded answers, not with a
+   person's real secret.
 
 ## What happens when a stage fails
 

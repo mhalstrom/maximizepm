@@ -1,0 +1,16 @@
+{
+  "contract": 1,
+  "name": "shipyard",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "Reads the deploys of a Shipyard CI project (their tasks as steps, their JUnit results); starts, stops and runs them again. Shipyard has no roll back.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop", "rerun"],
+  "settings": {
+    "url": {"required": true, "help": "the Shipyard address, such as https://ci.example.com"},
+    "project": {"required": true, "help": "the Shipyard project, such as shop"}
+  },
+  "secrets": {"key": {"help": "a Shipyard API key (sent as X-Shipyard-Key)"}},
+  "poll_every": 60,
+  "timeout": 30
+}
