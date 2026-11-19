@@ -3962,6 +3962,48 @@ def project_path(conn, name, path, actor=None, move=False):
     return dict(_project(conn, name))
 
 
+# Folders of the system: MaximizePM makes no project folder in them, even when this user may write there (#6236).
+SYSTEM_FOLDERS = ("/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/private/var/db", "/dev",
+                  "/cores", "/Applications", "/proc", "/sys", "/boot", "/lib", "/lib64", "/snap", "/run")
+
+
+def folder_create_refusal(folder):
+    """Why MaximizePM does not make the folder (a full path that does not exist), or None when it may (#6236): a
+    path in a folder of the system, a file in the way, or a nearest existing folder that this user cannot write."""
+    full = Path(folder).expanduser()
+    for p in {str(full), str(full.resolve())}:
+        for s in SYSTEM_FOLDERS:
+            if p == s or p.startswith(s + "/"):
+                return f"{full} is in {s}, a folder of the system. Pick a folder in your home folder, such as ~/Projects/{full.name}"
+    if full.parent == full:
+        return f"{full} is not a folder that MaximizePM can make"
+    up = full.parent
+    while not up.exists():
+        up = up.parent
+    if not up.is_dir():
+        return f"{up} is a file, so {full} cannot be a folder. Pick another path"
+    if not os.access(up, os.W_OK | os.X_OK):
+        return f"you cannot write in {up}, so MaximizePM cannot make {full}. Pick a folder in your home folder"
+    return None
+
+
+def make_folder(folder):
+    """Make the folder and its missing parents (mkdir -p) after folder_create_refusal; return its full path (#6236)."""
+    full = Path(folder).expanduser()
+    if full.is_dir():
+        return str(full.resolve())
+    if full.exists():
+        raise RiverError(f"{full} is a file; pick a folder")
+    why = folder_create_refusal(full)
+    if why:
+        raise RiverError(why)
+    try:
+        full.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RiverError(f"MaximizePM could not make {full}: {e.strerror or e}")
+    return str(full.resolve())
+
+
 def start_folder(conn, p, folder=None, actor=None):
     """The project p, with the folder a new session opens in (#5894). A project with no folder gets the folder the
     person picked at the start (Start's Folder field, --folder of launch and expert start): MaximizePM makes it, when
@@ -3976,10 +4018,7 @@ def start_folder(conn, p, folder=None, actor=None):
     if not full:
         raise RiverError(f"project {p['name']} has no folder yet. Pick the folder its sessions work in: --folder "
                          f"<folder>, or the Folder field of Start on the page. It becomes the project's folder")
-    if Path(full).exists() and not Path(full).is_dir():
-        raise RiverError(f"{full} is a file; pick a folder")
-    Path(full).mkdir(parents=True, exist_ok=True)
-    return project_path(conn, p["name"], full, actor)
+    return project_path(conn, p["name"], make_folder(full), actor)
 
 
 def project_target(conn, name, target, actor=None):

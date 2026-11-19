@@ -5510,19 +5510,29 @@ def setup_block(conn, path, move=None):
     return setup_instructions(folder, move)
 
 
-def folder_add(conn, path, name=None, description="", move=None, actor=None):
+def folder_add(conn, path, name=None, description="", move=None, actor=None, create=False):
     """Add a project folder from the page: what maxpm init does in that folder, without a terminal. The
     project is created (default name: the folder's) or linked; a project linked to another folder that
     still exists is refused (only the user moves it: maxpm project path --move). Then the agent block
-    goes in AGENTS.md; move is the choice for the rules of an old CLAUDE.md (None: ask)."""
+    goes in AGENTS.md; move is the choice for the rules of an old CLAUDE.md (None: ask).
+    A folder that does not exist (#6236): without create, the answer is {missing: True, path} (no error), and the
+    form asks whether to make it; with create, MaximizePM makes it (mkdir -p), then adds it. A path that MaximizePM
+    may not make (a folder of the system, a parent this user cannot write) is refused before the question."""
     from .cli import link_folder, setup_instructions, instructions_layout, folder_project_name
     if not (path or "").strip():
         raise RiverError("choose a folder")
     folder = Path(path.strip()).expanduser()
     if not folder.is_absolute():
         raise RiverError(f"{path} is not a full path; start it with / or ~")
-    if not folder.is_dir():
-        raise RiverError(f"{folder} is not a folder on this computer")
+    if folder.exists() and not folder.is_dir():
+        raise RiverError(f"{folder} is a file; pick a folder")
+    if not folder.exists():
+        why = core.folder_create_refusal(folder)
+        if why:
+            raise RiverError(why)
+        if not create:
+            return {"missing": True, "path": str(folder)}
+        core.make_folder(folder)
     folder = folder.resolve()
     name = (name or "").strip() or None
     if name:
@@ -5810,7 +5820,8 @@ OPS = {
     "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
     "setup_block": lambda c, a, who: setup_block(c, a["path"], a.get("move")),
     "setup_maxpm_cmd": lambda c, a, who: install_command(),
-    "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who),
+    "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who,
+                                                   bool(a.get("create"))),
     "setup_skills": lambda c, a, who: setup_skills(),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
     "setup_ntfy": lambda c, a, who: setup_ntfy(c, who, a.get("open")),

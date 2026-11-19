@@ -346,6 +346,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .folderForm input { flex: 1 1 200px; min-width: 0; }
 .folderForm .ff-out:empty { display: none; }
 .folderForm .ff-out .btn { margin-left: 4px; }
+.folderForm .ff-ask { overflow-wrap: anywhere; }
 /* Setup guide: the first step not done yet, numbered steps, and the optional extras. */
 /* The current step: its box reaches out into the margin, so its number and text stay in line with the other steps (#5318). */
 #setup .step.next { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--r-m);

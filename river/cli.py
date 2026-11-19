@@ -1103,6 +1103,7 @@ def build_parser(only=None):
     x.add_argument("--description", "--notes", dest="notes", default="",
                    help="what the project covers and what context helps (agents read this to pick an area)")
     x.add_argument("--path", help="folder this project lives in; maxpm go run there finds it")
+    x.add_argument("--create", action="store_true", help="make the --path folder when it does not exist")
     x.add_argument("--target", help="deploy target this project ships to (maxpm target list)")
     x.add_argument("--result-look", choices=("ask_first", "push_first"),
                    help="the look of the person at a finished result, as the person confirmed it: ask_first (the worker "
@@ -1111,6 +1112,7 @@ def build_parser(only=None):
     x = prs.add_parser("describe", help="set a project's description"); x.add_argument("name"); x.add_argument("text")
     x = prs.add_parser("path", help="link a project to a folder (maxpm go uses it)"); x.add_argument("name"); x.add_argument("path", nargs="?")
     x.add_argument("--move", action="store_true", help="move a project that is linked to another folder (the user decides)")
+    x.add_argument("--create", action="store_true", help="make the folder when it does not exist")
     x = prs.add_parser("show", help="a project's description, who works on it, and its ready items"); x.add_argument("name")
     x = prs.add_parser("target", help="put a project in a deploy target (no target clears it)")
     x.add_argument("name"); x.add_argument("target", nargs="?")
@@ -4687,6 +4689,29 @@ def _dispatch_ops(conn, a, actor):
     return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor)
 
 
+def _project_folder(path, create, again):
+    """The folder of maxpm project add --path and project path (#6236). A folder that does not exist: --create makes
+    it; a person at a terminal is asked; else the error names the command with --create (again, {} for the path)."""
+    import shlex
+    if not path:
+        return path
+    folder = Path(path).expanduser()
+    if folder.is_dir():
+        return path
+    if folder.exists():
+        raise RiverError(f"{folder} is a file; pick a folder")
+    why = core.folder_create_refusal(folder)
+    if why:
+        raise RiverError(why)
+    if not create and sys.stdin.isatty() and sys.stdout.isatty():
+        create = input(f"{folder} does not exist. Create it? [y/N] ").strip().lower() in ("y", "yes")
+        if not create:
+            raise RiverError(f"{folder} does not exist; nothing changed")
+    if not create:
+        raise RiverError(f"{folder} does not exist. To create it: {again.format(shlex.quote(str(folder)))}")
+    return core.make_folder(folder)
+
+
 def dispatch(conn, a, actor):
     c = a.cmd
     if c == "schedule":
@@ -4700,11 +4725,13 @@ def dispatch(conn, a, actor):
         return _dispatch_ops(conn, a, actor)
     if c == "project":
         if a.pcmd == "add":
-            return core.project_add(conn, a.name, a.rank, a.notes, actor, a.path, a.target, a.result_look)
+            path = _project_folder(a.path, a.create, f"maxpm project add {a.name} --path {{}} --create")
+            return core.project_add(conn, a.name, a.rank, a.notes, actor, path, a.target, a.result_look)
         if a.pcmd == "rank":
             return core.project_rank(conn, a.name, a.rank, actor)
         if a.pcmd == "path":
-            return core.project_path(conn, a.name, a.path, actor, move=a.move)
+            path = _project_folder(a.path, a.create, f"maxpm project path {a.name} {{}} --create")
+            return core.project_path(conn, a.name, path, actor, move=a.move)
         if a.pcmd == "describe":
             return core.project_describe(conn, a.name, a.text, actor)
         if a.pcmd == "show":

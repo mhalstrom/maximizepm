@@ -4471,10 +4471,39 @@ class SetupGuide(unittest.TestCase):
         self.assertIn("No tabs.", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
+    def test_a_new_folder_is_made_after_the_person_says_create(self):
+        """#6236: a folder that does not exist is a question, not an error; Create (create=True) makes it with its
+        missing parents and adds it as any folder. A folder of the system or one under a parent this user cannot
+        write is refused before the question."""
+        new = os.path.join(self.dir.name, "Projects", "Garden Notes")
+        r = server.OPS["folder_add"](self.c, {"path": new, "description": "notes"}, "mark")
+        self.assertEqual(r, {"missing": True, "path": new})
+        self.assertFalse(os.path.exists(new))
+        self.assertFalse(any(p["name"] == "garden-notes" for p in core.project_list(self.c)))
+        r = server.OPS["folder_add"](self.c, {"path": new, "description": "notes", "create": True}, "mark")
+        self.assertTrue(os.path.isdir(new))
+        self.assertEqual((r["project"], r["path"]), ("garden-notes", os.path.realpath(new)))
+        self.assertEqual(core._project(self.c, "garden-notes")["path"], os.path.realpath(new))
+        self.assertIn("MaximizePM", Path(os.path.join(new, "AGENTS.md")).read_text(encoding="utf-8"))
+        for bad in ("/System/shop", "/usr/local/shop", "/etc/shop"):
+            with self.assertRaisesRegex(RiverError, "a folder of the system"):
+                server.folder_add(self.c, bad, create=True)
+        locked = os.path.join(self.dir.name, "locked")
+        os.mkdir(locked)
+        os.chmod(locked, 0o500)
+        self.addCleanup(lambda: os.path.isdir(locked) and os.chmod(locked, 0o700))
+        if os.access(locked, os.W_OK):
+            self.skipTest("runs as a user who may write everywhere")
+        with self.assertRaisesRegex(RiverError, "you cannot write in"):
+            server.folder_add(self.c, os.path.join(locked, "a", "b"))
+        self.assertFalse(os.path.exists(os.path.join(locked, "a")))
+
     def test_add_a_project_folder_refuses_bad_paths_and_a_name_in_use_elsewhere(self):
-        for bad in ("", "relative/path", os.path.join(self.dir.name, "missing")):
+        afile = os.path.join(self.dir.name, "a-file")
+        Path(afile).write_text("x", encoding="utf-8")
+        for bad in ("", "relative/path", afile, os.path.join(afile, "below")):
             with self.assertRaises(RiverError):
-                server.folder_add(self.c, bad)
+                server.folder_add(self.c, bad, create=True)
         other = os.path.join(self.dir.name, "other")
         os.mkdir(other)
         with self.assertRaisesRegex(RiverError, "--move"):

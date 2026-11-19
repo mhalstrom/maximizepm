@@ -4951,6 +4951,34 @@ class ProjectArchive(Base):
         self.c = core.connect(self.path)
 
 
+class ProjectNewFolder(Base):
+    """#6236: maxpm project add --path and project path with a folder that does not exist: the error names
+    --create, and --create makes the folder before it links the project."""
+
+    def run_cli(self, *words):
+        from river import cli
+        a = cli.build_parser().parse_args(list(words))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cli.dispatch(self.c, a, "mark")
+
+    def test_create_makes_the_folder_and_the_error_names_it(self):
+        new = os.path.join(self.dir.name, "code", "shop")
+        with self.assertRaisesRegex(RiverError, r"does not exist. To create it: maxpm project add shop --path .* --create"):
+            self.run_cli("project", "add", "shop", "--path", new)
+        self.assertFalse(os.path.exists(new))
+        self.assertFalse(any(p["name"] == "shop" for p in core.project_list(self.c)))
+        r = self.run_cli("project", "add", "shop", "--path", new, "--create")
+        self.assertTrue(os.path.isdir(new))
+        self.assertEqual(r["path"], os.path.realpath(new))
+        other = os.path.join(self.dir.name, "code", "shop2")
+        with self.assertRaisesRegex(RiverError, "maxpm project path shop .* --create"):
+            self.run_cli("project", "path", "shop", other, "--move")
+        self.run_cli("project", "path", "shop", other, "--move", "--create")
+        self.assertEqual(core._project(self.c, "shop")["path"], os.path.realpath(other))
+        with self.assertRaisesRegex(RiverError, "a folder of the system"):
+            self.run_cli("project", "path", "shop", "/System/shop", "--create")
+
+
 class Version(unittest.TestCase):
     def test_version_flag(self):
         import contextlib
