@@ -319,6 +319,10 @@ DETECT = {
     # The key lines of its menus: "↑/↓ to navigate · enter to select · esc to cancel" and, in the ask_user form,
     # "↑/↓ select · enter accept · ctrl+d decline · esc cancel".
     "hint": r"\benter to (select|confirm)\b|\benter accept\b",
+    # The ask_user form (#6235): its message, a tab for each question when it asks more, the question as a label,
+    # the options (boxes for more answers), 'Other (type your answer)'; read and answered by river/ask_forms.
+    "ask": r"^\s*Copilot needs information\.?\s*$",
+    "ask_form": "copilot",
 }
 
 # Stop on the Sessions tab (#5547): Ctrl+C ends the turn ('ctrl+c interrupt'); a second one at the prompt quits.

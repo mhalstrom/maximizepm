@@ -2,6 +2,7 @@
 tests of each view are in a file of their own, tests/test_view_<view>.py.)"""
 import json
 import os
+import re
 import tempfile
 import time
 import types
@@ -1041,6 +1042,99 @@ Review your answers
 ❯ 1. Submit answers
   2. Cancel
 """
+# The dialogs of the other CLIs (#6235), from scratch sessions on 2026-11-19: Codex 0.159.1 (Plan mode), Copilot
+# 1.0.110, OpenCode 2.2.7 (its marked option has the colour of its number; the tab shown now is bold).
+CODEX_TWO = """› Ask me two questions.
+  Question 1/2 (2 unanswered)
+  Which color for the button?
+  › 1. Red (Recommended)  Use red for the button.
+    2. Green              Use green for the button.
+    3. Blue               Use blue for the button.
+    4. None of the above  Optionally, add details in notes (tab)
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+"""
+CODEX_NOTES = """  Question 2/2
+  Which name?
+    1. Rex (Recommended)  Choose Rex.
+    2. Tom                Choose Tom.
+  › 3. None of the above  Optionally, add details in notes (tab)
+  › Polly
+  tab or esc to clear notes | enter to submit all | ←/→ to navigate questions
+"""
+CODEX_UNANSWERED = """  Submit with unanswered questions?
+  1 unanswered question
+  › 1. Proceed  Submit with 1 unanswered question
+    2. Go back  Return to the first unanswered question
+  Press enter to confirm or esc to go back
+"""
+CRULE = "─" * 100
+COPILOT_TWO = f""" ○ Asking user Waiting for response                     27s
+{CRULE}
+ Copilot needs information.
+ Please choose the button color and size.
+  Which color for the button?  [Which size?]
+ Which size?:
+   Small
+   Large
+ ❯ Other (type your answer below)
+ ↑/↓ select · enter accept · shift+tab prev · ctrl+d decline · esc cancel
+{CRULE}
+{CRULE}
+❯ Medium please
+{CRULE}
+"""
+COPILOT_MULTI = f"""{CRULE}
+ Copilot needs information.
+ Which toppings?
+ Which toppings?:
+ ❯ • Cheese
+   ✓ Bacon
+   • Onions
+   • Other (type your answer)
+ ↑/↓ select · space toggle · enter accept · ctrl+d decline · esc cancel
+{CRULE}
+"""
+_O, _G, _W, _B, _R = "\x1b[38;2;250;178;131m", "\x1b[38;2;128;128;128m", "\x1b[38;2;238;238;238m", "\x1b[1m", "\x1b[0m"
+OPENCODE_TWO = f"""  ┃  Questions
+  ┃
+  ┃  {_B}{_W}Button color{_R}  {_G}Size  {_G}Submit
+  ┃
+  ┃  {_W}Which color for the button?
+  ┃
+  ┃  {_G}1. {_W}Red
+  ┃     {_G}Choose red
+  ┃  {_O}2. {_O}Green
+  ┃     {_G}Choose green
+  ┃  {_G}3. {_W}Blue
+  ┃     {_G}Choose blue
+  ┃  {_G}4. {_W}Type your own answer
+  ┃
+  ┃  ⇆ tab  ↑↓ select  enter confirm  esc dismiss
+  ┃                                                         /work:main
+"""
+OPENCODE_REVIEW = f"""  ┃  Questions
+  ┃
+  ┃  {_G}Button color  {_G}Size  {_B}{_W}Submit{_R}
+  ┃
+  ┃  Button color: Green
+  ┃  Size: Medium please
+  ┃
+  ┃  ⇆ tab  enter submit  esc dismiss
+"""
+OPENCODE_MULTI = f"""  ┃  Questions
+  ┃
+  ┃  {_B}{_W}Toppings{_R}  {_G}Submit
+  ┃
+  ┃  Which toppings?
+  ┃
+  ┃  {_O}1. {_O}[ ] {_O}Cheese
+  ┃         {_G}Choose cheese
+  ┃  {_G}2. {_G}[✓] {_W}Bacon
+  ┃         {_G}Choose bacon
+  ┃  {_G}3. {_G}[ ] {_W}Type your own answer
+  ┃
+  ┃  ⇆ tab  ↑↓ select  enter toggle  esc dismiss
+"""
 ASK_ONE = f"""{RULE}
  ☐ Pet
 
@@ -1163,6 +1257,112 @@ class AskDialog(TmuxBase):
         self.assertEqual(([t["header"] for t in w["ask"]["tabs"]], w["ask"]["current"]), (["Pet"], 0))
         self.answer(w, pick=1)
         self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+
+class AskForms(TmuxBase):
+    """#6235 (mark 2026-11-19: test the question asking with the other agent types): the question dialogs of Codex
+    (request_user_input), Copilot (ask_user) and OpenCode (question), as their panes showed them in scratch sessions
+    on 2026-11-19, are read into the same card as Claude Code's and answered with each CLI's own keys."""
+
+    card, answer = AskDialog.card, AskDialog.answer
+
+    def kind(self, agent_type):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type=? WHERE name='ag'", (agent_type,))
+
+    def test_codex_answers_with_the_arrows_and_a_note(self):
+        self.kind("codex")
+        w = self.card(CODEX_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["multi"]),
+                         (["Question 1", "Question 2"], 0, 0, "Which color for the button?", False))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:2]],
+                         [("Red (Recommended)", "Use red for the button."), ("Green", "Use green for the button.")])
+        self.assertTrue(a["options"][3]["text"])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+        # Its own answer is 'None of the above' with a note (Tab opens the notes box).
+        r = self.answer(self.card(CODEX_TWO), other="Teal")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Teal", ["Down"] * 3 + ["Tab", "Teal", "Enter"]))
+        self.answer(self.card(CODEX_TWO), tab=1)
+        self.assertEqual(self.pane["keys"], ["Right"])
+        # The notes box is open with a text: the new text takes its place; an option closes the box first.
+        w = self.card(CODEX_NOTES)
+        self.assertEqual((w["ask"]["current"], w["ask"]["options"][2]["typed"]), (1, "Polly"))
+        self.answer(w, other="Polly the parrot")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 5 + ["Polly the parrot", "Enter"])
+        self.answer(self.card(CODEX_NOTES), pick=0)
+        self.assertEqual(self.pane["keys"], ["Tab", "Up", "Up", "Enter"])
+        # The question before a submit with a question unanswered: Proceed or Go back, no text.
+        w = self.card(CODEX_UNANSWERED)
+        self.assertEqual(([o["label"] for o in w["ask"]["options"]], w["ask"]["warn"]),
+                         (["Proceed", "Go back"], "1 unanswered question"))
+        with self.assertRaisesRegex(core.RiverError, "takes no text"):
+            self.answer(w, other="later")
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+    def test_copilot_answers_with_tab_space_and_its_input_box(self):
+        self.kind("copilot")
+        w = self.card(COPILOT_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["warn"]),
+                         (["Which color for the button?", "Which size?"], 1, 2, "Which size?",
+                          "Please choose the button color and size."))
+        self.assertEqual(([o["label"] for o in a["options"][:2]], a["options"][2]["typed"]),
+                         (["Small", "Large"], "Medium please"))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Up", "Up", "Enter"])
+        self.answer(self.card(COPILOT_TWO), other="Huge")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 13 + ["Huge", "Enter"])
+        self.answer(self.card(COPILOT_TWO), tab=0)
+        self.assertEqual(self.pane["keys"], ["BTab"])
+        # More answers: Space turns a box over, the text goes into Other's input box, Enter answers.
+        w = self.card(COPILOT_MULTI)
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["multi"], w["ask"]["warn"]),
+                         ([False, True, False, None], True, ""))
+        r = self.answer(w, picks=[0], other="Ketchup")
+        self.assertEqual((r["picked"], self.pane["keys"]),
+                         ("Cheese, Ketchup", ["Space", "Down", "Space", "Down", "Down", "Ketchup", "Enter"]))
+
+    def test_opencode_reads_the_marked_option_from_its_colours(self):
+        self.kind("opencode")
+        w = self.card(OPENCODE_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"]),
+                         (["Button color", "Size", "Submit"], 0, 1, "Which color for the button?"))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:2]], [("Red", "Choose red"),
+                                                                                ("Green", "Choose green")])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+        # The own answer: Enter opens its input in its place, then the text and Enter.
+        self.answer(self.card(OPENCODE_TWO), other="Teal")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "Teal", "Enter"])
+        self.answer(self.card(OPENCODE_TWO), tab=2)
+        self.assertEqual(self.pane["keys"], ["Tab", "Tab"])
+        # With no colours the marked option is not known: no keys.
+        w = self.card(re.sub(r"\x1b\[[0-9;]*m", "", OPENCODE_TWO))
+        with self.assertRaisesRegex(core.RiverError, "cannot see the marked option"):
+            self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], [])
+        w = self.card(OPENCODE_REVIEW)
+        self.assertEqual((w["ask"]["current"], w["ask"]["review"][1]), (2, {"q": "Size", "a": "Medium please"}))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Enter"])
+        # More answers: Enter turns a box over, the own answer's input, then Tab to the Submit tab.
+        w = self.card(OPENCODE_MULTI)
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["at"]), ([False, True, False], 0))
+        self.answer(w, picks=[0], other="Ketchup")
+        self.assertEqual(self.pane["keys"], ["Enter", "Down", "Enter", "Down", "Enter", "Ketchup", "Enter", "Tab"])
+
+    def test_an_adapter_names_a_known_form(self):
+        from river import agents
+        self.assertEqual(agents.check(codex_agent), [])
+        bad = types.SimpleNamespace(**{k: v for k, v in vars(codex_agent).items() if not k.startswith("__")})
+        bad.DETECT = dict(codex_agent.DETECT, ask="(", ask_form="x")
+        got = agents.check(bad)
+        self.assertTrue(any("ask_form" in x for x in got), got)
+        self.assertTrue(any("DETECT['ask']" in x for x in got), got)
 
 
 class Uploads(TmuxBase):

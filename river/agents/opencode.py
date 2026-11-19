@@ -126,6 +126,10 @@ DETECT = {
     # confirm' (with mono output 'left/right select'). Left, Right and Tab move the selection, which wraps; each new
     # request starts at 'Allow once' (OpenCode 2.2.7, #5281). Always allow asks again: Confirm   Cancel.
     "row": r"^\s*(\S.*?)\s{3,}(?:ctrl\+f fullscreen\s+)?(?:⇆|left/right) select\s+enter confirm",
+    # The question tool's dialog under its title 'Questions' (#6235): tabs, numbered options with descriptions,
+    # 'Type your own answer', and a Submit tab; read and answered by river/ask_forms.
+    "ask": r"^\s*┃\s+Questions\s*$",
+    "ask_form": "opencode",
 }
 
 # Stop on the Sessions tab (#5547): the first Esc shows 'esc again to interrupt'; the second ends the turn.

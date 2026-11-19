@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, dictation, relay
+from . import ask_forms, core, dictation, relay
 from .core import RiverError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -2352,7 +2352,7 @@ def _layout(detect=None):
                                "behind": d["behind"] and re.compile(d["behind"]),
                                "header": d["header"] and re.compile(d["header"]),
                                "fixed": d["fixed"] and re.compile(d["fixed"]),
-                               "ask": d["ask"] and re.compile(d["ask"])}
+                               "ask": d["ask"] and re.compile(d["ask"]), "ask_form": d["ask_form"]}
     return got
 
 
@@ -4508,17 +4508,40 @@ def _ask_current(raw, ask):
     return 0 if len(ask["tabs"]) == 1 else None
 
 
+def _ask_read(tail, layout):
+    """The question dialog of the CLI that a pane's last lines (and the lines above them) show, or None: Claude Code's
+    (_ask_dialog), or the form of river/ask_forms that the adapter names (DETECT['ask_form'], #6235)."""
+    form = ask_forms.FORMS.get(layout.get("ask_form"))
+    if form is None:
+        ask = _ask_dialog(tail, layout)
+    else:
+        rows = list(getattr(tail, "above", ())) + list(tail)
+        t = next((n for n in range(len(rows) - 1, -1, -1) if layout["ask"].match(rows[n])), None)
+        ask = form.read(rows, t) if t is not None else None
+    if ask:
+        ask["form"] = layout.get("ask_form") if form else "claude"
+    return ask
+
+
 def _ask_prompt(pane, ask):
-    """The prompt of pane_prompts for a question dialog (_ask_dialog): the fields of any prompt, and 'ask'."""
-    try:
-        ask["current"] = _ask_current(_tmux("capture-pane", "-p", "-e", "-t", pane, check=False), ask)
-    except RiverError:
-        ask["current"] = None
+    """The prompt of pane_prompts for a question dialog (_ask_read): the fields of any prompt, and 'ask'. What only
+    the colours say (Claude Code's tab shown now, OpenCode's marked option) comes from one capture with colours."""
+    form = ask_forms.FORMS.get(ask["form"])
+    if form is None or ask["current"] is None or ask["at"] is None:
+        try:
+            raw = _tmux("capture-pane", "-p", "-e", "-t", pane, check=False)
+        except RiverError:
+            raw = None
+        if form is None:
+            ask["current"] = _ask_current(raw, ask)
+        else:
+            form.finish(ask, raw)
     rows = ask.pop("rows")
     lines = rows[ask.pop("start"):]
     opts = ask["options"]
     # The same question with the same answers keeps its sig while the marker moves; a typed text or a box changes it.
-    sig = "\x1f".join([lines[0], ask["question"], *(f"{o['label']}|{o['checked']}|{o['chosen']}" for o in opts),
+    sig = "\x1f".join([lines[0], ask["question"],
+                       *(f"{o['label']}|{o['checked']}|{o['chosen']}|{o.get('typed', '')}" for o in opts),
                        *(f"{r['q']}|{r['a']}" for r in ask["review"])])
     marked = next((n for n, o in enumerate(opts) if o["stop"] == ask["at"]), 0)
     return {"question": ask["question"], "options": [o["label"] for o in opts], "fixed": False, "selected": marked,
@@ -4530,8 +4553,12 @@ def _ask_answer(conn, agent, pane, p, pick=None, other=None, picks=None, tab=Non
     """An answer to a question dialog (_ask_dialog) from the page: the keys Claude Code takes. tab: show that tab
     (Left, Right). pick: an option (the arrows to it, then Enter; a digit would choose at once in one dialog and only
     move the marker in a dialog with previews). other: the text of its 'Type something' option. picks: the options
-    to tick in a question with boxes (Enter on an option turns its box on or off), then 'Submit' goes to the next tab."""
+    to tick in a question with boxes (Enter on an option turns its box on or off), then 'Submit' goes to the next tab.
+    The dialog of another CLI (river/ask_forms, #6235) takes its form's keys: _ask_form_answer."""
     ask, opts = p["ask"], p["ask"]["options"]
+    form = ask_forms.FORMS.get(ask.get("form"))
+    if form is not None:
+        return _ask_form_answer(conn, agent, pane, form, ask, pick, other, picks, tab, who)
 
     def move(a, b):
         return [{"key": "Down" if b > a else "Up"}] * abs(b - a)
@@ -4590,6 +4617,46 @@ def _ask_answer(conn, agent, pane, p, pick=None, other=None, picks=None, tab=Non
     return {"agent": agent, "pane": pane, "picked": o.get("typed") or o["label"], "text": ""}
 
 
+def _ask_form_answer(conn, agent, pane, form, ask, pick, other, picks, tab, who):
+    """An answer to the question dialog of Codex, Copilot or OpenCode (river/ask_forms, #6235): the form's keys go
+    in; before each text the CLI gets PROMPT_PAUSE to draw its input box, and the text goes in only while the agent
+    still runs in the pane."""
+    if tab is not None:
+        if not isinstance(tab, int) or not 0 <= tab < len(ask["tabs"]):
+            raise RiverError("pick one of the dialog's tabs")
+        if ask.get("current") is None:
+            raise RiverError(f"MaximizePM cannot tell which question the terminal of {agent} shows; use its terminal")
+        terminal_keys(conn, agent, form.tab(ask, tab), who)
+        return {"agent": agent, "pane": pane, "picked": ask["tabs"][tab]["header"], "text": ""}
+    text = " ".join(str(other or "").split())
+    if len(text) > 4000:
+        raise RiverError("text is at most 4000 characters")
+    try:
+        steps, picked = form.answer(ask, pick, text, picks)
+    except RiverError as e:
+        raise RiverError(f"{e} ({agent})") from None
+    batch, sent = [], False
+    for s in steps:
+        if s.get("pause"):  # the CLI reads what came before it first (ask_forms._typed)
+            if batch:
+                terminal_keys(conn, agent, batch, who)
+            batch, sent = [], True
+            time.sleep(PROMPT_PAUSE)
+            continue
+        if "text" in s and (batch or sent):
+            if batch:
+                terminal_keys(conn, agent, batch, who)
+            batch, sent = [], True
+            time.sleep(PROMPT_PAUSE)
+            _agent_in_pane(agent, pane, "before the text")
+        batch.append(s)
+    if batch:
+        terminal_keys(conn, agent, batch, who)
+    if text and not ask["multi"]:
+        core.typed_to(conn, agent)
+    return {"agent": agent, "pane": pane, "picked": picked, "text": text}
+
+
 def pane_prompts(conn, terminals):
     """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
@@ -4609,7 +4676,7 @@ def pane_prompts(conn, terminals):
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
         rx, layout, _ = _pane_rule(conn, agent, *procs.get(pane, (None, None)))
-        ask = _ask_dialog(tail, layout) if layout.get("ask") else None
+        ask = _ask_read(tail, layout) if layout.get("ask") else None
         if ask:  # the CLI's own question dialog (#6234): its card shows each part and answers with its keys
             out[agent] = _ask_prompt(pane, ask)
             continue

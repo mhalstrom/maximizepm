@@ -297,9 +297,11 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      reading (a line that starts with command, file, edit, fetch or tool),
 #      "fixed":        a regex of a question (its text or an option) that takes only one of its options, no typed text,
 #                      when it has no "tell_instead" option: the question card then has no Other (#5904). "": none,
-#      "ask":          a regex of the tab line of the CLI's own question dialog (Claude Code's AskUserQuestion:
-#                      "←  ☐ Color  ☒ Size  ✔ Submit  →", or " ☐ Pet" for one question); the page then reads the
-#                      dialog with server._ask_dialog and answers it on its own card (#6234). "": none,
+#      "ask":          a regex of the first line of the CLI's own question dialog (Claude Code's AskUserQuestion: its
+#                      tab line "←  ☐ Color  ☒ Size  ✔ Submit  →", or " ☐ Pet" for one question); the page then reads
+#                      the dialog and answers it on its own card (#6234). "": none,
+#      "ask_form":     how that dialog is drawn and answered: "claude" (server._ask_dialog), or a form of
+#                      river/ask_forms: "codex", "copilot", "opencode" (#6235),
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -312,7 +314,8 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "behind": str, "header": str, "fixed": str, "ask": str}
+               "behind": str, "header": str, "fixed": str, "ask": str, "ask_form": str}
+ASK_FORMS = ("claude", "codex", "copilot", "opencode")
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -333,6 +336,7 @@ DETECT_LAYOUT = {
     # Copilot, Grok, Pi): its Esc exits the CLI, so the card offers no Other there (#5904).
     "fixed": r"(?i)\btrust\b",
     "ask": "",
+    "ask_form": "claude",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
@@ -547,9 +551,11 @@ def check(module, mid=None):
     if det is not None:
         out += _shape("DETECT", det, DETECT_KEYS, ("idle", "working", "blocked"))
         if isinstance(det, dict):
-            for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args"):
+            for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args", "ask"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
+            if isinstance(det.get("ask_form"), str) and det["ask_form"] not in ASK_FORMS:
+                out.append(f"DETECT['ask_form'] is {det['ask_form']!r}, not one of {', '.join(ASK_FORMS)}")
             if isinstance(det.get("item"), str):
                 if "{mark}" not in det["item"]:
                     out.append("DETECT['item'] has no {mark}")

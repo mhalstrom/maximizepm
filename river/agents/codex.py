@@ -122,6 +122,11 @@ DETECT = {
     "blocked": BLOCKED,
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Codex what to do differently"
     "image_paste": None,  # not read yet: an image path is pasted alone, as for every agent
+    # The request_user_input dialog of Plan mode (#6235): 'Question 1/2 (2 unanswered)', the question, numbered
+    # options with a description, 'None of the above' with notes, and the question before a submit with unanswered
+    # questions; read and answered by river/ask_forms.
+    "ask": r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$",
+    "ask_form": "codex",
 }
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
