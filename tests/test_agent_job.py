@@ -2,6 +2,7 @@
 pipeline's stage-failed rules there; GitHub starts the job when a stage's workflow fails, and the github plugin's poll
 brings its state, proof and transcript back. GitHub is the fake API of tests/test_pipeline.py."""
 
+import base64
 import contextlib
 import io
 import json
@@ -13,7 +14,7 @@ from river import cli, core, runners
 from river.core import RiverError
 from river.pipeline import agent_job, define, triggers
 
-from tests.test_pipeline import Base, FakeGitHub, FakeGitLab, gh_run, gl_job, plugin_hooks
+from tests.test_pipeline import Base, FakeGitHub, FakeGitLab, FakePulumi, gh_run, gl_job, pd_run, plugin_hooks
 
 TRANSCRIPT = "\n".join([
     json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5-5", "cwd": "/work"}),
@@ -401,3 +402,181 @@ class AgentJobGitLab(Base):
         self.assertTrue(out.getvalue().startswith("# >>> maxpm-agent: the MaximizePM agent job of pipeline shop"))
         with self.assertRaisesRegex(RiverError, "only a person or the manager"):
             cli.run(["--as", "w1", "runner", "gitlab", "shop", "--print"])
+
+
+def _exe(folder, name, text):
+    path = os.path.join(folder, name)
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n" + text)
+    os.chmod(path, 0o755)
+
+
+class PulumiAgentJob(Base):
+    """The agent job in Pulumi Deployments (#6173): maxpm runner pulumi keeps the job's settings and moves the
+    stage-failed rules; when a Delivery stage fails, the pulumi plugin's poll starts a deployment of the agent stack,
+    reads its state, and at its end reads the proof, the transcript and the patch from its log. Pulumi is the fake API
+    of tests/test_pipeline.py."""
+
+    DEPLOYS = "/api/stacks/acme/shop-delivery/main/deployments"
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import runner
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        self.api = FakePulumi()
+        self.pd = plugin_hooks(self, self.api)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        define.pipeline_add(self.c, "shop", project="shop")
+        define.stage_set(self.c, "shop", "test", "test", workflow="checks")
+        define.forge_set(self.c, "shop", "pulumi", repo="acme/shop-delivery/main", secret="pulumi-token")
+        self.p = lambda: self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
+
+    def run_row(self):
+        return self.c.execute("SELECT * FROM runner_runs").fetchone()
+
+    def fail_checks(self):
+        """Stage checks of Delivery run 1 fails; the poll reads it and the rule acts."""
+        self.api.routes[("GET", "/runs/1")] = (200, pd_run(1, "failed", [("checks", "failed", None)]))
+        self.pd.poll(self.c, self.p())
+        triggers.serve_pass(self.c)
+        return self.run_row()
+
+    def job_output(self, conf):
+        """Run the job's own script in a git checkout, with fake npm, curl, timeout and claude (the agent commits a
+        fix), and return what it prints: the deployment's log."""
+        work = os.path.join(self.dir.name, "work")
+        bin_ = os.path.join(self.dir.name, "bin")
+        out = os.path.join(self.dir.name, "out")
+        os.makedirs(bin_)
+        subprocess.run(["git", "init", "-q", work], check=True)
+        for args in (["config", "user.name", "t"], ["config", "user.email", "t@x"], ["commit", "-q", "--allow-empty",
+                                                                                     "-m", "start"]):
+            subprocess.run(["git", "-C", work, *args], check=True)
+        _exe(bin_, "npm", "exit 0\n")
+        _exe(bin_, "curl", "echo '{\"summary\": {\"number\": 1}}'\n")
+        _exe(bin_, "timeout", 'shift\nexec "$@"\n')
+        _exe(bin_, "claude", "test -z \"$MAXPM_GIT_TOKEN\" || exit 9\necho fixed > fix.txt\ngit add fix.txt\n"
+                             "git commit -qm 'Restore the fixture'\n" + "".join(
+                                 f"echo '{line}'\n" for line in TRANSCRIPT.splitlines()))
+        script = agent_job.pulumi_script(conf).replace(agent_job.OUT, out)
+        env = {**os.environ, "PATH": bin_ + os.pathsep + os.environ["PATH"], "MAXPM_PROMPT": "fix it",
+               "MAXPM_TEST": "true", "MAXPM_GIT_TOKEN": "", "MAXPM_BRANCH": "maxpm/fix-pd-1-checks",
+               "MAXPM_RUN_URL": "https://api.pulumi.com/x"}
+        r = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.splitlines()
+
+    def test_setup_keeps_the_settings_and_moves_the_stage_failed_rule(self):
+        with self.assertRaises(RiverError):
+            agent_job.setup_pulumi(self.c, "shop", env="shop/agents", actor="w1")
+        with self.assertRaisesRegex(RiverError, "--env names the Pulumi ESC environment"):
+            agent_job.setup_pulumi(self.c, "shop", actor="mark")
+        with self.assertRaisesRegex(RiverError, "does not read Pulumi Delivery"):
+            define.pipeline_add(self.c, "plain", project="shop")
+            agent_job.setup_pulumi(self.c, "plain", env="shop/agents", actor="mark")
+        with self.assertRaisesRegex(RiverError, "maxpm runner pulumi shop"):
+            agent_job.setup(self.c, "shop", actor="mark", show=True)
+        res = agent_job.setup_pulumi(self.c, "shop", env="shop/agents", test="make test", actor="mark")
+        self.assertEqual((res["stack"], res["branch"], res["stages"]), ("acme/shop-delivery/main", "main", ["checks"]))
+        self.assertIn("now runs its agent in Pulumi Deployments", res["rules"][0])
+        self.assertEqual(triggers.rules(self.c, "shop")["rules"][0]["runner"], "pulumi")
+        self.assertEqual(agent_job.conf(self.p())["env"], "shop/agents")
+        self.assertIn("agent job in Pulumi Deployments set", define.history(self.c, "shop", 1)[0]["change"])
+        shown = agent_job.setup_pulumi(self.c, "shop", show=True, actor="mark", test="make test")
+        self.assertIn("env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN timeout 30m claude -p", shown["script"])
+        self.assertIn("'Bash(make:*)'", shown["script"])
+        self.assertIn("pulumi", runners.choices(self.c, self.p()))
+
+    def test_a_failed_delivery_stage_starts_a_deployment_and_its_proof_comes_back(self):
+        agent_job.setup_pulumi(self.c, "shop", env="shop/agents", test="true", actor="mark")
+        run = self.fail_checks()
+        self.assertEqual((run["runner"], run["state"], run["forge_key"], run["agent"]),
+                         ("pulumi", "queued", "pd-1-checks", f"pulumi-r{run['id']}"))
+        self.assertEqual(core._item(self.c, run["item"])["reserved_for"], run["agent"])
+        # The next poll starts the deployment with the request that MaximizePM made.
+        self.api.routes[("POST", self.DEPLOYS)] = (202, {"id": "dep-1", "version": 3,
+                                                         "consoleUrl": "https://app.pulumi.com/acme/dep-1"})
+        self.pd.poll(self.c, self.p())
+        body = next(c[2] for c in self.api.calls if c[:2] == ("POST", self.DEPLOYS))
+        self.assertEqual((body["operation"], body["inheritSettings"]), ("preview", True))
+        pre = body["operationContext"]["preRunCommands"]
+        self.assertEqual(pre[1], "pulumi env run shop/agents -- bash /tmp/maxpm-agent.sh")
+        script = base64.b64decode(pre[0].split()[1]).decode()
+        conf = agent_job.conf(self.p())
+        self.assertEqual(script, agent_job.pulumi_script(conf))
+        env = body["operationContext"]["environmentVariables"]
+        self.assertEqual(env["MAXPM_RUN_URL"],
+                         "https://api.pulumi.com/api/preview/stacks/acme/shop-delivery/main/delivery/runs/1")
+        self.assertEqual(env["MAXPM_BRANCH"], "maxpm/fix-pd-1-checks")
+        self.assertIn("Stage checks of Pulumi Delivery run 1", env["MAXPM_PROMPT"])
+        run = self.run_row()
+        self.assertEqual((run["state"], run["job"], run["url"]),
+                         ("queued", "pdd-dep-1", "https://app.pulumi.com/acme/dep-1"))
+        # It runs, then ends: the plugin reads the log that the job's own script prints.
+        self.api.routes[("GET", self.DEPLOYS + "/dep-1")] = (200, {"status": "running", "created": core.iso(core.now())})
+        self.pd.poll(self.c, self.p())
+        self.assertEqual(self.run_row()["state"], "running")
+        self.assertEqual(len([c for c in self.api.calls if c[:2] == ("POST", self.DEPLOYS)]), 1)
+        lines = self.job_output(conf)
+        self.assertTrue(any(x.startswith("::maxpm-patch ") for x in lines))
+        half = len(lines) // 2
+        self.api.routes[("GET", self.DEPLOYS + "/dep-1")] = (200, {"status": "succeeded"})
+        self.api.routes[("GET", self.DEPLOYS + "/dep-1/logs")] = lambda path, body: (200, (
+            {"lines": [{"line": x} for x in lines[half:]]} if "continuationToken=t%202" in path else
+            {"lines": [{"header": "Pre-run", "line": x} for x in lines[:half]], "nextToken": "t 2"}))
+        self.pd.poll(self.c, self.p())
+        run = self.run_row()
+        self.assertEqual((run["state"], run["cost"]), ("ended", 1.1))
+        proof = json.loads(run["proof"])
+        self.assertEqual(proof["test"], {"command": "true", "exit": 0, "last": None})
+        with open(proof["patch"]) as f:
+            self.assertIn("Restore the fixture", f.read())
+        self.assertIn("proof ready: commit", run["result"])
+        item = core._item(self.c, run["item"])
+        self.assertEqual((item["status"], item["reserved_for"]), ("open", None))
+        notes = [m["body"] for m in self.c.execute("SELECT body FROM messages WHERE item_id=?", (item["id"],))]
+        self.assertTrue(any(f"git am {proof['patch']}" in b for b in notes))
+        self.assertIn(("say", "The test reads a removed file."),
+                      [(x["kind"], x["text"]) for x in runners.log(self.c, run["id"])["lines"]])
+
+    def test_no_settings_leaves_the_task_here_and_stop_cancels_the_deployment(self):
+        triggers.rule_edit(self.c, "shop", "t1", runner="pulumi", actor="mark")
+        self.fail_checks()
+        fire = self.c.execute("SELECT result FROM pipeline_trigger_fires").fetchone()["result"]
+        self.assertIn("no agent job is set for Pulumi Deployments", fire)
+        self.assertIsNone(self.run_row())
+        agent_job.setup_pulumi(self.c, "shop", env="shop/agents", actor="mark")
+        self.api.routes[("GET", "/runs/2")] = (200, pd_run(2, "failed", [("checks", "failed", None)]))
+        self.pd.poll(self.c, self.p())
+        triggers.serve_pass(self.c)
+        run = self.run_row()
+        self.assertEqual(run["forge_key"], "pd-2-checks")
+        self.api.routes[("POST", self.DEPLOYS)] = (403, {"message": "no deployment settings"})
+        self.pd.poll(self.c, self.p())
+        self.assertIn("Pulumi answered 403", self.run_row()["result"])  # a note on the run; the poll goes on
+        self.assertIsNone(self.p()["poll_error"])
+        self.api.routes[("POST", self.DEPLOYS)] = (202, {"id": "dep-2", "consoleUrl": "u", "version": 1})
+        self.pd.poll(self.c, self.p())
+        self.api.routes[("POST", self.DEPLOYS + "/dep-2/cancel")] = (200, {})
+        res = runners.stop(self.c, run["id"], "mark", "a person looks at it")
+        self.assertEqual(res["state"], "stopped")
+        self.assertIn(("POST", self.DEPLOYS + "/dep-2/cancel", {}), self.api.calls)
+        with core.tx(self.c):
+            self.c.execute("UPDATE runner_runs SET state='queued', job=NULL, queued_at=?",
+                           (core.iso(core.now() - core.timedelta(hours=1)),))
+        runners.serve_pass(self.c)
+        self.assertIn("no deployment of the agent job started in Pulumi within 30m", self.run_row()["result"])
+
+    def test_the_command_line(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "runner", "pulumi", "shop", "--env", "shop/agents"])
+        self.assertIn("ESC environment shop/agents", out.getvalue())
+        self.assertIn("MAXPM_GIT_TOKEN", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "runner", "list"])
+        self.assertIn("Pulumi Deployments (pulumi): a deployment of the agent stack", out.getvalue())

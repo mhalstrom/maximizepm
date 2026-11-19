@@ -38,13 +38,36 @@ are in one GitLab pipeline, and the gitlab plugin finds the job maxpm-agent amon
 every CI/CD variable to every job, so the agent and the proof command run with a clean environment (env -i): only
 the model key goes in. The CI/CD variable MAXPM_GITLAB_TOKEN (a project access token that a person sets, policy g6)
 reads the failed jobs' logs and pushes the fix; push options open the merge request. The artifact holds the proof and
-the transcript, and the plugin reads the two files by path. Pulumi Delivery comes later: it adds its name to FORGES,
-its part of the plugin's poll, and its file.
+the transcript, and the plugin reads the two files by path.
+
+Pulumi Delivery (#6173). Delivery has no step that runs when a stage fails, no log of a job by its API, and no way to
+call this computer (Pulumi's docs, read 2026-11-19: stages run only after their upstream stages succeeded; a job that
+fails fails its stage). So MaximizePM starts the job itself, as a Pulumi Deployment, the hosted runner of Pulumi Cloud:
+
+    maxpm runner pulumi <pipeline> --env <ESC environment>    keeps the job's settings (pipelines.agent_job) and sets
+                                                              the stage-failed rules to run their agent in Pulumi
+
+1. The pulumi plugin's poll reads a failed Delivery stage (key pd-<run>-<stage>); the rule opens the fault task, and
+   queue() makes a runner run for it, as for GitHub.
+2. The next poll asks the plugin about the open runs; a run with no job carries "start", the whole request of the
+   deployment (pulumi_request): operation preview on the agent stack (--stack; the pipeline stack when none), whose
+   deployment settings a person set in Pulumi Cloud (the source repository and its branch). Its pre-run commands
+   write the job's script and run it inside `pulumi env run <the ESC environment>`: the model key is there, set by a
+   person (policy g6), and also MAXPM_GIT_TOKEN when the fix should go back as a branch. The plugin answers the
+   deployment's id as the run's job.
+3. The script saves what Pulumi shows of the failed Delivery run, runs the agent with no terminal (with neither the
+   git token nor the Pulumi token in its environment), runs --test, and pushes the commit to maxpm/fix-pd-<run>-<stage>
+   with a pull request on GitHub; with no git token the fix comes back as a patch. It prints its proof, the end of the
+   transcript and the patch as '::maxpm-' lines of the deployment's log, and always ends with 0 (the preview after it
+   changes nothing).
+4. Each poll reads the deployment's status; at its end the plugin reads its log and answers the proof, the
+   transcript and the patch; take() keeps them, as for GitHub.
 
 Standard library only."""
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shlex
@@ -55,12 +78,13 @@ from .. import __version__, core, runners
 from ..core import RiverError
 from . import store
 
-FORGES = {"github": "GitHub Actions", "gitlab": "GitLab CI"}  # a rule's runner that is a forge's own CI: its label
-SOURCE = {"github": "GitHub", "gitlab": "GitLab"}  # the pipeline's source that each one needs
-KEY = {"github": "gh-run-", "gitlab": "gl-"}  # the start of the key of a stage run that ran in that forge
+FORGES = {"github": "GitHub Actions", "gitlab": "GitLab CI",  # a rule's runner that is a forge's own CI: its label
+          "pulumi": "Pulumi Deployments"}
+SOURCE = {"github": "GitHub", "gitlab": "GitLab", "pulumi": "Pulumi Delivery"}  # the pipeline's source each one needs
+KEY = {"github": "gh-run-", "gitlab": "gl-", "pulumi": "pd-"}  # the start of the key of a stage run that ran there
 WORKFLOW = "agent.yml"  # the workflow file of the agent job, and the setting 'agent' of the github plugin
 FILE = {"github": f".github/workflows/{WORKFLOW}", "gitlab": ".gitlab-ci.yml"}  # where the job is, in the checkout
-CHANGE = {"github": "pull request", "gitlab": "merge request"}  # what the job opens with the fix
+CHANGE = {"github": "pull request", "gitlab": "merge request", "pulumi": "pull request"}  # what the job opens
 IMAGE = "node:20"  # GitLab: the job's image (it has npm, git and python3); maxpm runner gitlab --image changes it
 TOKEN_VAR = "MAXPM_GITLAB_TOKEN"  # GitLab: the CI/CD variable with a project access token (the logs and the push)
 JOB = "maxpm-agent"     # the job's name, and the name of its artifact
@@ -75,6 +99,11 @@ ALLOW = ("Read Edit Write Glob Grep Bash(git status:*) Bash(git diff:*) Bash(git
 SECRET = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY"}  # the repository secret of the model key
 PACKAGE = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"}  # npm, inside the job only
 _SECRET_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,99}$")
+SCRIPT = "/tmp/maxpm-agent.sh"  # the Pulumi job's script, which its first pre-run command writes
+PATCH_MAX = 300_000  # bytes of a patch that a Pulumi job prints in its log
+_ESC_ENV = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){1,2}$")
+_STACK = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 
 
 def label(name):
@@ -84,6 +113,15 @@ def label(name):
 def choices(p):
     """The forge runners that pipeline p may name: its source's own CI."""
     return [p["forge"]] if p["forge"] in FORGES else []
+
+
+def conf(p):
+    """The settings of a pipeline's agent job in Pulumi (maxpm runner pulumi), or None."""
+    try:
+        c = json.loads(p["agent_job"] or "null")
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+    return c if isinstance(c, dict) and c.get("stack") else None
 
 
 # ---------------------------------------------------------------- a run
@@ -100,8 +138,10 @@ def queue(conn, p, rule, item_id, ev):
     if row is None or not row["workflow"] or not (row["key"] or "").startswith(KEY.get(forge, "-")):
         return f"; stage {ev['stage']} did not run in {label(forge)}{here}"
     ref = p["ref"] or "main"
-    if row["ref"] and row["ref"] != ref:  # the job runs only on the branch the pipeline follows
+    if forge != "pulumi" and row["ref"] and row["ref"] != ref:  # the job runs only on the branch the pipeline follows
         return f"; it failed on {row['ref']}, and the job {JOB} runs only on {ref}{here}"
+    if forge == "pulumi" and not conf(p):  # Pulumi's ref is the first run number; the job needs its settings
+        return f"; no agent job is set for {label(forge)} (maxpm runner pulumi {p['name']} --env <ESC environment>){here}"
     it = core._item(conn, item_id)
     if it["assignee"] or (it["reserved_for"] and (it["reserved_until"] or "9") > runners._now()):
         return f"; #{item_id} is with {it['assignee'] or it['reserved_for']} already: no job in {label(forge)}"
@@ -121,9 +161,24 @@ def open_runs(conn, p):
     """What a poll asks the plugin about: the runs of pipeline p that wait for or run in its forge's job."""
     if p["forge"] not in FORGES:
         return []
-    return [{"run": r["id"], "key": r["forge_key"], "state": r["state"], "job": r["job"], "since": r["queued_at"]}
-            for r in conn.execute("SELECT * FROM runner_runs WHERE runner=? AND pipeline=? AND state IN ('queued', "
-                                  "'running') ORDER BY id", (p["forge"], p["name"]))]
+    c = conf(p) if p["forge"] == "pulumi" else None
+    out = []
+    for r in conn.execute("SELECT * FROM runner_runs WHERE runner=? AND pipeline=? AND state IN ('queued', "
+                          "'running') ORDER BY id", (p["forge"], p["name"])):
+        d = {"run": r["id"], "key": r["forge_key"], "state": r["state"], "job": r["job"], "since": r["queued_at"]}
+        if p["forge"] == "pulumi" and c:  # #6173: MaximizePM starts the Pulumi job; the plugin sends the request
+            d["stack"] = c["stack"]
+            if not r["job"]:
+                d["start"] = pulumi_request(p, c, r["forge_key"], _does(conn, r["rule"]))
+        out.append(d)
+    return out
+
+
+def _does(conn, rule):
+    """What the rule that queued a run asks its agent to do."""
+    m = re.match(r"t(\d+)$", rule or "")
+    row = conn.execute("SELECT does FROM pipeline_triggers WHERE id=?", (int(m[1]),)).fetchone() if m else None
+    return (row["does"] if row else None) or "Find the cause of the failure and fix it."
 
 
 STATES = ("queued", "running", "ended", "failed", "stopped")
@@ -179,17 +234,29 @@ def _finish(conn, run_id, state, a):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(a["transcript"][-TRANSCRIPT_MAX:], encoding="utf-8")
         path = str(path)
+    if isinstance(a.get("patch"), str) and a["patch"].strip():  # #6173: a Pulumi job with no git token
+        patch = Path(core.river_dir()) / "runners" / f"run{run['id']}.patch"
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text(a["patch"][:PATCH_MAX], encoding="utf-8")
+        proof = {**proof, "patch": str(patch)}
     _cost, last = runners._transcript_end(path) if path else (None, None)
-    words = proof_text(proof, last, a.get("note"), CHANGE.get(run["runner"], "pull request"))
+    change = CHANGE.get(run["runner"], "pull request")
+    words = proof_text(proof, last, a.get("note"), change)
+    if proof.get("pr"):
+        check = f"read the {change}, check that its tests pass, merge it"
+    elif proof.get("patch"):
+        check = (f"apply the patch in a worktree of the repository (git am {proof['patch']}), run the tests, and "
+                 f"commit it")
+    else:
+        check = f"read the branch {proof.get('branch') or 'of the fix'}, check that its tests pass, merge it"
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET transcript=?, proof=? WHERE id=?",
                      (path, json.dumps(proof)[:20000] if proof else None, run["id"]))
         if proof.get("commit") or proof.get("pr"):
             core._send(conn, "note", run["agent"],
                        f"The agent job in {label(run['runner'])} (run #{run['id']}"
-                       + (f", {run['url']}" if run["url"] else "") + f") made a fix: {words}. Check it: read the "
-                       f"{CHANGE.get(run['runner'], 'pull request')}, check that its tests pass, merge it, then close "
-                       f"this task. Its transcript: maxpm runner log {run['id']}.", item_id=run["item"])
+                       + (f", {run['url']}" if run["url"] else "") + f") made a fix: {words}. Check it: {check}, "
+                       f"then close this task. Its transcript: maxpm runner log {run['id']}.", item_id=run["item"])
     code = proof.get("agent_exit") if isinstance(proof.get("agent_exit"), int) else None
     run = conn.execute("SELECT * FROM runner_runs WHERE id=?", (run["id"],)).fetchone()  # with its transcript
     return runners._end(conn, run, state, code, words)
@@ -203,6 +270,8 @@ def proof_text(proof, last=None, note=None, change="pull request"):
             text += f" on branch {proof['branch']}"
         if proof.get("pr"):
             text += f", {change} {proof['pr']}"
+        if proof.get("patch"):
+            text += f", the patch {proof['patch']}"
         test = proof.get("test") if isinstance(proof.get("test"), dict) else {}
         if test.get("command"):
             text += f"; {test['command']}: " + ("passed" if test.get("exit") == 0 else f"exit {test.get('exit')}")
@@ -228,7 +297,12 @@ def serve_pass(conn):
     for run in conn.execute(f"SELECT * FROM runner_runs WHERE state IN ('queued', 'running') AND runner IN ({q}) "
                             f"ORDER BY id", tuple(FORGES)).fetchall():
         age = (t - core.parse_iso(run["started_at"] or run["queued_at"])).total_seconds()
-        if run["state"] == "queued" and age > QUEUE_MAX:
+        if run["state"] == "queued" and age > QUEUE_MAX and run["runner"] == "pulumi":
+            out.append(runners._end(conn, run, "failed", None, (run["result"] + "; " if run["result"] else "") +
+                                    f"no deployment of the agent job started in Pulumi within {QUEUE_MAX // 60}m: "
+                                    f"read the pipeline's last poll (maxpm pipeline show {run['pipeline']}) and the "
+                                    f"job's settings (maxpm runner pulumi {run['pipeline']} --print)"))
+        elif run["state"] == "queued" and age > QUEUE_MAX:
             where = (f"is .github/workflows/{WORKFLOW} on the default branch (maxpm runner github {run['pipeline']}), "
                      f"and its model key set as a repository secret?" if run["runner"] == "github" else
                      f"is the job {JOB} in .gitlab-ci.yml of the failed commit (maxpm runner {run['runner']} "
@@ -258,6 +332,8 @@ def stop(conn, run, actor, why):
             req = plugin._request(conn, p, m, "stop")
             req["run"] = {"id": run["id"], "key": run["job"], "stage": None, "version": run["rev"],
                           "work": WORKFLOW if run["runner"] == "github" else JOB}
+            if run["runner"] == "pulumi":  # #6173: the deployment runs on the agent stack, not on the pipeline stack
+                req["agent_stack"] = (conf(p) or {}).get("stack")
             plugin.call(m, req)
         except RiverError as e:
             why += f"; cancel the job on its page{': ' + run['url'] if run['url'] else ''} ({e})"
@@ -281,8 +357,9 @@ def listing(conn, runs=8):
                             (name,)).fetchone()[0]
         out.append({"name": name, "label": text, "pipelines": pipes, "used_by": sorted({x["pipeline"] for x in rules}),
                     "rules": rules, "busy": count("running"), "waiting": count("queued"), "last_seen": last,
-                    "what": f"the job {JOB} in {FILE[name]} of each " + ("repository" if name == "github" else
-                                                                         "project"),
+                    "what": ("a deployment of the agent stack that MaximizePM starts when a Delivery stage fails"
+                             if name == "pulumi" else f"the job {JOB} in {FILE[name]} of each "
+                             + ("repository" if name == "github" else "project")),
                     "runs": [runners._run_info(x) for x in conn.execute(
                         "SELECT * FROM runner_runs WHERE runner=? ORDER BY id DESC LIMIT ?", (name, runs))]})
     return out
@@ -336,30 +413,44 @@ def prompt(does, test):
             "${{ github.event.workflow_run.head_sha }} on ${{ github.event.workflow_run.head_branch }}: "
             f"${{{{ github.event.workflow_run.html_url }}}}. Its failed log is in the file {OUT}/failed.log. This "
             "folder is a checkout of that commit.\n\n"
-            f"What to do: {does.replace('${{', '$ {{')}\n\n"
-            "Find the cause in the log and the code, and fix it in this folder. "
+            + _task(does.replace('${{', '$ {{'), test, "the log and the code"))
+    return text
+
+
+def _task(does, test, where):
+    """The part of the agent's instructions that the GitHub and Pulumi jobs share: what to do, the proof, the commit."""
+    return (f"What to do: {does}\n\n"
+            f"Find the cause in {where}, and fix it in this folder. "
             + (f"Prove the fix: run `{test}`. " if test else "")
             + "Commit the fix with a message that says what you changed and why (git add, git commit). Do not push: "
             "the job pushes your commit to a branch and opens a pull request after you. When you cannot fix it, "
             "commit nothing. End with a short report: the cause, what you changed, and the proof.")
-    return text
+
+
+def _tools(allow, test):
+    tools = tool_list(allow or ALLOW)
+    if test and not allow:
+        tools.append(f"Bash({shlex.split(test)[0]}:*)")
+    return tools
+
+
+def _agent_cmd(cli, tools, max_cost):
+    """The shell line that runs the agent CLI with no terminal (GitHub and Pulumi); its transcript goes to
+    $MAXPM_OUT."""
+    if cli == "codex":
+        return ('codex exec --json --sandbox workspace-write --skip-git-repo-check "$MAXPM_PROMPT" '
+                '> "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
+    return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
+            f'--max-budget-usd {float(max_cost):g} --add-dir {OUT} --allowedTools '
+            + " ".join(shlex.quote(t) for t in tools)
+            + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
 
 
 def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=None, max_minutes=30, max_cost=5.0,
                   allow=None, does=None):
     """The file .github/workflows/agent.yml of the job."""
     secret = secret or SECRET[cli]
-    tools = tool_list(allow or ALLOW)
-    if test and not allow:
-        tools.append(f"Bash({shlex.split(test)[0]}:*)")
-    if cli == "codex":
-        agent = ('codex exec --json --sandbox workspace-write --skip-git-repo-check "$MAXPM_PROMPT" '
-                 '> "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
-    else:
-        agent = ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
-                 f'--max-budget-usd {float(max_cost):g} --add-dir {OUT} --allowedTools '
-                 + " ".join(shlex.quote(t) for t in tools)
-                 + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
+    agent = _agent_cmd(cli, _tools(allow, test), max_cost)
     run = "${{ github.event.workflow_run.id }}"
     text = prompt(does or "Find the cause of the failure and fix it.", test)
     lines = [
@@ -680,15 +771,39 @@ def _target(p, forge, file, show, cwd):
     return path, top
 
 
+def _moves(conn, p, stages):
+    """The pipeline's stage-failed rules, and those of this computer that the forge's job takes over: enabled, for
+    a stage (or a tier) that runs in the forge."""
+    from . import triggers
+    rules = conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? AND event='stage-failed' ORDER BY id",
+                         (p["id"],)).fetchall()
+    stage_names = {s["name"] for s in stages}
+    tiers = {s["tier"] for s in stages if s["tier"]}
+    return rules, [r for r in rules if r["enabled"] and r["runner"] == triggers.THIS
+                   and (not r["stage"] or r["stage"] in stage_names) and (not r["tier"] or r["tier"] in tiers)]
+
+
+def _move(conn, p, rules, moves, actor):
+    """Move the rules to the forge, or add one when the pipeline has none there. Returns a line for each."""
+    from . import triggers
+    out = []
+    for r in moves:
+        triggers.rule_edit(conn, p["name"], f"t{r['id']}", runner=p["forge"], actor=actor)
+        out.append(f"t{r['id']} ({triggers.when_text(r).lower()}) now runs its agent in {label(p['forge'])}")
+    if not any(r["runner"] == p["forge"] for r in rules) and not moves:
+        r = triggers.rule_add(conn, p["name"], "stage-failed", runner=p["forge"], actor=actor)
+        out.append(f"{r['name']} added: {r['when'].lower()}, its agent runs in {label(p['forge'])}")
+    return out
+
+
 def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, max_cost=5.0, allow=None, file=None,
           show=False, actor=None, cwd=None, forge="github", image=None):
     """maxpm runner github|gitlab <pipeline>: write the agent job into a checkout of the pipeline's repository, and
     set the pipeline's stage-failed rules on this computer to run their agent there. --print only shows the file."""
-    from . import triggers
     runners._may(conn, actor, "writes the agent job of a pipeline and moves its trigger rules there, because the "
                               "job runs an agent with the repository's rights")
-    if forge not in FORGES:
-        raise RiverError(f"the agent job runs in one of: {', '.join(FORGES)}")
+    if forge not in FILE:  # Pulumi has no file of the job: maxpm runner pulumi (setup_pulumi)
+        raise RiverError(f"the agent job's file is written for one of: {', '.join(FILE)}")
     p = store._pipeline(conn, pipeline)
     if p["forge"] != forge:
         hint = {"github": "owner/name", "gitlab": "group/project"}[forge]
@@ -733,12 +848,7 @@ def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, 
         names = list(dict.fromkeys(workflow_name(folder, s["workflow"]) for s in stages))
     else:
         names = list(dict.fromkeys(s["workflow"] for s in stages))  # the GitLab stages
-    rules = conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? AND event='stage-failed' ORDER BY id",
-                         (p["id"],)).fetchall()
-    stage_names = {s["name"] for s in stages}
-    tiers = {s["tier"] for s in stages if s["tier"]}
-    moves = [r for r in rules if r["enabled"] and r["runner"] == triggers.THIS
-             and (not r["stage"] or r["stage"] in stage_names) and (not r["tier"] or r["tier"] in tiers)]
+    rules, moves = _moves(conn, p, stages)
     does = next((r["does"] for r in moves + [x for x in rules if x["runner"] == p["forge"]]), None)
     if forge == "github":
         text = workflow_text(p["name"], p["repo"], ref, names, cli, secret, test, max_minutes, max_cost, allow, does)
@@ -758,16 +868,206 @@ def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, 
         text = put_block(old, text)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    for r in moves:
-        triggers.rule_edit(conn, p["name"], f"t{r['id']}", runner=p["forge"], actor=actor)
-        out["rules"].append(f"t{r['id']} ({triggers.when_text(r).lower()}) now runs its agent in {label(p['forge'])}")
-    if not any(r["runner"] == p["forge"] for r in rules) and not moves:
-        r = triggers.rule_add(conn, p["name"], "stage-failed", runner=p["forge"], actor=actor)
-        out["rules"].append(f"{r['name']} added: {r['when'].lower()}, its agent runs in {label(p['forge'])}")
+    out["rules"] = _move(conn, p, rules, moves, actor)
     from . import define
     with core.tx(conn):
         define._change(conn, p["id"], actor, f"agent job written ({path.name}, {cli}, secret {secret}"
                        + (f", test {test}" if test else "") + f") for the "
                        + ("workflows" if forge == "github" else "GitLab stages") + f" {', '.join(names)}",
                        {"file": str(path), "cli": cli, "secret": secret, "test": test, "workflows": names})
+    return out
+
+
+# ---------------------------------------------------------------- maxpm runner pulumi <pipeline> (#6173)
+
+# What the Pulumi job does after the agent, in Python (the job's image has python3): its proof, the end of the
+# transcript and the patch as '::maxpm-' lines of the deployment's log, which the pulumi plugin reads at the end.
+_PROOF_PY = r'''import base64, gzip, json, os
+out = os.environ["MAXPM_OUT"]
+def tail(name):
+    try:
+        lines = [x.strip() for x in open(os.path.join(out, name), errors="replace") if x.strip()]
+    except OSError:
+        return None
+    return lines[-1][:300] if lines else None
+def read(name):
+    try:
+        with open(os.path.join(out, name), "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+def emit(tag, data):
+    text = base64.b64encode(gzip.compress(data)).decode()
+    for i in range(0, len(text), 1000):
+        print("::maxpm-%s %s" % (tag, text[i:i + 1000]))
+changed = os.environ["HEAD_SHA"] != os.environ["FAILED"]
+test = ({"command": os.environ["MAXPM_TEST"], "exit": int(os.environ["TEST_EXIT"]), "last": tail("test.log")}
+        if os.environ.get("TEST_EXIT") else None)
+error, patch = tail("error"), read("fix.patch")
+if len(patch) > __PATCH_MAX__:
+    error, patch = "the patch has %d bytes, more than __PATCH_MAX__: read the transcript" % len(patch), b""
+data = b"\n".join(read("transcript.jsonl").splitlines()[-400:])[-(1 << 20):]
+while len(gzip.compress(data)) > 300000:
+    data = data[len(data) // 2:]
+if data:
+    emit("transcript", data + b"\n")
+if patch:
+    emit("patch", patch)
+proof = {"rev": os.environ["FAILED"], "commit": os.environ["HEAD_SHA"] if changed else None,
+         "branch": os.environ.get("BRANCH") or None, "pr": os.environ.get("PR") or None, "test": test, "error": error,
+         "agent_exit": int(tail("agent-exit") or 0)}
+print("::maxpm-proof " + json.dumps({k: v for k, v in proof.items() if v is not None}))
+'''
+
+# The pull request on GitHub, with the token that only this step holds.
+_PR_PY = r'''import json, os, sys, urllib.request
+repo = sys.argv[1].split("/", 1)[1]
+try:
+    t = [json.loads(x) for x in open(os.environ["MAXPM_OUT"] + "/transcript.jsonl") if x.startswith("{")]
+    body = ([x.get("result") for x in t if x.get("type") == "result"] or [""])[-1]
+except (OSError, ValueError):
+    body = ""
+req = urllib.request.Request("https://api.github.com/repos/%s/pulls" % repo, method="POST", data=json.dumps({
+    "title": "maxpm agent: fix " + os.environ["MAXPM_FAILED"], "head": os.environ["MAXPM_BRANCH"],
+    "base": os.environ["MAXPM_BASE"], "body": body or "The agent of MaximizePM made this fix."}).encode(),
+    headers={"Authorization": "Bearer " + os.environ["MAXPM_GIT_TOKEN"], "Accept": "application/vnd.github+json"})
+print(json.load(urllib.request.urlopen(req, timeout=30))["html_url"])
+'''
+
+
+def pulumi_script(c):
+    """The bash script of the Pulumi job (its first pre-run command writes it to SCRIPT). It always ends with 0: the
+    proof in the log, not the deployment's status, says what the agent did."""
+    agent = _agent_cmd(c["cli"], _tools(c.get("allow"), c.get("test")), c["max_cost"])
+    return "\n".join([
+        f"# The MaximizePM agent job in Pulumi Deployments (#6173), written by maxpm {__version__}:",
+        "#   maxpm runner pulumi <pipeline>",
+        "set +e",
+        f"export MAXPM_OUT={OUT}",
+        'mkdir -p "$MAXPM_OUT"',
+        'cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"',
+        "FAILED=$(git rev-parse HEAD)",
+        'curl -sS -H "Authorization: token $PULUMI_ACCESS_TOKEN" "$MAXPM_RUN_URL" > "$MAXPM_OUT/failed-run.json" '
+        '2> "$MAXPM_OUT/curl.err"',
+        f'npm install -g {PACKAGE[c["cli"]]} > "$MAXPM_OUT/install.log" 2>&1 || echo "npm install -g '
+        f'{PACKAGE[c["cli"]]} failed: $(tail -1 "$MAXPM_OUT/install.log")" > "$MAXPM_OUT/error"',
+        'git config user.name "maxpm-agent"',
+        'git config user.email "maxpm-agent@users.noreply.github.com"',
+        "# The agent gets neither the git token nor the Pulumi token: it cannot push, and it changes nothing in Pulumi.",
+        f'env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN timeout {int(c["max_minutes"])}m {agent}',
+        'HEAD_SHA=$(git rev-parse HEAD); BRANCH=""; PR=""; TEST_EXIT=""',
+        "cat > \"$MAXPM_OUT/pr.py\" <<'MAXPM_PY'",
+        _PR_PY.rstrip("\n"),
+        "MAXPM_PY",
+        'if [ "$HEAD_SHA" != "$FAILED" ]; then',
+        '  if [ -n "$MAXPM_TEST" ]; then bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; TEST_EXIT=$?; fi',
+        '  if [ -n "$MAXPM_GIT_TOKEN" ]; then',
+        "    REPO=$(git remote get-url origin | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\\1/#; s#\\.git$##')",
+        "    # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
+        '    if git -c core.hooksPath=/dev/null push -q "https://x-access-token:${MAXPM_GIT_TOKEN}@${REPO}.git" '
+        '"HEAD:refs/heads/$MAXPM_BRANCH" 2> "$MAXPM_OUT/push.err"; then',
+        '      BRANCH="$MAXPM_BRANCH"',
+        '      if [ "${REPO#github.com/}" != "$REPO" ]; then',
+        '        PR=$(python3 "$MAXPM_OUT/pr.py" "$REPO" 2> "$MAXPM_OUT/pr.err") || echo "no pull request: '
+        '$(tail -1 "$MAXPM_OUT/pr.err")" > "$MAXPM_OUT/error"',
+        "      fi",
+        "    else",
+        '      echo "the push of $MAXPM_BRANCH failed: $(tail -1 "$MAXPM_OUT/push.err")" > "$MAXPM_OUT/error"',
+        "    fi",
+        "  fi",
+        '  [ -n "$BRANCH" ] || git format-patch --stdout "$FAILED..HEAD" > "$MAXPM_OUT/fix.patch"',
+        "fi",
+        "export FAILED HEAD_SHA BRANCH PR TEST_EXIT",
+        "python3 - <<'MAXPM_PY'",
+        _PROOF_PY.replace("__PATCH_MAX__", str(PATCH_MAX)).rstrip("\n"),
+        "MAXPM_PY",
+        "exit 0",
+        ""])
+
+
+def pulumi_prompt(does, test, n, stage, stack, branch):
+    return (f"You are a MaximizePM agent in a Pulumi Deployments job, with no person, no terminal and no permission "
+            f"prompt. Stage {stage} of Pulumi Delivery run {n} of the pipeline stack {stack} failed. What Pulumi shows "
+            f"of that run (its stages, their status and gates) is in the file {OUT}/failed-run.json; Pulumi gives no "
+            f"log of a Delivery job by its API, so read the stage's jobs and stacks in the code. This folder is a "
+            f"checkout of the branch {branch}.\n\n" + _task(does, test, "that file and the code"))
+
+
+def pulumi_request(p, c, key, does):
+    """The body of POST /api/stacks/<agent stack>/deployments for the run whose failed stage has key
+    pd-<run>-<stage>: a preview with the stack's own deployment settings (its source), whose pre-run commands write
+    the script and run it inside the ESC environment. Plain strings as environment variables: Pulumi reads a string
+    as a value that is not secret."""
+    m = re.match(r"pd-(\d+)-(.+?)(?:~\d+)?$", key or "")
+    n, stage = (m[1], m[2]) if m else ("?", key or "?")
+    org, project, stack = ((p["repo"] or "").split("/") + ["", "", ""])[:3]
+    q = lambda s: re.sub(r"[^A-Za-z0-9_.~-]", lambda x: "%%%02X" % ord(x[0]), s)  # noqa: E731
+    url = (f"{(p['forge_url'] or 'https://api.pulumi.com').rstrip('/')}/api/preview/stacks/{q(org)}/{q(project)}/"
+           f"{q(stack)}/delivery/runs/{n}")
+    branch = "maxpm/fix-pd-" + n + "-" + (re.sub(r"[^A-Za-z0-9._-]+", "-", stage).strip("-.") or "stage")
+    env = {"MAXPM_PROMPT": pulumi_prompt(does, c.get("test"), n, stage, p["repo"], c["branch"]),
+           "MAXPM_TEST": c.get("test") or "", "MAXPM_BASE": c["branch"], "MAXPM_BRANCH": branch,
+           "MAXPM_RUN_URL": url, "MAXPM_FAILED": f"stage {stage} of Delivery run {n}"}
+    script = base64.b64encode(pulumi_script(c).encode()).decode()
+    return {"operation": "preview", "inheritSettings": True,
+            "operationContext": {"preRunCommands": [f"echo {script} | base64 -d > {SCRIPT}",
+                                                    f"pulumi env run {shlex.quote(c['env'])} -- bash {SCRIPT}"],
+                                 "environmentVariables": env}}
+
+
+def setup_pulumi(conn, pipeline, env=None, stack=None, branch=None, cli="claude", test=None, max_minutes=30,
+                 max_cost=5.0, allow=None, show=False, actor=None):
+    """maxpm runner pulumi <pipeline> --env <ESC environment>: keep the agent job's settings on the pipeline and move
+    its stage-failed rules to 'pulumi'. --print shows the settings and the script, and changes nothing."""
+    runners._may(conn, actor, "sets the agent job of a pipeline and moves its trigger rules there, because the job "
+                              "runs an agent with the repository's rights")
+    p = store._pipeline(conn, pipeline)
+    if p["forge"] != "pulumi":
+        raise RiverError(f"pipeline {p['name']} does not read Pulumi Delivery (its source: {p['forge'] or 'none'}): "
+                         + (f"its job is maxpm runner {p['forge']} {p['name']}" if p["forge"] in FILE else
+                            f"first maxpm pipeline forge {p['name']} pulumi --repo org/project/stack --secret <name>"))
+    old = conf(p) or {}
+    env = env or old.get("env")
+    if not show and not (env and _ESC_ENV.match(env)):
+        raise RiverError("--env names the Pulumi ESC environment that holds the model key, project/env or "
+                         "org/project/env; a person sets the key there (ANTHROPIC_API_KEY, or CODEX_API_KEY with "
+                         "--cli codex), and MAXPM_GIT_TOKEN when the fix should come back as a branch")
+    stack = stack or old.get("stack") or p["repo"]
+    if not _STACK.match(stack or ""):
+        raise RiverError("--stack is the stack whose deployments run the job, org/project/stack (default: the "
+                         "pipeline stack)")
+    branch = branch or old.get("branch") or "main"
+    if not _BRANCH.match(branch) or ".." in branch:
+        raise RiverError("--branch is the branch that the job checks out and a fix goes into, such as main")
+    if cli not in SECRET:
+        raise RiverError(f"the agent CLI of the job is one of: {', '.join(SECRET)}")
+    if not 1 <= int(max_minutes) <= RUN_MAX // 60:
+        raise RiverError(f"--max-minutes is a whole number from 1 to {RUN_MAX // 60}")
+    if float(max_cost) <= 0:
+        raise RiverError("--max-cost is a number of dollars above 0")
+    test = (test or "").strip() or None
+    if test:
+        try:
+            shlex.split(test)
+        except ValueError as e:
+            raise RiverError(f"--test is a shell command: {e}") from None
+    stages = conn.execute("SELECT name, workflow, tier FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS "
+                          "NULL AND workflow IS NOT NULL ORDER BY pos, id", (p["id"],)).fetchall()
+    if not stages:
+        raise RiverError(f"no stage of pipeline {p['name']} names a Delivery stage: maxpm pipeline stage {p['name']} "
+                         f"<stage> --workflow <Delivery stage>")
+    rules, moves = _moves(conn, p, stages)
+    c = {"stack": stack, "env": env, "branch": branch, "cli": cli, "test": test, "max_minutes": int(max_minutes),
+         "max_cost": float(max_cost), "allow": allow}
+    out = {"pipeline": p["name"], "repo": p["repo"], "stages": [s["workflow"] for s in stages], "rules": [],
+           **c, "script": pulumi_script(c) if show else None}
+    if show:
+        return out
+    from . import define
+    with core.tx(conn):
+        conn.execute("UPDATE pipelines SET agent_job=? WHERE id=?", (json.dumps(c, sort_keys=True), p["id"]))
+    out["rules"] = _move(conn, p, rules, moves, actor)
+    with core.tx(conn):
+        define._change(conn, p["id"], actor, f"agent job in Pulumi Deployments set (stack {stack}, ESC environment "
+                       f"{env}, branch {branch}, {cli}" + (f", test {test}" if test else "") + ")", c)
     return out

@@ -1,9 +1,9 @@
 {
   "contract": 1,
   "name": "pulumi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "level": "act",
-  "description": "Pulumi Delivery (public preview): reads each Delivery run by number, one MaximizePM stage for each Delivery stage; the yes at a MaximizePM transition continues the Delivery gate; starts a run, retries it, cancels it. A roll back stays on Pulumi's page.",
+  "description": "Pulumi Delivery (public preview): reads each Delivery run by number, one MaximizePM stage for each Delivery stage; the yes at a MaximizePM transition continues the Delivery gate; starts a run, retries it, cancels it. A roll back stays on Pulumi's page. With maxpm runner pulumi, a failed stage's agent runs in a Pulumi Deployment that this plugin starts, reads and cancels.",
   "run": ["{python}", "plugin.py"],
   "actions": ["start", "stop", "rerun"],
   "settings": {

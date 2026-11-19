@@ -25,8 +25,17 @@ Not documented, so not done, and what follows:
 The yes at a MaximizePM transition continues the Delivery gate: each pending manual condition, and an approval
 condition only after a person's yes (the run's approved_by_person). When the gate is not open yet, poll continues it
 when the run comes to it. The token: a Pulumi access token, mapped to this plugin's secret 'token'.
+
+The agent job (#6173, maxpm runner pulumi): Delivery runs nothing when a stage fails, so MaximizePM asks for a Pulumi
+Deployment (the documented Deployments API: POST /api/stacks/<stack>/deployments, GET .../deployments/<id> and its
+/logs, POST .../<id>/cancel). When the poll's request lists "agents", a run with no job carries "start", the whole
+request body that MaximizePM made: this plugin creates the deployment and answers its id as the job (pdd-<id>). For a
+run with a job it answers the deployment's state, and at its end the '::maxpm-' lines of its log: the proof, and the
+transcript and the patch (gzip, base64, in parts).
 """
 
+import base64
+import gzip
 import json
 import re
 import sys
@@ -244,7 +253,97 @@ def poll(req, api):
         if oldest_open is None and status not in FINAL:
             oldest_open = n
         n += 1
-    return {"events": p.events, "notes": p.notes, "counts": {"runs": count}, "state": {**state, "next": oldest_open or n}}
+    answer = {"events": p.events, "notes": p.notes, "counts": {"runs": count},
+              "state": {**state, "next": oldest_open or n}}
+    if req.get("agents"):
+        answer["agents"] = agent_runs(api, req["agents"])
+    return answer
+
+
+# ---------------------------------------------------------------- the agent job (#6173)
+
+JOB = "pdd-"  # the job of a run: pdd-<deployment id>
+LOG_PAGES = 40  # pages of a deployment's log that one read takes
+JOB_STATE = {"not-started": "queued", "accepted": "queued", "running": "running"}
+MARK = re.compile(r"::maxpm-(proof|transcript|patch) (\S+.*)$")
+
+
+def deployments(api, stack):
+    parts = (stack or "").split("/")
+    if len(parts) != 3:
+        raise Failed("the agent job names no stack (maxpm runner pulumi <pipeline> --stack org/project/stack)")
+    return "/api/stacks/" + "/".join(urllib.parse.quote(x, safe="") for x in parts) + "/deployments"
+
+
+def agent_runs(api, agents):
+    """For each run that MaximizePM waits for: start its deployment (no job yet), or read the deployment's state. A
+    call that fails becomes the run's note; the poll goes on."""
+    out = []
+    for a in agents:
+        try:
+            out.append(read_job(api, a) if a.get("job") else start_job(api, a))
+        except Failed as e:
+            out.append({"run": a["run"], "note": str(e)})
+    return out
+
+
+def start_job(api, a):
+    if not isinstance(a.get("start"), dict):
+        return {"run": a["run"], "note": "no agent job is set for this pipeline (maxpm runner pulumi <pipeline>)"}
+    got = api.call("POST", deployments(api, a.get("stack")), a["start"]) or {}
+    if not got.get("id"):
+        raise Failed("Pulumi answered no deployment id")
+    return {"run": a["run"], "job": JOB + str(got["id"]), "url": got.get("consoleUrl"), "state": "queued"}
+
+
+def read_job(api, a):
+    dep_id = str(a["job"])[len(JOB):]
+    path = f"{deployments(api, a.get('stack'))}/{urllib.parse.quote(dep_id, safe='')}"
+    dep = api.call("GET", path, missing=True)
+    if dep is None:
+        return {"run": a["run"], "state": "failed", "note": f"Pulumi has no deployment {dep_id}"}
+    status = dep.get("status") or "not-started"
+    d = {"run": a["run"], "job": a["job"], "started_at": dep.get("created")}
+    if status in JOB_STATE:
+        return {**d, "state": JOB_STATE[status]}
+    d.update(job_log(api, path))
+    if "proof" in d:
+        d["state"] = "ended"
+    else:
+        d["state"] = "stopped" if status == "skipped" else "failed"
+        d["note"] = f"the deployment ended ({status}) and printed no proof: read its log on Pulumi's page"
+    return d
+
+
+def job_log(api, path):
+    """The '::maxpm-' lines of the deployment's log (streaming mode, until Pulumi gives no next token)."""
+    parts, token = {"transcript": [], "patch": []}, None
+    out = {}
+    for _ in range(LOG_PAGES):
+        page = api.call("GET", path + "/logs" + (f"?continuationToken={urllib.parse.quote(token, safe='')}"
+                                                 if token else "")) or {}
+        for x in page.get("lines") or []:
+            m = MARK.search(str(x.get("line") or "").rstrip())
+            if not m:
+                continue
+            if m[1] == "proof":
+                try:
+                    proof = json.loads(m[2])
+                    out["proof"] = proof if isinstance(proof, dict) else {}
+                except ValueError:
+                    out["note"] = "its proof line is not JSON"
+            else:
+                parts[m[1]].append(m[2].strip())
+        token = page.get("nextToken")
+        if not token:
+            break
+    for key, chunks in parts.items():
+        if chunks:
+            try:
+                out[key] = gzip.decompress(base64.b64decode("".join(chunks))).decode("utf-8", "replace")
+            except (ValueError, OSError):
+                out.setdefault("note", f"its {key} lines do not decode")
+    return out
 
 
 def number_for(run, runs):
@@ -261,6 +360,10 @@ def act(req, api):
     """start: continue the stage's gate in its Delivery run (now, or when the run comes to it), or start a Delivery
     run for a version no run carries yet. rerun: retry the Delivery run. stop: cancel the whole Delivery run."""
     run, runs, state = req["run"], req.get("runs") or [], req.get("state") or {}
+    if req["call"] == "stop" and str(run.get("key") or "").startswith(JOB):  # #6173: the agent job's deployment
+        dep_id = run["key"][len(JOB):]
+        api.call("POST", f"{deployments(api, req.get('agent_stack'))}/{urllib.parse.quote(dep_id, safe='')}/cancel", {})
+        return {"note": f"cancelled deployment {dep_id}"}
     n = number_for(run, runs)
     if req["call"] == "stop":
         if n is None:

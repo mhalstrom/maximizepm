@@ -313,6 +313,9 @@ the jsonl example only, with its test against recorded answers (#6165):
   person's yes. When the gate is not open yet, the next poll continues it.
   Run again retries the Delivery run (its failed members, the same commit);
   stop cancels the whole Delivery run.
+- **The agent job**: while MaximizePM waits for an agent job, it starts the
+  job's deployment, reads its state, and at its end reads the proof from its
+  log (see 'Agents in Pulumi Deployments').
 - **What it cannot do, and why**: Pulumi documents no list of runs (so it
   reads them by number), no commit or times of a run (so a run's version is
   the one MaximizePM sent, else `release <n>`, else `run <n>`, and a stage
@@ -1158,6 +1161,63 @@ What MaximizePM does with it is the same as for GitHub, with the record
 failed run's GitLab pipeline. When that pipeline ended with no such job (the
 commit's file has none), the run ends at once and a session here takes the
 task.
+
+## Agents in Pulumi Deployments
+
+When a stage is a Pulumi Delivery stage, its agent can run in a Pulumi
+Deployment, the hosted runner of Pulumi Cloud. Delivery runs nothing when a
+stage fails, and it gives no log of a job by its API. So MaximizePM starts
+the job itself: the pulumi plugin's next read (once a minute) creates the
+deployment, follows it, and reads the proof from its log at its end.
+
+```
+maxpm runner pulumi <pipeline> --env <project/env> --test "<the command that proves a fix>"
+maxpm runner pulumi <pipeline> --print         # show the settings and the job's script; change nothing
+maxpm runner runs pulumi                       # the jobs, newest first
+maxpm runner log <run>                         # what the agent printed, in words
+maxpm runner stop <run> --reason "<why>"       # cancels the deployment
+```
+
+`maxpm runner pulumi` (a person or the manager) keeps the job's settings on
+the pipeline, and moves its stage-failed rules from this computer to
+`pulumi` (or adds one). `--stack` names the stack whose deployments run the
+job (default: the pipeline stack), `--branch` the branch that the job checks
+out and a fix goes into (default `main`).
+
+Then a person does two things on Pulumi's page, once:
+
+1. Puts the model key in the ESC environment of `--env`, under
+   `environmentVariables`: `ANTHROPIC_API_KEY` for Claude Code (the default),
+   `CODEX_API_KEY` with `--cli codex`. Also `MAXPM_GIT_TOKEN`, a token that
+   may push branches, when the fix should come back as a branch (on GitHub
+   also with a pull request); without it, it comes back as a patch.
+   MaximizePM never reads or searches for these keys.
+2. Sets the deployment settings of the stack (Settings > Deploy): the source
+   repository and the branch.
+
+What the deployment does: a preview of the stack, whose pre-run commands
+write the job's script and run it inside `pulumi env run <the environment>`.
+The script, in order:
+
+1. Saves what Pulumi shows of the failed Delivery run (its stages, their
+   status and gates) in `/tmp/maxpm-agent/failed-run.json`.
+2. Runs the agent with no terminal and no prompt, as the GitHub job does
+   (`--allow`, `--max-cost`, `--max-minutes`), with neither the git token nor
+   the Pulumi token in its environment: it can commit, and it cannot push.
+3. When the agent committed: runs `--test`, then pushes the commit to the
+   branch `maxpm/fix-pd-<run>-<stage>` and opens a pull request on GitHub,
+   or, with no git token, makes a patch.
+4. Prints its proof, the end of the transcript and the patch as lines that
+   start with `::maxpm-` in the deployment's log, and ends with 0: the proof,
+   not the deployment's status, says what the agent did.
+
+What MaximizePM does with it is the same as for GitHub: the fault task is
+reserved for the record `pulumi-r<run>`, the run shows under Deploy >
+Runners, and at its end the task goes back to the queue with the proof in a
+note. A patch is kept beside the queue: the session that takes the task
+applies it (`git am <file>`), runs the tests, and commits it. No deployment
+within 30 minutes (Pulumi refused it: the reason is on the run), or no
+settings for the job: a session here takes the task.
 
 ## What agents may do with no prompt
 

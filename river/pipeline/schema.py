@@ -39,7 +39,10 @@ CREATE TABLE IF NOT EXISTS pipelines (
                                          -- versions come from events; no transition, start, move back or override of
                                          -- ours; its trigger rules and hooks still act
   followed_by     TEXT,
-  followed_at     TEXT
+  followed_at     TEXT,
+  agent_job       TEXT                   -- #6173: JSON settings of its agent job in Pulumi Deployments (maxpm runner
+                                         -- pulumi): stack, env, branch, cli, test, max_minutes, max_cost, allow.
+                                         -- Readers: agent_job.queue, open_runs, stop
 );
 
 -- The numbered versions of a pipeline's definition (#6143): each change of it makes version n+1 with the whole
@@ -549,7 +552,7 @@ def migrate(conn):
     for c in ("stop_runs", "agents_operate", "followed"):  # #6145, #6167
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
-    for c in ("followed_by", "followed_at"):  # #6167
+    for c in ("followed_by", "followed_at", "agent_job"):  # #6167; #6173
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     tcols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_triggers)")}

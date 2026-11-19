@@ -59,7 +59,7 @@ COMMANDS = {
     "plugin": {"list": ANY, "show": ANY, "new": ANY, "add": LEAD, "pin": LEAD, "trust": ONLY_PERSON},
     "runner": {"list": ANY, "runs": ANY, "log": ANY, "add": LEAD, "check": LEAD, "set": LEAD, "remove": LEAD,
                "allow": LEAD, "deny": LEAD, "stop": LEAD, "github": LEAD,  # #6152: it moves trigger rules
-               "gitlab": LEAD},  # #6172
+               "gitlab": LEAD, "pulumi": LEAD},  # #6172, #6173
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,

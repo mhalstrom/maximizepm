@@ -37,8 +37,8 @@ function runnerRow(r, clis) {
     <td data-label="Used by">${used}</td><td>${button("Check", { data: { "rn-check": r.name }, title: "Ask the server again" })}</td></tr>`;
 }
 
-// A forge's own CI (#6152 GitHub Actions, #6172 GitLab CI): the forge starts the agent in its job when a stage
-// fails; no slots, no Check.
+// A forge's own CI (#6152 GitHub Actions, #6172 GitLab CI, #6173 Pulumi Deployments): the agent runs there when a
+// stage fails; no slots, no Check.
 function forgeRow(f) {
   const used = f.used_by.map(p => button(esc(p), { cls: "plain", data: { "dp-triggers": p }, title: "Open its triggers" })).join(" ")
     || `<span class="muted">no rule yet: maxpm runner ${esc(f.name)} &lt;pipeline&gt;</span>`;
