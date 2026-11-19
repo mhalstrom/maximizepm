@@ -229,7 +229,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         r = self.drive(driver, "/", size="1280,900")
-        self.assertIn("definition v3 · mark", r["head"], r)
+        self.assertIn("definition v3 · mark", r["head"], r)  # (the override's page test is below, #6146)
         self.assertIn("stage build run: make → make all", r["diff"], r)
         self.assertEqual(r["over"], 0, r)
         self.assertEqual(versions.listing(self.c, "api")["versions"][0]["why"], "back to version 2: the old command was right")
@@ -238,6 +238,44 @@ try {
         r = self.drive(driver, "/", size="390,844")
         self.assertIn("definition v4 · mark", r["head"], r)
         self.assertEqual(r["over"], 0, r)
+
+    def test_a_stage_sends_its_version_here_directly_and_runs_the_whole_pipeline(self):
+        """#6146: a stage's 'Send a version here directly…' opens the Emergency tab's override with that stage; it
+        shows what it skips; after the override the card says 'not through the pipeline' and the stage offers
+        'Run the whole pipeline for <version>'."""
+        from river.pipeline import define, runner, operators
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "app", project="site")
+        for s in ("build", "test", "prod"):
+            define.stage_set(self.c, "app", s, "test")
+        runner._queue(self.c, "app", "build", "abc1234")
+        rid = runner.run_again(self.c, "app", "prod", "fix9999", "mark", purpose="override")["run"]
+        from river.pipeline import store
+        store.run_finish(self.c, rid, "passed")
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="app"]'), "Deploy: the pipeline app");
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('#plRow [data-pl-stage="prod"]'), "the stages of app");
+  const out = { card: q('#plRow [data-pl-stage="prod"]').textContent.replace(/\s+/g, " ") };
+  q('#plRow [data-pl-stage="prod"]').click();
+  await until(() => q('[data-pl-whole]'), "Run the whole pipeline");
+  out.whole = q('[data-pl-whole]').textContent.trim();
+  q('[data-em-preset="prod"]').click();
+  await until(() => q("#emOvStage"), "the override on the Emergency tab");
+  out.stage = q("#emOvStage").value;
+  out.acts = q(".dp-em-card ul").textContent.replace(/\s+/g, " ");
+  out.go = q('[data-em-go="override"]').textContent.trim();
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="1280,900")
+        self.assertIn("⚠ not through the pipeline", r["card"], r)
+        self.assertEqual(r["whole"], "Run the whole pipeline for fix9999", r)
+        self.assertEqual(r["stage"], "prod", r)
+        self.assertIn("It skips: build, test", r["acts"], r)
+        self.assertTrue(r["go"].startswith("Send ") and r["go"].endswith(" to prod now"), r)
 
     def test_branches_draw_as_rows_that_fan_out_and_join(self):
         """#6142: a pipeline that splits draws each branch as a row of its own, with the lines that fan out and in;
@@ -350,7 +388,7 @@ try {
         for size in ("1280,900", "390,844"):
             r = self.drive(driver, "/", size=size)
             self.assertTrue(r["ops"], r)
-            self.assertEqual(r["picks"], ["stop", "agents", "moveback", "revoke"], r)
+            self.assertEqual(r["picks"], ["stop", "agents", "moveback", "override", "revoke"], r)  # override: #6146
             self.assertIn("gh-shared: the token that pipeline app reads its source with ⚠ web uses it too", r["revoke"], r)
             self.assertIn("app is stopped by mark", r["banner"], r)
             self.assertIn("the prod database is slow", r["banner"], r)

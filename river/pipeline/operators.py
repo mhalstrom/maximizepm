@@ -236,7 +236,7 @@ def plan(conn, pipeline):
     return {"pipeline": p["name"], "stopped": {"reason": p["held_reason"], "by": p["held_by"], "at": p["held_at"],
                                                 "stop_runs": bool(p["stop_runs"])} if p["held_reason"] else None,
             "operators": listing(conn, pipeline), "stop": stop, "agents": _agents(conn, p), "moveback": back,
-            "keys": _keys(conn, p)}
+            "keys": _keys(conn, p), "override": _override_plan(conn, p)}
 
 
 # ---------------------------------------------------------------- the actions
@@ -313,6 +313,68 @@ def move_back(conn, pipeline, stage, reason, actor=None):
         out = runner.move_back(conn, p["name"], stage, good["rev"], reason, actor,
                                words=f"emergency: moved stage {stage} back to {good['rev']}")
     return dict(out, previous=now)
+
+
+def _override_plan(conn, p):
+    """For the override (#6146): the versions an operator may send (newest first) with the stages each one passed,
+    and each stage after the first with the stages before it and what runs in it."""
+    rows, prev, _ = store.stage_graph(conn, p["id"])
+    order = [r["name"] for r in rows]
+    versions = []
+    for v in conn.execute("SELECT id, rev FROM pipeline_versions WHERE pipeline_id=? ORDER BY id DESC LIMIT 12",
+                          (p["id"],)).fetchall():
+        passed = sorted({x["name"] for x in conn.execute(
+            "SELECT s.name FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE r.version_id=? AND "
+            "r.state='passed'", (v["id"],))}, key=lambda n: order.index(n) if n in order else 0)
+        versions.append({"rev": v["rev"], "passed": passed})
+    stages = []
+    for r in rows:
+        before = [n for n in order if n in store.ancestors(prev, r["name"])]
+        if not before:
+            continue
+        what = r["run"] or (f"the workflow {r['workflow']}" if r["workflow"] else "nothing to run")
+        stages.append({"name": r["name"], "before": before, "runs": what, "check": r["check_cmd"]})
+    return {"versions": versions, "stages": stages}
+
+
+def override(conn, pipeline, stage, rev, reason, actor=None):
+    """The override (#6146; mark 2026-11-18: 'we also need to be able to override to deploy directly to prod'): send
+    version rev straight to a later stage, past the stages and the transitions between. The stage's own steps and
+    checks run, and the flow goes on after it. The stages it skipped do not run by themselves (mark: 'no'); until the
+    version passed them, the stage shows 'not through the pipeline', and whole() runs them later."""
+    reason = _reason(reason)
+    p = store._pipeline(conn, pipeline)
+    check(conn, p, actor)
+    plan = _override_plan(conn, p)
+    s = next((x for x in plan["stages"] if x["name"] == stage), None)
+    if s is None:
+        raise core.RiverError(f"stage {stage} is not a later stage of pipeline {p['name']} (the first stage: maxpm "
+                              f"pipeline start {p['name']} --rev <commit>)")
+    if not (rev or "").strip():
+        raise core.RiverError("name the version: --rev <commit>")
+    v = next((x for x in plan["versions"] if x["rev"] == rev or (len(rev) >= 7 and x["rev"].startswith(rev))), None)
+    skipped = [n for n in s["before"] if not v or n not in v["passed"]]
+    from . import runner
+    words = (f"override: sent {rev} straight to stage {stage}" + (f"; skipped {', '.join(skipped)}" if skipped
+                                                                    else "; it had passed every stage before"))
+    with _acting(actor):
+        out = runner.run_again(conn, p["name"], stage, v["rev"] if v else rev, actor, purpose="override",
+                               note=words, reason=reason)
+    return dict(out, skipped=skipped)
+
+
+def whole(conn, pipeline, rev, actor=None):
+    """'Run the whole pipeline for <version>' (#6146; mark: 'we can rerun the whole pipeline for the stuff we had to do
+    an emergency release for'): the version starts at the first stage and goes through the flow; the run ends at a
+    stage where an override put it already."""
+    p = store._pipeline(conn, pipeline)
+    check(conn, p, actor)
+    from . import runner
+    with _acting(actor):
+        out = runner.start(conn, p["name"], rev=rev, actor=actor)
+    with core.tx(conn):
+        conn.execute("UPDATE stage_runs SET purpose='whole', sent_by=? WHERE id=?", (actor or "a person", out["run"]))
+    return out
 
 
 def revoke(conn, pipeline, key, reason, actor=None):

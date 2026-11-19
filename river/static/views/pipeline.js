@@ -124,6 +124,7 @@ function stageCardOnly(s) {
     <span class="pl-meta pl-more-line">${esc(meta)}</span>
     ${s.start === "manual" ? `<span class="pl-meta">✋ ${s.waits_for_run ? "waits for Run" : "starts manually"}</span>` : ""}
     ${keysLine(s)}
+    ${s.override ? `<span class="pl-meta c-warn" title="Skipped: ${esc(s.override.skipped.join(", "))}">⚠ not through the pipeline</span>` : ""}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
@@ -464,6 +465,10 @@ function stageActions(s, r) {
   if (r && ["running", "queued"].includes(r.state) && r.id != null)
     b.push(srcButton(D, ours ? null : s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }, miss));
   if (r && rev && !["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }, miss));
+  // The override (#6146): a version came here past the stages before; run them for it, or send another one here.
+  if (s.override) b.push(button(`Run the whole pipeline for ${esc(short(s.override.rev))}`, { kind: "primary", data: { "pl-whole": s.override.rev }, title: "Run the skipped stages" }));
+  if ((s.prev || []).length || D.stages.indexOf(s) > 0)
+    b.push(button("Send a version here directly…", { kind: "warn", data: { "dp-tab": "emergency", "em-preset": s.name }, title: "Override" }));
   const bad = r && r.tests ? (r.tests.failed || 0) + (r.tests.error || 0) : 0;
   if (bad && r.id != null && !["running", "queued"].includes(r.state))
     b.push(srcButton(D, s, "rerun", `Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }, miss));
@@ -611,6 +616,8 @@ $("#dpStages").addEventListener("click", (e) => {
   })();
   const tr = e.target.closest("[data-pl-block],[data-pl-unblock],[data-pl-delay],[data-pl-undelay],[data-pl-disable],[data-pl-enable],[data-pl-pass],[data-pl-freeze],[data-pl-unfreeze],[data-pl-change]");
   if (tr) return arrowAct(tr.dataset);
+  const whole = e.target.closest("[data-pl-whole]");  // #6146: the stages an override skipped
+  if (whole) return doAct("pipeline_emergency", { action: "whole", rev: whole.dataset.plWhole });
   const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback],[data-pl-moveback]");
   if (a) {
     const d = a.dataset;

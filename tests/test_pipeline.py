@@ -1250,6 +1250,42 @@ class Emergency(RunnerBase):
         with self.assertRaises(RiverError):
             self.ops.move_back(self.c, "app", "prod", "x", actor="mark")  # nothing passed prod
 
+    def test_override_sends_a_version_straight_to_a_stage_and_a_whole_run_ends_there(self):
+        """#6146: the override skips the stages and transitions between; prod runs its own command; prod shows 'not
+        through the pipeline' until the whole run passes the skipped stages, which ends where the override put it."""
+        self.runner.start(self.c, "app", rev="old0001")
+        self.passes(4)  # build, test and beta pass; prod waits for mark's yes
+        plan = self.ops.plan(self.c, "app")["override"]
+        self.assertEqual([s["name"] for s in plan["stages"]], ["test", "beta", "prod"])
+        self.assertEqual(plan["stages"][-1]["before"], ["build", "test", "beta"])
+        with self.assertRaises(RiverError):
+            self.ops.override(self.c, "app", "prod", "fix0001", "", actor="mark")  # no reason
+        with self.assertRaises(RiverError):
+            self.ops.override(self.c, "app", "build", "fix0001", "x", actor="mark")  # the first stage: start it
+        with self.assertRaises(RiverError):
+            self.ops.override(self.c, "app", "prod", "fix0001", "x", actor="w1")  # an agent that is no operator
+        r = self.ops.override(self.c, "app", "prod", "fix0001", "hotfix: checkout down", actor="mark")
+        self.assertEqual(r["skipped"], ["build", "test", "beta"])
+        self.passes(2)
+        runs = [(x["stage"], x["rev"], x["state"], x["purpose"]) for x in self.c.execute(
+            "SELECT s.name stage, v.rev, r.state, r.purpose FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+            "JOIN pipeline_versions v ON v.id=r.version_id WHERE v.rev='fix0001' ORDER BY r.id")]
+        self.assertEqual(runs, [("prod", "fix0001", "passed", "override")])  # the skipped stages do not run
+        prod = {s["name"]: s for s in store.show(self.c, "app")["stages"]}["prod"]
+        self.assertEqual(prod["override"]["skipped"], ["build", "test", "beta"])
+        line = self.c.execute("SELECT actor, change, reason FROM pipeline_changes WHERE action='override'").fetchone()
+        self.assertEqual(tuple(line), ("mark", "override: sent fix0001 straight to stage prod; skipped build, test, beta",
+                                       "hotfix: checkout down"))
+        w = self.ops.whole(self.c, "app", "fix0001", actor="mark")
+        self.assertEqual(w["stage"], "build")
+        self.passes(6)
+        runs = [(x["stage"], x["state"]) for x in self.c.execute(
+            "SELECT s.name stage, r.state FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN "
+            "pipeline_versions v ON v.id=r.version_id WHERE v.rev='fix0001' ORDER BY r.id")]
+        self.assertEqual(runs, [("prod", "passed"), ("build", "passed"), ("test", "passed"), ("beta", "passed")])
+        self.assertIsNone({s["name"]: s for s in store.show(self.c, "app")["stages"]}["prod"]["override"])
+        self.assertIn("whole pipeline run", [r["what"] for r in store.stage_versions(self.c, "app", "build")["runs"]])
+
     def test_revoke_a_token_warns_of_the_other_pipelines_that_use_it(self):
         define.forge_set(self.c, "app", "github", repo="o/app", secret="gh-tok", actor="mark")
         define.pipeline_add(self.c, "site", actor="mark")

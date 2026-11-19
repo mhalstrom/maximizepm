@@ -80,6 +80,25 @@ def stage_graph(conn, pid):
     return rows, prev, nxt
 
 
+def _not_through(conn, p, s, cache):
+    """The stage's newest passed run came by an override (#6146) and its version has not passed every stage before
+    it yet: {rev, by, at, skipped}; the stage shows 'not through the pipeline' until a whole run passes. Else None."""
+    r = conn.execute("SELECT r.version_id, r.sent_by, r.ended_at, r.purpose, v.rev FROM stage_runs r LEFT JOIN "
+                     "pipeline_versions v ON v.id=r.version_id WHERE r.stage_id=? AND r.state='passed' ORDER BY r.id "
+                     "DESC LIMIT 1", (s["id"],)).fetchone()
+    if r is None or r["purpose"] != "override":
+        return None
+    key = ("graph", p["id"])
+    if key not in cache:
+        cache[key] = stage_graph(conn, p["id"])
+    rows, prev, _ = cache[key]
+    ids = {x["name"]: x["id"] for x in rows}
+    skipped = [n for n in (x["name"] for x in rows) if n in ancestors(prev, s["name"]) and not conn.execute(
+        "SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND state='passed'",
+        (ids[n], r["version_id"])).fetchone()]
+    return {"rev": r["rev"], "by": r["sent_by"], "at": r["ended_at"], "skipped": skipped} if skipped else None
+
+
 def ancestors(prev, name):
     """Every stage that a version passes before it reaches stage name."""
     out, todo = set(), list(prev.get(name, []))
@@ -504,6 +523,7 @@ def show(conn, name):
             "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())
         d["start"] = s["start"] or "auto"  # #6138: manual: a version that enters waits for Run
         d["prev"] = d["transition"].get("from") or []  # #6142: the stages it follows (branches, joins)
+        d["override"] = _not_through(conn, p, s, cache)  # #6146
         w = conn.execute("SELECT r.id, v.rev, r.entered_at FROM stage_runs r LEFT JOIN pipeline_versions v ON "
                          "v.id=r.version_id WHERE r.stage_id=? AND r.state='queued' AND r.entered_at IS NOT NULL AND "
                          "r.run_at IS NULL ORDER BY r.id LIMIT 1", (s["id"],)).fetchone() if s["start"] else None

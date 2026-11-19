@@ -1989,7 +1989,8 @@ def build_parser(only=None):
     x = pls.add_parser("emergency", help="the emergency actions of a pipeline (its operators): with no action, what "
                        "each one acts on")
     x.add_argument("name")
-    x.add_argument("action", nargs="?", choices=("stop", "resume", "agents", "moveback", "revoke"))
+    x.add_argument("action", nargs="?", choices=("stop", "resume", "agents", "moveback", "revoke", "override", "whole"))
+    x.add_argument("--rev", help="override, whole: the version")
     x.add_argument("--stage", help="moveback: the stage to put back on its last good version")
     x.add_argument("--key", help="revoke: the token or credential set to take away")
     x.add_argument("--reason")
@@ -7820,8 +7821,10 @@ def _pipeline_cmd(conn, a, actor):
             return ops.change(conn, a.name, a.add, a.remove, None if a.agents is None else a.agents == "on", actor)
         if a.action is None:
             return ops.plan(conn, a.name)
-        if a.action == "moveback" and not a.stage:
-            raise RiverError("name the stage: maxpm pipeline emergency <name> moveback --stage <stage> --reason \"...\"")
+        if a.action in ("moveback", "override") and not a.stage:
+            raise RiverError(f"name the stage: maxpm pipeline emergency <name> {a.action} --stage <stage> --reason \"...\"")
+        if a.action in ("override", "whole") and not a.rev:
+            raise RiverError(f"name the version: maxpm pipeline emergency <name> {a.action} --rev <commit>")
         if a.action == "revoke" and not a.key:
             raise RiverError("name the key: maxpm pipeline emergency <name> revoke --key <name> --reason \"...\" (maxpm "
                              f"pipeline emergency {a.name} lists them)")
@@ -7829,7 +7832,9 @@ def _pipeline_cmd(conn, a, actor):
                 "resume": lambda: ops.resume(conn, a.name, actor),
                 "agents": lambda: ops.stop_agents(conn, a.name, a.reason, actor),
                 "moveback": lambda: ops.move_back(conn, a.name, a.stage, a.reason, actor),
-                "revoke": lambda: ops.revoke(conn, a.name, a.key, a.reason, actor)}[a.action]()
+                "revoke": lambda: ops.revoke(conn, a.name, a.key, a.reason, actor),
+                "override": lambda: ops.override(conn, a.name, a.stage, a.rev, a.reason, actor),  # #6146
+                "whole": lambda: ops.whole(conn, a.name, a.rev, actor)}[a.action]()
     if sub == "stop":
         from .pipeline import runner
         return runner.stop(conn, a.id, actor)
@@ -7980,8 +7985,21 @@ def _render_emergency(a, res):
                                                                if k["others"] else ""))
         if not res["keys"]:
             print("  revoke: the pipeline names no key")
+        o = res.get("override") or {}
+        if o.get("stages"):
+            print("  override --stage <stage> --rev <commit>: " + "; ".join(
+                f"{s['name']} (after {', '.join(s['before'])})" for s in o["stages"]))
         return
     p = res["pipeline"]
+    if a.action == "override":
+        print(f"pipeline {p}: {res['version']} goes straight to stage {res['stage']} (run #{res['run']})"
+              + (f"; skipped {', '.join(res['skipped'])}: they do not run by themselves; later: maxpm pipeline "
+                 f"emergency {p} whole --rev {res['version']}" if res["skipped"] else ""))
+        return
+    if a.action == "whole":
+        print(f"pipeline {p}: {res['version']} runs through the pipeline from stage {res['stage']} (run #{res['run']}); "
+              "it ends at the stage where the override put it")
+        return
     if a.action == "stop":
         print(f"pipeline {p} stopped: nothing new starts" + (f"; {res['running']} running stage(s) stop after their "
                                                              "present step" if res["running"] else "")

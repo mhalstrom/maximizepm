@@ -1136,6 +1136,8 @@ maxpm pipeline emergency <name> resume
 maxpm pipeline emergency <name> agents --reason "<why>"          # Stop its agents
 maxpm pipeline emergency <name> moveback --stage <stage> --reason "<why>"
 maxpm pipeline emergency <name> revoke --key <token or set> --reason "<why>"
+maxpm pipeline emergency <name> override --stage <stage> --rev <commit> --reason "<why>"
+maxpm pipeline emergency <name> whole --rev <commit>                # Run the whole pipeline for <commit>
 maxpm pipeline operators <name> [--add <name>] [--remove <name>] [--agents on|off]
 ```
 
@@ -1154,6 +1156,17 @@ maxpm pipeline operators <name> [--add <name>] [--remove <name>] [--agents on|of
   and the grants their tasks hold end). The secret itself stays: a person
   replaces it (`maxpm secret put <name>`) or deletes it. When another pipeline
   uses the same token, the plan and the reply name it, and it keeps the token.
+
+- **Send a version straight to a stage** (the override): a hotfix, or a
+  version that passed elsewhere, goes to a later stage now, past the stages
+  and transitions between. The plan shows what it skips and what runs in the
+  stage: the stage's own steps and checks always run, and the flow goes on
+  after it. The skipped stages do not run by themselves; the stage shows
+  "not through the pipeline" until they passed for that version. Run them
+  later with Run the whole pipeline for <version> (on the stage, or
+  `whole`): the version starts at the first stage, and the run ends at the
+  stage where the override put it. A stage's own Send a version here
+  directly… opens this action with that stage.
 
 Each action needs a reason, and its audit line names who pressed it.
 
@@ -1217,8 +1230,8 @@ The person follows all of this on the page's Deploy tab:
   failure prompt; a target's release card), Versions, Triggers (its trigger
   rules: add, edit, turn off or on; the runners it may use; what they did
   lately), Emergency (its operators; stop the pipeline, stop its agents, move
-  a stage back, revoke a key, each with what it acts on first) and its Audit
-  log.
+  a stage back, send a version straight to a stage, revoke a key, each with
+  what it acts on first) and its Audit log.
 - The red number on the tab counts what waits on the person there.
 
 When you tell the person about a release, name the pipeline and the stage:
@@ -1232,6 +1245,6 @@ comes back to you as an answer to the question.
 
 ## Later
 
-Each Deploy tab task adds its part to this guide when it is built: the
-override, the agent job in GitLab CI and Pulumi Delivery, and each pipeline's
-list of what its agents may do with no prompt.
+Each Deploy tab task adds its part to this guide when it is built: the agent
+job in GitLab CI and Pulumi Delivery, and each pipeline's list of what its
+agents may do with no prompt.

@@ -583,6 +583,9 @@ def _hand_on(conn, r):
 
 def _hand_to(conn, r, nxt):
     """Queue the version of run r at the next stage nxt, once."""
+    if nxt and conn.execute("SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND purpose='override' AND "
+                            "state='passed'", (nxt["id"], r["version_id"])).fetchone():
+        return  # the whole run of an override's version ends where the override put it (#6146)
     if nxt:
         # A newer version replaces an older one that still waits at that gate (#6119): the person approves the
         # newest, and a stage never runs a version that a newer one passed by.

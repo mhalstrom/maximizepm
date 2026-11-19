@@ -203,7 +203,12 @@ def _emergency(conn, a, who):
         return o.move_back(conn, p, a["stage"], a.get("reason"), who)
     if act == "revoke":
         return o.revoke(conn, p, a["key"], a.get("reason"), who)
-    raise RiverError(f"the emergency action {act!r} is not one of: stop, resume, agents, moveback, revoke")
+    if act == "override":  # #6146
+        return o.override(conn, p, a["stage"], a.get("rev"), a.get("reason"), who)
+    if act == "whole":
+        return o.whole(conn, p, a["rev"], who)
+    raise RiverError(f"the emergency action {act!r} is not one of: stop, resume, agents, moveback, revoke, override, "
+                     "whole")
 
 
 def _versions():
@@ -348,6 +353,7 @@ def _strip(stages, no_news=False, work=None):
         out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "tier": s.get("tier"),
                     "start": s.get("start"), "waits_for_run": s.get("waits_for_run"),  # #6138
                     "prev": s.get("prev"),  # #6142: the stages it follows
+                    "override": s.get("override"),  # #6146: not through the pipeline
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
