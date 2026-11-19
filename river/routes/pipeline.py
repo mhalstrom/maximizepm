@@ -15,11 +15,12 @@ from ..pipeline import prompt, store, targets
 TESTS_MAX = 2000  # the test results one read sends
 
 
-def _with(fn):
+def _with(fn, query=False):
+    """A GET handler of fn(conn, path); query: fn gets the path with its query string (the frame cuts it off)."""
     def handler(h, path):
         conn = core.connect()
         try:
-            return h._send(200, fn(conn, path))
+            return h._send(200, fn(conn, h.path if query else path))
         except (RiverError, ValueError) as e:
             return h._send(404, {"error": str(e)})
         finally:
@@ -82,4 +83,31 @@ OPS = {
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
     "pipeline_rollback": lambda c, a, who: _runner().rollback(c, a["pipeline"], a["env"], a["rev"], a.get("reason"), who),
     "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
+    # #6118: the prompt of a failed run as a fix task, and with start a session on it
+    "pipeline_fix": lambda c, a, who: _links().fix_task(c, int(a["run"]), who, bool(a.get("start"))),
 }
+
+
+def _links():
+    from ..pipeline import links
+    return links
+
+
+def version(conn, path):
+    """GET /api/pipeline-version?pipeline=<name>&rev=<commit>: the tasks of a version (#6118)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    if not q.get("pipeline") or not q.get("rev"):
+        raise RiverError("name the pipeline and the version: ?pipeline=<name>&rev=<commit>")
+    return _links().version_tasks(conn, q["pipeline"][0], q["rev"][0])
+
+
+def item(conn, path):
+    """GET /api/pipeline-item/<id>: where a task runs (#6118)."""
+    return _links().item_versions(conn, int(path.rsplit("/", 1)[1]))
+
+
+GET += [
+    (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
+    (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),
+]

@@ -1926,6 +1926,13 @@ def build_parser(only=None):
     x = pls.add_parser("rollback", help="put an older version on an environment again: its deploy stage runs with "
                        "it, and that gate holds until you end the hold")
     x.add_argument("name"); x.add_argument("env"); x.add_argument("--rev", required=True); x.add_argument("--reason")
+    x = pls.add_parser("fix", help="add a fix task with the prompt of a failed run (--start: and start a session on "
+                       "it now)")
+    x.add_argument("id", type=int); x.add_argument("--start", action="store_true")
+    x = pls.add_parser("version", help="the tasks of a version: the items its commits name since the version before")
+    x.add_argument("name"); x.add_argument("rev"); x.add_argument("--base", help="the version to count from")
+    x = pls.add_parser("item", help="where a task runs: the environments and versions that carry its commits")
+    x.add_argument("id", type=int)
     x = pls.add_parser("rerun-failed", help="run the failed tests of a test stage run again (MAXPM_TESTS lists them)")
     x.add_argument("id", type=int)
     x = pls.add_parser("run", help="one stage run: its steps, failed tests and last lines; --prompt: the prompt that "
@@ -7518,6 +7525,13 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "stop":
         from .pipeline import runner
         return runner.stop(conn, a.id, actor)
+    if sub in ("fix", "version", "item"):
+        from .pipeline import links
+        if sub == "fix":
+            return links.fix_task(conn, a.id, actor, a.start)
+        if sub == "version":
+            return links.version_tasks(conn, a.name, a.rev, a.base)
+        return links.item_versions(conn, a.id)
     if sub in ("hold", "unhold", "rollback", "rerun-failed"):
         from .pipeline import runner
         if sub == "hold":
@@ -7576,6 +7590,24 @@ def render_pipeline(a, res):
         return
     if sub == "stop":
         print(f"run #{res['run']}: stopped {res['stopped']}")
+        return
+    if sub == "fix":
+        print(f"fix task #{res['item']} added" + (" and a session starts on it" if res["started"] else
+                                                   "; a session takes it from the queue"))
+        return
+    if sub == "version":
+        print(f"version {res['rev']} of pipeline {res['pipeline']}" + (f", since {res['base']}" if res["base"] else "")
+              + f": {len(res['tasks'])} task(s)")
+        for t in res["tasks"]:
+            print(f"  #{t['id']} [{t['status']}] {t['title'][:100]}  ({', '.join(t['commits'][:3])})")
+        return
+    if sub == "item":
+        if not res["commits"]:
+            print(f"no commit names #{res['item']} yet")
+        for p in res["pipelines"]:
+            live = [f"{n} ({(e['rev'] or '')[:7]})" for n, e in p["envs"].items() if e["carries"]]
+            print(f"pipeline {p['pipeline']}: runs on " + (", ".join(live) or "no environment yet")
+                  + (f"; in versions {', '.join(v[:7] for v in p['versions'])}" if p["versions"] else ""))
         return
     if sub in ("hold", "unhold"):
         what = f"the gate of stage {res['stage']}" if res["stage"] else "every stage"

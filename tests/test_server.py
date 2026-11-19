@@ -4144,9 +4144,10 @@ class PipelineRoutes(unittest.TestCase):
         h, out = server.Handler.__new__(server.Handler), {}
         h.path = path
         h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        bare = path.split("?")[0]  # as Handler.do_GET gives it to a view's route
         for test, handler in server.VIEW_GET:
-            if test(path):
-                handler(h, path)
+            if test(bare):
+                handler(h, bare)
                 return out
         raise AssertionError("no route for " + path)
 
@@ -4174,6 +4175,11 @@ class PipelineRoutes(unittest.TestCase):
         self.assertEqual(d["versions"], [])
         self.assertEqual(self.get("/api/pipeline/nowhere")["code"], 404)
         self.assertEqual(self.get("/api/pipeline-run/999")["code"], 404)
+        # #6118: the tasks of a version need the project's folder; where a task runs needs the task.
+        v = self.get("/api/pipeline-version?pipeline=web-app&rev=abc1234")
+        self.assertEqual(v["code"], 404)
+        self.assertIn("no project folder", v["body"]["error"])
+        self.assertIn("no item #999", self.get("/api/pipeline-item/999")["body"]["error"])
 
     def test_the_page_s_pipeline_actions_are_for_a_person_or_the_manager(self):
         """#6117: the page's buttons are server OPS; the permission table gives each one to a person or the manager."""

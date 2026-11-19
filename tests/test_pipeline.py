@@ -649,6 +649,67 @@ class Actions(RunnerBase):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], build_runs)
 
 
+class Links(RunnerBase):
+    """Pipelines and the rest of MaximizePM (#6118): fault items, fix tasks, the tasks of a version and back."""
+
+    def git(self, *a):
+        import subprocess
+        return subprocess.run(["git", "-C", self.folder, *a], capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, msg):
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def test_a_failed_stage_opens_one_fault_item(self):
+        define.stage_set(self.c, "app", "build", run="echo broken; exit 3")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes(2)
+        r = self.runs()["build"]
+        it = core.item_show(self.c, r["fault_item"])
+        self.assertEqual((it["kind"], it["project"]), ("operational", "app"))
+        self.assertTrue(it["title"].startswith("pipeline:app:build failed for bad0001: exit 3"))
+        self.assertIn("maxpm pipeline rerun app build --rev bad0001", it["context"])
+        self.runner.start(self.c, "app", rev="bad0002")
+        self.passes(2)
+        second = self.c.execute("SELECT fault_item FROM stage_runs ORDER BY id DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(second, r["fault_item"])  # it joins the open fault item
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='operational'").fetchone()[0], 1)
+
+    def test_failed_tests_give_the_prompt_and_a_fix_task(self):
+        define.stage_set(self.c, "app", "test", run=(
+            "printf '<testsuite name=\"u\"><testcase classname=\"u\" name=\"b\"><failure message=\"no\"/></testcase>"
+            "</testsuite>' > report.xml"))
+        self.runner.start(self.c, "app", rev="tst0001")
+        self.passes(3)
+        run = self.runs()["test"]
+        self.assertIn("Failed tests:", core.item_show(self.c, run["fault_item"])["context"])
+        from river.pipeline import links
+        from river import server
+        with mock.patch.object(server, "dispatch_item", return_value={"agent": "w9"}) as d:
+            out = links.fix_task(self.c, run["id"], actor="mark", start=True)
+        d.assert_called_once()
+        fix = core.item_show(self.c, out["item"])
+        self.assertIn("1. u.b: no.", fix["context"])
+        self.assertEqual(out["started"], {"agent": "w9"})
+
+    def test_the_tasks_of_a_version_and_the_versions_of_a_task(self):
+        from river.pipeline import links
+        self.git("init", "-q")
+        a = core.item_add(self.c, "app", "Header", actor="mark")["id"]
+        b = core.item_add(self.c, "app", "Footer", actor="mark")["id"]
+        v1 = self.commit("start")
+        self.commit(f"Fix the header (#{a})")
+        v2 = self.commit(f"Fix the footer (#{b}); see #99999")
+        for rev in (v1, v2):
+            self.runner.start(self.c, "app", rev=rev)
+            self.passes(4)
+        t = links.version_tasks(self.c, "app", v2)
+        self.assertEqual((t["base"], [x["id"] for x in t["tasks"]]), (v1, [a, b]))
+        where = links.item_versions(self.c, a)["pipelines"][0]
+        self.assertEqual((where["envs"]["beta"]["carries"], where["envs"]["prod"]["carries"]), (True, False))
+        self.assertEqual(where["versions"], [v2])
+
+
 class DefaultPipelines(Base):
     """Each deploy target of today as a default pipeline, computed from its records (#6115)."""
 
@@ -1034,7 +1095,8 @@ class JUnitRunner(unittest.TestCase):
             junit_run.write([("tests.test_x.A.test_ok", "passed", 0.5, None),
                              ("tests.test_x.A.test_bad", "failure", 1.0, "Traceback\nAssertionError: 2 != 3"),
                              ("tests.test_y.B.test_skip", "skipped", 0.0, "no Chrome")], path, "py3.13")
-            suites = junit.parse(open(path, "rb").read())
+            with open(path, "rb") as f:
+                suites = junit.parse(f.read())
         tests = {t["name"]: t for s in suites for t in s["tests"]}
         self.assertEqual((tests["test_bad"]["state"], tests["test_bad"]["message"], tests["test_bad"]["suite"]),
                          ("failed", "AssertionError: 2 != 3", "py3.13 tests.test_x.A"))

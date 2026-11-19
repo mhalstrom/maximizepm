@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   approved_at  TEXT,
   runner       TEXT,                     -- <pid>:<token> of the maxpm serve process that runs its command
   purpose      TEXT,                     -- rerun, rollback, or failed:<run id> (its failed tests again); none: the flow
+  fault_item   INTEGER,                  -- the fault item of MaximizePM that a failed run opened or joined (#6118)
   UNIQUE (pipeline_id, key)
 );
 CREATE INDEX IF NOT EXISTS stage_runs_state ON stage_runs(state);
@@ -230,6 +231,6 @@ def migrate(conn):
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
-                 ("runner", "TEXT"), ("purpose", "TEXT")):  # #6114, #6117
+                 ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER")):  # #6114, #6117, #6118
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")

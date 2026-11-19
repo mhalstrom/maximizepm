@@ -593,4 +593,6 @@ def serve_pass(conn):
             _execute(conn, r["id"])
         else:
             _launch(r["id"])
+    from . import links
+    links.serve_pass(conn)  # a failed stage opens a fault item (#6118)
     return {"started": started, "waiting": waiting}

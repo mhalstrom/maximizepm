@@ -161,7 +161,8 @@ function detail() {
   const head = `<h3>${esc(s.name)}${r && r.version ? ` · <span class="pl-ver">${esc(short(r.version))}</span>` : ""}</h3>`;
   if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>`;
   const when = r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
-  const item = r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "";
+  const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
+    + (r.fault_item ? ` · fault <span class="link" data-open="${r.fault_item}">#${r.fault_item}</span>` : "");
   return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ended ${esc(ago(r.ended_at))}` : ""}${item}</span></div>`
     + (s.held_reason ? `<div class="pl-banner">Held by ${esc(s.held_by || "a person")}: ${esc(s.held_reason)}</div>` : "")
     + (r.gate_note && r.state === "queued" ? `<div class="t-s">Gate: ${esc(r.gate_note)}</div>` : "")
@@ -240,7 +241,8 @@ function tests(r) {
       ${shown.slice(0, 500).map(t => `<tr><td class="mono">${esc(t.suite)}.${esc(t.name)}</td><td>${st(t.state)}</td><td>${esc(secs(t.seconds))}</td>
         <td class="t-s">${esc(t.message || "")}</td></tr>`).join("")}</table></div>
     ${r.prompt ? `<div class="pl-card"><h3>Prompt to analyze the failures</h3><pre class="pl-pre">${esc(r.prompt)}</pre>
-      <div class="pl-bar">${button("Copy", { kind: "primary", data: { "pl-copy": 1 }, title: "Copy the prompt" })}</div></div>` : ""}`;
+      <div class="pl-bar">${button("Start a session", { kind: "primary", data: { "pl-fix": r.id, start: 1 }, title: "Fix it now" })}${button("Add a fix task",
+        { data: { "pl-fix": r.id }, title: "Queue a fix" })}${button("Copy", { data: { "pl-copy": 1 }, title: "Copy the prompt" })}</div></div>` : ""}`;
 }
 
 // ---- the versions in each stage
@@ -252,13 +254,36 @@ function versionsView(D) {
   const cell = (c) => c ? st(c.state) : `<span class="muted">·</span>`;
   return `<div class="muted t-s">Each row is one version, newest on top. Read across to see how far it went.</div>
     <div class="pl-table"><table><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
-    ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${esc(short(v.rev))}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
-      ${names.map(n => `<td>${cell(v.stages[n])}</td>`).join("")}</tr>`).join("")}</table></div>`;
+    ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${v.deploy
+        ? `<span class="link" data-report="${v.deploy}" title="The release report">${esc(short(v.rev))}</span>`
+        : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Its tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
+      ${names.map(n => `<td>${cell(v.stages[n])}</td>`).join("")}</tr>`).join("")}</table></div>
+    <div id="plTasks"></div>`;
+}
+
+// The tasks of a version (#6118): the items its commits name since the version before; a click opens one.
+async function drawTasks(rev) {
+  const box = $("#plTasks"); if (!box) return;
+  if (!rev) { box.innerHTML = ""; return; }
+  let T;
+  try { T = await getJson(`api/pipeline-version?pipeline=${encodeURIComponent(V.name)}&rev=${encodeURIComponent(rev)}`); }
+  catch (e) { box.innerHTML = `<div class="muted t-s">${esc(e.message)}</div>`; return; }
+  box.innerHTML = `<div class="pl-card"><h3>Tasks of ${esc(short(rev))}${T.base ? ` <span class="muted t-s">since ${esc(short(T.base))}</span>` : ""}</h3>
+    ${T.tasks.length ? T.tasks.map(t => `<div class="t-m"><span class="link" data-open="${t.id}">#${t.id}</span> ${esc(t.title)}
+      <span class="muted t-s">${esc(t.status)}</span></div>`).join("") : `<div class="muted t-s">No commit of this version names a task.</div>`}</div>`;
 }
 
 // ---- clicks
 
 $("#plan-pipelines").addEventListener("click", (e) => {
+  const vb = e.target.closest("[data-pl-version]");
+  if (vb) { V.version = V.version === vb.dataset.plVersion ? null : vb.dataset.plVersion; sig = ""; renderPipeline(true).then(() => drawTasks(V.version)); return; }
+  const fx = e.target.closest("[data-pl-fix]");
+  if (fx) return (async () => {
+    let r;
+    try { r = await act("pipeline_fix", { run: +fx.dataset.plFix, start: !!fx.dataset.start }); } catch (err) { return; }
+    toast(fx.dataset.start ? `Fix task #${r.item} added; a session starts on it` : `Fix task #${r.item} added`);
+  })();
   const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback]");
   if (a) {
     const d = a.dataset;

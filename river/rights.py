@@ -34,7 +34,8 @@ COMMANDS = {
                "report": ANY, "summary": LEAD, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
                  "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "rerun": LEAD,
-                 "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD},  # #6113, #6114, #6116
+                 "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD,
+                 "fix": ANY, "version": ANY, "item": ANY},  # #6113, #6114, #6116
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -65,7 +66,7 @@ READS = {"project show", "project list", "canvas list", "canvas show", "canvas c
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
-         "pipeline list", "pipeline show", "pipeline history", "pipeline run"}
+         "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
@@ -80,7 +81,8 @@ OPS = {op: ANY for op in (
     "ops_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
-    "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock")}
+    "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
+    "pipeline_fix")}
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
