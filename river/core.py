@@ -9036,7 +9036,13 @@ def deploy_hook_start(conn, dep_id, token=None):
             conn.execute("UPDATE hook_runs SET queued_by=? WHERE queued_by=? AND started_at IS NULL AND deploy_id=?",
                          (token, hook_token(), dep["id"]))
         # #6213: after the person's yes on the prepared release, the run's item is that yes (MAXPM_APPROVED)
-        yes = _person_yes(conn, dep["id"]) if release_approval(conn, dep["target"])["approval"] == "draft" else None
+        # The release is prepared when the gate says draft, or when this release's last deploy run asked for the yes
+        # (exit HOOK_YES), so a missing setting never asks for the yes again after each yes.
+        last = conn.execute("SELECT * FROM hook_runs WHERE deploy_id=? AND event='deploy' AND ended_at IS NOT NULL "
+                            "ORDER BY id DESC LIMIT 1", (dep["id"],)).fetchone()
+        prepared = bool(last) and last["exit_code"] == HOOK_YES and not _run_approved(dict(last))
+        yes = (_person_yes(conn, dep["id"])
+               if prepared or release_approval(conn, dep["target"])["approval"] == "draft" else None)
         _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}"
                + (f" (after the person's yes #{yes})" if yes else ""))
         # The manager's watch prints the start with its next wake, at the latest with the end of the deploy (#5382).

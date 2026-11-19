@@ -9024,6 +9024,17 @@ class DraftRelease(DeployHook):
         self.assertEqual(core._approvals(self.c, self.deploy), [], "the release takes a new yes")
         self.assertEqual(self.stages()["publish"]["state"], "failed")
 
+    def test_without_the_setting_the_yes_still_ends_the_wait(self):
+        self.draft()
+        core.config_unset(self.c, "release_approval", project="site")
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")], "no second yes")
+        with open(self.seen, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines(), ["", str(yes)])
+
     def test_exit_76_after_the_yes_is_a_failure(self):
         self.draft()
         self.pass_review("rev")
