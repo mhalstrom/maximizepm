@@ -1935,6 +1935,12 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--show", type=int, metavar="N")
     x.add_argument("--compare", type=int, nargs=2, metavar=("A", "B"))
     x.add_argument("--back", type=int, metavar="N"); x.add_argument("--reason")
+    # #6167: follow an outside system's flow, with no control of it
+    x = pls.add_parser("follow", help="follow a pipeline that an outside system runs: its stages and versions come "
+                       "from its events; no transition, start or move back of ours; its trigger rules and hooks act")
+    x.add_argument("name"); x.add_argument("--source", help="the plugin that reads it (settings: maxpm pipeline forge)")
+    x.add_argument("--project", help="a new pipeline: its project"); x.add_argument("--off", action="store_true",
+                                                                                   help="control its flow here again")
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
@@ -2079,6 +2085,8 @@ def build_parser(only=None):
     x.add_argument("--does", help="what the agent does: the instructions of its task")
     x.add_argument("--runs-on", dest="runner", help="where the agent runs (this computer)")
     x.add_argument("--keys", help="credential sets its task gets, comma-separated ('' for none)")
+    x.add_argument("--command", help="a hook: this command runs on the event in the project folder, instead of an "
+                   "agent ('' clears it)")
     x.add_argument("--reason", help="off: why")
     x = pls.add_parser("permissions", help="what a pipeline's agents do at once, ask first (a card, never a prompt) "
                        "and never do, and their recent asks")
@@ -7767,6 +7775,9 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "run-stage":
         from .pipeline import runner
         return runner.run_stage(conn, a.name, a.stage, a.rev, actor)
+    if sub == "follow":  # #6167
+        from .pipeline import follow
+        return follow.follow(conn, a.name, a.source, a.project, a.off, actor)
     if sub == "versions":
         from .pipeline import versions
         if a.back is not None:
@@ -7912,12 +7923,14 @@ def _pipeline_cmd(conn, a, actor):
         if a.action == "add":
             if not a.event:
                 raise RiverError("name the event: --when " + "|".join(triggers.EVENTS))
-            return triggers.rule_add(conn, a.name, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor)
+            return triggers.rule_add(conn, a.name, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor,
+                                     command=a.command)
         if not a.rule:
             raise RiverError(f"name the rule: maxpm pipeline trigger {a.name} {a.action} t<n> (maxpm pipeline "
                              f"triggers {a.name} lists them)")
         if a.action == "edit":
-            return triggers.rule_edit(conn, a.name, a.rule, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor)
+            return triggers.rule_edit(conn, a.name, a.rule, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor,
+                                      command=a.command)
         if a.action == "remove":
             return triggers.rule_remove(conn, a.name, a.rule, actor)
         return triggers.rule_switch(conn, a.name, a.rule, a.action == "on", a.reason, actor)
@@ -8269,6 +8282,13 @@ def render_pipeline(a, res):
         what = f"the transition into stage {res['stage']}" if res["stage"] else "every stage"
         print(f"pipeline {res['pipeline']}: {what} " + ((f"is blocked: {res['held']}" if res["stage"] else
                                                           f"is held: {res['held']}") if res["held"] else "goes on"))
+        return
+    if sub == "follow":  # #6167
+        print(f"pipeline {res['pipeline']}: " + (
+            f"followed{' through ' + res['source'] if res.get('source') else ''}: its outside system runs its flow; "
+            f"its stages come from its events, and its trigger rules and hooks act on them (maxpm pipeline trigger "
+            f"{res['pipeline']} add --when stage-failed --does \"...\" | --command \"...\")" if res["followed"]
+            else "MaximizePM runs its flow again"))
         return
     if sub == "versions":  # #6143
         if "back_to" in res:

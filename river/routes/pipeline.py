@@ -248,10 +248,10 @@ def trigger_op(conn, a, who):
     act = a.get("action")
     if act == "add":
         return triggers.rule_add(conn, a["pipeline"], a.get("event"), a.get("does"), a.get("stage"), a.get("tier"),
-                                 a.get("runner"), a.get("keys"), who)
+                                 a.get("runner"), a.get("keys"), who, command=a.get("command"))
     if act == "edit":
         return triggers.rule_edit(conn, a["pipeline"], a["rule"], a.get("event"), a.get("does"), a.get("stage"),
-                                  a.get("tier"), a.get("runner"), a.get("keys"), who)
+                                  a.get("tier"), a.get("runner"), a.get("keys"), who, command=a.get("command"))
     if act == "remove":
         return triggers.rule_remove(conn, a["pipeline"], a["rule"], who)
     if act in ("on", "off"):
@@ -404,7 +404,8 @@ def deploy(conn, path):
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits,
-                    "definition": _versions().current(conn, p["id"])})  # #6143: the head's 'definition vN'
+                    "definition": _versions().current(conn, p["id"]),  # #6143: the head's 'definition vN'
+                    "followed": bool(p.get("followed"))})  # #6167: an outside system runs its flow
     for t in targets.default_list(conn):
         d = defaults[t["name"]]
         approval = next((s for s in d["stages"] if s["name"] == "approval"), None)

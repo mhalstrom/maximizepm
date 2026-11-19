@@ -33,8 +33,13 @@ CREATE TABLE IF NOT EXISTS pipelines (
   runners     TEXT,                      -- JSON list of the runners its trigger rules may use (#6151)
   intake_secret   TEXT,                  -- events in over HTTP (#6163): the maxpm secret whose value a sender shows
   plugin_pin      TEXT,                  -- the kept version of its plugin that it runs (#6166); NULL: the plugin's folder
-  permissions     TEXT                   -- #6154: JSON {allow, ask, never} of its agents' permission rules; NULL: the
+  permissions     TEXT,                  -- #6154: JSON {allow, ask, never} of its agents' permission rules; NULL: the
                                          -- default (permissions.DEFAULT)
+  followed        INTEGER,               -- 1: MaximizePM only follows an outside system's flow (#6167): its stages and
+                                         -- versions come from events; no transition, start, move back or override of
+                                         -- ours; its trigger rules and hooks still act
+  followed_by     TEXT,
+  followed_at     TEXT
 );
 
 -- The numbered versions of a pipeline's definition (#6143): each change of it makes version n+1 with the whole
@@ -357,6 +362,7 @@ CREATE TABLE IF NOT EXISTS pipeline_triggers (
   stage        TEXT,                     -- only this stage (a name); none: any stage
   tier         TEXT,                     -- or only the stages of this tier (#6137)
   does         TEXT NOT NULL,            -- what the agent does: the instructions of its task
+  command      TEXT,                     -- a hook (#6167): this command runs on the event instead of an agent
   runner       TEXT NOT NULL DEFAULT 'this computer',  -- where the agent runs
   keys         TEXT,                     -- the credential sets its task gets, comma-separated
   keys_by      TEXT,                     -- the person or the manager who named them (vault._may_grant checked)
@@ -540,9 +546,15 @@ def migrate(conn):
             # #6166: plugin_pin, the kept version of its plugin (plugin_versions.key) that it runs; NULL: the plugin's folder
             # #6154: permissions, the JSON list of what its agents may do with no prompt
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
-    for c in ("stop_runs", "agents_operate"):  # #6145
+    for c in ("stop_runs", "agents_operate", "followed"):  # #6145, #6167
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
+    for c in ("followed_by", "followed_at"):  # #6167
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
+    tcols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_triggers)")}
+    if tcols and "command" not in tcols:  # #6167: a rule that runs a hook command
+        conn.execute("ALTER TABLE pipeline_triggers ADD COLUMN command TEXT")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait",
               "tier", "start", "after"):  # #6113, #6114, #6120, #6137, #6138, #6142

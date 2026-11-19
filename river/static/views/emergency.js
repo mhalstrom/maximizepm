@@ -108,9 +108,13 @@ function viewHtml(d) {
   const banner = st ? `<div class="pl-banner">⛔ ${esc(d.pipeline)} is ${st.stop_runs ? "stopped" : "held"} by ${esc(st.by || "a person")}${st.at ? " " + esc(ago(st.at)) : ""}: ${esc(st.reason)}.
     ${st.stop_runs ? "Nothing new starts; a running stage stops after its present step." : "Nothing new starts."}
     ${button(`Resume ${esc(d.pipeline)}`, { kind: "primary", data: { "em-resume": 1 }, title: "Stages start again" })}</div>` : "";
-  const picks = ACTS.map(([k, t, text, tip]) => button(`<b>${esc(t)}</b><span class="t-s muted">${esc(text)}</span>`,
+  // A followed pipeline (#6167): its own system runs the flow, so only the actions on our side apply.
+  const acts = d.followed ? ACTS.filter(([k]) => k === "agents" || k === "revoke") : ACTS;
+  if (d.followed && !acts.some(([k]) => k === pick)) pick = "agents";
+  const picks = acts.map(([k, t, text, tip]) => button(`<b>${esc(t)}</b><span class="t-s muted">${esc(text)}</span>`,
     { kind: "card", cls: "pl-card em-pick", pressed: pick === k, data: { "em-pick": k }, title: tip })).join("");
-  return `${banner}${operatorsHtml(d.operators)}<div class="em-picks">${picks}</div>${actionHtml(d)}
+  const note = d.followed ? `<div class="pl-banner">${esc(d.pipeline)} is followed: ${esc(d.followed)} runs its flow. Stop, Move back and Send a version act there, not here; Stop its agents and Revoke its keys act on our side.</div>` : "";
+  return `${banner}${note}${operatorsHtml(d.operators)}<div class="em-picks">${picks}</div>${actionHtml(d)}
     <div class="muted t-s">The emergency actions take ${esc(d.operators.rule)}.</div>`;
 }
 

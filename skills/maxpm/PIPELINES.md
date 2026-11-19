@@ -789,6 +789,44 @@ curl -fsS "http://127.0.0.1:<serve_port>/api/pipeline-gate?pipeline=<p>&stage=<s
 When you connect such a system, add the question as a step before each stage
 of its own flow, and name the system with `--from`.
 
+## Followed pipelines
+
+A pipeline that an outside system runs, where MaximizePM controls nothing of
+its flow, is followed (mark 2026-11-18: "also we need to be able to just
+follow along with outside systems").
+
+```
+maxpm pipeline follow <name> [--source <plugin>] [--project <project>]
+maxpm pipeline follow <name> --off                     # MaximizePM runs its flow again
+```
+
+- Its runs come from its source: a plugin (`--source`; its settings with
+  `maxpm pipeline forge <name> <plugin> --set ...`) or events in over HTTP. An
+  event that names a stage the pipeline lacks adds the stage, so a followed
+  pipeline needs no setup of stages.
+- None of our flow acts on it: no transition, start, run again, Run, hold,
+  move back, stop or override. Each refuses and says the pipeline is
+  followed. MaximizePM hands no version on: the outside system reports each
+  stage itself. The page marks it "followed · read only" and draws plain
+  arrows.
+- What still acts on its events: its trigger rules (`--does`: an agent works
+  on the failure where we can act: our code, a pull request, a fix task, a
+  message to its owner) and its hooks (`--command`, below). On the Emergency
+  tab, Stop its agents and Revoke its keys still apply: they act on our side.
+
+**Hooks.** A trigger rule with `--command "<command>"` runs that command on
+its event instead of starting an agent, on any pipeline:
+
+```
+maxpm pipeline trigger <name> add --when stage-failed --command "./notify-owner.sh"
+```
+
+It runs in the pipeline's project folder, with `MAXPM_PIPELINE`,
+`MAXPM_STAGE`, `MAXPM_REV`, `MAXPM_EVENT` and `MAXPM_RUN`; `maxpm serve` runs
+it in the background, stops it after 10 minutes, and writes its exit code and
+last line to the rule's list and to the audit log. A hook gets no keys. A
+person or the manager adds it, as any rule.
+
 ## Trigger rules: what starts an agent
 
 Each pipeline has its own trigger rules. A rule says: when this happens in the

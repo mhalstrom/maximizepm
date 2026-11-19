@@ -47,6 +47,7 @@ COMMANDS = {
                  "runs": ANY, "move-back": LEAD,  # #6141
                  "run-stage": ANY,  # #6138: runner.run_stage takes an operator, a person or the manager
                  "versions": ANY,  # #6143: --back checks a person or the manager (versions.restore)
+                 "follow": ANY,  # #6167: follow.follow checks a person or the manager
                  "triggers": ANY, "trigger": LEAD,  # #6150
                  "keys": ANY,  # #6153: names only; --kept-in takes a person or the manager (keys.kept)
                  "permissions": ANY, "permit": LEAD,  # #6154

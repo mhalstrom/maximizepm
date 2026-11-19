@@ -277,6 +277,37 @@ try {
         self.assertIn("It skips: build, test", r["acts"], r)
         self.assertTrue(r["go"].startswith("Send ") and r["go"].endswith(" to prod now"), r)
 
+    def test_a_followed_pipeline_shows_read_only_and_offers_no_flow_action(self):
+        """#6167: a followed pipeline: the head says 'followed · read only', the arrows are plain lines, a stage has no
+        action of our flow, and the Emergency tab offers only Stop its agents and Revoke its keys."""
+        from river.pipeline import cdevents, follow, store
+        core.register(self.c, "mark", human=True)
+        follow.follow(self.c, "partner", actor="mark")
+        for i, stage in enumerate(("build", "deploy"), 1):
+            store.ingest(self.c, cdevents.make("pipelinerun", "queued", f"j-{i}", {"pipelineName": stage},
+                                               {"pipeline": "partner", "version": "ptn0001"}, "jenkins", None))
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="partner"]'), "Deploy: the pipeline partner");
+  q('#dpList [data-dp-open="partner"]').click();
+  await until(() => q('#plRow [data-pl-stage="deploy"]'), "the stages of partner");
+  const out = { head: q("#dpHead").textContent, arrows: document.querySelectorAll("#plRow [data-pl-arrow]").length,
+    hold: !!q("[data-pl-hold]") };
+  q('#plRow [data-pl-stage="deploy"]').click();
+  await until(() => q("#plDetail").textContent.includes("Followed"), "the stage detail");
+  out.buttons = [...q("#plDetail").querySelectorAll("button")].length;
+  q('[data-dp-tab="emergency"]').click();
+  await until(() => q(".em-picks"), "the Emergency tab");
+  out.picks = [...document.querySelectorAll("[data-em-pick]")].map(b => b.dataset.emPick);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="1280,900")
+        self.assertIn("followed · read only", r["head"], r)
+        self.assertEqual((r["arrows"], r["hold"], r["buttons"]), (0, False, 0), r)
+        self.assertEqual(r["picks"], ["agents", "revoke"], r)
+
     def test_branches_draw_as_rows_that_fan_out_and_join(self):
         """#6142: a pipeline that splits draws each branch as a row of its own, with the lines that fan out and in;
         the join's arrow says what it waits for; no two stages overlap. At 1280 and at 390 px."""

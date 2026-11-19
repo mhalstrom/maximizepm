@@ -236,7 +236,9 @@ def plan(conn, pipeline):
     return {"pipeline": p["name"], "stopped": {"reason": p["held_reason"], "by": p["held_by"], "at": p["held_at"],
                                                 "stop_runs": bool(p["stop_runs"])} if p["held_reason"] else None,
             "operators": listing(conn, pipeline), "stop": stop, "agents": _agents(conn, p), "moveback": back,
-            "keys": _keys(conn, p), "override": _override_plan(conn, p)}
+            "keys": _keys(conn, p), "override": _override_plan(conn, p),
+            # #6167: a followed pipeline: only Stop its agents and Revoke its keys act (on our side)
+            "followed": (p["forge"] or "its outside system") if p["followed"] else None}
 
 
 # ---------------------------------------------------------------- the actions
@@ -254,6 +256,8 @@ def stop(conn, pipeline, reason, actor=None):
     reason = _reason(reason)
     p = store._pipeline(conn, pipeline)
     check(conn, p, actor)
+    from . import follow
+    follow.check(conn, p, "stops")  # #6167
     with core.tx(conn):
         conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=?, stop_runs=1 WHERE id=?",
                      (reason, actor, store._now(), p["id"]))

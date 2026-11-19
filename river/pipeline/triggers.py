@@ -124,11 +124,17 @@ def _keys(text):
     return [k.strip() for k in str(text).replace(" ", ",").split(",") if k.strip()]
 
 
-def rule_add(conn, pipeline, event, does=None, stage=None, tier=None, runner=None, keys=None, actor=None):
-    """maxpm pipeline trigger <pipeline> add: a new rule, on from now."""
+def rule_add(conn, pipeline, event, does=None, stage=None, tier=None, runner=None, keys=None, actor=None,
+             command=None):
+    """maxpm pipeline trigger <pipeline> add: a new rule, on from now. command: a hook (#6167): that command runs on
+    the event, in the pipeline's project folder, instead of an agent."""
     runner = runner or THIS
     keys = _keys(keys) or []
-    does = (does or "").strip() or {"stage-failed": DEFAULT_DOES, "check-failed": CHECK_DOES}.get(event)
+    command = (command or "").strip() or None
+    if command and keys:
+        raise core.RiverError("a hook command gets no keys: keys go to an agent's task (--does)")
+    does = (does or "").strip() or (f"run the hook: {command}" if command else None) or {
+        "stage-failed": DEFAULT_DOES, "check-failed": CHECK_DOES}.get(event)
     if event in EVENTS and not does:
         raise core.RiverError(f"say what the agent does when {EVENTS[event]}: --does \"<instructions>\"")
     _may(conn, actor)
@@ -137,32 +143,38 @@ def rule_add(conn, pipeline, event, does=None, stage=None, tier=None, runner=Non
     with core.tx(conn):
         at = store._now()
         rid = conn.execute("INSERT INTO pipeline_triggers(pipeline_id, event, stage, tier, does, runner, keys, keys_by, "
-                           "since, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           "since, created_by, created_at, command) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                            (p["id"], event, stage or None, tier or None, does, runner, ",".join(keys) or None,
-                            (actor or "a person") if keys else None, at, actor, at)).lastrowid
+                            (actor or "a person") if keys else None, at, actor, at, command)).lastrowid
         r = conn.execute("SELECT * FROM pipeline_triggers WHERE id=?", (rid,)).fetchone()
         _change(conn, p["id"], actor, f"trigger t{rid} added: {when_text(r)}: {does}" + _where_keys(r), r)
     return _info(r)
 
 
 def _where_keys(r):
+    if r["command"]:
+        return f" (a hook: {r['command']})"
     return f" (runs on {r['runner']}" + (f"; keys {r['keys'].replace(',', ', ')}" if r["keys"] else "") + ")"
 
 
 def _change(conn, pid, actor, text, r):
     from . import define
     define._change(conn, pid, actor, text, {k: r[k] for k in ("event", "stage", "tier", "does", "runner", "keys",
-                                                              "enabled")} | {"rule": f"t{r['id']}"})
+                                                              "enabled", "command")} | {"rule": f"t{r['id']}"})
 
 
-def rule_edit(conn, pipeline, ref, event=None, does=None, stage=None, tier=None, runner=None, keys=None, actor=None):
-    """Change the fields given ('' clears the stage, the tier or the keys)."""
+def rule_edit(conn, pipeline, ref, event=None, does=None, stage=None, tier=None, runner=None, keys=None, actor=None,
+              command=None):
+    """Change the fields given ('' clears the stage, the tier, the keys or the hook command)."""
     _may(conn, actor)
     p = store._pipeline(conn, pipeline)
     r = _rule(conn, p["id"], ref)
     new = {"event": event or r["event"], "does": (does.strip() if does is not None else r["does"]),
            "stage": r["stage"] if stage is None else (stage or None), "tier": r["tier"] if tier is None else (tier or None),
-           "runner": runner or r["runner"], "keys": r["keys"] if keys is None else (",".join(_keys(keys)) or None)}
+           "runner": runner or r["runner"], "keys": r["keys"] if keys is None else (",".join(_keys(keys)) or None),
+           "command": r["command"] if command is None else (command.strip() or None)}  # a hook (#6167)
+    if new["command"] and new["keys"]:
+        raise core.RiverError("a hook command gets no keys: keys go to an agent's task (--does)")
     if stage:
         new["tier"] = None
     if tier:
@@ -260,7 +272,8 @@ def export(conn, pid):
 def export_one(r):
     """One rule as the export keeps it (a version of the definition compares rules in this form, #6143)."""
     return ({k: r[k] for k in ("event", "stage", "tier", "does", "runner")}
-            | {"keys": _keys(r["keys"] or ""), "on": bool(r["enabled"])})
+            | {"keys": _keys(r["keys"] or ""), "on": bool(r["enabled"])}
+            | ({"command": r["command"]} if r["command"] else {}))  # a hook (#6167)
 
 
 # ---------------------------------------------------------------- the generic events
@@ -386,6 +399,8 @@ def _fire(conn, p, r, ev):
         if not cur.rowcount:
             return None
         fid = cur.lastrowid
+    if r["command"]:  # a hook (#6167): the command runs; its end updates this fire and writes an audit line
+        return _hook(conn, p, r, ev, fid)
     try:
         item, result = _act(conn, p, r, ev)
     except core.RiverError as e:
@@ -409,6 +424,66 @@ def _fire(conn, p, r, ev):
         audit.write(conn, p["id"], f"trigger t{r['id']}", action, f"{ev['text']}: {result}", kind="trigger",
                     place=f"stage {ev['stage']}", rev=ev.get("rev"), run_id=ev.get("run_id"), result=result,
                     detail={"rule": f"t{r['id']}", "event": ev["event"], "key": ev["key"], "item": item})
+    return dict(conn.execute("SELECT * FROM pipeline_trigger_fires WHERE id=?", (fid,)).fetchone())
+
+
+HOOK_TIMEOUT = 600  # seconds: a hook command that runs longer is stopped
+HOOK_RUNNER = None  # tests: a function(command, folder, env) -> (exit code, output)
+
+
+def _run_hook(command, folder, env):
+    import subprocess
+    try:
+        out = subprocess.run(command, shell=True, cwd=folder or None, env=env, capture_output=True, text=True,
+                             timeout=HOOK_TIMEOUT, start_new_session=True)
+        return out.returncode, (out.stdout or "") + (out.stderr or "")
+    except subprocess.TimeoutExpired:
+        return "timeout", f"stopped after {HOOK_TIMEOUT}s"
+    except OSError as e:
+        return "not started", str(e)
+
+
+def _hook(conn, p, r, ev, fid):
+    """Run the rule's hook command for the event (#6167; mark: 'pipelines we are just following along with we can
+    still have hooks to fix issues'): in the pipeline's project folder, with MAXPM_PIPELINE, MAXPM_STAGE, MAXPM_REV,
+    MAXPM_EVENT and MAXPM_RUN. maxpm serve runs it in the background (runner.SYNC: at once, for the tests); its exit
+    code and last line go to the fire and to the audit log."""
+    import os
+    import threading
+    from . import audit, runner
+    folder = runner._folder(conn, p["project"])
+    env = dict(os.environ, MAXPM_PIPELINE=p["name"], MAXPM_STAGE=ev["stage"] or "", MAXPM_REV=ev.get("rev") or "",
+               MAXPM_EVENT=ev["event"], MAXPM_RUN=str(ev.get("run_id") or ""))
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+
+    def finish(c):
+        if folder and not os.path.isdir(folder):
+            code, out = "not started", f"the folder {folder} does not exist"
+        else:
+            code, out = (HOOK_RUNNER or _run_hook)(r["command"], folder, env)
+        last = (out or "").strip().splitlines()[-1][:200] if (out or "").strip() else ""
+        result = f"ran the hook `{r['command']}`: exit {code}" + (f": {last}" if last else "")
+        with core.tx(c):
+            c.execute("UPDATE pipeline_trigger_fires SET result=? WHERE id=?", (result, fid))
+            audit.write(c, p["id"], f"trigger t{r['id']}", "hook", f"{ev['text']}: {result}", kind="hook",
+                        place=f"stage {ev['stage']}", rev=ev.get("rev"), run_id=ev.get("run_id"), result=result,
+                        detail={"rule": f"t{r['id']}", "event": ev["event"], "key": ev["key"], "exit": code})
+        return result
+
+    if runner.SYNC["on"] or not path:
+        finish(conn)
+    else:
+        with core.tx(conn):
+            conn.execute("UPDATE pipeline_trigger_fires SET result=? WHERE id=?",
+                         (f"the hook `{r['command']}` runs", fid))
+
+        def bg():
+            c = core.connect(path)
+            try:
+                finish(c)
+            finally:
+                c.close()
+        threading.Thread(target=bg, name=f"hook t{r['id']}", daemon=True).start()
     return dict(conn.execute("SELECT * FROM pipeline_trigger_fires WHERE id=?", (fid,)).fetchone())
 
 

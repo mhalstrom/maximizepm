@@ -1026,6 +1026,67 @@ class Branches(RunnerBase):
             self.runner.move_back_branches(self.c, "app", "test", "brn0001", "x", "mark")  # on no branch
 
 
+class Followed(RunnerBase):
+    """#6167: a followed pipeline learns its stages from an outside system's events; none of our flow actions apply;
+    its trigger rules and hooks still act on its events."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import follow, triggers
+        self.follow, self.triggers = follow, triggers
+
+    def ev(self, predicate, sid, content=None, **maxpm):
+        return cdevents.make("pipelinerun", predicate, sid, content, {"pipeline": "partner", **maxpm}, "jenkins", None)
+
+    def test_events_make_its_stages_and_our_flow_actions_refuse(self):
+        r = self.follow.follow(self.c, "partner", project="app", actor="mark")
+        self.assertEqual(r["followed"], True)
+        for i, (stage, out) in enumerate((("build", "success"), ("deploy", "success")), 1):
+            store.ingest(self.c, self.ev("queued", f"j-{i}", {"pipelineName": stage}, version="ptn0001"))
+            res = store.ingest(self.c, self.ev("finished", f"j-{i}", {"outcome": out}))
+            self.runner.hand_on_passed(self.c, [res])
+        self.assertEqual([s["name"] for s in store.show(self.c, "partner")["stages"]], ["build", "deploy"])
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs r JOIN pipelines p ON p.id=r.pipeline_id "
+                                        "WHERE p.name='partner'").fetchone()[0], 2)  # we queued nothing after build
+        from river.pipeline import operators, transitions
+        for act in (lambda: self.runner.start(self.c, "partner", rev="x1", actor="mark"),
+                    lambda: self.runner.run_again(self.c, "partner", "deploy", "ptn0001", "mark"),
+                    lambda: self.runner.move_back(self.c, "partner", "deploy", "ptn0001", "x", "mark"),
+                    lambda: self.runner.hold(self.c, "partner", reason="x", actor="mark"),
+                    lambda: transitions.block(self.c, "partner", "deploy", "x", actor="mark"),
+                    lambda: operators.stop(self.c, "partner", "x", actor="mark"),
+                    lambda: operators.override(self.c, "partner", "deploy", "ptn0001", "x", actor="mark")):
+            with self.assertRaises(RiverError) as e:
+                act()
+            self.assertIn("pipeline partner is followed", str(e.exception))
+        self.assertTrue(operators.plan(self.c, "partner")["followed"])
+        with self.assertRaises(RiverError):
+            self.follow.follow(self.c, "partner", actor="w1")  # a person or the manager
+        self.follow.follow(self.c, "partner", off=True, actor="mark")
+        transitions.block(self.c, "partner", "deploy", "ours again", actor="mark")
+
+    def test_its_rules_act_on_its_failures_an_agent_and_a_hook(self):
+        self.follow.follow(self.c, "partner", project="app", actor="mark")
+        store.ingest(self.c, self.ev("queued", "j-1", {"pipelineName": "deploy"}, version="ptn0002"))
+        self.triggers.rule_add(self.c, "partner", "stage-failed", command="echo $MAXPM_EVENT $MAXPM_STAGE $MAXPM_REV "
+                               "> hook.txt; echo done", actor="mark")
+        with self.assertRaises(RiverError):
+            self.triggers.rule_add(self.c, "partner", "stage-failed", command="x", keys="prod", actor="mark")
+        store.ingest(self.c, self.ev("finished", "j-1", {"outcome": "failure", "errors": "exit 1"}))
+        fires = self.triggers.serve_pass(self.c)
+        results = sorted(f["result"] for f in self.c.execute("SELECT result FROM pipeline_trigger_fires"))
+        self.assertEqual(len(fires), 2)  # the default rule's agent and the hook
+        self.assertTrue(any(r.startswith("opened fault #") or "fault #" in r for r in results), results)
+        self.assertIn("ran the hook `echo $MAXPM_EVENT $MAXPM_STAGE $MAXPM_REV > hook.txt; echo done`: exit 0: done",
+                      results)
+        with open(os.path.join(self.folder, "hook.txt")) as f:
+            self.assertEqual(f.read().strip(), "stage-failed deploy ptn0002")
+        line = self.c.execute("SELECT kind, change FROM pipeline_changes WHERE action='hook'").fetchone()
+        self.assertEqual(line["kind"], "hook")
+        self.assertEqual(self.triggers.export(self.c, store._pipeline(self.c, "partner")["id"])[-1]["command"],
+                         "echo $MAXPM_EVENT $MAXPM_STAGE $MAXPM_REV > hook.txt; echo done")
+
+
 class DefinitionVersions(RunnerBase):
     """#6143: each change of a pipeline's definition makes a numbered version (who, when, why); compare two; go back
     to one as one more version. Actions of a moment (a block, a hold) make none."""

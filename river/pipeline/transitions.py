@@ -377,6 +377,8 @@ def _reason(reason, what):
 def _target(conn, pipeline, stage):
     """The pipeline row and the live stage row that a command names."""
     p = store._pipeline(conn, pipeline)
+    from . import follow
+    follow.check(conn, p, "controls a transition")  # #6167: a followed pipeline has none of ours
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
                      (p["id"], stage)).fetchone()
     if not s:

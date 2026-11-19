@@ -69,7 +69,8 @@ function draw() {
   const envs = D.envs.length;
   $("#plNote").innerHTML = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
     + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : "")  // the page's head names the project
-    + (D.default ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
+    + (D.followed ? ` · followed: its own system runs the flow; its trigger rules and hooks act on its events` : "")  // #6167
+    + (D.default || D.followed ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
       : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" })))
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
@@ -166,6 +167,7 @@ const plainArrow = (t) => t.mode === "auto" && t.state === "open" && !t.window &
 function arrowEl(s, i) {
   const t = s.transition;
   if (!t || (!i && plainArrow(t))) return "";
+  if (V.data && V.data.followed) return i ? `<div class="pl-gate"></div>` : "";  // #6167: no transition of ours
   const [m, word, cls] = arrowMark(t);
   const w = (t.waiting || [])[0];
   const by = t.state !== "open" ? [t.set_by, t.until ? (t.until.startsWith("#") ? `until ${t.until} closes` : `${left(t.until)} left`) : ""]
@@ -318,15 +320,15 @@ async function refreshStageRuns(force) {
 function stageRunsHtml(SR) {
   if (!SR.runs.length) return "";
   const liveRev = (SR.runs.find(r => r.live) || {}).rev;
-  const D = V.data, s = D.stages.find(x => x.name === SR.stage), miss = [];
+  const D = V.data, s = D.stages.find(x => x.name === SR.stage), miss = [], ours = !D.followed;  // #6167
   const rows = SR.runs.map(r => {
     const b = [];
-    if (r.state === "passed" && r.rev && r.rev !== liveRev)
+    if (ours && r.state === "passed" && r.rev && r.rev !== liveRev)
       b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
-    if (r.state === "passed" && r.rev && r.rev !== liveRev && (SR.branches || []).length)  // #6142: the same place of every branch
+    if (ours && r.state === "passed" && r.rev && r.rev !== liveRev && (SR.branches || []).length)  // #6142: the same place of every branch
       b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
-    if (["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
-    else if (r.rev) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
+    if (ours && ["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
+    else if (ours && r.rev) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
     const when = r.started_at || r.queued_at;
     return `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
       <td class="mono">${esc(short(r.rev))}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
@@ -337,7 +339,8 @@ function stageRunsHtml(SR) {
   return `<div class="pl-card"><h3>Versions in ${esc(SR.stage)}</h3>
     <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>What</th><th>Why, or who</th><th>How</th><th></th></tr>${rows}</table></div>
     ${missLine(D, [...new Set(miss)])}
-    <div class="muted t-s">A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.</div></div>`;
+    <div class="muted t-s">${ours ? `A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.`
+      : "Followed: these runs come from its own system; a move back or a run again happens there."}</div></div>`;
 }
 
 async function refreshRun(force) {
@@ -459,6 +462,7 @@ function wavesHtml(s, r) {
 // its own actions on Releases. The controls before the stage are on its transition (#6139).
 function stageActions(s, r) {
   if (V.data.default) return "";
+  if (V.data.followed) return `<div class="muted t-s">Followed: its own system runs this stage. A trigger rule acts on its events (Triggers).</div>`;  // #6167
   const rev = r && r.version, b = [];
   if (s.transition) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
   const D = V.data, miss = [], ours = r && r.state === "queued" && !r.runner && (!r.source || r.source === "maxpm");

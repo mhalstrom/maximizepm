@@ -13,6 +13,7 @@
 // /deploy/pipeline/<name>[/<tab>] (app.js writes it from D).
 import { $, esc, getJson, ago, act, toast } from "../lib.js";
 import { button } from "../components/button.js";
+import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { tab, nav } from "../page.js";
 import { showPipeline, hidePipeline, renderPipeline } from "./pipeline.js";
@@ -110,8 +111,13 @@ function gateMark(s) {
   return ["›", "", "Goes on by itself"];
 }
 function sourceChip(p) {
+  // A followed pipeline (#6167): its outside system runs the flow; we read it.
+  return (p.followed ? chip("c-waiting", "followed · read only", "Its own system runs it") : "") + sourceOnly(p);
+}
+function sourceOnly(p) {
   const s = p.source;
   if (p.default) return "";  // the head says "deploy target" already
+  if (s.state === "local" && p.followed) return "";  // its events come in; "this computer" would be wrong (#6167)
   if (s.state === "local") return `<span class="dp-src muted t-s">${esc(s.label)}</span>`;
   const icon = { ok: "●", new: "○", bad: "✕", missing: "○" }[s.state];
   // A plugin (#6159) may need no token, and its failed read may have another cause than a token.

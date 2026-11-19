@@ -587,6 +587,7 @@ def stage_versions(conn, pipeline, stage, limit=STAGE_VERSIONS):
         live_seen = live_seen or is_live
         who = r["sent_by"] or r["passed_by"] or r["approved_by"]
         why = r["reason"] or (f"{r['approved_by']} said yes" if r["approved_by"] and not r["sent_by"] else
+                              f"its own system ran it ({r['source']})" if p["followed"] and r["source"] else  # #6167
                               "the flow: the stage before passed" if not r["purpose"] else None)
         took = None
         if r["started_at"] and r["ended_at"]:

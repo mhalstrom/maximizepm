@@ -67,8 +67,9 @@ def _waits_for_run(r):
 def run_stage(conn, pipeline, stage, rev=None, actor=None):
     """maxpm pipeline run-stage <name> <stage> [--rev]: start the version that waits in a stage that starts manually
     (the Run button of its card). A person or the manager; the operators of the pipeline too (#6145)."""
-    from . import operators
+    from . import follow, operators
     p = store._pipeline(conn, pipeline)
+    follow.check(conn, p, "starts a stage")  # #6167
     if operators.refusal(conn, p, actor):  # an operator, or else a person or the manager
         _lead(conn, actor, "starts a stage")
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
@@ -123,6 +124,8 @@ def _queue(conn, pipeline, stage, rev, source="maxpm"):
 def start(conn, pipeline, rev=None, actor=None):
     """maxpm pipeline start: queue a version (a commit; the project folder's HEAD when none) at the first stage."""
     p = store._pipeline(conn, pipeline)
+    from . import follow
+    follow.check(conn, p, "starts a version")  # #6167
     first = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id "
                          "LIMIT 1", (p["id"],)).fetchone()
     if not first:
@@ -568,6 +571,8 @@ def _hand_on(conn, r):
         if e:
             store.deployed(conn, r["pipeline"], e["name"], r["rev"],
                            run_id=r["id"], kind="rolledback" if r["purpose"] == "rollback" else "deployed")
+    if conn.execute("SELECT followed FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()["followed"]:
+        return  # followed (#6167): the outside system reports each stage itself; we hand nothing on
     if r["purpose"] == "rollback" or (r["purpose"] or "").startswith("failed:"):
         return  # a roll back or a run of some tests hands nothing on: a person decides what comes next
     rows, prev, nexts = store.stage_graph(conn, r["pipeline_id"])
@@ -657,7 +662,8 @@ def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None
     pipeline still stops it."""
     _lead(conn, actor, "runs a stage again")
     p = store._pipeline(conn, pipeline)
-    from . import plugin
+    from . import follow, plugin
+    follow.check(conn, p, "runs a stage")  # #6167: a run again, a move back, an override
     plugin.need(conn, p, _stage_row(conn, p, stage), plugin.action_for(purpose))  # a plugin may not list it (#6159)
     run = _queue(conn, p["name"], stage, rev)
     with core.tx(conn):
@@ -680,6 +686,8 @@ def hold(conn, pipeline, stage=None, reason=None, actor=None):
     if not reason:
         raise core.RiverError("say why: --reason \"<why>\" (the people who look at the pipeline read it)")
     p = store._pipeline(conn, pipeline)
+    from . import follow
+    follow.check(conn, p, "holds the stages")  # #6167
     with core.tx(conn):
         conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=?, stop_runs=NULL WHERE id=?",
                      (reason, actor, store._now(), p["id"]))  # a hold lets running work end (an operator's stop does not)
