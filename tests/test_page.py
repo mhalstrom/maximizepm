@@ -205,7 +205,7 @@ try {
     first: document.querySelectorAll('#plRow [data-pl-arrow]').length !== document.querySelectorAll('#plRow [data-pl-stage]').length - 1,
     tier: q('#plRow [data-pl-stage="prod"] .pl-tier') && q('#plRow [data-pl-stage="prod"] .pl-tier').textContent };  // #6137
   q('#plRow [data-pl-arrow="test"]').click();  // #6189: the transition opens in a dialog
-  await until(() => q("#plArrowDlg:not(.hidden)") && q("#plArrowDlg").textContent.includes("The transition build → test"), "the controls of build → test");
+  await until(() => q("#plArrowDlg:not(.hidden)") && q("#plArrowDlg").textContent.includes("build → test"), "the controls of build → test");
   out.detail = q("#plArrowDlg").textContent.replace(/\s+/g, " ");
   out.buttons = [...q("#plArrowDlg").querySelectorAll("button")].map(b => b.textContent.trim());
   out.over = [...q("#plArrowDlg").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
@@ -228,9 +228,9 @@ try {
             self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
             self.assertEqual(r["tier"], "PROD", r)  # the tier badge on the stage card (#6137)
             self.assertIn("the test database is down", r["detail"], r)
-            self.assertIn("abc1234 waits since", r["detail"], r)
-            for b in ("Unblock", "Delay…", "Disable…", "Let abc1234 pass once…", "Freeze…",
-                      "Change the mode or the window…"):
+            self.assertIn("build → test", r["detail"], r)  # #6198: the title names the transition
+            self.assertNotIn("Set by, until", r["detail"], r)  # no control table in the dialog
+            for b in ("Unblock", "Delay", "Disable", "Let abc1234 pass", "Freeze", "Window"):
                 self.assertIn(b, r["buttons"], r)
             self.assertEqual(r["over"], [], r)
             self.assertIn("abc1234", r["runs"], r)
@@ -378,8 +378,10 @@ try {
             self.assertEqual(r["all"], 8, r)
             self.assertFalse(r["tasks"], r)
             self.assertEqual(r["over"], [], r)
-            self.assertIn("What it does now", r["dlg"], r)
-            self.assertIn("What it can do", r["dlg"], r)
+            self.assertIn("Release toolscaled-prod", r["dlg"], r)  # #6198: the title names the action
+            self.assertIn("Block", r["dlg"], r)
+            self.assertNotIn("Set by, until", r["dlg"], r)  # no control table, no paragraphs
+            self.assertNotIn("The mode comes from", r["dlg"], r)
             self.assertEqual(r["dlgOver"], [], r)
 
     def test_the_next_step_waits_on_the_graph_and_approves_in_place(self):

@@ -86,7 +86,7 @@ export function releaseButton(D) {
   if (item) return button(`Approve and release${dep ? " #" + dep : ""}`, { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Give your yes" })
     + button("Open the card", { data: { "dp-card": item }, title: "Approve or decline" });
   const r = D.release;
-  return r ? button(`Release ${r.tasks} task${r.tasks === 1 ? "" : "s"} now`, { kind: "primary", data: { relnow: D.name, relshow: "1" },
+  return r ? button("Release now", { kind: "primary", data: { relnow: D.name, relshow: "1" },
     title: "Start the release" }) : "";
 }
 
@@ -140,9 +140,9 @@ function nextBar(D) {
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {});
   const text = appr.state === "queued" && appr.item
     ? `Next: your yes for release${dep.item ? " #" + dep.item : ""}${appr.version ? ` (<span class="pl-ver">${esc(short(appr.version))}</span>)` : ""}. It goes to production after it.`
-    : R ? `Next: ${R.tasks} task${R.tasks === 1 ? "" : "s"} wait for the release. Without a click: ${esc(R.text)}.`
+    : R ? `Next: release ${releaseLine(D, (D.stages.find(s => s.holding) || {}).holding)}`  // #6198: the dialog's words
     : "Next: the collected tasks can go out.";
-  const agent = R ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
+  const agent = R ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
   const help = b.includes("data-deploy=") ? `<div class="muted t-s pl-next-help">${DEPLOY_WORDS}</div>` : "";
   return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}${help}</div>`;
 }
@@ -555,29 +555,62 @@ function drawArrow() {
   if (!arrowName || !arrowBox || !V.data) return;
   const D = V.data, s = D.stages.find(x => x.name === arrowName);
   if (!s || !s.transition) return arrowDlg.close();
-  arrowBox.innerHTML = `<div class="dlg-head"><h2>Into ${esc(s.name)}</h2>${iconButton("✕", "Close", { data: { "pl-arrowclose": "1" } })}</div>`
-    + arrowNow(D, s) + arrowDetail(s);
+  // #6198 (mark 2026-11-19: 'excess text in the modal also the button naming is weird'): the title names the action,
+  // one or two short lines, the buttons in plain words, the hold options as one quiet row; the guide explains the rest.
+  const i = D.stages.indexOf(s), release = D.default && i > 0 && D.stages[i - 1].holding;
+  const from = i > 0 ? D.stages[i - 1].name : "start";
+  const title = release ? `Release ${D.name}` : s.name === "approval" && releaseButton(D).includes("pl-yes") ? `Approve the release of ${D.name}`
+    : `${from} → ${s.name}`;
+  arrowBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-arrowclose": "1" } })}</div>`
+    + arrowNow(D, s, release) + arrowOptions(s);
+}
+
+// The release in one line: what goes out and when it goes out by itself (#6198).
+function releaseLine(D, h) {
+  const R = D.release, bits = [];
+  if (R) bits.push(`${R.tasks} task${R.tasks === 1 ? "" : "s"}`);
+  if (h && h.commits) bits.push(`${h.commits} commit${h.commits === 1 ? "" : "s"}`);
+  const report = R && R.deploy ? ` · <span class="link" data-report="${R.deploy}">report</span>` : "";
+  const by = R && R.until ? ` · goes out by itself ${esc(when(R.until))} (in ${esc(left(R.until))})`
+    : R && R.running ? ` · goes out after release #${R.running}` : "";
+  return bits.length ? `${bits.join(", ")}${report}${by}` : "";
 }
 
 // What the transition does now, with the buttons that act on it.
-function arrowNow(D, s) {
-  const i = D.stages.indexOf(s), afterHolding = i > 0 && D.stages[i - 1].holding;
-  if (!afterHolding) {
+function arrowNow(D, s, release) {
+  if (!release) {
     const yes = s.name === "approval" ? releaseButton(D) : "";
-    return yes ? `<div class="pl-bar">${yes}</div>` : "";
+    const t = s.transition, w = (t.waiting || [])[0];
+    const line = t.state !== "open" ? esc(t.state_text) : w ? `<span class="pl-ver">${esc(short(w.rev))}</span> waits here` : esc(t.text);
+    return `<div class="t-m">${line}</div>` + (yes ? `<div class="pl-bar">${yes}</div>` : "");
   }
-  const h = D.stages[i - 1].holding || {}, r = h.release || {}, R = D.release, hook = (D.stages.find(x => x.name === "deploy") || {}).run;
-  const lines = [];
-  if (R) lines.push(`${R.tasks} task${R.tasks === 1 ? "" : "s"} wait for this release${R.deploy ? ` (<span class="link" data-open="${R.deploy}">#${R.deploy}</span>, <span class="link" data-report="${R.deploy}">its report</span>)` : ""}. Without a click: ${esc(R.text)}.`);
-  if (h.commits) lines.push(`${h.commits} commit${h.commits === 1 ? "" : "s"} in holding, ${h.reviewed || 0} reviewed${r.last ? `; Release all goes up to <span class="pl-ver">${esc(short(r.last))}</span>` : ""}.`);
-  if (hook) lines.push(`Then the deploy hook runs: <code>${esc(hook)}</code>`);
-  if (!lines.length) lines.push("Nothing waits for a release now.");
-  // Release via agent beside the manual release (mark 2026-11-19), when a release can go and no yes waits.
-  const waitsYes = releaseButton(D).includes("dp-card"), agent = D.default && !waitsYes && (R || h.commits)
-    ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
+  const h = D.stages[D.stages.indexOf(s) - 1].holding || {}, hook = (D.stages.find(x => x.name === "deploy") || {}).run;
+  const line = releaseLine(D, h) || "Nothing waits for a release now.";
+  const waitsYes = releaseButton(D).includes("pl-yes"), agent = !waitsYes && (D.release || h.commits)
+    ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
   const b = headControls(D) + agent;
-  if (b.includes("data-deploy=")) lines.push(`<span class="muted">${DEPLOY_WORDS}</span>`);  // #6193
-  return `<h3>What it does now</h3>${lines.map(x => `<div class="t-m">${x}</div>`).join("")}${b ? `<div class="pl-bar">${b}</div>` : ""}<h3>What it can do</h3>`;
+  return `<div class="t-m">${line}</div>${b ? `<div class="pl-bar">${b}</div>` : ""}`
+    + (b.includes("data-deploy=") ? `<div class="muted t-s">${DEPLOY_WORDS}</div>` : "")
+    + (hook ? `<details class="t-s"><summary>What runs</summary><code>${esc(hook)}</code></details>` : "");
+}
+
+// The hold options of a transition as one quiet row (#6198), each undone by the same place; the state line above
+// says what holds it now. A stored pipeline's waiting version can also be approved or let past here.
+function arrowOptions(s) {
+  const t = s.transition, D = V.data;
+  if (t.fixed || (D.default && !D.controls)) return "";
+  const n = s.name, w = (t.waiting || [])[0], b = [];
+  const o = (label, data, title, kind = "") => button(label, { kind, cls: kind ? "" : "plain", data, title });
+  if (w && !D.default && NEEDS_YES.includes(t.mode) && !w.approved_by)
+    b.push(o(`Approve ${esc(short(w.rev))}`, { "pl-approve": n, rev: w.rev }, "Give its yes", "primary"));
+  b.push(t.block ? o("Unblock", { "pl-unblock": n }, "End the block") : o("Block", { "pl-block": n }, "Stop versions here"));
+  b.push(t.delay ? o("End the delay", { "pl-undelay": n }, "End the delay") : o("Delay", { "pl-delay": n }, "Hold for a time"));
+  b.push(t.disabled ? o("Enable", { "pl-enable": n }, "Let versions pass") : o("Disable", { "pl-disable": n }, "Until enabled"));
+  b.push(o("Freeze", { "pl-freeze": n }, "Stop for a period"));
+  if ((t.freezes || []).length) b.push(o("Unfreeze", { "pl-unfreeze": n }, "Remove the freezes"));
+  b.push(o("Window", { "pl-change": n }, "The standing rules"));
+  if (w && t.state !== "open" && !D.default) b.push(o(`Let ${esc(short(w.rev))} pass`, { "pl-pass": n, rev: w.rev }, "Past every control"));
+  return `<div class="pl-opts t-s">${b.join("")}</div>`;
 }
 
 function arrowDetail(s) {

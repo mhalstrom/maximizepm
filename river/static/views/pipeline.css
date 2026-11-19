@@ -33,6 +33,9 @@ button.pl-stage { display: flex; flex-direction: column; justify-content: flex-s
 #plArrowDlg { --dlg-w: var(--w-dlg-m); }  /* a transition's dialog (#6189) */
 #plArrowDlg .box { display: flex; flex-direction: column; gap: var(--sp-3); }
 #plArrowDlg h3 { margin: var(--sp-2) 0 0; font-size: var(--fs-base); }
+/* The hold options of a transition: one quiet row of plain buttons under a line (#6198). */
+.pl-opts { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); padding-top: var(--sp-3);
+  border-top: var(--hair) solid var(--line); }
 .pl-kind .pl-tier { font-size: var(--fs-xs); padding: 0 var(--sp-1); margin-left: var(--sp-1); }
 .pl-name { font-weight: 600; }
 .pl-ver { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); }
