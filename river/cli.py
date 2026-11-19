@@ -8438,7 +8438,12 @@ def render_pipeline(a, res):
         print(f"Versions in {res['stage']} (pipeline {res['pipeline']}), newest first:")
         for r in res["runs"]:
             took = f", {r['seconds'] / 60:.0f}m" if r["seconds"] is not None else ""
-            print(f"  run #{r['run']}  {(r['rev'] or '')[:12]}  {r['what']}: {r['state']}{took}"
+            # #6222: a deploy target's rows are its releases (no stage run): the release's deploy item, 'not pinned'
+            # for a release with no pin, and no word for a plain release, as the page shows them.
+            head = f"run #{r['run']}" if r["run"] is not None else f"deploy #{r['deploy']}"
+            rev = "not pinned" if r.get("pinned") is False else (r["rev"] or "")[:12]
+            what = f"{r['what']}: " if r["what"] else ""
+            print(f"  {head}  {rev}  {what}{r['state']}{took}"
                   + (f"  {show_time(r['started_at'] or r['queued_at'])}" if r["started_at"] or r["queued_at"] else "")
                   + ("  (live)" if r["live"] else "")
                   + (f"  by {r['by']}" if r["by"] else "") + (f": {r['why']}" if r["why"] else ""))

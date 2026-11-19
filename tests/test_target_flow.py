@@ -160,6 +160,15 @@ class TargetControls(unittest.TestCase):
             self.assertEqual([(r["rev"], r["live"]) for r in rows], [("bbbbbbb", False), ("aaaaaaa", True)], stage)
             self.assertEqual({(r["what"], r["why"]) for r in rows}, {(None, None)}, stage)
         self.assertEqual(self.c.execute("SELECT cut_rev FROM items WHERE id=?", (out,)).fetchone()[0], "aaaaaaa")
+        # #6222: the text names each release's deploy item, with no 'run #None' and no 'None:'.
+        from river import cli
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "mark", "pipeline", "runs", "web-prod", "deploy"])
+        lines = text.getvalue().splitlines()
+        self.assertNotIn("None", text.getvalue())
+        self.assertTrue(lines[2].startswith(f"  deploy #{out}  aaaaaaa  passed"), lines)
+        self.assertIn("(live)", lines[2])
 
     def test_release_now_is_offered_only_for_a_release_that_waits(self):
         """#6189 (mark 2026-11-19: 'I cannot figure out how to deploy maximizepm-github'): the Deploy tab and the
