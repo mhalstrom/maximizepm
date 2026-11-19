@@ -2532,8 +2532,17 @@ class Holding(RunnerBase):
         self.assertEqual((dep["cut_rev"], out["rev"]), (sha, sha))
         stages = self.targets.default_pipeline(self.c, "site")["stages"]
         self.assertEqual((stages[0]["name"], stages[0]["last_run"]["state"]), ("holding", "passed"))
+        # #6175: the cut release left holding: its commits are no longer there while it waits after it.
         h = self.targets.holding(self.c, "site", fresh=True)
-        self.assertEqual(h["commits"][-1]["review"]["text"], f"in release #{out['release']}, which has no review")
+        self.assertEqual((h["commits"], h["base"], h["base_label"]), ([], sha, f"the pin of release #{out['release']}"))
+        self.assertEqual(self.targets.holding_stage(h)["last_run"]["state"], "none")
+        later = self.commit("A later change")
+        h = self.targets.holding(self.c, "site", fresh=True)
+        self.assertEqual([c["sha"] for c in h["commits"]], [later])
+        # A release dropped after its cut gives its commits back to holding.
+        core.drop(self.c, out["release"], "mark", note="not this one")
+        h = self.targets.holding(self.c, "site", fresh=True)
+        self.assertEqual([c["sha"] for c in h["commits"]][-2:], [sha, later])
 
 
 class AgentsOnStages(RunnerBase):

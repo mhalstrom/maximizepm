@@ -330,7 +330,9 @@ def _ancestor(root, a, b):
 
 def _base(conn, root, p, target, head):
     """(rev, label): the last version that left holding. A pipeline: the newest version that reached its first stage.
-    A target: the pin of its last done release, else the last version tag. None when there is none (an empty start)."""
+    A target: the pin of its newest cut release (#6175: the release left holding at its cut, done or not; toolscaled-prod
+    listed the 5 commits of cut release #6128 as queued in holding while they waited at approval), else of its last
+    done release, else the last version tag. None when there is none (an empty start)."""
     if p is not None:
         r = conn.execute("SELECT v.rev FROM stage_runs r JOIN pipeline_versions v ON v.id=r.version_id JOIN "
                          "pipeline_stages s ON s.id=r.stage_id WHERE r.pipeline_id=? AND s.removed_at IS NULL AND "
@@ -339,6 +341,12 @@ def _base(conn, root, p, target, head):
         if r and _ancestor(root, r["rev"], head):
             return r["rev"], "the last version that left holding"
         return None, None
+    # The newest cut releases first (a pin that is not in head, from another branch, is passed over), then the done ones.
+    for d in conn.execute("SELECT id, cut_rev FROM items WHERE kind='deploy' AND target=? AND cut_rev IS NOT NULL AND "
+                          "cut_at IS NOT NULL AND status<>'dropped' ORDER BY cut_at DESC, id DESC LIMIT 5",
+                          (target,)).fetchall():
+        if _ancestor(root, d["cut_rev"], head):
+            return d["cut_rev"], f"the pin of release #{d['id']}"
     d = conn.execute("SELECT id, cut_rev FROM items WHERE kind='deploy' AND target=? AND status='done' AND cut_rev IS "
                      "NOT NULL ORDER BY closed_at DESC LIMIT 1", (target,)).fetchone()
     if d and _ancestor(root, d["cut_rev"], head):
