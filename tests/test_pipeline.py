@@ -105,6 +105,7 @@ class Commands(Base):
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
                                              "workflow": None, "env": "prod", "junit": None, "waves": None,
                                              "check": None, "rollback": None, "wave_wait": None, "tier": None,
+                                             "start": "auto",
                                              "transition": {"mode": "delay 30m", "window": None, "freezes": [],
                                                             "fault_rule": False}})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
@@ -942,6 +943,68 @@ class Transitions(RunnerBase):
         self.c.execute("UPDATE pipeline_stages SET gate='forge'")
         schema.migrate(self.c)  # once only
         self.assertEqual(self.tr.get(self.c, ids["build"])["mode"], "yes")
+
+
+class ManualStart(RunnerBase):
+    """#6138: a stage starts automatically when its transition lets a version in, or manually: the version waits in
+    the stage until someone presses Run (maxpm pipeline run-stage)."""
+
+    def test_a_manual_stage_waits_for_run_and_then_runs(self):
+        define.stage_set(self.c, "app", "beta", start="manual", actor="mark")
+        self.assertEqual(define.export(self.c, "app")["stages"][2]["start"], "manual")
+        with self.assertRaises(RiverError):
+            define.stage_set(self.c, "app", "beta", start="later", actor="mark")
+        self.runner.start(self.c, "app", rev="man0001")
+        out = self.passes(4)
+        self.assertEqual(self.runs()["beta"]["state"], "queued")  # in the stage, not run
+        self.assertIn("waits in stage beta for Run", list(out[-1]["waiting"].values())[0])
+        s = {x["name"]: x for x in store.show(self.c, "app")["stages"]}
+        self.assertEqual((s["beta"]["start"], s["beta"]["waits_for_run"]["rev"]), ("manual", "man0001"))
+        self.assertIsNone(s["test"]["waits_for_run"])
+        self.assertEqual(s["beta"]["transition"]["waiting"], [])  # in the stage, not at its arrow
+        with self.assertRaises(RiverError) as e:
+            self.runner.run_stage(self.c, "app", "test", actor="mark")
+        self.assertIn("stage test starts by itself", str(e.exception))
+        with self.assertRaises(RiverError):
+            self.runner.run_stage(self.c, "app", "beta", actor="w1")  # an agent that is no operator
+        r = self.runner.run_stage(self.c, "app", "beta", actor="mark")
+        self.assertEqual(r["version"], "man0001")
+        self.passes(2)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        lines = [x["change"] for x in self.c.execute("SELECT change FROM pipeline_changes WHERE action IN "
+                                                     "('entered','run') ORDER BY id")]
+        self.assertEqual(lines, ["version man0001 entered stage beta; it waits for Run (the stage starts manually)",
+                                 f"pressed Run: version man0001 starts in stage beta (run #{r['run']})"])
+        with self.assertRaises(RiverError):
+            self.runner.run_stage(self.c, "app", "beta", actor="mark")  # nothing waits now
+        # A run again starts at once: a person sent it.
+        self.runner.run_again(self.c, "app", "beta", "man0001", "mark")
+        self.passes(2)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        # An operator of the pipeline may press Run too, an agent when the pipeline lets agents operate.
+        from river.pipeline import operators
+        operators.change(self.c, "app", add=["w1"], agents=True, actor="mark")
+        self.runner.start(self.c, "app", rev="man0002")
+        self.passes(4)
+        self.assertEqual(self.runner.run_stage(self.c, "app", "beta", actor="w1")["version"], "man0002")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "show", "app"])
+        self.assertIn("[deploy, env beta, starts manually]", out.getvalue())
+
+    def test_a_held_pipeline_holds_a_pressed_run(self):
+        define.stage_set(self.c, "app", "beta", start="manual", actor="mark")
+        self.runner.start(self.c, "app", rev="hld0001")
+        self.passes(4)
+        self.runner.hold(self.c, "app", reason="a freeze", actor="mark")
+        self.runner.run_stage(self.c, "app", "beta", actor="mark")
+        out = self.passes(1)
+        self.assertIn("every stage is held by mark", list(out[-1]["waiting"].values())[0])
+        self.runner.release_hold(self.c, "app", actor="mark")
+        self.passes(2)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
 
 
 class Emergency(RunnerBase):

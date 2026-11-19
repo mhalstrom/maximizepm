@@ -1917,7 +1917,11 @@ def build_parser(only=None):
     x.add_argument("--wave-wait", help="how long the checks of a wave must hold before the next wave (10m)")
     x.add_argument("--tier", help="alpha, beta, prod, or a name of your own; several stages may share a tier ('' "
                    "clears it)")
+    x.add_argument("--start", choices=("auto", "manual"), help="auto: it runs when its transition lets a version in; "
+                   "manual: the version waits in it until someone runs maxpm pipeline run-stage")
     x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
+    x = pls.add_parser("run-stage", help="Run: start the version that waits in a stage that starts manually")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", help="that version, when several wait")
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
@@ -7673,7 +7677,10 @@ def _pipeline_cmd(conn, a, actor):
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
         return define.stage_set(conn, a.name, a.stage, a.kind, a.run, a.workflow, a.env, a.gate, a.pos, a.remove,
-                                actor, a.junit, a.waves, a.check, a.rollback, a.wave_wait, a.tier)
+                                actor, a.junit, a.waves, a.check, a.rollback, a.wave_wait, a.tier, a.start)
+    if sub == "run-stage":
+        from .pipeline import runner
+        return runner.run_stage(conn, a.name, a.stage, a.rev, actor)
     if sub == "start":
         from .pipeline import runner
         return runner.start(conn, a.name, a.rev, actor)
@@ -8167,7 +8174,8 @@ def render_pipeline(a, res):
         does = f"run: {s['run']}" if s["run"] else f"workflow: {s['workflow']}" if s["workflow"] else "nothing to run"
         t = s["transition"]
         print(f"  {s['pos']}. {s['name']}  [{s['kind']}{', env ' + s['env'] if s['env'] else ''}"
-              f"{', tier ' + s['tier'] if s.get('tier') else ''}]  mode {t['words']}"
+              f"{', tier ' + s['tier'] if s.get('tier') else ''}"
+              f"{', starts manually' if s.get('start') == 'manual' else ''}]  mode {t['words']}"
               + (f", window {t['window']['text']}" if t.get("window") else "")
               + (", fault rule" if t.get("fault_rule") else "") + f"  {does}")
         if t["state"] != "open":

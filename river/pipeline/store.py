@@ -448,6 +448,11 @@ def show(conn, name):
         d["env"] = envs[s["env_id"]]["name"] if s["env_id"] in envs else None
         d["last_run"] = _run_dict(conn, conn.execute(
             "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())
+        d["start"] = s["start"] or "auto"  # #6138: manual: a version that enters waits for Run
+        w = conn.execute("SELECT r.id, v.rev, r.entered_at FROM stage_runs r LEFT JOIN pipeline_versions v ON "
+                         "v.id=r.version_id WHERE r.stage_id=? AND r.state='queued' AND r.entered_at IS NOT NULL AND "
+                         "r.run_at IS NULL ORDER BY r.id LIMIT 1", (s["id"],)).fetchone() if s["start"] else None
+        d["waits_for_run"] = {"run": w["id"], "rev": w["rev"], "since": w["entered_at"]} if w else None
         stages.append(d)
     p["stages"] = stages
     p["envs"] = list(envs.values())

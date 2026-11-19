@@ -45,6 +45,7 @@ COMMANDS = {
                  "may": ANY,  # #6164: an outside flow asks; the answer acts only on its own run at that stage
                  "accounts": ANY,  # #6147: --check takes a person or the manager (accounts.check_now)
                  "runs": ANY, "move-back": LEAD,  # #6141
+                 "run-stage": ANY,  # #6138: runner.run_stage takes an operator, a person or the manager
                  "triggers": ANY, "trigger": LEAD,  # #6150
                  # #6145: operators.change takes a person, operators.check the pipeline's operators
                  "operators": ANY, "emergency": ANY,
@@ -101,7 +102,8 @@ OPS = {op: ANY for op in (
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
     "pipeline_fix", "pipeline_correct",
-    "pipeline_operators", "pipeline_emergency")}  # #6145: the functions check a person, or the pipeline's operators
+    "pipeline_operators", "pipeline_emergency",  # #6145: the functions check a person, or the pipeline's operators
+    "pipeline_run_stage")}  # #6138: the same
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",

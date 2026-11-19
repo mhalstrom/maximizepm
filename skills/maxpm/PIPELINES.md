@@ -18,6 +18,13 @@ Deploy tab of the page.
   can share a tier, for example two prod regions. The stage card shows it as a
   badge, and a trigger rule can name a tier ("any prod stage failed"). A
   deploy target's default pipeline has its deploy and watch stages in prod.
+- **Start**: how a stage starts when its transition lets a version in
+  (`--start auto|manual`). `auto` (the default): it runs at once. `manual`:
+  the version waits in the stage until someone presses Run on its card, or
+  runs `maxpm pipeline run-stage <name> <stage>`. The transition decides
+  whether a version may enter; the start decides whether the stage then runs
+  by itself. A run again or a move back starts at once: a person sent it.
+  Run takes a person, the manager, or an operator of the pipeline.
 - **Environment**: a place that runs the code (dev, beta, prod, one server).
   A deploy stage names the environment it deploys to. When the stage passes,
   that version runs there.
@@ -741,6 +748,7 @@ did it.
 ```
 maxpm pipeline hold <name> --reason "<why>"               # every stage: nothing new starts
 maxpm pipeline unhold <name>
+maxpm pipeline run-stage <name> <stage> [--rev <commit>]  # Run: a stage that starts manually
 maxpm pipeline runs <name> <stage>                       # Versions in <stage>: each run there, who and why
 maxpm pipeline rerun <name> <stage> --rev <commit> [--reason "<why>"]   # run one stage again, an older version too
 maxpm pipeline move-back <name> <stage> --rev <commit> --reason "<why>" # back to a version that passed there
@@ -877,7 +885,7 @@ comes back to you as an answer to the question.
 
 ## Later
 
-Each Deploy tab task adds its part to this guide when it is built: manual
-starts, branches, the override, an agent inside a forge's own CI job, keys
-granted per stage to a runner's agent, and each pipeline's list of what its
-agents may do with no prompt.
+Each Deploy tab task adds its part to this guide when it is built: branches,
+the override, an agent inside a forge's own CI job, keys granted per stage to
+a runner's agent, and each pipeline's list of what its agents may do with no
+prompt.

@@ -51,9 +51,48 @@ def _row(conn, run_id):
     return conn.execute(
         "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.pos, s.env_id, "
         "p.held_reason pipe_hold, p.held_by pipe_hold_by, s.waves, s.check_cmd, s.rollback_cmd, s.wave_wait, "
-        "p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
-        "JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?",
-        (run_id,)).fetchone()
+        "s.start, p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON "
+        "s.id=r.stage_id JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id "
+        "WHERE r.id=?", (run_id,)).fetchone()
+
+
+def _waits_for_run(r):
+    """The note of a run that waits in its stage for Run (#6138), or None: a stage that starts manually, a run of the
+    flow (a run again, a move back or a failed tests' run is a person's start already), and nobody pressed Run."""
+    if r["start"] != "manual" or r["purpose"] or r["run_at"]:
+        return None
+    return f"waits in stage {r['stage']} for Run (the stage starts manually)"
+
+
+def run_stage(conn, pipeline, stage, rev=None, actor=None):
+    """maxpm pipeline run-stage <name> <stage> [--rev]: start the version that waits in a stage that starts manually
+    (the Run button of its card). A person or the manager; the operators of the pipeline too (#6145)."""
+    from . import operators
+    p = store._pipeline(conn, pipeline)
+    if operators.refusal(conn, p, actor):  # an operator, or else a person or the manager
+        _lead(conn, actor, "starts a stage")
+    s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
+                     (p["id"], stage)).fetchone()
+    if s is None:
+        raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
+    q = ("SELECT r.id, v.rev FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.stage_id=? "
+         "AND r.state='queued' AND r.entered_at IS NOT NULL AND r.run_at IS NULL")
+    args = [s["id"]]
+    if rev:
+        q, args = q + " AND v.rev LIKE ?", args + [rev + "%"]
+    row = conn.execute(q + " ORDER BY r.id LIMIT 1", args).fetchone()
+    if row is None:
+        waiting = conn.execute("SELECT v.rev FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id "
+                               "WHERE r.stage_id=? AND r.state='queued' AND r.entered_at IS NULL", (s["id"],)).fetchone()
+        raise core.RiverError(f"no version waits in stage {stage} for Run" + (
+            f"; {waiting['rev']} still waits at the transition into it (maxpm pipeline show {p['name']})"
+            if waiting else "") + ("" if s["start"] == "manual" else f"; stage {stage} starts by itself"))
+    with core.tx(conn):
+        conn.execute("UPDATE stage_runs SET run_by=?, run_at=?, gate_note=NULL WHERE id=?",
+                     (actor, store._now(), row["id"]))
+        _act(conn, p["id"], actor, f"pressed Run: version {row['rev']} starts in stage {stage} (run #{row['id']})",
+             "run", f"stage {stage}", row["rev"], row["id"])
+    return {"pipeline": p["name"], "stage": stage, "run": row["id"], "version": row["rev"]}
 
 
 def _folder(conn, project):
@@ -243,7 +282,8 @@ def _ask(conn, r, t, note):
 def _waiting_run(conn, p, stage, rev=None):
     """The version that waits at the transition into a stage (the newest one; rev names one when several wait)."""
     q = ("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id LEFT JOIN pipeline_versions v "
-         "ON v.id=r.version_id WHERE r.pipeline_id=? AND s.name=? AND r.state='queued' AND s.removed_at IS NULL")
+         "ON v.id=r.version_id WHERE r.pipeline_id=? AND s.name=? AND r.state='queued' AND s.removed_at IS NULL "
+         "AND r.entered_at IS NULL")  # in the stage already: it waits for Run, not at the transition (#6138)
     args = [p["id"], stage]
     if rev:
         q, args = q + " AND (v.rev=? OR substr(v.rev,1,length(?))=?)", args + [rev, rev, rev]
@@ -515,7 +555,8 @@ def _hand_on(conn, r):
         # A newer version replaces an older one that still waits at that gate (#6119): the person approves the
         # newest, and a stage never runs a version that a newer one passed by.
         for old in conn.execute("SELECT id, gate_item FROM stage_runs WHERE stage_id=? AND state='queued' AND "
-                                "approved_at IS NULL AND passed_at IS NULL AND runner IS NULL AND version_id IS NOT ?",
+                                "approved_at IS NULL AND passed_at IS NULL AND runner IS NULL AND run_at IS NULL AND "
+                                "version_id IS NOT ?",
                                 (nxt["id"], r["version_id"])).fetchall():
             store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
             _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
@@ -772,6 +813,7 @@ def serve_pass(conn):
         busy = None if r["outside"] else conn.execute(
             "SELECT id FROM stage_runs WHERE stage_id=? AND state='running' AND outside IS NULL",
             (r["stage_id"],)).fetchone()
+        manual = None if r["outside"] else _waits_for_run(r)  # an outside system starts its stage itself
         if r["outside"]:  # #6164: an outside system runs it; its next question (river/pipeline/gates.py) gets the yes
             open_, note = gate(conn, r)  # the approval card or the manager's alert, once, as for our own runs
             if note != "declined":
@@ -782,8 +824,14 @@ def serve_pass(conn):
                 if note:
                     waiting[r["id"]] = note
                 continue
+        elif r["entered_at"] and manual:  # in the stage already (#6138): it waits for Run, no transition asks again
+            open_, note = False, manual
         elif busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
             open_, note = False, f"waits for run #{busy['id'] if busy else started[-1]} of stage {r['stage']}"
+        elif r["entered_at"] and r["pipe_hold"]:
+            open_, note = False, f"every stage is held by {r['pipe_hold_by'] or 'a person'}: {r['pipe_hold']}"
+        elif r["entered_at"]:
+            open_, note = True, None  # it entered, and a person pressed Run
         else:
             open_, note = gate(conn, r)
         if note == "declined":
@@ -809,6 +857,14 @@ def serve_pass(conn):
                 _act(conn, r["pipeline_id"], by, f"approved version {r['rev']} into stage {r['stage']} on "
                      f"#{r['gate_item']} (run #{r['id']})", "approve", f"the transition into {r['stage']}", r["rev"],
                      r["id"])
+        if manual and not r["entered_at"]:  # the transition let it in; a stage that starts manually waits (#6138)
+            with core.tx(conn):
+                conn.execute("UPDATE stage_runs SET entered_at=?, gate_note=? WHERE id=?",
+                             (store._now(), manual, r["id"]))
+                _act(conn, r["pipeline_id"], "maxpm", f"version {r['rev']} entered stage {r['stage']}; it waits for "
+                     "Run (the stage starts manually)", "entered", f"stage {r['stage']}", r["rev"], r["id"])
+            waiting[r["id"]] = manual
+            continue
         started.append(r["id"])
         if forge:  # the gate opened: the source's plugin starts it in its system (#6159)
             try:

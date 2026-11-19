@@ -33,6 +33,11 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
   max-width: var(--w-input-s); }
 .pl-ctl td:first-child, .pl-ctl th:first-child { white-space: nowrap; }
 .pl-compact .pl-stage { flex-basis: calc(var(--w-col) - var(--w-input-s) + var(--sp-7)); padding: var(--sp-3); }
+/* A stage that starts manually (#6138): its card, and under it Run for the version that waits in it. */
+.pl-stack { flex: 1 0 var(--w-card); max-width: calc(var(--w-card) + var(--w-input-s)); display: flex;
+  flex-direction: column; gap: var(--sp-1); }
+.pl-stack > .pl-stage { flex: 1 1 auto; max-width: none; }
+.pl-compact .pl-stack { flex-basis: calc(var(--w-col) - var(--w-input-s) + var(--sp-7)); }
 .pl-compact .pl-more-line { display: none; }
 .pl-compact .pl-gate { min-width: var(--sp-7); padding: 0 var(--sp-1); }
 

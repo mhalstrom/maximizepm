@@ -89,7 +89,17 @@ function tierBadge(s) {
   return s.tier ? " " + chip(`${TIER_COLOR[s.tier] || ""} pl-tier`, esc(s.tier.toUpperCase()), `Tier ${s.tier}`) : "";
 }
 
+// A stage that starts manually (#6138): its card says so, and the version that its transition let in waits there
+// until someone presses Run (a button under the card: the card itself is a button).
 function stageCard(s) {
+  const card = stageCardOnly(s);
+  if (s.start !== "manual") return card;
+  const w = s.waits_for_run;
+  return `<span class="pl-stack">${card}${w ? button(`▶ Run ${esc(short(w.rev))}`, { kind: "primary", cls: "pl-run",
+    data: { "pl-run-stage": s.name, rev: w.rev || "" }, title: `Start ${s.name}` }) : ""}</span>`;
+}
+
+function stageCardOnly(s) {
   const D = V.data;
   if (s.holding) {  // the first stage: the commits that wait for the release (#6140, views/holding.js)
     return button(`<span class="pl-in">${holdingCardHtml(s.holding)}</span>`, { kind: "card", cls: "pl-stage pl-hold",
@@ -112,6 +122,7 @@ function stageCard(s) {
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}
     <span class="pl-meta pl-more-line">${esc(meta)}</span>
+    ${s.start === "manual" ? `<span class="pl-meta">✋ ${s.waits_for_run ? "waits for Run" : "starts manually"}</span>` : ""}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
@@ -552,6 +563,8 @@ $("#dpStages").addEventListener("click", (e) => {
       "Its deploy stage runs with this version, and the transition into it is blocked until you unblock it, so no newer version comes by itself.",
       "Roll back", (reason) => doAct("pipeline_rollback", { env: d.plRollback, rev: d.rev, reason }));
   }
+  const run = e.target.closest("[data-pl-run-stage]");  // Run: a stage that starts manually (#6138)
+  if (run) return doAct("pipeline_run_stage", { stage: run.dataset.plRunStage, rev: run.dataset.rev || null });
   const t = e.target.closest("[data-pl-stage],[data-pl-arrow],[data-pl-filter],[data-pl-copy]");
   if (!t) return;
   if (t.dataset.plArrow) { V.arrow = t.dataset.plArrow; sig = ""; draw(); return; }

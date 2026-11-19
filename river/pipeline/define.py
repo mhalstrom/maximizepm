@@ -16,7 +16,8 @@ import re
 from .. import core
 from . import audit, store, transitions
 
-_FIELDS = ("kind", "tier", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback", "wave_wait")
+_FIELDS = ("kind", "tier", "start", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback",
+           "wave_wait")
 TIERS = ("alpha", "beta", "prod")  # the usual tiers; a pipeline may name others (#6137)
 _TIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -128,11 +129,15 @@ def _stage_detail(conn, s):
             "env": env["name"] if env else None, "mode": transitions.mode_words(t["mode"], t["mode_arg"]),
             "junit": s["junit"],
             "waves": "; ".join(", ".join(w) for w in json.loads(s["waves"])) if s["waves"] else None,
-            "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"], "tier": s["tier"]}
+            "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"], "tier": s["tier"],
+            "start": s["start"] or "auto"}
+
+
+STARTS = ("auto", "manual")  # how a stage starts when its transition lets a version in (#6138)
 
 
 def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None, gate=None, pos=None, remove=False,
-              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None, tier=None):
+              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None, tier=None, start=None):
     """Add a stage (kind needed), or change the fields given ('' clears run, workflow or env), or move it (pos), or
     remove it (its runs stay; adding the name again brings it back). A stage runs a command (run) or a forge
     workflow (workflow), not both; a deploy stage names its environment."""
@@ -180,6 +185,11 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
                 raise core.RiverError(f"the tier {tier!r} is a short lower-case name such as {', '.join(TIERS)} "
                                       "(letters, digits, '-')")
             sets["tier"] = t or None
+        if start is not None:  # auto: it runs by itself; manual: the version waits in it for Run (#6138)
+            s = start.strip().lower() or "auto"
+            if s not in STARTS:
+                raise core.RiverError(f"a stage starts {' or '.join(STARTS)}, not {start!r}")
+            sets["start"] = None if s == "auto" else s
         if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
             sets["junit"] = junit.strip() or None
         if waves is not None:  # a stage over many servers (#6120)
@@ -203,7 +213,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             sid = row["id"]
             changed = "added again" if row["removed_at"] else "changed"
             if changed == "changed" and not sets and pos is None and rule is None:
-                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --tier, --run, --workflow, --env, "
+                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --tier, --start, --run, --workflow, --env, "
                                       "--gate or --pos")
             if row["removed_at"]:
                 sets["removed_at"] = None
@@ -225,7 +235,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             parts = [f"{k} {old[k] or 'none'} -> {detail[k] or 'none'}" for k in ("pos",) + _FIELDS
                      if old[k] != detail[k]]
         else:
-            parts = [f"{k} {detail[k]}" for k in _FIELDS + ("pos",) if detail[k] and (k, detail[k]) != ("mode", "auto")]
+            parts = [f"{k} {detail[k]}" for k in _FIELDS + ("pos",) if detail[k] and (k, detail[k]) not in (("mode", "auto"), ("start", "auto"))]
         _change(conn, pid, actor, f"stage {name} {changed}" + (": " + ", ".join(parts) if parts else ""), detail)
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 

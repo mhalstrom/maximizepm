@@ -195,6 +195,46 @@ try {
             self.assertIn("ran", r["runs"], r)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
+    def test_a_stage_that_starts_manually_shows_run_under_its_card(self):
+        """#6138: the card of a stage that starts manually says so; the version that waits in it has Run under the
+        card, and Run starts it. At 1280 and at 390 px, nothing wider than the page."""
+        from river.pipeline import define, runner
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "app", project="site")
+        define.stage_set(self.c, "app", "build", "build")
+        define.stage_set(self.c, "app", "prod", "build", start="manual")
+        rid = runner._queue(self.c, "app", "prod", "run1234")
+        self.c.execute("UPDATE stage_runs SET entered_at=? WHERE id=?", (core.iso(core.now()), rid))
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="app"]'), "Deploy: the pipeline app");
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('#plRow [data-pl-stage="prod"]'), "the stages of app");
+  const out = { card: q('#plRow [data-pl-stage="prod"]').textContent.replace(/\s+/g, " "),
+    build: q('#plRow [data-pl-stage="build"]').textContent.includes("✋"),
+    run: q('#plRow [data-pl-run-stage="prod"]') && q('#plRow [data-pl-run-stage="prod"]').textContent.trim() };
+  out.over = [...q("#plRow").querySelectorAll(".pl-stack, .pl-run")].filter(e => e.getBoundingClientRect().width > innerWidth)
+    .map(e => e.className);
+  if (q('#plRow [data-pl-run-stage="prod"]')) {
+    q('#plRow [data-pl-run-stage="prod"]').click();
+    await until(() => !q('#plRow [data-pl-run-stage="prod"]'), "Run is pressed");
+  }
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="1280,900")
+        self.assertIn("✋ waits for Run", r["card"], r)
+        self.assertFalse(r["build"], r)
+        self.assertEqual(r["run"], "▶ Run run1234", r)
+        self.assertEqual(r["over"], [], r)
+        self.assertEqual(self.c.execute("SELECT run_by FROM stage_runs WHERE id=?", (rid,)).fetchone()[0], "mark")
+        rid = runner._queue(self.c, "app", "prod", "run5678")
+        self.c.execute("UPDATE stage_runs SET entered_at=? WHERE id=?", (core.iso(core.now()), rid))
+        r = self.drive(driver, "/", size="390,844")
+        self.assertEqual(r["run"], "▶ Run run5678", r)
+        self.assertEqual(r["over"], [], r)
+
     def test_the_emergency_tab_shows_what_each_action_acts_on_and_stops_the_pipeline(self):
         """#6145: a pipeline's Emergency tab: its operators, four actions to pick, what the picked one acts on (a
         shared token warns), a reason, and Stop: a banner until Resume. At 1280 and at 390 px, nothing wider."""

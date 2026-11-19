@@ -272,6 +272,7 @@ def describe(conn, stage, pipeline, cache=None, at=None):
         "SELECT r.id run, v.rev, r.queued_at since, r.approved_by, r.passed_by, r.gate_note note, r.gate_item item, "
         "r.outside, r.outside_at "
         "FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.stage_id=? AND r.state='queued' "
+        "AND r.entered_at IS NULL "  # a version in a stage that starts manually waits in the stage, not here (#6138)
         "ORDER BY r.id DESC LIMIT ?", (stage["id"], WAITING_SHOWN))]
     block = None
     if t["block_reason"] and not block_ended(conn, t, at):

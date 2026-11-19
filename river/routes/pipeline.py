@@ -118,6 +118,8 @@ OPS = {
         c, a["pipeline"], a.get("add") or [], a.get("remove") or [],
         None if a.get("agents") is None else bool(a["agents"]), who),
     "pipeline_emergency": lambda c, a, who: _emergency(c, a, who),
+    # #6138: Run on a stage that starts manually (the function checks: an operator, a person or the manager)
+    "pipeline_run_stage": lambda c, a, who: _runner().run_stage(c, a["pipeline"], a["stage"], a.get("rev"), who),
     "pipeline_move_back": lambda c, a, who: _runner().move_back(c, a["pipeline"], a["stage"], a["rev"],
                                                                 a.get("reason"), who),
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
@@ -318,6 +320,7 @@ def _strip(stages, no_news=False, work=None):
         r = s.get("last_run") or {}
         t = s.get("transition") or {}
         out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "tier": s.get("tier"),
+                    "start": s.get("start"), "waits_for_run": s.get("waits_for_run"),  # #6138
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
@@ -337,7 +340,8 @@ def _person_waits(conn, pipeline_id):
         "SELECT r.id, r.gate_note, r.gate_item, r.queued_at, s.name stage, v.rev FROM stage_runs r "
         "JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipeline_transitions t ON t.stage_id=s.id "
         "LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.pipeline_id=? AND r.state='queued' AND "
-        "t.mode='yes' AND COALESCE(t.mode_arg, '')<>'manager' AND r.approved_at IS NULL AND s.removed_at IS NULL "
+        "t.mode='yes' AND COALESCE(t.mode_arg, '')<>'manager' AND r.approved_at IS NULL AND r.entered_at IS NULL "
+        "AND s.removed_at IS NULL "
         "AND t.block_reason IS NULL AND t.disabled_at IS NULL ORDER BY r.id", (pipeline_id,))]
 
 

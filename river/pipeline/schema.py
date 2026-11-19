@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   wave_wait    TEXT,                     -- ... how long the checks of a wave must hold before the next wave
   tier         TEXT,                     -- alpha, beta, prod, or a name the pipeline adds; several stages may share one
                                          -- (#6137). Readers: the stage card, trigger rules (any stage of a tier)
+  start        TEXT,                     -- manual: a version that its transition lets in waits for Run (#6138);
+                                         -- none: auto, the stage runs by itself
   UNIQUE (pipeline_id, name)
 );
 
@@ -236,6 +238,10 @@ CREATE TABLE IF NOT EXISTS stage_runs (
                                          -- itself, so MaximizePM only answers whether the version may enter
   outside_at   TEXT,                     -- ... when it asked last
   outside_said TEXT,                     -- ... the last answer: yes, or no and the kind of control (one audit line each)
+  entered_at   TEXT,                     -- a stage that starts manually (#6138): its transition let the version in;
+                                         -- the run waits in the stage for Run
+  run_by       TEXT,                     -- who pressed Run (maxpm pipeline run-stage)
+  run_at       TEXT,
   UNIQUE (pipeline_id, key)
 );
 CREATE INDEX IF NOT EXISTS stage_runs_state ON stage_runs(state);
@@ -437,14 +443,15 @@ def migrate(conn):
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait",
-              "tier"):  # #6113, #6114, #6120, #6137
+              "tier", "start"):  # #6113, #6114, #6120, #6137, #6138
         if c not in stage_cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
                  ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER"), ("passed_by", "TEXT"),
                  ("passed_at", "TEXT"), ("sent_by", "TEXT"), ("reason", "TEXT"),
-                 ("outside", "TEXT"), ("outside_at", "TEXT"), ("outside_said", "TEXT")):  # #6114, #6117, #6118, #6139, #6141, #6164
+                 ("outside", "TEXT"), ("outside_at", "TEXT"), ("outside_said", "TEXT"),  # #6114, #6117, #6118, #6139, #6141, #6164
+                 ("entered_at", "TEXT"), ("run_by", "TEXT"), ("run_at", "TEXT")):  # #6138
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_changes)")}
