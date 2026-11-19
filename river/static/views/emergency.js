@@ -113,7 +113,8 @@ function viewHtml(d) {
   if (d.followed && !acts.some(([k]) => k === pick)) pick = "agents";
   const picks = acts.map(([k, t, text, tip]) => button(`<b>${esc(t)}</b><span class="t-s muted">${esc(text)}</span>`,
     { kind: "card", cls: "pl-card em-pick", pressed: pick === k, data: { "em-pick": k }, title: tip })).join("");
-  const note = d.followed ? `<div class="pl-banner">${esc(d.pipeline)} is followed: ${esc(d.followed)} runs its flow. Stop, Move back and Send a version act there, not here; Stop its agents and Revoke its keys act on our side.</div>` : "";
+  const note = d.followed ? `<div class="pl-banner">${esc(d.pipeline)} is followed: ${esc(d.followed)} runs its flow. Stop, Move back and Send a version act there, not here; Stop its agents and Revoke its keys act on our side.</div>`
+    : d.target ? `<div class="muted t-s">${esc(d.pipeline)} is a deploy target. Stop holds its release items. Move back and Send a version add a deploy item pinned at that version: it still waits for the person's yes and goes out through the deploy hook.</div>` : "";  // #6176
   return `${banner}${note}${operatorsHtml(d.operators)}<div class="em-picks">${picks}</div>${actionHtml(d)}
     <div class="muted t-s">The emergency actions take ${esc(d.operators.rule)}.</div>`;
 }

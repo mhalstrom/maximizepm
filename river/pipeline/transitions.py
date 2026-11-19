@@ -186,7 +186,8 @@ def _fault(conn, pipeline, cache=None):
     project and of the targets of its environments. None when none is open."""
     if cache is not None and "fault" in cache:
         return cache["fault"]
-    heads = [f"pipeline:{pipeline['name']}:"] + [f"ops:{s}:" for s in [pipeline["project"]] + [r["target"] for r in conn.execute(
+    own = [pipeline["target"]] if "target" in pipeline.keys() and pipeline["target"] else []  # #6176
+    heads = [f"pipeline:{pipeline['name']}:"] + [f"ops:{s}:" for s in [pipeline["project"]] + own + [r["target"] for r in conn.execute(
         "SELECT target FROM pipeline_envs WHERE pipeline_id=? AND target IS NOT NULL AND removed_at IS NULL",
         (pipeline["id"],))] if s]
     where = " OR ".join("substr(title, 1, ?)=?" for _ in heads)
@@ -377,8 +378,9 @@ def _reason(reason, what):
 def _target(conn, pipeline, stage):
     """The pipeline row and the live stage row that a command names."""
     p = store._pipeline(conn, pipeline)
-    from . import follow
+    from . import follow, target_flow
     follow.check(conn, p, "controls a transition")  # #6167: a followed pipeline has none of ours
+    target_flow.fixed_stage(p, stage)  # #6176: a deploy target's watch has no controls
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
                      (p["id"], stage)).fetchone()
     if not s:
@@ -417,6 +419,10 @@ def change(conn, pipeline, stage, mode=None, window=None, fault_rule=None, reaso
         win = " ".join(window.split())
     with core.tx(conn):
         p, s = _target(conn, pipeline, stage)
+        if new_mode is not None and p["target"]:  # #6176: the modes of a deploy target come from its settings
+            raise core.RiverError(f"the mode of the transition into {stage} of deploy target {p['name']} comes from the "
+                                  f"target (its release cadence: maxpm target cadence; the person's yes: the setting "
+                                  f"release_approval); a window, the fault rule, a block, a delay or a freeze work here")
         old = get(conn, s["id"])
         _ensure(conn, p["id"], s["id"])
         parts = []
@@ -535,9 +541,9 @@ def freeze(conn, pipeline, stage=None, start=None, end=None, reason=None, clear=
             raise core.RiverError("say until when: --to <time> ('fri 08:00', 2026-11-28T18:00, 3d)")
     with core.tx(conn):
         p = store._pipeline(conn, pipeline)
-        stages = [_target(conn, pipeline, stage)[1]] if stage else conn.execute(
+        stages = [_target(conn, pipeline, stage)[1]] if stage else [s for s in conn.execute(
             "SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
-            (p["id"],)).fetchall()
+            (p["id"],)).fetchall() if not (p["target"] and s["name"] == "watch")]  # #6176: a target's watch has none
         if not stages:
             raise core.RiverError(f"pipeline {p['name']} has no stages")
         zone, now = _zone(conn, p["project"]), core.now()
@@ -576,6 +582,10 @@ def let_pass(conn, pipeline, stage, rev=None, reason=None, actor=None):
     from . import runner
     with core.tx(conn):
         p, s = _target(conn, pipeline, stage)
+        if p["target"]:  # #6176: no version waits at a target's arrow; its release items do
+            raise core.RiverError(f"no version waits at the transition into {stage} of deploy target {p['name']}: it "
+                                  f"holds the release items instead. To let them go: maxpm pipeline unblock "
+                                  f"{p['name']} {stage}, or end the delay or the freeze")
         r = runner._waiting_run(conn, p, stage, rev)
         t = get(conn, s["id"])
         yes = r["approved_at"] is not None or t["mode"] in ("auto", "forge") or runner._may_say_yes(conn, t, actor)

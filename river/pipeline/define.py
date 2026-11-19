@@ -14,7 +14,7 @@ import json
 import re
 
 from .. import core
-from . import audit, store, transitions
+from . import audit, store, target_flow, transitions
 
 _FIELDS = ("kind", "tier", "start", "after", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback",
            "wave_wait")
@@ -80,6 +80,7 @@ def env_set(conn, pipeline, name, target=None, url=None, notes=None, remove=Fals
     with core.tx(conn):
         _may(conn, actor)
         p = store._pipeline(conn, pipeline)
+        target_flow.refuse_define(p, "adds or changes an environment")  # #6176
         row = _env_row(conn, p["id"], name)
         if remove:
             if row is None or row["removed_at"]:
@@ -158,6 +159,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
     with core.tx(conn):
         _may(conn, actor)
         p = store._pipeline(conn, pipeline)
+        target_flow.refuse_define(p, "adds or changes a stage")  # #6176
         pid, row = p["id"], _stage_row(conn, p["id"], name)
         old = _stage_detail(conn, row) if row is not None else None  # before the mode changes below
         if remove:
@@ -300,6 +302,7 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
     with core.tx(conn):
         _may(conn, actor)
         p = store._pipeline(conn, pipeline)
+        target_flow.refuse_define(p, "reads a forge")  # #6176
         vals = (None,) * 5 if forge == "none" else (forge, repo, secret, ref, url)
         conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, forge_url=?, polled_at=NULL, "
                      "poll_error=NULL, plugin_settings=NULL, plugin_state=NULL WHERE id=?", (*vals, p["id"]))

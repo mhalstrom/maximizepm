@@ -58,6 +58,10 @@ def _tail(old, lines, n):
 
 def _pipeline(conn, name):
     row = conn.execute("SELECT * FROM pipelines WHERE name=?", (name,)).fetchone()
+    if not row or row["target"]:
+        # #6176: a deploy target with no pipeline of its own has a row for its controls (made at its first use)
+        from . import target_flow
+        row = target_flow.ensure(conn, name) or row
     if not row:
         raise core.RiverError(f"no pipeline named {name!r}; a person or the manager adds it first")
     return row
@@ -483,7 +487,8 @@ def step_output(conn, step_id, lines):
 # ---------------------------------------------------------------- reads
 
 def pipelines(conn):
-    return [dict(r) for r in conn.execute("SELECT * FROM pipelines ORDER BY name")]
+    # #6176: not the rows of the deploy targets' controls: each target shows as its default pipeline
+    return [dict(r) for r in conn.execute("SELECT * FROM pipelines WHERE target IS NULL ORDER BY name")]
 
 
 def _run_dict(conn, r):
@@ -573,6 +578,9 @@ def stage_versions(conn, pipeline, stage, limit=STAGE_VERSIONS):
     moved back, run again, ...), who sent it or let it in and why, its state and times, and whether that version is
     the one the stage's environment runs now. A move back is one more run, so the list is the stage's own record."""
     p = _pipeline(conn, pipeline)
+    if p["target"]:  # #6176: a deploy target's stage: its releases
+        from . import target_flow
+        return target_flow.stage_versions(conn, p, stage, limit)
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=?", (p["id"], stage)).fetchone()
     if not s:
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")

@@ -161,7 +161,8 @@ def item_versions(conn, item_id):
         raise core.RiverError(f"no item #{item_id}")
     folder = _folder(conn, it["project"])
     out = []
-    pipes = conn.execute("SELECT * FROM pipelines WHERE project=?", (it["project"],)).fetchall()
+    pipes = conn.execute("SELECT * FROM pipelines WHERE project=? AND target IS NULL",  # #6176: not a target's row
+                         (it["project"],)).fetchall()
     log = (_git(folder, "log", "--all", "--format=%H", "-n", "20", "-E", f"--grep=#{item_id}([^0-9]|$)")
            if folder and pipes else None)
     commits = log.stdout.split() if log else []

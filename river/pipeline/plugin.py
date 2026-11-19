@@ -400,6 +400,7 @@ def use(conn, pipeline, name, settings=None, secrets=None, repo=None, url=None, 
     with core.tx(conn):
         define._may(conn, actor)
         p = store._pipeline(conn, pipeline)
+        define.target_flow.refuse_define(p, "reads a plugin source")  # #6176
         conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, forge_url=?, plugin_settings=?, "
                      "plugin_state=NULL, polled_at=NULL, poll_error=NULL, plugin_pin=? WHERE id=?",
                      (name, settings.get("repo"), next(iter(mapped.values()), None), settings.get("ref"),

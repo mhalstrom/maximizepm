@@ -45,7 +45,7 @@ def pipelines(conn, path):
 
 def pipeline(conn, path):
     name = unquote(path.split("/api/pipeline/", 1)[1])
-    if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
+    if conn.execute("SELECT 1 FROM pipelines WHERE name=? AND target IS NULL", (name,)).fetchone():  # #6176
         p = store.show(conn, name)
         p["versions"] = store.versions(conn, name)
         p["account"] = _accounts().for_pipeline(conn, conn.execute("SELECT * FROM pipelines WHERE name=?",
@@ -414,7 +414,8 @@ def deploy(conn, path):
                    "since": r.get("started_at"), "note": "the release waits for a person's yes"}]
                  if r.get("state") == "queued" and r.get("item") else [])
         out.append({"name": t["name"], "project": d["project"], "default": True, "source": {"forge": None,
-                    "label": "deploy target", "state": "local"}, "held": None, "held_by": None,
+                    "label": "deploy target", "state": "local"}, "held": d.get("held_reason"),
+                    "held_by": d.get("held_by"), "controls": True,  # #6176
                     "stages": _strip(_with_holding(conn, t["name"], d["stages"]), work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [t["name"]], "waits": waits})

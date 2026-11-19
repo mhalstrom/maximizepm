@@ -8902,6 +8902,8 @@ def release_yes_pass(conn):
     """maxpm serve: each ready deploy item of a target that takes a person's yes asks for it once (release_yes).
     Returns {deploy id: approval item id}."""
     out, ann = {}, None
+    with tx(conn):
+        _pipeline_holds(conn)  # #6176: a release item that a closed transition holds is not ready: nobody is asked yet
     for d in conn.execute(f"SELECT * FROM items WHERE kind='deploy' AND status='open' ORDER BY id").fetchall():
         if approval_refusal(conn, d) is None or any(a["status"] != "dropped" for a in _approvals(conn, d["id"])):
             continue
@@ -8935,6 +8937,7 @@ def deploy_hook_start(conn, dep_id, token=None):
     runs, the release is cut when no reviewer cut it, and one run of the hook is queued for token. Returns the run
     id, or None when the item is not open, nobody may start it now, or the target has no deploy hook."""
     with tx(conn):
+        _pipeline_holds(conn)  # #6176: a block, a window or a freeze that began since the last command holds it now
         dep = _item(conn, dep_id)
         cmd = deploy_hook(conn, dep["target"])
         if (dep["kind"] != "deploy" or dep["status"] != "open" or dep["assignee"] or dep["blocked_reason"]
@@ -9562,6 +9565,10 @@ def target_cut(conn, name, rev=None, actor=None):
         if plan["waits"]:
             raise RiverError(f"{plan['text']}. To cut it sooner, give the reason first: "
                              f"maxpm target release-now {name} --reason \"<why>\"")
+        from .pipeline import target_flow
+        held = target_flow.cut_refusal(conn, name)  # #6176: the transition after holding, or a stop of the pipeline
+        if held:
+            raise RiverError(held)
         _release_cut(conn, plan["deploy"], actor, f"maxpm target cut by {actor or 'a person'}", rev)
         _cadence_sync(conn)
     return dict(target_show(conn, name), cut=item_show(conn, plan["deploy"]), items=plan["ships"])
@@ -9595,6 +9602,13 @@ def _cadence_sync(conn):
                      "blocked_at=COALESCE(blocked_at, ?) WHERE id=?", (reason, until, CADENCE_BY, t, item_id))
         if not mine or it["blocked_until"] != until:
             _event(conn, item_id, "maxpm", why + (f"; this release waits until {show_time(until, zone)}" if until else ""))
+
+
+def _pipeline_holds(conn):
+    """Inside a tx: the release items that a closed transition of a deploy target's pipeline holds get its outside
+    blocker, and lose it when the transition opens (#6176, pipeline/target_flow.sync)."""
+    from .pipeline import target_flow
+    return target_flow.sync(conn)
 
 
 def cadence_holds(conn, dep_id):
@@ -14385,6 +14399,7 @@ def _sweep(conn):
             _send(conn, "notice", "maxpm", f"the push of #{r['id']} {r['title']} to {r['reserved_for']} expired "
                   f"without an answer; it is open to every agent again", to=who, item_id=r["id"])
     _cadence_sync(conn)  # the waits of a release cadence end and move here, not in the loop below
+    _pipeline_holds(conn)  # #6176: a closed transition of a deploy target's pipeline holds its release items
     for r in conn.execute("SELECT id, title, blocked_reason, blocked_set_by, doer FROM items WHERE blocked_until <= ? "
                           "AND blocked_reason IS NOT NULL AND COALESCE(blocked_set_by,'')<>?", (t, CADENCE_BY)).fetchall():
         conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "

@@ -182,42 +182,88 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
     return out
 
 
-def default_pipeline(conn, name):
-    """The default pipeline of target name, in the form of store.show, with its releases newest first."""
-    t = _target(conn, name)
-    deps = conn.execute("SELECT * FROM items WHERE kind='deploy' AND target=? ORDER BY id DESC LIMIT ?",
-                        (name, RELEASES)).fetchall()
-    reviews = core._target_reviews(conn, name) or any(
+KINDS = {"holding": "holding", "build": "build", "review": "review", "approval": "approve", "deploy": "deploy",
+         "watch": "check"}
+
+
+def _deploys(conn, name, limit=RELEASES):
+    return conn.execute("SELECT * FROM items WHERE kind='deploy' AND target=? ORDER BY id DESC LIMIT ?",
+                        (name, limit)).fetchall()
+
+
+def _has_reviews(conn, name, deps):
+    return core._target_reviews(conn, name) or any(
         conn.execute("SELECT 1 FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND i.kind='review'",
                      (d["id"],)).fetchone() for d in deps)
+
+
+def _has_build(conn, name, deps):
+    """True when the target has a release-cut hook, or one of these releases ran one."""
+    if conn.execute("SELECT 1 FROM hooks h JOIN targets x ON x.id=h.target_id WHERE x.name=? AND h.event='release-cut'",
+                    (name,)).fetchone():
+        return True
+    ids = [d["id"] for d in deps]
+    return bool(ids) and conn.execute(f"SELECT 1 FROM hook_runs WHERE event='release-cut' AND deploy_id IN "
+                                      f"({','.join('?' * len(ids))}) LIMIT 1", ids).fetchone() is not None
+
+
+def shape(conn, name, deps=None):
+    """The stages of target name, left to right, holding first: the names that its default pipeline shows (#6176:
+    the stored pipeline of its controls has the same ones, less holding)."""
+    deps = _deploys(conn, name) if deps is None else deps
+    out = ["holding"]
+    if _has_build(conn, name, deps):
+        out.append("build")
+    if _has_reviews(conn, name, deps):
+        out.append("review")
+    if core.release_approval(conn, name)["approval"] == "person":
+        out.append("approval")
+    return out + ["deploy", "watch"]
+
+
+def release_runs(conn, name, deps=None):
+    """The releases of target name, newest first: [{deploy, status, runs: {stage: run}}] (_release)."""
+    t = _target(conn, name)
+    deps = _deploys(conn, name) if deps is None else deps
+    reviews = _has_reviews(conn, name, deps)
     approval = core.release_approval(conn, name)["approval"] == "person"
-    has_cut_hook = conn.execute("SELECT 1 FROM hooks h JOIN targets x ON x.id=h.target_id WHERE x.name=? AND "
-                                "h.event='release-cut'", (name,)).fetchone()
-    hook = {r["event"]: r["command"] for r in conn.execute(
-        "SELECT h.event, h.command FROM hooks h JOIN targets x ON x.id=h.target_id WHERE x.name=?", (name,))}
     checks = _checks(conn, name)
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
-    releases = []
+    out = []
     for d in deps:
         later = [x["closed_at"] for x in done if x["closed_at"] > (d["closed_at"] or "")]
-        releases.append({"deploy": d["id"], "status": d["status"],
-                         "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, checks)})
-    shape = [("holding", "holding", None, "auto"), ("build", "build", hook.get("release-cut"), "auto"),
-             ("review", "review", None, "auto"), ("approval", "approve", None, "yes"),
-             ("deploy", "deploy", hook.get("deploy"), "auto"), ("watch", "check", None, "auto")]
+        out.append({"deploy": d["id"], "status": d["status"], "closed_at": d["closed_at"], "cut_rev": d["cut_rev"],
+                    "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, checks)})
+    return out
+
+
+def default_pipeline(conn, name):
+    """The default pipeline of target name, in the form of store.show, with its releases newest first. Its arrows
+    have the controls of the target's stored pipeline (#6176, target_flow.py) when it has one, else none set yet."""
+    from . import target_flow
+    t = _target(conn, name)
+    deps = _deploys(conn, name)
+    releases = release_runs(conn, name, deps)
+    done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
+    hook = {r["event"]: r["command"] for r in conn.execute(
+        "SELECT h.event, h.command FROM hooks h JOIN targets x ON x.id=h.target_id WHERE x.name=?", (name,))}
+    own = target_flow.row(conn, name)
+    rows = {r["name"]: r for r in conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS "
+                                               "NULL", (own["id"],))} if own else {}
+    cache = {}
     stages = []
-    for stage, kind, cmd, gate in shape:
-        if stage == "build" and not (has_cut_hook or any("build" in r["runs"] for r in releases)):
-            continue
-        if stage == "review" and not reviews:
-            continue
-        if stage == "approval" and not approval:
-            continue
+    for stage in shape(conn, name, deps):
         last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
-        # The arrow after holding is the release (#6140): the manager or the cadence makes it.
-        arrow = transitions.plain("release", core.parse_cadence(t["cadence"])[0] or None) if len(stages) == 1 else \
-            transitions.plain(gate)
-        stages.append({"name": stage, "pos": len(stages) + 1, "kind": kind, "run": cmd, "workflow": None,
+        # The arrow after holding is the release (#6140): the manager or the cadence makes it. The arrow into approval
+        # is the person's yes; the others are automatic. These modes come from the target's settings; the controls
+        # (a block, a delay, disabled, a window, a freeze, the fault rule) from its stored pipeline (#6176).
+        mode = ("release", core.parse_cadence(t["cadence"])[0] or None) if len(stages) == 1 else \
+            ("yes", None) if stage == "approval" else ("auto", None)
+        arrow = transitions.plain("auto") if stage == "holding" else \
+            target_flow.arrow(conn, own, rows.get(stage), stage, mode, cache)
+        stages.append({"name": stage, "pos": len(stages) + 1, "kind": KINDS[stage],
+                       "run": hook.get("release-cut") if stage == "build" else hook.get("deploy") if stage == "deploy"
+                       else None, "workflow": None,
                        "env": name if stage == "deploy" else None, "transition": arrow,
                        "tier": "prod" if stage in ("deploy", "watch") else None,  # #6137: the target is production
                        "junit": None, "last_run": last})
@@ -230,6 +276,8 @@ def default_pipeline(conn, name):
     project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id "
                            "LIMIT 1", (name, f"deploy-{name}")).fetchone()  # not the deploy project of the target
     return {"name": name, "project": project["name"] if project else None, "default": True, "stages": stages,
+            "controls": True,  # #6176: its arrows, operators, emergency actions, triggers and audit log act
+            "held_reason": own["held_reason"] if own else None, "held_by": own["held_by"] if own else None,
             "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
                                          "version": next(iter(r["runs"].values()))["version"],
                                          "stages": {k: {"state": v["state"], "item": v["item"]}
@@ -264,8 +312,8 @@ def _root_of(conn, project):
 
 def _where(conn, name):
     """(pipeline row or None, target name or None, project name): what holding reads for a pipeline or a target."""
-    p = conn.execute("SELECT * FROM pipelines WHERE name=?", (name,)).fetchone()
-    if p:
+    p = conn.execute("SELECT * FROM pipelines WHERE name=? AND target IS NULL", (name,)).fetchone()  # #6176: not
+    if p:  # the stored row of a target's controls: its holding is the target's
         env = conn.execute("SELECT target FROM pipeline_envs WHERE pipeline_id=? AND target IS NOT NULL AND removed_at "
                            "IS NULL ORDER BY id LIMIT 1", (p["id"],)).fetchone()
         proj = conn.execute("SELECT target FROM projects WHERE name=?", (p["project"],)).fetchone() if p["project"] else None

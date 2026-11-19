@@ -359,6 +359,9 @@ def _short(rev):
 
 def events(conn, p, since):
     """Every generic event of one pipeline from since on, oldest first."""
+    from . import target_flow
+    if target_flow.is_target(p):  # #6176: a deploy target's runs are its release items
+        return sorted(target_flow.events(conn, p, since), key=lambda e: (e["at"], e["key"]))
     stages = {s["id"]: dict(s) for s in conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=?", (p["id"],))}
     return sorted(_runs(conn, p, stages, since) + _checks(conn, p, stages, since), key=lambda e: (e["at"], e["key"]))
 
@@ -492,7 +495,7 @@ def _act(conn, p, r, ev):
     name = f"t{r['id']}"
     if not p["project"] or not conn.execute("SELECT 1 FROM projects WHERE name=?", (p["project"],)).fetchone():
         return None, "no project to hold the task: the pipeline names none (maxpm pipeline add ... --project)"
-    if ev["event"] == "stage-failed":
+    if ev["event"] == "stage-failed" and ev.get("run_id"):  # a deploy target's stage (#6176) has no run: a task
         item, how = links.fault_for(conn, ev["run_id"], r["does"], name)
         return item, f"{how} fault #{item}" if item else how
     if ev["event"] == "check-failed":
@@ -510,7 +513,8 @@ def _act(conn, p, r, ev):
 
 
 _SHORT = {"check-failed": "check failed after deploy", "transition-opened": "version let in",
-          "run-started": "run started", "run-ended": "run ended"}
+          "run-started": "run started", "run-ended": "run ended",
+          "stage-failed": "stage failed"}  # #6176: a deploy target's stage has no run, so no fault of a run
 
 
 def _short_title(ev):
@@ -520,7 +524,8 @@ def _short_title(ev):
 
 
 def _context(p, r, ev):
-    run = f"maxpm pipeline run {ev['run_id']}" if ev.get("run_id") else f"maxpm pipeline show {p['name']}"
+    run = f"maxpm pipeline run {ev['run_id']}" if ev.get("run_id") else (
+        f"maxpm show {ev['item']}" if ev.get("item") else f"maxpm pipeline show {p['name']}")  # #6176: a release item
     return (f"Trigger rule t{r['id']} of pipeline {p['name']} ({when_text(r).lower()}): {ev['text']}.\n\n"
             f"What to do: {r['does']}\n\nThe run: {run}. The pipeline: maxpm pipeline show {p['name']}.")
 

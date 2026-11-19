@@ -67,9 +67,12 @@ def _waits_for_run(r):
 def run_stage(conn, pipeline, stage, rev=None, actor=None):
     """maxpm pipeline run-stage <name> <stage> [--rev]: start the version that waits in a stage that starts manually
     (the Run button of its card). A person or the manager; the operators of the pipeline too (#6145)."""
-    from . import follow, operators
+    from . import follow, operators, target_flow
     p = store._pipeline(conn, pipeline)
     follow.check(conn, p, "starts a stage")  # #6167
+    if target_flow.is_target(p):  # #6176
+        raise core.RiverError(f"the stages of deploy target {p['name']} start by themselves (its review, the person's "
+                              f"yes, its deploy hook): none waits for Run")
     if operators.refusal(conn, p, actor):  # an operator, or else a person or the manager
         _lead(conn, actor, "starts a stage")
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
@@ -124,7 +127,9 @@ def _queue(conn, pipeline, stage, rev, source="maxpm"):
 def start(conn, pipeline, rev=None, actor=None):
     """maxpm pipeline start: queue a version (a commit; the project folder's HEAD when none) at the first stage."""
     p = store._pipeline(conn, pipeline)
-    from . import follow
+    from . import follow, target_flow
+    if target_flow.is_target(p):  # #6176: a deploy target's release from holding: its cut
+        return target_flow.start(conn, p, rev, actor)
     follow.check(conn, p, "starts a version")  # #6167
     first = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id "
                          "LIMIT 1", (p["id"],)).fetchone()
@@ -325,6 +330,14 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
     person's yes, the manager's yes, the release, or a delay cut short). Its controls (a block, a window) still hold
     the version; maxpm pipeline pass lets it past them."""
     p = store._pipeline(conn, pipeline)
+    from . import target_flow
+    if target_flow.is_target(p):  # #6176: the yes of a release is the person's own item
+        yes = conn.execute("SELECT id FROM items WHERE doer='human' AND target=? AND status IN " + str(core.OPEN_STATES)
+                           + " AND title LIKE ? ORDER BY id DESC LIMIT 1", (p["target"], core.APPROVE_TITLE + " %")
+                           ).fetchone()
+        raise core.RiverError(f"a release of deploy target {p['name']} takes the person's yes on its own item"
+                              + (f": #{yes['id']} (the person marks it done)" if yes else "") + "; a block, a delay or "
+                              f"a freeze of a transition ends with maxpm pipeline unblock|delay|freeze")
     r = _waiting_run(conn, p, stage, rev)
     t = transitions.get(conn, r["stage_id"])
     if t["mode"] in ("auto", "forge"):
@@ -662,7 +675,9 @@ def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None
     pipeline still stops it."""
     _lead(conn, actor, "runs a stage again")
     p = store._pipeline(conn, pipeline)
-    from . import follow, plugin
+    from . import follow, plugin, target_flow
+    if target_flow.is_target(p):  # #6176: a deploy item of the target, through its approval and its deploy hook
+        return target_flow.send(conn, p, stage, rev, actor, purpose, note, reason)
     follow.check(conn, p, "runs a stage")  # #6167: a run again, a move back, an override
     plugin.need(conn, p, _stage_row(conn, p, stage), plugin.action_for(purpose))  # a plugin may not list it (#6159)
     run = _queue(conn, p["name"], stage, rev)
@@ -717,6 +732,10 @@ def rollback(conn, pipeline, env, rev, reason=None, actor=None):
     unblocks it."""
     _lead(conn, actor, "rolls back an environment")
     p = store._pipeline(conn, pipeline)
+    from . import target_flow
+    if target_flow.is_target(p):  # #6176: the target is its one environment, and deploy its stage
+        out = move_back(conn, p["name"], "deploy", rev, reason, actor, words=f"rolled back {p['target']} to {rev}")
+        return {**out, "env": p["target"]}
     s = conn.execute("SELECT s.name FROM pipeline_stages s JOIN pipeline_envs e ON e.id=s.env_id WHERE "
                      "s.pipeline_id=? AND e.name=? AND s.removed_at IS NULL ORDER BY s.pos LIMIT 1",
                      (p["id"], env)).fetchone()
@@ -734,8 +753,19 @@ def move_back(conn, pipeline, stage, rev, reason=None, actor=None, words=None, r
     ran False (rollback of an environment): the version need not have passed the stage here."""
     _lead(conn, actor, "moves a stage back")
     p = store._pipeline(conn, pipeline)
-    from . import plugin
-    plugin.need(conn, p, _stage_row(conn, p, stage), "rollback")  # a source that cannot: before the block (#6159)
+    from . import plugin, target_flow
+    if target_flow.is_target(p):  # #6176: a version that went out before, as a new deploy item of the target
+        if stage != "deploy":
+            raise core.RiverError(f"a move back of deploy target {p['name']} acts on its deploy stage: maxpm pipeline "
+                                  f"move-back {p['name']} deploy --rev <commit>")
+        found = target_flow.passed_deploy(conn, p, rev)
+        if not found:
+            raise core.RiverError(f"version {rev} never went out to {p['target']} (no done release is pinned there); "
+                                  f"to send it anyway: maxpm pipeline rerun {p['name']} deploy --rev {rev}")
+        rev = found
+        ran = False
+    else:
+        plugin.need(conn, p, _stage_row(conn, p, stage), "rollback")  # a source that cannot: before the block (#6159)
     if ran:
         found = conn.execute(
             "SELECT v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipeline_versions v ON "

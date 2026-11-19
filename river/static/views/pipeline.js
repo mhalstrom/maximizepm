@@ -70,7 +70,7 @@ function draw() {
   $("#plNote").innerHTML = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
     + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : "")  // the page's head names the project
     + (D.followed ? ` · followed: its own system runs the flow; its trigger rules and hooks act on its events` : "")  // #6167
-    + (D.default || D.followed ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
+    + ((D.default && !D.controls) || D.followed ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
       : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" })))
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
@@ -307,7 +307,7 @@ let srSig = "";
 async function refreshStageRuns(force) {
   const s = chosen(), box = $("#plStageRuns");
   if (!box) return;
-  if (!s || V.data.default || V.arrow || s.holding) { box.innerHTML = ""; srSig = ""; return; }
+  if (!s || (V.data.default && !V.data.controls) || V.arrow || s.holding) { box.innerHTML = ""; srSig = ""; return; }
   let SR;
   try { SR = await getJson(`api/pipeline-stage?pipeline=${encodeURIComponent(V.name)}&stage=${encodeURIComponent(s.name)}`); }
   catch (e) { return; }
@@ -321,14 +321,21 @@ function stageRunsHtml(SR) {
   if (!SR.runs.length) return "";
   const liveRev = (SR.runs.find(r => r.live) || {}).rev;
   const D = V.data, s = D.stages.find(x => x.name === SR.stage), miss = [], ours = !D.followed;  // #6167
+  // #6176: a deploy target's rows are its releases: a move back and a run again of deploy make a deploy item (the
+  // person's yes and the deploy hook still release it); a run again of review or build acts on a release not out yet.
+  const tg = !!SR.target, busy = (r) => ["running", "queued"].includes(r.state);
+  const back = (r) => ours && r.state === "passed" && r.rev && r.rev !== liveRev && (!tg || (SR.stage === "deploy" && r.pinned));
+  const again = (r) => ours && r.rev && (!tg || (r.pinned && (SR.stage === "deploy" ? !busy(r)
+    : ["review", "build"].includes(SR.stage) && !r.released)));
   const rows = SR.runs.map(r => {
     const b = [];
-    if (ours && r.state === "passed" && r.rev && r.rev !== liveRev)
+    if (back(r))
       b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
-    if (ours && r.state === "passed" && r.rev && r.rev !== liveRev && (SR.branches || []).length)  // #6142: the same place of every branch
+    if (back(r) && (SR.branches || []).length)  // #6142: the same place of every branch
       b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
-    if (ours && ["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
-    else if (ours && r.rev) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
+    if (ours && r.run != null && busy(r)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
+    else if (again(r)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
+    if (tg && r.item) b.push(`<span class="link t-s" data-open="${r.item}">#${r.item}</span>`);
     const when = r.started_at || r.queued_at;
     return `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
       <td class="mono">${esc(short(r.rev))}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
@@ -339,7 +346,8 @@ function stageRunsHtml(SR) {
   return `<div class="pl-card"><h3>Versions in ${esc(SR.stage)}</h3>
     <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>What</th><th>Why, or who</th><th>How</th><th></th></tr>${rows}</table></div>
     ${missLine(D, [...new Set(miss)])}
-    <div class="muted t-s">${ours ? `A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.`
+    <div class="muted t-s">${tg ? `Each row is a release of ${esc(SR.target)}. A move back or a run again of deploy adds a deploy item pinned at that version: it waits for the person's yes and goes out through the deploy hook, like every release. A move back also blocks the transition into deploy until someone unblocks it.`
+      : ours ? `A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.`
       : "Followed: these runs come from its own system; a move back or a run again happens there."}</div></div>`;
 }
 
@@ -380,7 +388,7 @@ function arrowDetail(s) {
   const from = (t.from || []).length ? t.from.join(" + ") : t.from ? "start" : i > 0 ? D.stages[i - 1].name : "start";  // #6142
   const [m, word, cls] = arrowMark(t);
   const row = (what, now, by) => `<tr><td><b>${esc(what)}</b></td><td>${now}</td><td class="t-s muted">${by}</td></tr>`;
-  const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : t.fixed ? "the deploy target" : "the start: automatic")];
+  const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : t.fixed || D.default ? "the deploy target" : "the start: automatic")];
   if (t.window) rows.push(row("Time window", `${esc(t.window.text)} ${st(t.window.open ? "passed" : "queued", t.window.open ? "open now" : "closed now")}`,
     setBy(t.window.by, t.window.at) + (t.window.change ? ` · ${t.window.open ? "closes" : "opens"} ${esc(when(t.window.change))}` : "")));
   for (const f of t.freezes || []) rows.push(row("Freeze", `${esc(when(f.from))} to ${esc(when(f.to))}: ${esc(f.reason)}${f.now ? " " + st("failed", "now") : ""}`, setBy(f.by)));
@@ -396,14 +404,15 @@ function arrowDetail(s) {
     + (w.note ? `<div class="muted t-s">${esc(w.note)}</div>` : "") + `</div>`).join("");
   return `<h3>The transition ${esc(from)} → ${esc(s.name)} ${chip(cls, `${esc(m)} ${esc(word)}`)}</h3>
     <div class="t-m">${t.state === "open" ? "Open: " + esc(t.text) : esc(t.state_text)}</div>
-    ${waits || `<div class="muted t-s">No version waits here now.</div>`}
+    ${waits || (D.default ? "" : `<div class="muted t-s">No version waits here now.</div>`)}
     <div class="pl-table"><table class="pl-ctl"><tr><th>Control</th><th>Now</th><th>Set by, until</th></tr>${rows.join("")}</table></div>
     ${arrowActions(s, t)}
     <div class="muted t-s">The tests and checks run inside the stages; a transition only lets versions in. Each change is a line in the audit log with who made it, why and until when.</div>`;
 }
 
 function arrowActions(s, t) {
-  if (V.data.default || t.fixed) return `<div class="muted t-s">A deploy target's own steps decide this. Give it a pipeline of its own to control its transitions.</div>`;
+  if (t.fixed || (V.data.default && !V.data.controls))
+    return `<div class="muted t-s">${t.fixed_why ? esc(t.fixed_why[0].toUpperCase() + t.fixed_why.slice(1)) + "." : "A deploy target's own steps decide this."}</div>`;
   const w = (t.waiting || [])[0], b = [], n = s.name;
   if (w && NEEDS_YES.includes(t.mode) && !w.approved_by)
     b.push(button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": n, rev: w.rev }, title: "Give its yes" }));
@@ -416,8 +425,11 @@ function arrowActions(s, t) {
   if (w && t.state !== "open") b.push(button(`Let ${esc(short(w.rev))} pass once…`, { data: { "pl-pass": n, rev: w.rev }, title: "Past every control" }));
   b.push(button("Freeze…", { data: { "pl-freeze": n }, title: "Stop for a period" }));
   if ((t.freezes || []).length) b.push(button("Remove the freezes", { data: { "pl-unfreeze": n }, title: "Remove the freezes" }));
-  b.push(button("Change the mode or the window…", { data: { "pl-change": n }, title: "The standing rules" }));
-  return `<div class="pl-bar">${b.join("")}</div>`;
+  b.push(button(V.data.default ? "Change the window…" : "Change the mode or the window…", { data: { "pl-change": n }, title: "The standing rules" }));
+  // #6176: a deploy target's arrow holds its release items, not versions: it names them.
+  const holds = (t.holds || []).map(h => `<span class="link" data-open="${h.id}">#${h.id}</span> ${esc(h.kind)}`).join(", ");
+  return `<div class="pl-bar">${b.join("")}</div>${holds ? `<div class="t-s">It holds ${holds} now.</div>` : ""}`
+    + (V.data.default ? `<div class="muted t-s">The mode comes from the deploy target (its release cadence, the person's yes). A closed transition holds the release item after it; the person's approval item and the deploy hook still release it.</div>` : "");
 }
 
 function detail() {
@@ -461,7 +473,7 @@ function wavesHtml(s, r) {
 // The actions on a stage (#6117): only a person or the manager acts; a default pipeline (a target's releases) has
 // its own actions on Releases. The controls before the stage are on its transition (#6139).
 function stageActions(s, r) {
-  if (V.data.default) return "";
+  if (V.data.default) return targetActions(s, r);
   if (V.data.followed) return `<div class="muted t-s">Followed: its own system runs this stage. A trigger rule acts on its events (Triggers).</div>`;  // #6167
   const rev = r && r.version, b = [];
   if (s.transition) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
@@ -477,6 +489,16 @@ function stageActions(s, r) {
   if (bad && r.id != null && !["running", "queued"].includes(r.state))
     b.push(srcButton(D, s, "rerun", `Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }, miss));
   return `<div class="pl-bar">${b.join("")}</div>${missLine(D, miss)}`;
+}
+
+// The actions on a stage of a deploy target (#6176): its transition, and for deploy a version sent there directly (a
+// deploy item that still waits for the person's yes); Versions in <stage> under it has Run again and Move back here.
+function targetActions(s, r) {
+  if (!V.data.controls) return "";
+  const b = [];
+  if (s.transition && !s.transition.fixed) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
+  if (s.name === "deploy") b.push(button("Send a version here directly…", { kind: "warn", data: { "dp-tab": "emergency", "em-preset": s.name }, title: "Override" }));
+  return b.length ? `<div class="pl-bar">${b.join("")}</div>` : "";
 }
 
 // The reason of a hold or a roll back: a small dialog (components/dialog.js). The Emergency tab asks with it too.
@@ -538,8 +560,9 @@ function arrowAct(d) {
     "Freeze", [{ id: "from", label: "From (empty: now)", hint: "wed 18:00, 2026-11-26T00:00" }, { id: "to", label: "To", hint: "mon 08:00, 3d" }],
     (v) => v.to ? doAct("pipeline_freeze", { stage: n, from: v.from || null, to: v.to, reason: v.why }) : toast("Say until when", true));
   if (d.plUnfreeze) return doAct("pipeline_freeze", { stage: n, clear: true });
-  return askForm(`Change ${into}`, "The mode is how a version passes when nothing holds it. The window says when versions may pass (for example mon-thu 09:00-17:00 America/Los_Angeles); empty: at any time.",
-    "Save", [{ id: "mode", label: "Mode", value: t.words, hint: "auto, yes mark, delay 10m, release" },
+  const target = V.data.default;  // #6176: a deploy target's mode comes from the target
+  return askForm(`Change ${into}`, (target ? "" : "The mode is how a version passes when nothing holds it. ") + "The window says when versions may pass (for example mon-thu 09:00-17:00 America/Los_Angeles); empty: at any time.",
+    "Save", [...(target ? [] : [{ id: "mode", label: "Mode", value: t.words, hint: "auto, yes mark, delay 10m, release" }]),
       { id: "window", label: "Time window", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00" },
       { id: "fault", label: "Fault rule", options: [["on", "Block it"], ["off", "Let versions pass"]], value: t.fault_rule ? "on" : "off" }],
     (v) => {

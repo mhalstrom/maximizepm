@@ -40,10 +40,31 @@ CREATE TABLE IF NOT EXISTS pipelines (
                                          -- ours; its trigger rules and hooks still act
   followed_by     TEXT,
   followed_at     TEXT,
-  agent_job       TEXT                   -- #6173: JSON settings of its agent job in Pulumi Deployments (maxpm runner
+  agent_job       TEXT,                  -- #6173: JSON settings of its agent job in Pulumi Deployments (maxpm runner
                                          -- pulumi): stack, env, branch, cli, test, max_minutes, max_cost, allow.
                                          -- Readers: agent_job.queue, open_runs, stop
+  target          TEXT                   -- #6176: the deploy target whose controls this row holds (its transitions,
+                                         -- operators, triggers, audit log); its runs come from the target's release
+                                         -- items (targets.py), never from stage_runs. Readers: target_flow.py
 );
+
+-- The versions that a person or the manager sent to a stage of a deploy target's pipeline on purpose (#6176): a run
+-- again, a move back or an override makes (or reuses) a deploy item of the target, which still waits on the person's
+-- approval item and goes out through the deploy hook. Writer: target_flow.send. Readers: target_flow.sync (such an item
+-- passes the transitions; a stop of the whole pipeline still holds it) and target_flow.stage_versions (what each
+-- release of the stage was, who sent it and why).
+CREATE TABLE IF NOT EXISTS target_sends (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  stage        TEXT NOT NULL,
+  item_id      INTEGER NOT NULL,          -- the deploy item (or the review item of a run again of review)
+  rev          TEXT,
+  purpose      TEXT NOT NULL,             -- rerun, rollback, override
+  sent_by      TEXT,
+  reason       TEXT,
+  at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS target_sends_item ON target_sends(item_id);
 
 -- The numbered versions of a pipeline's definition (#6143): each change of it makes version n+1 with the whole
 -- definition as maxpm pipeline export prints it (less the freezes). Writer: versions.snapshot (define._change,
@@ -552,7 +573,7 @@ def migrate(conn):
     for c in ("stop_runs", "agents_operate", "followed"):  # #6145, #6167
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
-    for c in ("followed_by", "followed_at", "agent_job"):  # #6167; #6173
+    for c in ("followed_by", "followed_at", "agent_job", "target"):  # #6167; #6173; #6176: a deploy target's controls
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     tcols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_triggers)")}

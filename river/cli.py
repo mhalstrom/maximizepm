@@ -7789,7 +7789,7 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "add":
         return define.pipeline_add(conn, a.name, a.project, a.notes, actor)
     if sub == "show":  # a target with no pipeline of its own shows as its default pipeline (#6115)
-        if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (a.name,)).fetchone():
+        if conn.execute("SELECT 1 FROM pipelines WHERE name=? AND target IS NULL", (a.name,)).fetchone():  # #6176
             return store.show(conn, a.name)
         return targets.default_pipeline(conn, a.name)
     if sub == "env":

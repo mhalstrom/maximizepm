@@ -44,6 +44,8 @@ def follow(conn, name, source=None, project=None, off=False, actor=None):
             raise core.RiverError(f"no pipeline named {name!r}")
         define.pipeline_add(conn, name, project=project, actor=actor)
     p = store._pipeline(conn, name)
+    from . import target_flow
+    target_flow.refuse_define(p, "follows an outside system")  # #6176
     if off:
         if not is_followed(p):
             raise core.RiverError(f"pipeline {name} is not followed")

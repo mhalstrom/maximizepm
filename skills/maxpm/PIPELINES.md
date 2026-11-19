@@ -57,6 +57,11 @@ Deploy tab of the page.
 - **Default pipeline**: each deploy target that no pipeline names shows as a
   pipeline of its own, computed from its releases: holding, build (the
   release-cut hook), review, approval, deploy, watch. It needs no setup.
+  Its transitions (not their modes, which come from the target), operators,
+  emergency actions, trigger rules and audit log work as on any pipeline. A
+  closed transition holds the release item after it. A run again, move back
+  or override of deploy adds a deploy item pinned at that version: the
+  person's yes and the deploy hook still release it.
 - **Holding**: the first stage of every pipeline. It holds the commits that
   wait for the next release (section "Holding and the release").
 

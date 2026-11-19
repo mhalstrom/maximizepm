@@ -214,8 +214,12 @@ def lines(conn, pipeline=None, who=None, since=None, search=None, limit=MAX):
     """The lines of the audit log, newest first: of every pipeline or of one; of a kind of actor (person, agent,
     trigger, hook, forge; a comma list) or one actor's name; since a time (today, 7d, a date); with every word of
     search. Returns {"lines": [...], "more": True when there were more than limit}."""
-    if pipeline and not conn.execute("SELECT 1 FROM pipelines WHERE name=?", (pipeline,)).fetchone():
-        raise core.RiverError(f"no pipeline {pipeline}: maxpm pipeline list")
+    if pipeline:
+        from . import store
+        try:
+            store._pipeline(conn, pipeline)  # #6176: a deploy target's controls have a row from their first use
+        except core.RiverError:
+            raise core.RiverError(f"no pipeline {pipeline}: maxpm pipeline list") from None
     limit = max(1, min(int(limit or MAX), EXPORT_MAX))
     at = _since(conn, since)
     kinds, name = _who(who)

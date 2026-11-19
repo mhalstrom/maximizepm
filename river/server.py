@@ -3684,8 +3684,12 @@ def auto_release(conn, runner=None):
         _release_event(conn, a["id"], f"started reviewer session {name}")
         out["started"][a["id"]] = name
         ann = None
+    # Not a release that waits on another deploy item of its target (#6176: a move back or a run again from the
+    # target's pipeline goes out first, and the release it passed waits for it): that one takes the target's turn.
     deploys = conn.execute("SELECT i.id, i.status, i.target, t.owner, t.deployer FROM items i JOIN targets t ON t.name=i.target "
-                           f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} ORDER BY i.id").fetchall()
+                           f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} AND NOT EXISTS (SELECT 1 FROM deps "
+                           f"d JOIN items b ON b.id=d.blocked_by WHERE d.item_id=i.id AND b.kind='deploy' AND b.target="
+                           f"i.target AND b.status IN {core.OPEN_STATES}) ORDER BY i.id").fetchall()
     seen = set()
     hooked = core.hooked_targets(conn)
     for d in deploys:

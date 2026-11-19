@@ -70,8 +70,9 @@ def _audit(conn, pid, actor, via, change, run_id=None):
 def take(conn, pipeline, events, actor=None, via="maxpm pipeline event"):
     """Keep the events of one pipeline (all of them or none) and hand on the versions whose runs they end as
     passed. Returns {'pipeline', 'events': new, 'duplicates', 'runs': [the stage runs they touched]}."""
-    from . import runner
+    from . import runner, target_flow
     p = store._pipeline(conn, pipeline)
+    target_flow.refuse_define(p, "takes events in")  # #6176: its runs are its release items
     res = store.ingest(conn, [_own(e, p["name"]) for e in events], pipeline=p["name"])
     runner.hand_on_passed(conn, res)
     new = [r for r in res if not r.get("duplicate")]
@@ -128,6 +129,8 @@ def set_secret(conn, pipeline, secret, actor=None):
     with core.tx(conn):
         define._may(conn, actor)
         p = store._pipeline(conn, pipeline)
+        from . import target_flow
+        target_flow.refuse_define(p, "takes events in")  # #6176
         conn.execute("UPDATE pipelines SET intake_secret=? WHERE id=?", (secret, p["id"]))
         define._change(conn, p["id"], actor, f"events in over HTTP: token from secret {secret}" if secret else
                        "events in over HTTP: off")

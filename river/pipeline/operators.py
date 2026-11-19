@@ -227,6 +227,11 @@ def plan(conn, pipeline):
     stop = [f"{len(stages)} stage(s) of {p['name']}: nothing new starts" + (f"; {waiting} waiting version(s) stay where "
                                                                              "they are" if waiting else "")]
     stop += [f"{r['stage']} runs {(r['rev'] or '')[:12]} now: it stops after its present step" for r in running]
+    target = p["target"] if "target" in p.keys() else None
+    if target:  # #6176: a deploy target's stop holds its release items
+        stop = [f"the open release items of deploy target {target} (its review, the person's yes, its deploy item): "
+                "each one is held; a deploy hook that runs now goes on to its end"]
+        stages = [s for s in stages if s["name"] == "deploy"]  # a move back of a target acts on its deploy stage
     stop.append("Other pipelines go on")
     back = []
     for s in stages:
@@ -238,7 +243,8 @@ def plan(conn, pipeline):
             "operators": listing(conn, pipeline), "stop": stop, "agents": _agents(conn, p), "moveback": back,
             "keys": _keys(conn, p), "override": _override_plan(conn, p),
             # #6167: a followed pipeline: only Stop its agents and Revoke its keys act (on our side)
-            "followed": (p["forge"] or "its outside system") if p["followed"] else None}
+            "followed": (p["forge"] or "its outside system") if p["followed"] else None,
+            "target": target}  # #6176: a deploy target's pipeline: a release still waits for the person's yes
 
 
 # ---------------------------------------------------------------- the actions
@@ -322,6 +328,9 @@ def move_back(conn, pipeline, stage, reason, actor=None):
 def _override_plan(conn, p):
     """For the override (#6146): the versions an operator may send (newest first) with the stages each one passed,
     and each stage after the first with the stages before it and what runs in it."""
+    from . import target_flow
+    if target_flow.is_target(p):  # #6176: a deploy target: its pinned releases, and its deploy stage
+        return target_flow.override_plan(conn, p)
     rows, prev, _ = store.stage_graph(conn, p["id"])
     order = [r["name"] for r in rows]
     versions = []

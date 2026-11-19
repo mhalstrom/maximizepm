@@ -233,12 +233,14 @@ function drawPage(force) {
   showPipeline(D.pipeline, D.tab);
   showTargets(D.tab === "stages" && p ? p.targets : []);
   if (stages) { pageSig = ""; return renderPipeline(force); }
+  // #6176: a deploy target's pipeline has its controls too (fixed: an older server sends no controls)
+  const fixed = p && p.default && !p.controls;
   if (D.tab === "audit") {
-    if (p && p.default) return setPage(empty("A deploy target keeps no audit log here: each release's history is on its items (Past deploys on the Stages tab)."), force);
+    if (fixed) return setPage(empty("A deploy target keeps no audit log here: each release's history is on its items (Past deploys on the Stages tab)."), force);
     return drawAudit(D.pipeline, $("#dpPage"), force);
   }
-  if (D.tab === "triggers" && p && !p.default) { pageSig = ""; return drawTriggers(D.pipeline, $("#dpPage"), force); }
-  if (D.tab === "emergency" && p && !p.default) { pageSig = ""; return drawEmergency(D.pipeline, $("#dpPage"), force); }
+  if (D.tab === "triggers" && p && !fixed) { pageSig = ""; return drawTriggers(D.pipeline, $("#dpPage"), force); }
+  if (D.tab === "emergency" && p && !fixed) { pageSig = ""; return drawEmergency(D.pipeline, $("#dpPage"), force); }
   setPage(!p ? empty(`No pipeline or deploy target ${esc(D.pipeline)}.`) : D.tab === "triggers" ? defaultTriggersHtml(p) : emergencyHtml(p), force);
 }
 function setPage(html, force) {
