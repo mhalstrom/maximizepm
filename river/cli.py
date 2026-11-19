@@ -2684,6 +2684,25 @@ def build_parser(only=None):
     x.add_argument("-n", type=int, default=200)
     x = rus.add_parser("stop", help="stop the agent of a run"); x.add_argument("run", type=int)
     x.add_argument("--reason")
+    pg = sub.add_parser("plugin", help="pipeline plugins: install, keep each version, pin one for each pipeline, and a "
+                        "person's yes before a plugin runs (#6166)")
+    pgs = pg.add_subparsers(dest="pgcmd", required=True)
+    pgs.add_parser("list", help="each plugin: its version, the person's yes, its kept versions and its pipelines")
+    x = pgs.add_parser("show", help="one plugin as a person approves it: level, actions, secrets, settings, hosts, "
+                       "command; its kept versions and the pipelines' pins"); x.add_argument("name")
+    x = pgs.add_parser("add", help="install a plugin from a folder or a git address beside the queue, and keep this "
+                       "version (a person or the manager)")
+    x.add_argument("source", help="a folder, or a git address (https://..., git@...:..., ...git)")
+    x.add_argument("--ref", help="a git tag or branch")
+    x.add_argument("--path", help="the plugin's folder inside the source")
+    x.add_argument("--replace", action="store_true", help="put it in place of a plugin folder that no kept version has")
+    x = pgs.add_parser("new", help="write a starter plugin from a shipped example beside the queue")
+    x.add_argument("name"); x.add_argument("--from", dest="example", default="jsonl",
+                                           help="the example: jsonl (default), github, gitlab, pulumi")
+    x = pgs.add_parser("trust", help="a person's yes for the plugin's files: it may run (only a person)")
+    x.add_argument("name"); x.add_argument("--version", help="a kept version (the plugin's folder when none)")
+    x = pgs.add_parser("pin", help="the kept version of its plugin that a pipeline runs (folder: the plugin's folder)")
+    x.add_argument("pipeline"); x.add_argument("version")
     x = sub.add_parser("agent-login", help="sign an agent CLI in on a computer with no browser (a host)")
     x.add_argument("agent", choices=["claude", "codex"])
     x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
@@ -4742,6 +4761,19 @@ def dispatch(conn, a, actor):
         return _pipeline_cmd(conn, a, actor)
     if c == "runner":
         return _runner_cmd(conn, a, actor)
+    if c == "plugin":  # #6166
+        from .pipeline import install
+        if a.pgcmd == "list":
+            return install.listing(conn)
+        if a.pgcmd == "show":
+            return install.show(conn, a.name)
+        if a.pgcmd == "add":
+            return install.add(conn, a.source, a.ref, a.path, a.replace, actor)
+        if a.pgcmd == "new":
+            return install.new(conn, a.name, a.example, actor)
+        if a.pgcmd == "trust":
+            return install.trust(conn, a.name, a.version, actor)
+        return install.pin(conn, a.pipeline, a.version, actor)
     if c == "target":
         if a.tcmd == "add":
             return core.target_add(conn, a.name, a.description, actor)
@@ -7717,7 +7749,7 @@ def _pipeline_cmd(conn, a, actor):
         return intake.set_secret(conn, a.name, None if a.off else a.secret, actor)
     if sub in ("plugins", "plugin"):  # #6159
         from .pipeline import plugin
-        return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin)
+        return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin, conn)  # #6166: after the yes
     if sub == "rerun":
         from .pipeline import runner
         return runner.run_again(conn, a.name, a.stage, a.rev, actor, reason=a.reason)
@@ -8229,6 +8261,61 @@ def _runner_line(r):
             + (f" ${r['cost']:.2f}" if r.get("cost") else "") + (f": {r['result']}" if r.get("result") else ""))
 
 
+def render_plugin(a, res):
+    """maxpm plugin (#6166)."""
+    def yes(t):
+        return ("shipped with MaximizePM" if t.get("shipped") else f"approved by {t['by']}" if t.get("trusted")
+                else "waits for a person's yes" + (f" (#{t['item']})" if t.get("item") else ""))
+    if a.pgcmd == "list":
+        if not res:
+            print("no plugins; maxpm plugin new <name> writes one, maxpm plugin add <folder or git address> installs one")
+        for p in res:
+            if p.get("error"):
+                print(f"{p['name']}: not usable: {p['error']}")
+                continue
+            t = {"shipped": p.get("shipped"), "trusted": p.get("trusted"), "by": p.get("trusted_by")}
+            pins = ", ".join(f"{x['pipeline']} ({x['pin'] or 'folder'})" for x in p["pipelines"])
+            print(f"{p['name']} {p['version']} ({p['level']}) · {yes(t)}"
+                  + (f" · kept: {', '.join(p['versions'])}" if p["versions"] else "")
+                  + (f" · used by {pins}" if pins else ""))
+        return
+    if a.pgcmd in ("show", "add", "trust"):
+        if a.pgcmd == "add":
+            print(f"installed {res['name']} {res['version']} in {res['folder']}"
+                  + (" (a version kept already)" if res["kept"] else f"; kept as version {res['key']}"))
+        if a.pgcmd == "trust":
+            if res.get("shipped"):
+                print(f"{res['name']} ships with MaximizePM: it needs no yes")
+            else:
+                print(f"approved: {res['name']} {res['version']} by {res['trusted_by']} (digest "
+                      f"{res['digest'][:16]}): it may run")
+        print(res["text"])
+        if a.pgcmd == "show":
+            print(f"files: {res['folder']} · {yes(res['trust'])}")
+            for v in res["versions"]:
+                print(f"  kept {v['key']} from {v['source'] or '?'} ({v['added_at'][:10]})"
+                      + (f" · approved by {v['trusted_by']}" if v["trusted_by"] else " · no yes")
+                      + (" · in the folder now" if v["live"] else ""))
+            for x in res["pipelines"]:
+                print(f"  pipeline {x['pipeline']} runs {x['pin'] or 'the folder'}")
+        if a.pgcmd == "add":
+            t = res["trust"]
+            print(yes(t) if t["trusted"] else f"next: a person reads the above and approves it: maxpm plugin trust "
+                                              f"{res['name']}")
+            for x in res["pinned"]:
+                if x["pin"] and x["pin"] != res["key"]:
+                    print(f"  pipeline {x['pipeline']} stays at {x['pin']}: maxpm plugin pin {x['pipeline']} "
+                          f"{res['key']} moves it")
+        return
+    if a.pgcmd == "new":
+        print(f"wrote plugin {res['name']} in {res['folder']} from the example {res['example']}; next:")
+        for n in res["next"]:
+            print(f"  {n}")
+        return
+    print(f"pipeline {res['pipeline']} runs plugin {res['plugin']} {res['version']} ({res['pin'] or 'its folder'}) · "
+          f"{yes(res['trust'])}")
+
+
 def render_runner(a, res):
     s = a.rucmd
     if s == "list":
@@ -8284,6 +8371,8 @@ def render(a, res):
         return render_pipeline(a, res)
     if c == "runner":
         return render_runner(a, res)
+    if c == "plugin":
+        return render_plugin(a, res)
     if c == "schedule":
         return render_schedule(a, res)
     if c == "ops":

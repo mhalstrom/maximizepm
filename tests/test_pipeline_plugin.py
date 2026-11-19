@@ -17,12 +17,13 @@ from tests import timing
 
 SHIPPED = os.path.join(os.path.dirname(plugin.__file__), "plugins")
 
-# A plugin for the tests. Its setting 'mode' says how it behaves; each request is kept in requests.jsonl in its
+# A plugin for the tests. Its setting 'mode' says how it behaves; each request is kept in var/requests.jsonl in its
 # folder, so a test reads what MaximizePM sent (the secrets too: only a test plugin does this).
 TEST_PLUGIN = r'''
 import json, os, sys, time
 req = json.load(sys.stdin)
-with open("requests.jsonl", "a") as f:
+os.makedirs("var", exist_ok=True)  # a plugin's own files go in var/: its digest skips them (#6166)
+with open("var/requests.jsonl", "a") as f:
     f.write(json.dumps({"req": req, "env": sorted(os.environ)}) + "\n")
 mode = (req.get("settings") or {}).get("mode", "ok")
 call = req["call"]
@@ -103,17 +104,24 @@ class Base(unittest.TestCase):
         define.stage_set(self.c, "app", "build", "build", workflow="build-job")
         define.stage_set(self.c, "app", "deploy", "deploy", env="prod", workflow="deploy-job")
 
-    def install(self, m, code=TEST_PLUGIN, folder=None):
+    def install(self, m, code=TEST_PLUGIN, folder=None, trust=True):
+        """Write a plugin into the plugins folder; trust: mark approves its files (#6166), when its manifest is good."""
         folder = os.path.join(self.plugins, folder or m["name"])
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "plugin.json"), "w") as f:
             json.dump(m, f)
         with open(os.path.join(folder, "plugin.py"), "w") as f:
             f.write(code)
+        if trust:
+            from river.pipeline import install
+            try:
+                install.trust(self.c, m.get("name"), actor="mark")
+            except RiverError:
+                pass  # a manifest that the test makes bad on purpose
         return folder
 
     def requests(self, name="tci"):
-        path = os.path.join(self.plugins, name, "requests.jsonl")
+        path = os.path.join(self.plugins, name, "var", "requests.jsonl")
         if not os.path.exists(path):
             return []
         with open(path) as f:
@@ -403,7 +411,7 @@ class Jsonl(Base):
         self.assertEqual(store.show(self.c, "app")["envs"][0]["rev"], "3f2a9c1")  # a deploy stage records it
 
 
-SHIPYARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins", "shipyard")
+SHIPYARD =os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins", "shipyard")
 COMMIT = "3f2a9c1e5b7d4a20c8e6f1b3a5d7c9e1f2a4b6c8"
 
 
@@ -446,6 +454,8 @@ class ShipyardProof(Base):
         self.addCleanup(lambda: setattr(plugin, "RUNNER", old[0]) or setattr(plugin, "DIRS", old[1]))
         define.stage_set(self.c, "app", "build", "build", workflow="build")
         define.stage_set(self.c, "app", "deploy", "deploy", env="prod", workflow="deploy", gate="person mark")
+        from river.pipeline import install
+        install.trust(self.c, "shipyard", actor="mark")  # #6166: a plugin runs after a person's yes for its files
         define.forge_set(self.c, "app", "shipyard", settings={"url": "https://ci.example.com", "project": "shop"},
                          secrets=["key=sy-key"])
 
@@ -501,6 +511,127 @@ class ShipyardProof(Base):
                          ("running", "9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c"))  # build 102 runs
         self.assertEqual((stages["deploy"]["state"], stages["deploy"]["version"], stages["deploy"]["no_news"]),
                          ("passed", COMMIT, False))
+
+
+class InstallAndTrust(Base):
+    """#6166: maxpm plugin add keeps each version, each pipeline pins one, and a plugin runs only after a person's yes
+    for its exact files (again after each change); maxpm plugin new writes a starter."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import install
+        self.inst = install
+        core.register(self.c, "w1")
+
+    def source(self, version="1.2.0", code=TEST_PLUGIN, name="tci", where="src"):
+        folder = os.path.join(self.dir.name, where, name)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "plugin.json"), "w") as f:
+            json.dump(manifest(name, version=version, hosts=["ci.example"]), f)
+        with open(os.path.join(folder, "plugin.py"), "w") as f:
+            f.write(code)
+        return folder
+
+    def poll(self):
+        self.due()
+        plugin.poll_due(self.c)
+        return self.pipeline()["poll_error"]
+
+    def test_a_plugin_runs_only_after_a_persons_yes_and_again_after_a_change(self):
+        folder = self.install(manifest(hosts=["ci.example"]), trust=False)
+        with self.assertRaises(RiverError) as e:
+            self.use()
+        self.assertIn("plugin tci 1.2.0 waits for a person's yes (no person approved it yet)", str(e.exception))
+        with self.assertRaises(RiverError):
+            self.inst.trust(self.c, "tci", actor="w1")  # an agent never approves a plugin
+        got = self.inst.trust(self.c, "tci", actor="mark")
+        self.assertIn("hosts it reaches: ci.example", got["text"])
+        self.assertIn("secrets it gets: token (the API token)", got["text"])
+        self.use()
+        self.assertIsNone(self.poll())
+        self.assertTrue(os.path.exists(os.path.join(folder, "var", "requests.jsonl")))  # its own files: no change
+        self.assertIsNone(self.poll())
+        with open(os.path.join(folder, "plugin.py"), "a") as f:
+            f.write("\n# a change\n")
+        err = self.poll()
+        self.assertIn("its files changed since mark approved tci 1.2.0", err)
+        items = self.c.execute("SELECT id, doer, title FROM items WHERE title LIKE 'Approve plugin tci%'").fetchall()
+        self.assertEqual([(i["doer"], i["title"]) for i in items], [("human", "Approve plugin tci 1.2.0 for pipeline app")])
+        self.assertIn(f"or marks #{items[0]['id']} done", err)
+        self.poll()
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE title LIKE 'Approve plugin%'").fetchone()[0], 1)
+        core.done(self.c, items[0]["id"], actor="mark")  # the person's yes on the item
+        self.assertIsNone(self.poll())
+
+    def test_add_keeps_each_version_and_pins_each_pipeline(self):
+        src = self.source()
+        with self.assertRaises(RiverError):
+            self.inst.add(self.c, src, actor="w1")  # a person or the manager installs
+        got = self.inst.add(self.c, src, actor="mark")
+        self.assertEqual((got["name"], got["key"], got["folder"]), ("tci", "1.2.0", os.path.join(self.plugins, "tci")))
+        self.assertFalse(got["trust"]["trusted"])
+        self.inst.trust(self.c, "tci", actor="mark")
+        self.use()
+        self.assertEqual(self.pipeline()["plugin_pin"], "1.2.0")
+        self.source("1.3.0", TEST_PLUGIN + "\n# 1.3\n")
+        got = self.inst.add(self.c, src, actor="mark")
+        self.assertEqual(got["key"], "1.3.0")
+        self.assertEqual(plugin.actions(self.c, self.pipeline())["version"], "1.2.0")  # the pipeline keeps its pin
+        self.assertIsNone(self.poll())
+        self.inst.pin(self.c, "app", "1.3.0", actor="mark")
+        self.assertIn("waits for a person's yes", self.poll())  # 1.3.0 has no yes yet
+        self.inst.trust(self.c, "tci", "1.3.0", actor="mark")
+        self.assertIsNone(self.poll())
+        self.assertEqual(plugin.actions(self.c, self.pipeline())["version"], "1.3.0")
+        self.source("1.3.0", TEST_PLUGIN + "\n# other files, the same number\n")
+        self.assertTrue(self.inst.add(self.c, src, actor="mark")["key"].startswith("1.3.0+"))
+        with open(os.path.join(self.plugins, "tci", "notes.txt"), "w") as f:
+            f.write("my own change")
+        with self.assertRaises(RiverError) as e:
+            self.inst.add(self.c, src, actor="mark")
+        self.assertIn("holds files that no kept version of tci has", str(e.exception))
+        self.inst.add(self.c, src, replace=True, actor="mark")
+        shown = self.inst.show(self.c, "tci")
+        self.assertEqual([v["key"] for v in shown["versions"]][:2], ["1.2.0", "1.3.0"])
+        self.assertEqual(shown["pipelines"], [{"pipeline": "app", "pin": "1.3.0"}])
+        self.inst.pin(self.c, "app", "folder", actor="mark")
+        self.assertIsNone(self.pipeline()["plugin_pin"])
+        with self.assertRaises(RiverError):
+            self.inst.pin(self.c, "app", "9.9", actor="mark")
+
+    def test_add_from_a_git_address(self):
+        import subprocess
+        repo = os.path.join(self.dir.name, "repo")
+        self.source(where=os.path.join("repo", "plugins"))
+        git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(git + ["add", "."], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "tci"], check=True)
+        subprocess.run(git + ["tag", "v1"], check=True)
+        got = self.inst.add(self.c, "file://" + repo, ref="v1", path="plugins/tci", actor="mark")
+        self.assertEqual((got["name"], got["version"]), ("tci", "1.2.0"))
+        self.assertFalse(os.path.exists(os.path.join(self.plugins, "tci", ".git")))
+        self.assertIn("--ref v1 --path plugins/tci", self.inst.show(self.c, "tci")["versions"][0]["source"])
+
+    def test_new_writes_a_starter_and_the_cli(self):
+        got = self.inst.new(self.c, "jenkins", actor="w1")  # an agent may write one; a person approves it
+        m = plugin.find("jenkins")
+        self.assertEqual((m["name"], m["version"], m["level"]), ("jenkins", "0.1.0", "act"))
+        self.assertTrue(got["folder"].startswith(self.plugins))
+        for bad in ("jenkins", "Jen kins", "github"):
+            with self.assertRaises(RiverError):
+                self.inst.new(self.c, bad)
+        with self.assertRaises(RiverError):
+            self.install(manifest(hosts="ci.example"), trust=False) and plugin.find("tci")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["plugin", "list"])
+        self.assertIn("jenkins 0.1.0 (act) · waits for a person's yes", out.getvalue())
+        self.assertIn("jsonl 1.0.0 (act) · shipped with MaximizePM", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["plugin", "trust", "jenkins"])
+        self.assertIn("approved: jenkins 0.1.0 by a person", out.getvalue())
+        from river import rights
+        self.assertIs(rights.COMMANDS["plugin"]["trust"], rights.ONLY_PERSON)
 
 
 if __name__ == "__main__":

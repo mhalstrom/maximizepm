@@ -120,12 +120,16 @@ def _check(m, folder):
         if not isinstance(v, dict) or not all(isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]{0,39}$", k)
                                               and isinstance(d, dict) for k, d in v.items()):
             raise _bad(folder, f"\"{key}\" maps each name (lower case, digits, '_') to an object with its help")
+    hosts = m.get("hosts", [])  # #6166: the hosts it reaches, for the person who approves it
+    if not isinstance(hosts, list) or len(hosts) > 20 or not all(isinstance(h, str) and 0 < len(h) <= 100
+                                                                  for h in hosts):
+        raise _bad(folder, "\"hosts\" is a list of the hosts it reaches (at most 20), such as [\"api.github.com\"]")
     for key, lo, hi in (("poll_every", POLL_MIN, 86400), ("timeout", 1, TIMEOUT_MAX)):
         v = m.get(key)
         if v is not None and (not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi):
             raise _bad(folder, f"\"{key}\" is a number of seconds from {lo} to {hi}")
     out = dict(m)
-    out.update(actions=list(acts), settings=m.get("settings", {}), secrets=m.get("secrets", {}),
+    out.update(actions=list(acts), settings=m.get("settings", {}), secrets=m.get("secrets", {}), hosts=list(hosts),
                poll_every=m.get("poll_every") or POLL_EVERY, timeout=m.get("timeout") or TIMEOUT,
                description=str(m.get("description") or ""), folder=folder)
     return out
@@ -152,8 +156,19 @@ def _read(folder):
     return got
 
 
-def find(name, need=True):
-    """The manifest of the installed plugin name (the first folder in dirs() that has it), or None (need: refuse)."""
+def find(name, need=True, pin=None):
+    """The manifest of the installed plugin name (the first folder in dirs() that has it), or None (need: refuse).
+    pin: a kept version of it (#6166: plugins/.versions/<name>/<pin>/<name> beside the queue), which a pipeline runs."""
+    if pin and name and _NAME.match(name) and name not in RESERVED:
+        folder = os.path.join(dirs()[-1], ".versions", name, pin, name)
+        got = _read(folder) if os.path.isdir(folder) else core.RiverError(
+            f"the pinned version {pin} of plugin {name} is gone ({folder}); pin another: maxpm plugin pin "
+            f"<pipeline> <version>")
+        if isinstance(got, core.RiverError):
+            if need:
+                raise got
+            return None
+        return got
     if name and _NAME.match(name) and name not in RESERVED:
         for d in dirs():
             folder = os.path.join(d, name)
@@ -168,6 +183,18 @@ def find(name, need=True):
         raise core.RiverError(f"no plugin {name!r} is installed (looked in {', '.join(dirs())}); maxpm pipeline "
                               "plugins lists the plugins")
     return None
+
+
+def of(p, need=True):
+    """The manifest that pipeline p runs: its plugin's pinned version (#6166), else the plugin's folder."""
+    pin = p["plugin_pin"] if "plugin_pin" in p.keys() else None
+    return find(plugin_name(p["forge"]), need=need, pin=pin)
+
+
+def _trusted(conn, m, p=None):
+    """#6166: a plugin runs only after a person's yes for its files (river/pipeline/install.py)."""
+    from . import install
+    install.check(conn, m, p)
 
 
 def is_plugin(forge):
@@ -287,9 +314,12 @@ def call(m, request):
     return answer
 
 
-def describe(name):
-    """maxpm pipeline plugin <name>: the manifest, and the plugin's own describe, which must match it."""
-    m = find(name)
+def describe(name, conn=None, pin=None):
+    """maxpm pipeline plugin <name>: the manifest, and the plugin's own describe, which must match it. With conn, it
+    runs only after a person's yes for its files (#6166)."""
+    m = find(name, pin=pin)
+    if conn is not None:
+        _trusted(conn, m)
     got = call(m, {"call": "describe"})
     diff = [k for k in ("name", "version", "level") if got.get(k) != m[k]]
     if sorted(got.get("actions") or []) != sorted(m["actions"]):
@@ -363,15 +393,17 @@ def use(conn, pipeline, name, settings=None, secrets=None, repo=None, url=None, 
         raise core.RiverError(f"plugin {name} needs " + ", ".join(
             f"--secret {k}=<maxpm secret: {m['secrets'][k].get('help') or 'its value'}>" for k in missing)
             + " (a person saves it: maxpm secret put <name>)")
-    describe(name)
+    from . import install
+    pin = install.pin_for_use(conn, name)  # #6166: the kept version whose files the plugin's folder holds now
+    describe(name, conn, pin)  # after a person's yes for its files: it runs here
     cfg = json.dumps({"settings": settings, "secrets": mapped}, sort_keys=True)
     with core.tx(conn):
         define._may(conn, actor)
         p = store._pipeline(conn, pipeline)
         conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, forge_url=?, plugin_settings=?, "
-                     "plugin_state=NULL, polled_at=NULL, poll_error=NULL WHERE id=?",
+                     "plugin_state=NULL, polled_at=NULL, poll_error=NULL, plugin_pin=? WHERE id=?",
                      (name, settings.get("repo"), next(iter(mapped.values()), None), settings.get("ref"),
-                      settings.get("url"), cfg, p["id"]))
+                      settings.get("url"), cfg, pin, p["id"]))
         text = (f"source plugin {name} {m['version']} ({m['level']}"
                 + (f": {', '.join(m['actions'])}" if m["actions"] else "") + ")"
                 + "".join(f", {k}={v}" for k, v in sorted(settings.items()))
@@ -501,7 +533,8 @@ def _take(conn, p, m, answer):
 def poll(conn, p):
     """Read one pipeline's system through its plugin: {'events': new events, 'tests': reports read, 'seconds'},
     and the numbers the plugin counts itself (its answer's "counts", such as runs read)."""
-    m = find(plugin_name(p["forge"]))
+    m = of(p)
+    _trusted(conn, m, p)  # #6166: a person's item asks once when its files have no yes
     req = _request(conn, p, m, "poll")
     req["runs"] = _known_runs(conn, p)
     answer = call(m, req)
@@ -517,13 +550,13 @@ def poll_due(conn):
     out = {}
     now = core.now()
     for p in conn.execute("SELECT * FROM pipelines WHERE forge IS NOT NULL AND forge<>'none'").fetchall():
-        m = find(plugin_name(p["forge"]), need=False)
+        m = of(p, need=False)
         every = m["poll_every"] if m else POLL_EVERY
         if p["polled_at"] and core.parse_iso(p["polled_at"]) > now - core.timedelta(seconds=every):
             continue
         try:
             if m is None:
-                find(plugin_name(p["forge"]))  # the reason
+                of(p)  # the reason
             out[p["name"]], err = poll(conn, p), None
         except core.RiverError as e:
             out[p["name"]], err = {"error": str(e)}, str(e)[:500]
@@ -554,7 +587,7 @@ def actions(conn, p):
     if not src or src == "none":
         return {"kind": "here", "name": None, "actions": ALL_ACTIONS}
     try:
-        m = find(plugin_name(src))
+        m = of(p)
     except core.RiverError as e:
         return {"kind": "missing", "name": plugin_name(src), "actions": [], "error": str(e)}
     return {"kind": "plugin", "name": m["name"], "version": m["version"], "level": m["level"], "actions": m["actions"]}
@@ -584,7 +617,7 @@ def act(conn, run_id, action):
     from .runner import _row
     r = _row(conn, run_id)
     p = conn.execute("SELECT * FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
-    m = find(plugin_name(p["forge"]))
+    m = of(p)
     if action not in m["actions"]:
         if action == "start":
             with core.tx(conn):
@@ -594,6 +627,7 @@ def act(conn, run_id, action):
             return {"run": run_id, "plugin": m["name"], "left": True}
         raise core.RiverError(f"{action} is not available for this source: plugin {m['name']} lists only "
                               f"{', '.join(m['actions']) or 'no actions'}")
+    _trusted(conn, m, p)
     req = _request(conn, p, m, action)
     req["run"] = _run_info(conn, r)
     req["runs"] = _known_runs(conn, p)

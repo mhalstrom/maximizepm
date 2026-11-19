@@ -51,6 +51,8 @@ COMMANDS = {
                  "operators": ANY, "emergency": ANY,
                  "event": LEAD, "report": LEAD, "intake": LEAD},  # #6163: events in from any system
     # #6151: a runner runs agents with the queue's rights: a person or the manager adds, changes and stops them
+    # #6166: anyone writes a starter or reads; installs and pins take a person or the manager; the yes, a person
+    "plugin": {"list": ANY, "show": ANY, "new": ANY, "add": LEAD, "pin": LEAD, "trust": ONLY_PERSON},
     "runner": {"list": ANY, "runs": ANY, "log": ANY, "add": LEAD, "check": LEAD, "set": LEAD, "remove": LEAD,
                "allow": LEAD, "deny": LEAD, "stop": LEAD},
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
@@ -78,7 +80,7 @@ COMMANDS = {
 }
 
 # The commands that change nothing: a command inside an agent with no name (no token, no --as) may run only these.
-READS = {"project show", "project list", "canvas list", "canvas show", "canvas comments", "goal list", "goal show",
+READS = {"plugin list", "plugin show", "project show", "project list","canvas list", "canvas show", "canvas comments", "goal list", "goal show",
          "ops list", "ops show", "ops history", "target show", "target list", "target report", "artifacts", "search", "duplicates",
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",

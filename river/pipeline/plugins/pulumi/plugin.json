@@ -14,6 +14,7 @@
   "secrets": {
     "token": {"help": "a Pulumi access token of the organization"}
   },
+  "hosts": ["api.pulumi.com", "the Pulumi Cloud address of the setting url"],
   "poll_every": 60,
   "timeout": 120
 }

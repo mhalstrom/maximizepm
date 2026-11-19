@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS pipelines (
                                          -- stage stops after its present step
   agents_operate  INTEGER,               -- 1: agent sessions on the operator list may press the emergency actions
   runners     TEXT,                      -- JSON list of the runners its trigger rules may use (#6151)
-  intake_secret   TEXT                   -- events in over HTTP (#6163): the maxpm secret whose value a sender shows
+  intake_secret   TEXT,                  -- events in over HTTP (#6163): the maxpm secret whose value a sender shows
+  plugin_pin      TEXT                   -- the kept version of its plugin that it runs (#6166); NULL: the plugin's folder
 );
 
 -- The operators of a pipeline (#6145; Decision 7, mark 2026-11-18: "operators can, we audit who does them"): the
@@ -422,6 +423,31 @@ CREATE TABLE IF NOT EXISTS runner_runs (
 );
 CREATE INDEX IF NOT EXISTS runner_runs_state ON runner_runs(state, runner);
 CREATE INDEX IF NOT EXISTS runner_runs_key ON runner_runs(key_hash);
+-- #6166: the versions of an installed plugin that MaximizePM keeps (plugins/.versions/<name>/<key> beside the queue)
+CREATE TABLE IF NOT EXISTS plugin_versions (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL,
+  key          TEXT NOT NULL,            -- its folder: the version, or <version>+<8 of its digest> when files differ
+  version      TEXT NOT NULL,
+  digest       TEXT NOT NULL,            -- sha256 of its files (river/pipeline/install.py digest)
+  source       TEXT,                     -- the folder or git address it came from (and --ref, --path)
+  added_by     TEXT,
+  added_at     TEXT NOT NULL,
+  UNIQUE (name, key)
+);
+-- #6166: a person's yes for the exact files of a plugin (its digest), and the one question that asks for it
+CREATE TABLE IF NOT EXISTS plugin_trust (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL,
+  digest       TEXT NOT NULL,
+  version      TEXT,
+  manifest     TEXT,                     -- what the person approved: level, actions, secrets, settings, hosts, run
+  item         INTEGER,                  -- the person's item that asks for the yes
+  asked_at     TEXT,
+  trusted_by   TEXT,                     -- NULL: asked, no yes yet
+  trusted_at   TEXT,
+  UNIQUE (name, digest)
+);
 """
 
 # The rule each pipeline starts with (#6150): what MaximizePM did for every pipeline before rules (#6118). The
@@ -435,8 +461,9 @@ def migrate(conn):
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
     for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
-              "forge_url", "plugin_settings", "plugin_state", "runners", "intake_secret"):
-        if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use; #6163
+              "forge_url", "plugin_settings", "plugin_state", "runners", "intake_secret", "plugin_pin"):
+        if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use; #6163;
+            # #6166: plugin_pin, the kept version of its plugin (plugin_versions.key) that it runs; NULL: the plugin's folder
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     for c in ("stop_runs", "agents_operate"):  # #6145
         if c not in cols:

@@ -356,7 +356,11 @@ in any language. It imports nothing of MaximizePM's. Put the folder in
 `plugins/<name>/` beside the queue's database (`maxpm db` shows that folder;
 usually `~/.maximizepm/plugins/<name>/`). The folder's name is the plugin's
 name. A plugin that lives in a project's repository: copy its folder into
-that plugins folder, or put a link to it there.
+that plugins folder (`maxpm plugin add <folder>`), or put a link to it there.
+`maxpm plugin new <name> [--from jsonl|github|gitlab|pulumi]` writes a
+starter there from a shipped plugin. The program writes no file in its
+folder but under `var/` (its files there are not part of what a person
+approves); keep a cursor in the answer's `state`.
 
 ### The manifest
 
@@ -372,6 +376,7 @@ that plugins folder, or put a link to it there.
   "settings": {"url": {"required": true, "help": "https://jenkins.example.com"},
                "job": {"required": true, "help": "the job's name"}},
   "secrets": {"token": {"help": "a Jenkins API token"}},
+  "hosts": ["jenkins.example.com"],
   "poll_every": 60,
   "timeout": 30
 }
@@ -382,9 +387,9 @@ that plugins folder, or put a link to it there.
   names of the built-in forges (`github`, `gitlab`, `gitea`, `forgejo`,
   `pulumi`) and `none`, `maxpm`, `here`, `plugin` are taken.
 - `level`: `report` (it reads only; no actions), `act` (it reads, and it does
-  the actions it lists), or `gate` (as `act`; the outside flow will also ask
-  MaximizePM's gates before it moves on; that call is not ready yet, so a gate
-  plugin works as `act` now).
+  the actions it lists), or `gate` (as `act`; the outside flow also asks
+  MaximizePM's transitions before each stage: `maxpm pipeline may`, section
+  "Outside flows ask the transitions").
 - `run`: the command as a list of words, run in the plugin's folder.
   `{python}` is the Python that runs MaximizePM. A test may load the program
   from another folder: open `plugin.json` by the program's own path, not the
@@ -395,6 +400,7 @@ that plugins folder, or put a link to it there.
   connected). A secret is required unless it says `"required": false`.
 - `description`: one line for the person. Say there what the plugin cannot
   do, such as "no roll back".
+- `hosts`: the hosts it reaches (at most 20), for the person who approves it.
 - `poll_every`: seconds between two polls (60 when not given; at least 10).
 - `timeout`: seconds for one call (30 when not given; at most 300). Keep the
   plugin's own network time limits below it: a call that MaximizePM stops
@@ -595,8 +601,9 @@ the mode `forge`, so MaximizePM only reads it.
    `tests/plugins/shipyard/test_shipyard.py` is such a test.
 3. Run each call by hand: `echo '{"contract": 1, "call": "describe"}' |
    python3 plugin.py`, then a `poll` request (the whole request above).
-4. `maxpm pipeline plugin <name>` checks the manifest and `describe`. It
-   finds plugins only in the plugins folder beside the queue's database: try
+4. `maxpm pipeline plugin <name>` checks the manifest and `describe`, after
+   a person's yes for its files (next part). It finds plugins only in the
+   plugins folder beside the queue's database: try
    it on a test queue (`MAXPM_DB=<new folder>/x.db`, with the plugin in
    `<new folder>/plugins/<name>/`). A session that `maxpm serve` started
    carries its token (`MAXPM_TOKEN`), which a test queue does not know:
@@ -605,6 +612,39 @@ the mode `forge`, so MaximizePM only reads it.
    <test pipeline> <name> ...`); follow it with `maxpm pipeline show <test
    pipeline>` and on the Deploy tab. Test with recorded answers, not with a
    person's real secret.
+
+### Install, versions and a person's yes
+
+```
+maxpm plugin add <folder or git address> [--ref <tag>] [--path <subfolder>]   # a person or the manager
+maxpm plugin list                       # each plugin: version, the yes, kept versions, pipelines
+maxpm plugin show <name>                # what a person approves, kept versions, pins
+maxpm plugin trust <name> [--version <v>]   # only a person
+maxpm plugin pin <pipeline> <version|folder>  # a person or the manager
+```
+
+- `add` copies the plugin into the plugins folder beside the queue and keeps
+  a copy of each version (`plugins/.versions/`). A version number that comes
+  again with other files is kept as `<version>+<8 of its digest>`. It
+  refuses to replace a folder whose files no kept version has (a plugin
+  someone writes there) unless `--replace`. Nothing goes into an agent CLI's
+  home.
+- A plugin runs only after a person approved its exact files: their sha256,
+  without `var/`. `trust` and `show` print what the person approves: the
+  level, the actions, the secrets it gets, the settings, the hosts it
+  reaches and its command. After any change of its files it waits for a new
+  yes: its pipelines get no news, the read says why, and a person's item
+  ("Approve plugin <name> <version> for pipeline <p>") asks once for those
+  files. Done by a person, that item is the yes. The shipped plugins need
+  no yes.
+- `maxpm pipeline forge <p> <plugin>` pins the version whose files the
+  plugin's folder holds then. A later `add` does not move it: `pin` does, and
+  the pinned version runs only with its own yes. A pipeline with no pin
+  (`folder`) runs the folder as it is, which is how you test a plugin that
+  you write.
+- An agent may write a plugin (`new`) and test it on a test pipeline after
+  the person's yes. It never approves one, and it asks the manager to
+  install one.
 
 ## What happens when a stage fails
 

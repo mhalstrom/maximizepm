@@ -15,6 +15,7 @@
   "secrets": {
     "token": {"help": "a fine-grained token: Actions read and write, Deployments read, Contents read"}
   },
+  "hosts": ["api.github.com", "the Gitea or Forgejo server of the setting url"],
   "poll_every": 60,
   "timeout": 120
 }

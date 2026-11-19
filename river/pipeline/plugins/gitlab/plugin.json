@@ -13,6 +13,7 @@
   "secrets": {
     "token": {"help": "a project access token with the api scope"}
   },
+  "hosts": ["gitlab.com", "the GitLab server of the setting url"],
   "poll_every": 60,
   "timeout": 120
 }
