@@ -530,6 +530,9 @@ def _take(conn, p, m, answer):
         with core.tx(conn):
             conn.execute("UPDATE pipelines SET plugin_state=? WHERE id=?", (state, p["id"]))
     runner.hand_on_passed(conn, res)
+    if answer.get("agents"):  # #6152: the state and proof of the agent jobs in the forge's own CI
+        from . import agent_job
+        agent_job.take(conn, p, answer["agents"], m["name"])
     return len([r for r in res if not r.get("duplicate")]), tests
 
 
@@ -540,6 +543,10 @@ def poll(conn, p):
     _trusted(conn, m, p)  # #6166: a person's item asks once when its files have no yes
     req = _request(conn, p, m, "poll")
     req["runs"] = _known_runs(conn, p)
+    from . import agent_job
+    agents = agent_job.open_runs(conn, p)
+    if agents:  # #6152: the agent jobs in the forge's own CI that wait or run; only then, so no read when none
+        req["agents"] = agents
     answer = call(m, req)
     events, tests = _take(conn, p, m, answer)
     counts = answer.get("counts") if isinstance(answer.get("counts"), dict) else {}

@@ -13,6 +13,9 @@ MaximizePM runs this program once for each call, with one JSON request on stdin;
   maxpm_run (MaximizePM's run id) and maxpm_rev (the commit). The workflow names its run 'maxpm run <id>' (run-name)
   and checks out maxpm_rev; the next poll links the two runs by that name.
 - stop: cancels the run.
+- agents (#6152): when the request lists agent jobs that MaximizePM waits for, the runs of the job maxpm-agent
+  (.github/workflows/agent.yml, written by maxpm runner github) go back as "agents": each one's state, and at its
+  end the proof and the transcript of its artifact maxpm-agent.
 
 Not possible here, and why: a run that a push or a tag starts carries no MaximizePM id; poll links it to the version
 that waits at that stage (same commit). Gitea and Forgejo list no deployments, and some of their versions have no
@@ -313,7 +316,73 @@ def poll(req, api):
     answer = {"events": events, "reports": reports, "counts": {"runs": runs}, "state": out_state}
     if names is not None:
         answer["secrets"] = names
+    if req.get("agents"):
+        answer["agents"] = agent_runs(api, req)
     return answer
+
+
+# ---------------------------------------------------------------- the agent job (#6152)
+
+AGENT_LINK = re.compile(r"\bmaxpm agent (\d+)\b")  # the run-name of the job maxpm-agent: the failed run's id
+AGENT_ART = "maxpm-agent"
+TRANSCRIPT_KEEP = 400  # the last lines of the transcript that go back
+AGENT_STATE = {"success": "ended", "cancelled": "stopped", "skipped": "stopped"}
+
+
+def agent_runs(api, req):
+    """The job maxpm-agent (.github/workflows/agent.yml, which maxpm runner github writes): GitHub starts it when a
+    stage's workflow fails, and names its run 'maxpm agent <the failed run's id>'. For each run that MaximizePM waits
+    for ({"run", "key": "gh-run-<failed id>"}): its state, and at its end the proof and the transcript of its
+    artifact maxpm-agent."""
+    wf = (req.get("settings") or {}).get("agent") or "agent.yml"
+    try:
+        runs = api.call("GET", f"/repos/{api.repo}/actions/workflows/{wf}/runs?per_page=30").get("workflow_runs", [])
+    except Failed as e:
+        if " 404 " not in str(e):
+            raise
+        return [{"run": a["run"], "note": f"{api.name} has no workflow {wf} in {api.repo} yet: commit the file that "
+                                          f"maxpm runner github wrote to the default branch"} for a in req["agents"]]
+    newest = {}
+    for r in runs:  # newest first: the first run that names a failed run is its newest attempt
+        m = AGENT_LINK.search(r.get("display_title") or r.get("name") or "")
+        if m:
+            newest.setdefault(m.group(1), r)
+    out = []
+    for a in req["agents"]:
+        r = newest.get(str(a.get("key") or "").rsplit("-", 1)[-1])
+        if r is None:
+            continue
+        d = {"run": a["run"], "job": f"gh-run-{r['id']}", "url": r.get("html_url"),
+             "started_at": r.get("run_started_at") or r.get("created_at")}
+        if r.get("status") != "completed":
+            d["state"] = "running" if r.get("status") == "in_progress" else "queued"
+        else:
+            d["state"] = AGENT_STATE.get(r.get("conclusion"), "failed")
+            d["ended_at"] = r.get("updated_at")
+            d.update(agent_artifact(api, r))
+        out.append(d)
+    return out
+
+
+def agent_artifact(api, run):
+    """proof.json and the end of transcript.jsonl from the artifact maxpm-agent of a finished job."""
+    arts = api.call("GET", f"/repos/{api.repo}/actions/runs/{run['id']}/artifacts?per_page=100").get("artifacts") or []
+    art = next((a for a in arts if a.get("name") == AGENT_ART and not a.get("expired")), None)
+    if art is None:
+        return {"note": f"the job left no artifact {AGENT_ART}"}
+    out = {}
+    with zipfile.ZipFile(io.BytesIO(api.call("GET", art["archive_download_url"], raw=True))) as z:
+        names = {n.rsplit("/", 1)[-1]: n for n in z.namelist()}
+        if "proof.json" in names:
+            try:
+                proof = json.loads(z.read(names["proof.json"]).decode("utf-8", "replace"))
+                out["proof"] = proof if isinstance(proof, dict) else {}
+            except ValueError:
+                out["note"] = "its proof.json is not JSON"
+        if "transcript.jsonl" in names:
+            lines = z.read(names["transcript.jsonl"]).decode("utf-8", "replace").splitlines()
+            out["transcript"] = "\n".join(lines[-TRANSCRIPT_KEEP:]) + "\n"
+    return out
 
 
 def act(req, api):

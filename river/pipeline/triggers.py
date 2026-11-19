@@ -17,7 +17,8 @@ target or of the pipeline's project.
 
 A rule names the event, the stage it watches (a stage, any stage of a tier, or any stage), what the agent does (the
 instructions of its task), where the agent runs (this computer, or a runner that the pipeline ticks, #6151: a server
-where the agent runs with no terminal and no prompt, river/runners.py), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
+where the agent runs with no terminal and no prompt, river/runners.py; or github, #6152: a job in GitHub Actions that
+GitHub starts when the stage's workflow fails, river/pipeline/agent_job.py), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
 manager adds, changes, turns off and removes rules; a rule that is off acts on nothing until it is on again, and then
 only on what happens after that.
 
@@ -391,8 +392,12 @@ def _fire(conn, p, r, ev):
         result += _grant(conn, r, item, ev["stage"])
     if item and r["runner"] and r["runner"] != THIS:  # #6151: the task goes to a runner, not to a session here
         from .. import runners
+        from . import agent_job
         try:
-            result += runners.queue(conn, r["runner"], item, p["name"], f"t{r['id']}", ev.get("rev"))
+            if r["runner"] in agent_job.FORGES:  # #6152: the forge starts the agent in its own CI job
+                result += agent_job.queue(conn, p, r, item, ev)
+            else:
+                result += runners.queue(conn, r["runner"], item, p["name"], f"t{r['id']}", ev.get("rev"))
         except core.RiverError as e:
             result += f"; not on runner {r['runner']}: {e}"
     with core.tx(conn):

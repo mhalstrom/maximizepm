@@ -260,6 +260,9 @@ the jsonl example only, with its test against recorded answers (#6165):
   the stage's workflow on the branch (`--ref`, `main` when not set) with the
   inputs `maxpm_run` and `maxpm_rev` (the older commit of a roll back); stop
   cancels the run.
+- **The agent job**: while MaximizePM waits for a job of `agent.yml` (setting
+  `agent`), it reads that job's runs and its artifact `maxpm-agent` (see
+  'Agents in GitHub Actions').
 - **What it cannot do, and why**: a run that a push or a tag starts carries no
   MaximizePM id, so the plugin links it to the version that waits at that
   stage (the same commit). Gitea and Forgejo have no deployments API: a deploy
@@ -986,6 +989,78 @@ allows without asking. Each grant and revoke of a stage or tier key is a line
 of the pipeline's audit log. The Emergency tab's Revoke its keys also ends the
 pipeline's stage and tier keys of that set.
 
+## Agents in GitHub Actions
+
+When a stage runs a GitHub workflow, its agent can run in GitHub's own
+runner: no server of yours, and no person's computer. GitHub cannot reach
+this computer, so the job does not use the queue while it runs. GitHub starts
+it, and the pipeline's read of GitHub (the github plugin, once a minute)
+brings its state, its proof and its transcript back.
+
+```
+maxpm runner github <pipeline> --test "<the command that proves a fix>"
+maxpm runner github <pipeline> --print         # show the file; write and change nothing
+maxpm runner runs github                       # the jobs, newest first
+maxpm runner log <run>                         # what the agent printed, in words
+maxpm runner stop <run> --reason "<why>"       # cancels the job on GitHub
+```
+
+`maxpm runner github` (a person or the manager) does two things:
+
+- It writes `.github/workflows/agent.yml` into the checkout you run it in (it
+  must be a checkout of the pipeline's repository; `--file <path>` writes
+  elsewhere). The job `maxpm-agent` starts on `workflow_run` when one of the
+  pipeline's stage workflows fails on the branch the pipeline follows
+  (`--ref`), for a commit of the repository itself, never a fork's.
+- It moves the pipeline's stage-failed rules from this computer to `github`
+  (or adds one): `--runs-on github` on a rule does the same by hand.
+
+Then a person does two things on GitHub, once:
+
+1. Set the model key as a repository secret: `ANTHROPIC_API_KEY` for Claude
+   Code (the default), `CODEX_API_KEY` with `--cli codex`; `--secret <NAME>`
+   names another. MaximizePM never reads or searches for the key.
+2. Allow GitHub Actions to create pull requests (Settings > Actions > General
+   > Workflow permissions). Then commit the file to the default branch:
+   GitHub runs a `workflow_run` job only from there.
+
+What the job does, in order:
+
+1. Checks out the failed commit with no saved token, and saves the failed
+   log (`gh run view --log-failed`) in `/tmp/maxpm-agent/failed.log`.
+2. Runs the agent with no terminal and no prompt: Claude Code in print mode
+   with `--permission-mode dontAsk`, `--max-budget-usd` (`--max-cost`, 5
+   dollars) and the tools of `--allow` (default: read and change files, `git`
+   status, diff, log, show, add and commit, and the first word of `--test`);
+   or `codex exec --json` in its workspace-write sandbox. The agent commits
+   its fix. It cannot push: its step has no token.
+3. When the agent committed: runs `--test`, pushes the commit to the branch
+   `maxpm/fix-<failed run id>`, and opens a pull request into the branch that
+   failed.
+4. Uploads the artifact `maxpm-agent`: `proof.json` (`commit`, `branch`, `pr`,
+   `test` with its command, exit code and last line, `agent_exit`, `error`),
+   the transcript and the logs. GitHub stops the job after `--max-minutes`
+   (30).
+
+What MaximizePM does with it:
+
+- The rule opens the fault task, as for any failed stage, and reserves it for
+  the record `github-r<run>`: no session here takes it while the job works.
+- Each read of GitHub asks for the job whose run name is `maxpm agent <failed
+  run id>`; the run shows running, then ended or failed, under Deploy >
+  Runners with its cost and the agent's last words.
+- At the end, the task goes back to the queue with the proof in a note, and
+  the manager gets an alert. The session that takes it reads the pull
+  request, checks that its tests pass, merges it, and closes the task.
+- No job within 30 minutes (the file is not on the default branch, or the
+  read of GitHub failed): the run fails with the reason, and a session here
+  takes the task. A rule on `github` for a stage that runs here, or for
+  another event than stage-failed, gives its task to a session here.
+
+Note: GitHub does not run your workflows on a pull request that the job's own
+token opened. The proof is the job's own `--test` run; the session that
+merges runs the tests again.
+
 ## Actions on a running pipeline
 
 A person or the manager does these; each one goes in the audit log with who
@@ -1158,5 +1233,5 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: the
-override, an agent inside a forge's own CI job, and each pipeline's list of
-what its agents may do with no prompt.
+override, the agent job in GitLab CI and Pulumi Delivery, and each pipeline's
+list of what its agents may do with no prompt.

@@ -435,7 +435,12 @@ CREATE TABLE IF NOT EXISTS runner_runs (
   cost         REAL,                     -- dollars, from the transcript (Claude Code's result line)
   result       TEXT,                     -- the agent's last words, or why the run failed
   stopped_by   TEXT,
-  stop_reason  TEXT
+  stop_reason  TEXT,
+  -- #6152: a run in a forge's own CI (runner 'github'): the forge starts the job, MaximizePM reads it in the poll
+  forge_key    TEXT,                     -- the failed stage run's key in the forge (gh-run-<id>), which the job names
+  job          TEXT,                     -- the forge's run of the agent job (gh-run-<id>)
+  url          TEXT,                     -- its page on the forge
+  proof        TEXT                      -- JSON: the job's proof (commit, branch, pull request, the test's result)
 );
 CREATE INDEX IF NOT EXISTS runner_runs_state ON runner_runs(state, runner);
 CREATE INDEX IF NOT EXISTS runner_runs_key ON runner_runs(key_hash);
@@ -535,6 +540,10 @@ def migrate(conn):
                  ("result", "TEXT"), ("corrects", "INTEGER")):  # #6144
         if c not in cols:
             conn.execute(f"ALTER TABLE pipeline_changes ADD COLUMN {c} {t}")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(runner_runs)")}
+    for c in ("forge_key", "job", "url", "proof"):  # #6152: an agent job in a forge's own CI
+        if c not in cols:
+            conn.execute(f"ALTER TABLE runner_runs ADD COLUMN {c} TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_run ON pipeline_changes(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_at ON pipeline_changes(at)")
     _gates_to_transitions(conn, stage_cols)

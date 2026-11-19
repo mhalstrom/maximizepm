@@ -2,7 +2,8 @@
 // on a pipeline's task with no person, no terminal and no prompt. Each runner: what it is (its SSH target, system,
 // Tailscale address), its agent CLIs, when it answered last, its load, and the pipelines that use it ("Used by" opens
 // that pipeline's Triggers tab, where it ticks its runners). Below: the agents that run or ran on runners, with Watch
-// (what the agent printed, in words) and Stop. Data: api/deploy's runners (river/runners.py listing); the log from GET
+// (what the agent printed, in words) and Stop. A forge's own CI (#6152, GitHub Actions) is a row too: its agent job
+// starts in the forge when a stage's workflow fails, and its runs show with the others. Data: api/deploy's runners (river/runners.py listing); the log from GET
 // api/runner-log/<run>; actions runner_add, runner_check, runner_stop (a person or the manager).
 import { esc, getJson, ago, act, toast } from "../lib.js";
 import { button, iconButton } from "../components/button.js";
@@ -36,6 +37,17 @@ function runnerRow(r, clis) {
     <td data-label="Used by">${used}</td><td>${button("Check", { data: { "rn-check": r.name }, title: "Ask the server again" })}</td></tr>`;
 }
 
+// A forge's own CI (#6152): GitHub starts the agent in its job when a stage's workflow fails; no slots, no Check.
+function forgeRow(f) {
+  const used = f.used_by.map(p => button(esc(p), { cls: "plain", data: { "dp-triggers": p }, title: "Open its triggers" })).join(" ")
+    || `<span class="muted">no rule yet: maxpm runner ${esc(f.name)} &lt;pipeline&gt;</span>`;
+  return `<tr><td><b>${esc(f.label)}</b></td><td class="t-s" data-label="What it is">${esc(f.what)}</td>
+    <td class="t-s" data-label="Agents">Claude Code, Codex</td>
+    <td class="t-s" data-label="Last seen">${f.last_seen ? `<span class="dot active"></span> ${esc(ago(f.last_seen))}` : "never"}</td>
+    <td class="t-s" data-label="Load">starts per failure${f.busy || f.waiting ? `<br>${f.busy} run, ${f.waiting} wait` : ""}</td>
+    <td data-label="Used by">${used}</td><td></td></tr>`;
+}
+
 function runRow(x) {
   const [cls, word] = STATE[x.state] || ["c-waiting", x.state];
   const live = ["queued", "running"].includes(x.state);
@@ -52,18 +64,19 @@ function runRow(x) {
 // The Runners part of Deploy, from the data of api/deploy.
 export function runnersHtml(data) {
   const R = data.runners || { runners: [], this: { rules: [] }, clis: {} };
-  const rows = R.runners.map(r => runnerRow(r, R.clis)).join("");
+  const forges = R.forges || [];
+  const rows = R.runners.map(r => runnerRow(r, R.clis)).join("") + forges.map(forgeRow).join("");
   const thisRules = R.this.rules.map(x => `${esc(x.pipeline)} ${esc(x.rule)}`).join(", ");
   const here = `<tr><td><b>This computer</b></td><td class="t-s" data-label="What it is">maxpm serve · a session in a terminal, with the agent CLI you signed in</td>
     <td class="t-s" data-label="Agents">every agent CLI</td><td class="t-s" data-label="Last seen"><span class="dot active"></span> now</td>
     <td class="t-s" data-label="Load">max_sessions</td>
     <td class="t-s" data-label="Used by">${thisRules || `<span class="muted">rules that name no runner</span>`}</td><td></td></tr>`;
-  const runs = R.runners.flatMap(r => r.runs).sort((a, b) => b.id - a.id);
+  const runs = R.runners.concat(forges).flatMap(r => r.runs).sort((a, b) => b.id - a.id);
   return `<div class="pl-bar"><b>Runners</b><span class="muted t-s">places where an agent runs with no person · shared by the pipelines</span>
       <span class="spacer"></span>${button("Add a runner", { kind: "primary", data: { "rn-add": 1 }, title: "Add a server" })}</div>
     <div class="pl-table"><table class="pl-blocks"><tr><th>Runner</th><th>What it is</th><th>Agents</th><th>Last seen</th><th>Load</th><th>Used by</th><th></th></tr>
       ${rows}${here}</table></div>
-    ${R.runners.length ? "" : empty("No runner yet. Add a server that you reach with ssh: MaximizePM installs itself there and runs the agents of the trigger rules that name it.")}
+    ${R.runners.length || forges.length ? "" : empty("No runner yet. Add a server that you reach with ssh: MaximizePM installs itself there and runs the agents of the trigger rules that name it.")}
     <h3 class="tg-h">Agents on runners</h3>
     ${runs.length ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Run</th><th>Task</th><th>Started by</th><th>Since</th><th>Cost</th><th>Result</th><th></th></tr>
       ${runs.map(runRow).join("")}</table></div>` : `<div class="muted t-m">No agent ran on a runner yet.</div>`}

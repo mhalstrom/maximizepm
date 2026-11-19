@@ -26,11 +26,13 @@ What a run is, step by step (serve_pass, each pass of maxpm serve):
 
 How it reaches the queue: only over this SSH connection, which this computer opens (Tailscale SSH or a key, policy
 p159). Nothing listens on the tailnet for it, and the runner needs no address of this computer. A CI runner of a forge
-is outside the tailnet: that is #6152. The model key of the CLI is the runner's own (a key in its environment, or the
-CLI's own sign-in there), or a set granted to the runner (#6153: maxpm secret grant <set> --runner <name>; its secret
-carries the variable the CLI reads, maxpm secret level <name> --var ANTHROPIC_API_KEY). The run also gets the sets
-that its rule granted to its task (pipeline/keys.run_env), in the script on stdin; the transcript masks them. The list
-of what an agent may do with no prompt per pipeline comes with #6154 (until then: ALLOW, or the runner's allow).
+is outside the tailnet: there the forge starts the agent in its own job, and the pipeline's read of the forge brings its
+state and proof back (river/pipeline/agent_job.py, #6152; runner 'github'). The model key of the CLI is the runner's
+own (a key in its environment, or the CLI's own sign-in there), or a set granted to the runner (#6153: maxpm secret
+grant <set> --runner <name>; its secret carries the variable the CLI reads, maxpm secret level <name> --var
+ANTHROPIC_API_KEY). The run also gets the sets that its rule granted to its task (pipeline/keys.run_env), in the script
+on stdin; the transcript masks them. The list of what an agent may do with no prompt per pipeline comes with #6154
+(until then: ALLOW, or the runner's allow).
 
 Standard library only."""
 
@@ -136,6 +138,10 @@ def add(conn, name, ssh, cli=None, slots=None, max_minutes=None, max_cost=None, 
     name = (name or "").strip().lower()
     if not NAME.match(name) or name == "this":
         raise RiverError("a runner's name is lower-case letters, digits and '-' (up to 32), such as ci-1")
+    from .pipeline import agent_job
+    if name in agent_job.FORGES:
+        raise RiverError(f"{name} names the agent job in {agent_job.label(name)} (maxpm runner {name} <pipeline>); "
+                         f"give the server another name")
     host._check_target(ssh)
     if cli and cli not in CLIS:
         raise RiverError(f"the agent CLI of a runner is one of: {', '.join(CLIS)}")
@@ -258,9 +264,11 @@ def ticked(p):
 
 
 def choices(conn, p):
-    """Where a rule of pipeline p may run its agent: this computer, and each runner it ticks that is on the list."""
+    """Where a rule of pipeline p may run its agent: this computer, its forge's own CI (#6152: github, when the
+    pipeline reads GitHub), and each runner it ticks that is on the list."""
+    from .pipeline import agent_job
     have = {r["name"] for r in conn.execute("SELECT name FROM runners")}
-    return [THIS] + [n for n in ticked(p) if n in have]
+    return [THIS] + agent_job.choices(p) + [n for n in ticked(p) if n in have]
 
 
 def allow_pipeline(conn, pipeline, name, on=True, actor=None):
@@ -314,7 +322,9 @@ def listing(conn, runs=8):
         out.append(d)
     this = {"name": THIS, "rules": [{"pipeline": x["name"], "rule": f"t{x['id']}", "on": bool(x["enabled"])}
                                     for x in rules if x["runner"] == THIS]}
-    return {"runners": out, "this": this, "clis": {k: {"label": v["label"], "key": v["key"]} for k, v in CLIS.items()}}
+    from .pipeline import agent_job
+    return {"runners": out, "this": this, "forges": agent_job.listing(conn, runs),  # #6152
+            "clis": {k: {"label": v["label"], "key": v["key"]} for k, v in CLIS.items()}}
 
 
 def _run_info(r):
@@ -326,7 +336,8 @@ def _run_info(r):
 
 def runs(conn, name=None, limit=30):
     q = "SELECT * FROM runner_runs" + (" WHERE runner=?" if name else "") + " ORDER BY id DESC LIMIT ?"
-    if name:
+    from .pipeline import agent_job
+    if name and name not in agent_job.FORGES:
         _runner(conn, name)
     return {"runs": [_run_info(r) for r in conn.execute(q, (name, limit) if name else (limit,))]}
 
@@ -353,16 +364,23 @@ def queue(conn, name, item_id, pipeline=None, rule=None, rev=None):
         run_id = conn.execute("INSERT INTO runner_runs(runner, item, agent, pipeline, rule, rev, state, cli, queued_at) "
                               "VALUES (?,?,?,?,?,?,?,?,?)", (name, item_id, "", pipeline, rule, rev, "queued", r["cli"],
                                                              _now())).lastrowid
+    _reserve(conn, run_id, name, item_id, int(r["max_minutes"]) + 60, rule, f"an agent on runner {name}")
+    return f"; runs on {name} (run #{run_id})"
+
+
+def _reserve(conn, run_id, name, item_id, minutes, rule, what):
+    """The session record <name>-r<run> of a run, and its task reserved for it for minutes (also for a forge's job,
+    river/pipeline/agent_job.py)."""
     agent = f"{name}-r{run_id}"
     core.register(conn, agent, note=f"runner {name}: #{item_id}")
-    until = core.iso(core.now() + core.timedelta(minutes=int(r["max_minutes"]) + 60))
+    until = core.iso(core.now() + core.timedelta(minutes=minutes))
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET agent=? WHERE id=?", (agent, run_id))
         conn.execute("UPDATE agents SET host=? WHERE name=?", (f"runner {name}", agent))
         conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
                      (agent, until, rule and f"trigger {rule}" or "maxpm", item_id))
-        core._event(conn, item_id, "maxpm", f"reserved for {agent}: an agent on runner {name} (run #{run_id})")
-    return f"; runs on {name} (run #{run_id})"
+        core._event(conn, item_id, "maxpm", f"reserved for {agent}: {what} (run #{run_id})")
+    return agent
 
 
 def _serve_port():
@@ -571,6 +589,9 @@ def stop(conn, run_id, actor=None, reason=None, by_serve=False):
     if run["state"] not in ("queued", "running"):
         raise RiverError(f"run #{run['id']} has ended already ({run['state']})")
     why = (reason or "").strip() or "stopped by a person"
+    from .pipeline import agent_job
+    if run["runner"] in agent_job.FORGES:  # #6152: a job in the forge's own CI
+        return agent_job.stop(conn, run, actor, why)
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET stopped_by=?, stop_reason=? WHERE id=?", (actor or "maxpm", why, run["id"]))
     if run["state"] == "queued":
@@ -650,9 +671,12 @@ def serve_pass(conn):
     """One pass of maxpm serve: end the runs whose connection ended, stop the ones past max_minutes, keep the leases
     of the others (an agent that works for long without a maxpm command keeps its task), then start queued runs on
     runners with a free slot. Returns {"started", "ended", "stopped"}."""
-    out = {"started": [], "ended": [], "stopped": []}
+    from .pipeline import agent_job
+    out = {"started": [], "ended": agent_job.serve_pass(conn), "stopped": []}  # #6152: the forge's own CI
     t = core.now()
-    for run in conn.execute("SELECT * FROM runner_runs WHERE state='running' ORDER BY id").fetchall():
+    forges = tuple(agent_job.FORGES)
+    for run in conn.execute(f"SELECT * FROM runner_runs WHERE state='running' AND runner NOT IN "
+                            f"({','.join('?' * len(forges))}) ORDER BY id", forges).fetchall():
         code = _exit_code(run)
         if code is None:
             r = conn.execute("SELECT max_minutes FROM runners WHERE name=?", (run["runner"],)).fetchone()
@@ -675,7 +699,8 @@ def serve_pass(conn):
         state = "ended" if code == 0 else "failed"
         out["ended"].append(_end(conn, run, state, code, "maxpm serve lost the connection (a restart)" if code == "lost"
                                  else None))
-    for run in conn.execute("SELECT * FROM runner_runs WHERE state='queued' ORDER BY id").fetchall():
+    for run in conn.execute(f"SELECT * FROM runner_runs WHERE state='queued' AND runner NOT IN "
+                            f"({','.join('?' * len(forges))}) ORDER BY id", forges).fetchall():
         r = conn.execute("SELECT * FROM runners WHERE name=?", (run["runner"],)).fetchone()
         if r is None:
             out["ended"].append(_end(conn, run, "failed", None, f"runner {run['runner']} is no longer on the list"))

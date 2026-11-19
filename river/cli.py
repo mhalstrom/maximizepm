@@ -2705,6 +2705,17 @@ def build_parser(only=None):
     x.add_argument("-n", type=int, default=200)
     x = rus.add_parser("stop", help="stop the agent of a run"); x.add_argument("run", type=int)
     x.add_argument("--reason")
+    x = rus.add_parser("github", help="write .github/workflows/agent.yml: when a stage's workflow fails, GitHub "
+                       "starts the agent in its own runner; its state and proof come back (#6152)")
+    x.add_argument("pipeline")
+    x.add_argument("--cli", choices=["claude", "codex"], default="claude", help="the agent CLI of the job")
+    x.add_argument("--secret", help="the repository secret of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
+    x.add_argument("--max-minutes", type=int, default=30, help="GitHub stops the job after this")
+    x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
+    x.add_argument("--allow", help="the tools of Claude Code allowed with no prompt (default: files and git commit)")
+    x.add_argument("--file", help="where to write it (default: .github/workflows/agent.yml of this checkout)")
+    x.add_argument("--print", dest="show", action="store_true", help="show the file; write and change nothing")
     pg = sub.add_parser("plugin", help="pipeline plugins: install, keep each version, pin one for each pipeline, and a "
                         "person's yes before a plugin runs (#6166)")
     pgs = pg.add_subparsers(dest="pgcmd", required=True)
@@ -8346,6 +8357,10 @@ def _runner_cmd(conn, a, actor):
         return runners.runs(conn, a.name, a.n)
     if s == "log":
         return runners.log(conn, a.run, a.n)
+    if s == "github":  # #6152
+        from .pipeline import agent_job
+        return agent_job.setup(conn, a.pipeline, a.cli, a.secret, a.test, a.max_minutes, a.max_cost, a.allow, a.file,
+                               a.show, actor, os.getcwd())
     return runners.stop(conn, a.run, actor, a.reason)
 
 
@@ -8428,9 +8443,33 @@ def render_runner(a, res):
                                              f"none (the model key: maxpm secret grant <set> --runner {r['name']})"))
             for x in r["runs"][:3]:
                 print("  " + _runner_line(x))
+        for f in res.get("forges") or []:  # #6152
+            rules = f["rules"]
+            print(f"{f['label']} ({f['name']}): {f['what']}; may be used by {', '.join(f['pipelines'])}"
+                  + (f"; rules {', '.join(x['pipeline'] + ' ' + x['rule'] for x in rules)}" if rules else
+                     f"; no rule runs there (maxpm runner {f['name']} <pipeline>)"))
+            for x in f["runs"][:3]:
+                print("  " + _runner_line(x))
         rules = res["this"]["rules"]
         print("This computer: maxpm serve here, in a terminal"
               + (f"; rules {', '.join(x['pipeline'] + ' ' + x['rule'] for x in rules)}" if rules else ""))
+        return
+    if s == "github":  # #6152
+        if res["text"] is not None:
+            print(res["text"], end="")
+            return
+        print(f"wrote {res['file']}: the job maxpm-agent of pipeline {res['pipeline']} ({res['repo']}) starts the "
+              f"agent ({res['cli']}) when one of these workflows fails: {', '.join(res['workflows'])}")
+        for line in res["rules"]:
+            print(f"  - rule {line}")
+        print("Next:")
+        print(f"  1. A person sets the model key as the repository secret {res['secret']} (GitHub: Settings > Secrets "
+              f"and variables > Actions), and allows GitHub Actions to create pull requests (Settings > Actions > "
+              f"General > Workflow permissions).")
+        print(f"  2. Commit the file and bring it to the default branch of {res['repo']}: GitHub runs a "
+              f"workflow_run job only from there. Until then a failure waits 30 minutes for the job, then a session "
+              f"here takes its fault.")
+        print("  3. Watch the jobs: maxpm runner runs github; a job's transcript: maxpm runner log <run>.")
         return
     if s in ("add", "check", "set"):
         r = res["runner"]
