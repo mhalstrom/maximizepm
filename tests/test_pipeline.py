@@ -944,6 +944,131 @@ class Transitions(RunnerBase):
         self.assertEqual(self.tr.get(self.c, ids["build"])["mode"], "yes")
 
 
+class Emergency(RunnerBase):
+    """The operators of a pipeline and its emergency actions (#6145): stop and resume, stop its agents, move a stage
+    back to its last good version, revoke a key; each with a reason and an audit line that names the operator."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import operators
+        self.ops = operators
+
+    def audit(self, action):
+        return [dict(r) for r in self.c.execute("SELECT actor, change, reason FROM pipeline_changes WHERE action=? "
+                                                "ORDER BY id", (action,))]
+
+    def test_operators_a_person_names_them_and_decides_whether_agents_may_act(self):
+        p = store._pipeline(self.c, "app")
+        self.assertIsNone(self.ops.refusal(self.c, p, "mark"))  # none named: a person or the manager
+        self.assertIn("only a person or the manager", self.ops.refusal(self.c, p, "w1"))
+        with self.assertRaises(RiverError):
+            self.ops.change(self.c, "app", add=["w1"], actor="w1")  # an agent names no operator
+        r = self.ops.change(self.c, "app", add=["mark", "w1"], actor="mark")
+        self.assertEqual([(o["name"], o["kind"], o["may_act"]) for o in r["operators"]],
+                         [("mark", "person", True), ("w1", "agent", False)])
+        p = store._pipeline(self.c, "app")
+        self.assertIn("lets no agent operate", self.ops.refusal(self.c, p, "w1"))
+        self.ops.change(self.c, "app", agents=True, actor="mark")
+        self.assertIsNone(self.ops.refusal(self.c, store._pipeline(self.c, "app"), "w1"))
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.assertIn("not an operator", self.ops.refusal(self.c, store._pipeline(self.c, "app"), "boss"))
+        for bad in (dict(add=["nobody"]), dict(add=["mark"]), dict(remove=["boss"]), {}):
+            with self.assertRaises(RiverError):
+                self.ops.change(self.c, "app", actor="mark", **bad)
+        self.assertEqual([x["change"] for x in self.audit("operators")][-1],
+                         "agents may be operators of pipeline app")
+
+    def test_stop_ends_a_running_stage_after_its_step_and_resume_lets_it_go_on(self):
+        self.runner.SYNC["on"] = False
+        define.stage_set(self.c, "app", "build", run="printf '::step start one\\n'; sleep 1; printf '::step end one\\n'; "
+                         "sleep 30; echo never")
+        self.runner.start(self.c, "app", rev="stp0001")
+        self.runner.serve_pass(self.c)
+        rid = self.runs()["build"]["id"]
+        timing.wait_for(lambda: rid in self.runner.PROCS, what="the command started")
+        r = self.ops.stop(self.c, "app", "the prod database is slow", actor="mark")
+        self.assertEqual(r["running"], 1)
+        t = time.monotonic()
+        timing.wait_for(lambda: self.runs()["build"]["state"] == "cancelled", what="the stage stopped")
+        self.assertLess(time.monotonic() - t, timing.limit(10, below=30))  # not the 30 s sleep
+        self.assertIn("stopped after its present step: pipeline stopped by mark: the prod database is slow",
+                      self.runs()["build"]["errors"])
+        plan = self.ops.plan(self.c, "app")
+        self.assertEqual(plan["stopped"]["reason"], "the prod database is slow")
+        define.stage_set(self.c, "app", "build", run="true")
+        self.runner.SYNC["on"] = True
+        self.runner.start(self.c, "app", rev="stp0002")
+        out = self.passes(1)
+        self.assertIn("every stage is held by mark", list(out[-1]["waiting"].values())[0])
+        self.ops.resume(self.c, "app", actor="mark")
+        self.passes(4)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        self.assertEqual(self.audit("emergency-stop")[0]["reason"], "the prod database is slow")
+        self.assertEqual(self.audit("resume")[0]["actor"], "mark")
+        with self.assertRaises(RiverError):
+            self.ops.resume(self.c, "app", actor="mark")  # not stopped
+        with self.assertRaises(RiverError):
+            self.ops.stop(self.c, "app", " ", actor="mark")  # no reason
+
+    def test_stop_its_agents_and_move_a_stage_back_as_an_agent_operator(self):
+        define.stage_set(self.c, "app", "test", run="exit 4")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes(2)  # the test stage fails: a fault item
+        fault = self.runs()["test"]["fault_item"]
+        self.assertTrue(fault)
+        core.claim(self.c, fault, "w1")
+        self.assertEqual([a["name"] for a in self.ops.plan(self.c, "app")["agents"]], ["w1"])
+        r = self.ops.stop_agents(self.c, "app", "a bad release, stop now", actor="mark")
+        self.assertEqual((r["asked"], r["refused"]), (["w1"], []))
+        self.assertTrue(self.c.execute("SELECT stop_at FROM agents WHERE name='w1'").fetchone()[0])
+        self.assertEqual(self.ops.plan(self.c, "app")["agents"], [])  # asked already
+        # Two good versions through beta, then w1 (an operator, with agents on) moves beta back.
+        define.stage_set(self.c, "app", "test", run=(
+            "printf '<testsuite name=\"unit\"><testcase name=\"a\"/></testsuite>' > report.xml"))
+        for rev in ("old0001", "new0002"):
+            self.runner.start(self.c, "app", rev=rev)
+            self.passes(4)
+        core.register(self.c, "w2")
+        self.ops.change(self.c, "app", add=["mark", "w2"], agents=True, actor="mark")
+        back = {m["stage"]: (m["now"], m["good"]) for m in self.ops.plan(self.c, "app")["moveback"]}
+        self.assertEqual(back["beta"], ("new0002", "old0001"))
+        with self.assertRaises(RiverError):
+            self.ops.move_back(self.c, "app", "beta", "x", actor="w1")  # not on the list
+        r = self.ops.move_back(self.c, "app", "beta", "new0002 breaks sign-in", actor="w2")
+        self.assertEqual((r["version"], r["previous"]), ("old0001", "new0002"))
+        self.passes(2)
+        self.assertEqual(store.show(self.c, "app")["envs"][0]["rev"], "old0001")
+        with self.assertRaises(RiverError):
+            self.ops.move_back(self.c, "app", "prod", "x", actor="mark")  # nothing passed prod
+
+    def test_revoke_a_token_warns_of_the_other_pipelines_that_use_it(self):
+        define.forge_set(self.c, "app", "github", repo="o/app", secret="gh-tok", actor="mark")
+        define.pipeline_add(self.c, "site", actor="mark")
+        define.forge_set(self.c, "site", "github", repo="o/site", secret="gh-tok", actor="mark")
+        keys = self.ops.plan(self.c, "app")["keys"]
+        self.assertEqual([(k["key"], k["kind"], k["others"]) for k in keys], [("gh-tok", "token", ["site"])])
+        with self.assertRaises(RiverError):
+            self.ops.revoke(self.c, "app", "nope", "x", actor="mark")
+        r = self.ops.revoke(self.c, "app", "gh-tok", "the token leaked in a log", actor="mark")
+        self.assertEqual((r["others"], store._pipeline(self.c, "app")["secret"]), (["site"], None))
+        self.assertEqual(store._pipeline(self.c, "site")["secret"], "gh-tok")  # the other keeps it
+        line = self.audit("revoke")[0]
+        self.assertEqual(line["reason"], "the token leaked in a log")
+        self.assertIn("other pipelines still use it: site", line["change"])
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            self.assertEqual(cli.run(["--as", "mark", "pipeline", "emergency", "site"]), 0)
+            self.assertEqual(cli.run(["--as", "mark", "pipeline", "emergency", "site", "stop", "--reason",
+                                      "a leaked token"]), 0)
+        text = out.getvalue()
+        self.assertIn("pipeline site: running. The emergency actions take a person or the manager", text)
+        self.assertIn("revoke --key gh-tok: the token that pipeline site reads its source with", text)
+        self.assertIn("pipeline site stopped: nothing new starts. Resume: maxpm pipeline emergency site resume", text)
+
+
 class Waves(RunnerBase):
     """A stage over many servers in waves (#6120): three fake servers (local commands), one fails its check."""
 

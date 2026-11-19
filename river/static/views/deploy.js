@@ -16,12 +16,13 @@ import { button } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { tab, nav } from "../page.js";
-import { showPipeline, hidePipeline, renderPipeline, askReason } from "./pipeline.js";
+import { showPipeline, hidePipeline, renderPipeline } from "./pipeline.js";
 import { showTargets } from "./targets.js";
 import { drawAudit } from "./audit.js";
 import { accountsHtml as accountsView } from "./accounts.js";
 import { agentsHtml, stageMarks } from "./agents.js";
 import { drawTriggers, defaultTriggersHtml } from "./triggers.js";
+import { drawEmergency } from "./emergency.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -240,40 +241,18 @@ function drawPage(force) {
     return drawAudit(D.pipeline, $("#dpPage"), force);
   }
   if (D.tab === "triggers" && p && !p.default) { pageSig = ""; return drawTriggers(D.pipeline, $("#dpPage"), force); }
+  if (D.tab === "emergency" && p && !p.default) { pageSig = ""; return drawEmergency(D.pipeline, $("#dpPage"), force); }
   setPage(!p ? empty(`No pipeline or deploy target ${esc(D.pipeline)}.`) : D.tab === "triggers" ? defaultTriggersHtml(p) : emergencyHtml(p), force);
 }
 function setPage(html, force) {
   const box = $("#dpPage");
-  if (html === pageSig && !force && !box.querySelector(".dp-audit, .tg-view")) return;
+  if (html === pageSig && !force && !box.querySelector(".dp-audit, .tg-view, .em-view")) return;
   pageSig = html; box.dataset.of = ""; box.innerHTML = html;
 }
 
-// The emergency actions of this pipeline (#6117 actions; the operators of Decision 7 come later): each asks why and
-// goes in the audit log with who pressed it.
+// A deploy target's Emergency tab: its release card has the actions. A pipeline's own: views/emergency.js (#6145).
 function emergencyHtml(p) {
-  if (p.default) return empty(`${esc(p.name)} is a deploy target: its release card on the Stages tab has Release now and Deploy now. Hold, stop and put back work on a pipeline of its own.`);
-  const stop = p.held
-    ? `<div class="pl-banner">⛔ Every stage is held${p.held_by ? " by " + esc(p.held_by) : ""}: ${esc(p.held)}</div>${button("End the hold", { kind: "primary", data: { "dp-unhold": p.name }, title: "Stages start again" })}`
-    : button("Hold every stage", { kind: "warn", data: { "dp-hold": p.name }, title: "Nothing new starts" });
-  const runs = p.stages.filter(s => ["running", "queued"].includes(s.state) && s.run != null);
-  // A stage whose work the source does has only the actions its plugin or adapter lists (#6159).
-  const can = (s, a) => !s || !s.by_source || ((p.source && p.source.actions) || []).includes(a);
-  const em = (ok, html, opts) => ok ? button(html, opts) : button(html, { ...opts, data: {}, disabled: true, title: "Source cannot do this" });
-  const envs = p.envs.map(e => {
-    const before = (e.history || []).filter(h => h.rev && h.rev !== e.rev).slice(0, 3);
-    const dep = p.stages.find(s => s.kind === "deploy" && s.env === e.name);
-    return `<div class="dp-envrow"><span><b>${esc(e.name)}</b> <span class="pl-ver">${esc(short(e.rev)) || "none yet"}</span></span>
-      ${before.map(h => em(can(dep, "rollback"), `Put back ${esc(short(h.rev))}`, { kind: "warn", data: { "dp-rollback": e.name, rev: h.rev }, title: `Roll back to ${short(h.rev)}` })).join("")
-        || `<span class="muted t-s">no earlier version</span>`}</div>`;
-  }).join("");
-  return `<div class="dp-cards">
-    <div class="pl-card dp-em-card"><h3>Stop this pipeline</h3><div class="t-m">Nothing new starts in any stage until you end the hold. Work that runs goes on to its end.</div><div class="pl-bar">${stop}</div></div>
-    <div class="pl-card dp-em-card"><h3>Stop what runs now</h3>${runs.length ? runs.map(s => `<div class="dp-envrow"><span><b>${esc(s.name)}</b>
-      <span class="pl-ver">${esc(short(s.version))}</span> <span class="muted t-s">${esc(s.state === "queued" ? "waits" : "runs")}</span></span>
-      ${em(s.state === "queued" || can(s, "stop"), "Stop", { kind: "warn", data: { "dp-stop": s.run }, title: "Stop this run" })}</div>`).join("") : `<div class="muted t-m">Nothing runs now.</div>`}</div>
-    <div class="pl-card dp-em-card"><h3>Put an environment back</h3>${envs || `<div class="muted t-m">This pipeline has no environment.</div>`}
-      <div class="muted t-s">The deploy stage runs with that version, and the transition into it is blocked after it, so no newer version comes by itself.</div></div>
-  </div><div class="muted t-s">A person or the manager may press these. A hold and a put back ask why; the audit log names who pressed each one.</div>`;
+  return empty(`${esc(p.name)} is a deploy target: its release card on the Stages tab has Release now and Deploy now. The emergency actions work on a pipeline of its own.`);
 }
 
 // ---- clicks
@@ -285,7 +264,7 @@ async function pipeAct(op, args, done) {
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-hold],[data-dp-unhold],[data-dp-stop],[data-dp-rollback],[data-dp-check]");
+  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-check]");
   if (!t) return;
   const d = t.dataset;
   if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the forge");
@@ -294,11 +273,4 @@ $("#tab-deploy").addEventListener("click", (e) => {
   if (d.dpTab) return go({ part: null, pipeline: D.pipeline, tab: d.dpTab });
   if (d.dpCard) return import("../components/waitDialog.js").then(m => m.openItemCard(+d.dpCard));
   if (d.dpApprove) return pipeAct("pipeline_approve", { pipeline: d.dpApprove, stage: d.stage, rev: d.rev || null }, `${d.dpApprove}: ${d.stage} approved`);
-  if (d.dpHold) return askReason("Hold every stage?", "Nothing new starts in any stage. Work that runs goes on to its end.", "Hold",
-    (reason) => pipeAct("pipeline_hold", { pipeline: d.dpHold, stage: null, reason }, `${d.dpHold} is held`));
-  if (d.dpUnhold) return pipeAct("pipeline_unhold", { pipeline: d.dpUnhold, stage: null }, `${d.dpUnhold} goes on`);
-  if (d.dpStop) return pipeAct("pipeline_stop", { pipeline: D.pipeline, run: +d.dpStop }, "Stopped");
-  if (d.dpRollback) return askReason(`Put ${short(d.rev)} back on ${d.dpRollback}?`,
-    "Its deploy stage runs with this version, and the transition into it is blocked until you unblock it, so no newer version comes by itself.",
-    "Put back", (reason) => pipeAct("pipeline_rollback", { pipeline: D.pipeline, env: d.dpRollback, rev: d.rev, reason }, `${d.dpRollback} goes back to ${short(d.rev)}`));
 });

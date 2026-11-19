@@ -26,7 +26,22 @@ CREATE TABLE IF NOT EXISTS pipelines (
   held_by     TEXT,
   held_at     TEXT,
   plugin_settings TEXT,                  -- a plugin source (#6159): JSON {settings, secrets: {its name: maxpm secret}}
-  plugin_state    TEXT                   -- the JSON state the plugin's last answer kept (a cursor), sent back to it
+  plugin_state    TEXT,                  -- the JSON state the plugin's last answer kept (a cursor), sent back to it
+  stop_runs       INTEGER,               -- 1: an operator stopped the pipeline (#6145): with the hold above, a running
+                                         -- stage stops after its present step
+  agents_operate  INTEGER                -- 1: agent sessions on the operator list may press the emergency actions
+);
+
+-- The operators of a pipeline (#6145; Decision 7, mark 2026-11-18: "operators can, we audit who does them"): the
+-- people, and the agent sessions when pipelines.agents_operate allows, who may press its emergency actions. A pipeline
+-- with none: a person or the manager. Readers: operators.check, the Emergency tab.
+CREATE TABLE IF NOT EXISTS pipeline_operators (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  name         TEXT NOT NULL,            -- a person's or an agent session's name in the agents table
+  added_by     TEXT,
+  added_at     TEXT NOT NULL,
+  UNIQUE (pipeline_id, name)
 );
 
 -- A place that runs the code: dev, beta, prod, or one server. version_id and since say what runs there now.
@@ -358,6 +373,9 @@ def migrate(conn):
               "forge_url", "plugin_settings", "plugin_state"):
         if c not in cols:  # #6119, #6117, #6121, #6159
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
+    for c in ("stop_runs", "agents_operate"):  # #6145
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait",
               "tier"):  # #6113, #6114, #6120, #6137

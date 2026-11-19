@@ -113,6 +113,11 @@ OPS = {
     "pipeline_rerun": lambda c, a, who: _runner().run_again(c, a["pipeline"], a["stage"], a["rev"], who,
                                                             reason=a.get("reason") or None),
     # #6141: Move back here, in Versions in <stage>
+    # #6145: the operators of a pipeline (a person changes them) and its emergency actions (its operators)
+    "pipeline_operators": lambda c, a, who: _operators().change(
+        c, a["pipeline"], a.get("add") or [], a.get("remove") or [],
+        None if a.get("agents") is None else bool(a["agents"]), who),
+    "pipeline_emergency": lambda c, a, who: _emergency(c, a, who),
     "pipeline_move_back": lambda c, a, who: _runner().move_back(c, a["pipeline"], a["stage"], a["rev"],
                                                                 a.get("reason"), who),
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
@@ -152,6 +157,36 @@ OPS = {
 def _transitions():
     from ..pipeline import transitions
     return transitions
+
+
+def _operators():
+    from ..pipeline import operators
+    return operators
+
+
+def _emergency(conn, a, who):
+    """op pipeline_emergency {pipeline, action stop|resume|agents|moveback|revoke, reason, stage, key} (#6145)."""
+    o, p, act = _operators(), a["pipeline"], a.get("action")
+    if act == "stop":
+        return o.stop(conn, p, a.get("reason"), who)
+    if act == "resume":
+        return o.resume(conn, p, who)
+    if act == "agents":
+        return o.stop_agents(conn, p, a.get("reason"), who)
+    if act == "moveback":
+        return o.move_back(conn, p, a["stage"], a.get("reason"), who)
+    if act == "revoke":
+        return o.revoke(conn, p, a["key"], a.get("reason"), who)
+    raise RiverError(f"the emergency action {act!r} is not one of: stop, resume, agents, moveback, revoke")
+
+
+def emergency_plan(conn, path):
+    """GET /api/pipeline-emergency?pipeline=<name>: what each emergency action acts on, and the operators (#6145)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    if not q.get("pipeline"):
+        raise RiverError("name the pipeline: ?pipeline=<name>")
+    return _operators().plan(conn, q["pipeline"][0])
 
 
 def _audit():
@@ -211,6 +246,7 @@ def stage_runs(conn, path):
 
 GET += [
     (lambda path: path == "/api/pipeline-stage", _with(stage_runs, query=True)),
+    (lambda path: path == "/api/pipeline-emergency", _with(emergency_plan, query=True)),
     (lambda path: path.startswith("/api/pipeline-triggers/"), _with(trigger_rules)),
     (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
     (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),

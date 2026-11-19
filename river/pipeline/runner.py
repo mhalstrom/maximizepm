@@ -378,7 +378,7 @@ def _execute(conn, run_id):
             state, errors = _waves(conn, r, folder, limit, limit_text, env)
         else:
             state, errors = _single(conn, r, r["cmd"], folder, limit, limit_text, env)
-        if r["junit"]:
+        if r["junit"] and state != "cancelled":  # a stage that an operator's stop ended reads no report (#6145)
             path = os.path.join(folder or "", os.path.expanduser(r["junit"]))
             try:
                 fresh = os.path.getmtime(path) >= began - 1
@@ -399,19 +399,40 @@ def _execute(conn, run_id):
     return state
 
 
+STOPPED = {}  # run id -> why an operator's stop ended it after a step (#6145)
+
+
+def _stop_asked(conn, r):
+    """Why the run must stop after its present step: an operator stopped its pipeline (operators.stop), or None."""
+    p = conn.execute("SELECT held_by, held_reason, stop_runs FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
+    if p and p["stop_runs"] and p["held_reason"]:  # an end of the hold (release_hold too) ends the stop
+        return f"stopped after its present step: pipeline stopped by {p['held_by'] or 'a person'}: {p['held_reason']}"
+    return None
+
+
 def _single(conn, r, cmd, folder, limit, limit_text, env, on_lines=None):
     """Run one command of a stage run to its end: ("passed", None) or ("failed", why)."""
     run_id = r["id"]
+
+    def lines_in(lines):
+        steps.ingest_output(conn, run_id, lines)
+        # An operator stopped the pipeline (#6145): the stage stops after its present step.
+        if any(x.startswith("::step end") for x in lines) and run_id in PROCS:
+            why = _stop_asked(conn, r)
+            if why:
+                STOPPED[run_id] = why
+                core._stop_group(PROCS[run_id])
     try:
         if folder and not os.path.isdir(folder):
             raise OSError(f"the folder {folder} does not exist")
         try:
-            code, timed_out = _command(cmd, folder, limit, env, on_lines or (lambda lines: steps.ingest_output(
-                conn, run_id, lines)), run_id)
+            code, timed_out = _command(cmd, folder, limit, env, on_lines or lines_in, run_id)
         finally:
             PROCS.pop(run_id, None)
     except OSError as e:
         return "failed", f"the command did not start: {e}"
+    if run_id in STOPPED:
+        return "cancelled", STOPPED.pop(run_id)
     if timed_out:
         return "failed", f"stopped at stage_timeout ({limit_text})"
     if code != 0:
@@ -441,9 +462,15 @@ def _waves(conn, r, folder, limit, limit_text, env):
 
     for n, wave in enumerate(waves, 1):
         done, bad = [], None
-        for host in wave:
+        for i, host in enumerate(wave):
+            stop = _stop_asked(conn, r)  # an operator stopped the pipeline: no next server (#6145)
+            if stop:
+                left = len(wave) - i + sum(len(w) for w in waves[n:])
+                return "cancelled", f"{stop}; {left} server(s) not started"
             ok, why = step("deploy", host, "deploy", r["cmd"])
             done.append(host)
+            if not ok and (why or "").startswith("stopped after its present step"):
+                return "cancelled", why  # its own ::step end lines met the stop: no roll back, no next server
             if not ok:
                 bad = f"wave {n}: {host} did not deploy ({why})"
                 break
@@ -514,6 +541,9 @@ def _drop_card(conn, item_id, note):
 
 
 def _lead(conn, actor, what):
+    from . import operators
+    if operators.vouched(actor):
+        return  # an operator's emergency action (#6145): operators.check let this actor act
     why = core._lead_refusal(conn, actor, what)
     if why:
         raise core.RiverError(why)
@@ -562,8 +592,8 @@ def hold(conn, pipeline, stage=None, reason=None, actor=None):
         raise core.RiverError("say why: --reason \"<why>\" (the people who look at the pipeline read it)")
     p = store._pipeline(conn, pipeline)
     with core.tx(conn):
-        conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=? WHERE id=?",
-                     (reason, actor, store._now(), p["id"]))
+        conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=?, stop_runs=NULL WHERE id=?",
+                     (reason, actor, store._now(), p["id"]))  # a hold lets running work end (an operator's stop does not)
         _act(conn, p["id"], actor, f"held every stage: {reason}", "hold", "every stage", reason=reason)
     return {"pipeline": p["name"], "stage": None, "held": reason}
 
@@ -578,7 +608,8 @@ def release_hold(conn, pipeline, stage=None, actor=None):
     with core.tx(conn):
         if not p["held_reason"]:
             raise core.RiverError(f"pipeline {p['name']} is not held")
-        conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (p["id"],))
+        conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL, stop_runs=NULL WHERE id=?",
+                     (p["id"],))  # an operator's stop ends with it (#6145)
         _act(conn, p["id"], actor, "ended the hold of every stage", "unhold", "every stage")
     return {"pipeline": p["name"], "stage": None, "held": None}
 

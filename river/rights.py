@@ -44,7 +44,9 @@ COMMANDS = {
                  "holding": ANY, "release": LEAD,  # #6140
                  "accounts": ANY,  # #6147: --check takes a person or the manager (accounts.check_now)
                  "runs": ANY, "move-back": LEAD,  # #6141
-                 "triggers": ANY, "trigger": LEAD},  # #6150
+                 "triggers": ANY, "trigger": LEAD,  # #6150
+                 # #6145: operators.change takes a person, operators.check the pipeline's operators
+                 "operators": ANY, "emergency": ANY},
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -92,7 +94,8 @@ OPS = {op: ANY for op in (
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
-    "pipeline_fix", "pipeline_correct")}
+    "pipeline_fix", "pipeline_correct",
+    "pipeline_operators", "pipeline_emergency")}  # #6145: the functions check a person, or the pipeline's operators
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",

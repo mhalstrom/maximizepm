@@ -67,11 +67,18 @@
 .dp-cards { display: flex; flex-direction: column; gap: var(--sp-4); margin-bottom: var(--sp-4); }
 .dp-rule { border: var(--hair) solid var(--line); border-radius: var(--r-l); padding: var(--sp-4) var(--sp-5);
   display: flex; flex-direction: column; gap: var(--sp-1); }
-.dp-envrow { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-1) 0;
-  border-top: var(--hair) solid var(--line); }
-.dp-envrow:first-of-type { border-top: 0; }
-.dp-em-card { border-color: var(--warn-bg); }
+.dp-em-card { border-color: var(--warn); }
 .plan-vbtn.dp-em { color: var(--warn); }
+/* The Emergency tab (#6145, views/emergency.js): the operators, four action cards to pick, the picked action. */
+.em-view { display: flex; flex-direction: column; gap: var(--sp-4); }
+.em-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--w-l), 1fr)); gap: var(--sp-3); }
+button.cardbtn.em-pick { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-1); text-align: left;
+  background: var(--panel); }
+button.cardbtn.em-pick:hover { background: var(--bubble); }
+button.cardbtn.em-pick.on { border-color: var(--warn); background: var(--warn-bg); }
+.em-op { display: inline-flex; align-items: center; }
+.em-list { margin: 0; padding-left: var(--sp-6); }
+.em-view .form { margin-bottom: var(--sp-3); }
 /* The audit log (views/audit.js, #6144): the filters in one bar; a corrected line is muted, its correction names it. */
 .dp-audit { display: flex; flex-direction: column; gap: var(--sp-3); }
 /* The Triggers tab (#6150, views/triggers.js): a card for each rule, a rule that is off is faint. */

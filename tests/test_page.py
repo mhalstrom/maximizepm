@@ -193,6 +193,53 @@ try {
             self.assertIn("ran", r["runs"], r)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
+    def test_the_emergency_tab_shows_what_each_action_acts_on_and_stops_the_pipeline(self):
+        """#6145: a pipeline's Emergency tab: its operators, four actions to pick, what the picked one acts on (a
+        shared token warns), a reason, and Stop: a banner until Resume. At 1280 and at 390 px, nothing wider."""
+        from river.pipeline import define, operators
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "app", project="site")
+        define.pipeline_add(self.c, "web")
+        define.stage_set(self.c, "app", "build", "build")
+        for p in ("app", "web"):
+            define.forge_set(self.c, p, "github", repo=f"o/{p}", secret="gh-shared", actor="mark")
+        operators.change(self.c, "app", add=["mark"], actor="mark")
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="app"]'), "Deploy: the pipeline app");
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('[data-dp-tab="emergency"]'), "the tabs of app");
+  q('[data-dp-tab="emergency"]').click();
+  await until(() => q(".em-picks"), "the Emergency tab");
+  const out = { ops: q(".em-view").textContent.includes("mark"), picks: [...document.querySelectorAll("[data-em-pick]")].map(b => b.dataset.emPick) };
+  q('[data-em-pick="revoke"]').click();
+  await until(() => q(".dp-em-card").textContent.includes("Revoke its keys"), "the revoke card");
+  out.revoke = q(".dp-em-card").textContent.replace(/\s+/g, " ");
+  q('[data-em-pick="stop"]').click();
+  await until(() => q(".dp-em-card").textContent.includes("Stop this pipeline"), "the stop card");
+  if (q("#emWhy")) {
+    q("#emWhy").value = "the prod database is slow";
+    q('[data-em-go="stop"]').click();
+  }
+  await until(() => q(".em-view .pl-banner"), "the stop banner");
+  out.banner = q(".em-view .pl-banner").textContent.replace(/\s+/g, " ");
+  out.over = [...q(".em-view").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5)
+    .map(e => e.tagName + "." + e.className).slice(0, 5);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1280,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertTrue(r["ops"], r)
+            self.assertEqual(r["picks"], ["stop", "agents", "moveback", "revoke"], r)
+            self.assertIn("gh-shared: the token that pipeline app reads its source with ⚠ web uses it too", r["revoke"], r)
+            self.assertIn("app is stopped by mark", r["banner"], r)
+            self.assertIn("the prod database is slow", r["banner"], r)
+            self.assertEqual(r["over"], [], r)
+        self.assertEqual(self.c.execute("SELECT actor, reason FROM pipeline_changes WHERE action='emergency-stop'")
+                         .fetchall()[0][:], ("mark", "the prod database is slow"))
+
     def test_every_view_draws_and_its_controls_answer(self):
         """#4656: each tab of the page is a module of its own (views/*.js); each one draws with the queue's data, and
         its controls (and the frame's) still answer a click, with no error on the page."""

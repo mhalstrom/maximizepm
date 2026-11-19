@@ -608,6 +608,48 @@ To find what a version carries: `maxpm pipeline version <name> <commit>`
 (the tasks its commits name). To find where a task runs: `maxpm pipeline item
 <id>`.
 
+## Emergency actions and operators
+
+Each pipeline has its own emergency actions, on the Emergency tab of its page
+and in `maxpm pipeline emergency`. They act on that pipeline only: the other
+pipelines go on.
+
+```
+maxpm pipeline emergency <name>                                  # what each action acts on now
+maxpm pipeline emergency <name> stop --reason "<why>"            # Stop this pipeline
+maxpm pipeline emergency <name> resume
+maxpm pipeline emergency <name> agents --reason "<why>"          # Stop its agents
+maxpm pipeline emergency <name> moveback --stage <stage> --reason "<why>"
+maxpm pipeline emergency <name> revoke --key <token or set> --reason "<why>"
+maxpm pipeline operators <name> [--add <name>] [--remove <name>] [--agents on|off]
+```
+
+- **Stop this pipeline**: every stage is held, so nothing new starts, and a
+  running stage stops after its present step (a stage over many servers
+  starts no next server). A banner shows the stop until an operator resumes
+  it. A plain `hold` lets running work end; a stop does not.
+- **Stop its agents**: each agent session that works on the pipeline now (on
+  a fault of its stages, or a fix task of one) gets a stop request
+  (`maxpm stop`): it commits, hands its task back with a note, and ends.
+- **Move back to the last good version**: a stage runs again with the newest
+  version that passed there before the one it has, and the transition into
+  it is blocked (the same as `move-back`, with the version picked for you).
+- **Revoke its keys**: the pipeline stops using a token (the forge or plugin
+  token it reads with) or a credential set (its trigger rules give it no more,
+  and the grants their tasks hold end). The secret itself stays: a person
+  replaces it (`maxpm secret put <name>`) or deletes it. When another pipeline
+  uses the same token, the plan and the reply name it, and it keeps the token.
+
+Each action needs a reason, and its audit line names who pressed it.
+
+**Operators.** Each pipeline has a list of operators: the people, and agent
+sessions, who may press its emergency actions. Only a person changes the list
+and the setting "agents may be operators" (a decision for each pipeline,
+mark 2026-11-18). An agent on the list acts only while that setting is on. A
+pipeline with no operators named: a person or the manager. You are an agent
+and not an operator: ask the person with `maxpm ask`, and name the action and
+its reason.
+
 ## The audit log
 
 Every change to a pipeline and its flow is one line of its audit log: who did
@@ -656,8 +698,9 @@ The person follows all of this on the page's Deploy tab:
   (⚠ a fault, 🤖 a session).
 - **A pipeline's own page**: Stages (each stage's runs, steps, tests and the
   failure prompt; a target's release card), Versions, Triggers (its trigger
-  rules: add, edit, turn off or on; what they did lately), Emergency (hold
-  every stage, stop what runs, put an environment back) and its Audit log.
+  rules: add, edit, turn off or on; what they did lately), Emergency (its
+  operators; stop the pipeline, stop its agents, move a stage back, revoke a
+  key, each with what it acts on first) and its Audit log.
 - The red number on the tab counts what waits on the person there.
 
 When you tell the person about a release, name the pipeline and the stage:
@@ -672,6 +715,6 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: manual
-starts, branches, operators and the override,
+starts, branches, the override,
 and runners that start agents with no person's computer (a rule then names
 one of them).

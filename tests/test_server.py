@@ -4191,6 +4191,22 @@ class PipelineRoutes(unittest.TestCase):
         sr = self.get(f"/api/pipeline-stage?pipeline=web-app&stage={p['stages'][1]['name']}")["body"]
         self.assertEqual([(r["run"], r["rev"], r["state"]) for r in sr["runs"]], [(run, "abc1234", "failed")])
         self.assertEqual(self.get("/api/pipeline-stage?pipeline=web-app")["code"], 404)
+        # #6145: the Emergency tab: what each action acts on, and the operators; the ops check who acts.
+        em = self.get("/api/pipeline-emergency?pipeline=web-app")["body"]
+        self.assertEqual((em["stopped"], em["operators"]["operators"], em["keys"]), (None, [], []))
+        self.assertIn("Other pipelines go on", em["stop"])
+        self.assertEqual(self.get("/api/pipeline-emergency")["code"], 404)
+        from river import rights
+        self.assertEqual((rights.OPS["pipeline_emergency"], rights.OPS["pipeline_operators"]), (rights.ANY, rights.ANY))
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w9")
+        server.OPS["pipeline_emergency"](self.c, {"pipeline": "web-app", "action": "stop", "reason": "slow db"}, "mark")
+        self.assertEqual(self.get("/api/pipeline-emergency?pipeline=web-app")["body"]["stopped"]["by"], "mark")
+        with self.assertRaises(core.RiverError):  # an agent that is no operator
+            server.OPS["pipeline_emergency"](self.c, {"pipeline": "web-app", "action": "resume"}, "w9")
+        with self.assertRaises(core.RiverError):  # an agent names no operator
+            server.OPS["pipeline_operators"](self.c, {"pipeline": "web-app", "add": ["w9"]}, "w9")
+        server.OPS["pipeline_emergency"](self.c, {"pipeline": "web-app", "action": "resume"}, "mark")
 
     def test_the_page_s_pipeline_actions_are_for_a_person_or_the_manager(self):
         """#6117: the page's buttons are server OPS; the permission table gives each one to a person or the manager."""

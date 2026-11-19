@@ -321,6 +321,9 @@ def _line(conn, pid, actor, text, reason=None, until=None, detail=None):
 
 
 def _lead(conn, actor, what):
+    from . import operators
+    if operators.vouched(actor):
+        return  # an operator's emergency action (#6145): operators.check let this actor act
     why = core._lead_refusal(conn, actor, what)
     if why:
         raise core.RiverError(why)

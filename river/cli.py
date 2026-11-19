@@ -1950,6 +1950,19 @@ def build_parser(only=None):
                        "transition into it until you unblock it")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x.add_argument("--reason", required=True)
+    # #6145: who may press the emergency actions, and the actions
+    x = pls.add_parser("operators", help="who may press the emergency actions of a pipeline; only a person changes "
+                       "the list")
+    x.add_argument("name"); x.add_argument("--add", action="append", default=[], metavar="NAME")
+    x.add_argument("--remove", action="append", default=[], metavar="NAME")
+    x.add_argument("--agents", choices=("on", "off"), help="on: agent sessions on the list may act too")
+    x = pls.add_parser("emergency", help="the emergency actions of a pipeline (its operators): with no action, what "
+                       "each one acts on")
+    x.add_argument("name")
+    x.add_argument("action", nargs="?", choices=("stop", "resume", "agents", "moveback", "revoke"))
+    x.add_argument("--stage", help="moveback: the stage to put back on its last good version")
+    x.add_argument("--key", help="revoke: the token or credential set to take away")
+    x.add_argument("--reason")
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
     x.add_argument("id", type=int)
     x = pls.add_parser("hold", help="hold every stage (nothing new starts; work that runs goes on); with a stage: "
@@ -7639,6 +7652,24 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "move-back":
         from .pipeline import runner
         return runner.move_back(conn, a.name, a.stage, a.rev, a.reason, actor)
+    if sub in ("operators", "emergency"):
+        from .pipeline import operators as ops
+        if sub == "operators":
+            if not a.add and not a.remove and a.agents is None:
+                return ops.listing(conn, a.name)
+            return ops.change(conn, a.name, a.add, a.remove, None if a.agents is None else a.agents == "on", actor)
+        if a.action is None:
+            return ops.plan(conn, a.name)
+        if a.action == "moveback" and not a.stage:
+            raise RiverError("name the stage: maxpm pipeline emergency <name> moveback --stage <stage> --reason \"...\"")
+        if a.action == "revoke" and not a.key:
+            raise RiverError("name the key: maxpm pipeline emergency <name> revoke --key <name> --reason \"...\" (maxpm "
+                             f"pipeline emergency {a.name} lists them)")
+        return {"stop": lambda: ops.stop(conn, a.name, a.reason, actor),
+                "resume": lambda: ops.resume(conn, a.name, actor),
+                "agents": lambda: ops.stop_agents(conn, a.name, a.reason, actor),
+                "moveback": lambda: ops.move_back(conn, a.name, a.stage, a.reason, actor),
+                "revoke": lambda: ops.revoke(conn, a.name, a.key, a.reason, actor)}[a.action]()
     if sub == "stop":
         from .pipeline import runner
         return runner.stop(conn, a.id, actor)
@@ -7758,6 +7789,44 @@ def _transition_lines(t, indent="  "):
                    + (f", yes from {v['approved_by']}" if v.get("approved_by") else "")
                    + (f", let pass by {v['passed_by']}" if v.get("passed_by") else ""))
     return [indent + line for line in out]
+
+
+def _render_emergency(a, res):
+    """maxpm pipeline emergency (#6145): the plan of each action, or what one action did."""
+    if a.action is None:
+        st = res["stopped"]
+        print(f"pipeline {res['pipeline']}: " + (f"STOPPED by {st['by'] or 'a person'}: {st['reason']}. Resume: maxpm "
+                                                 f"pipeline emergency {res['pipeline']} resume" if st else "running")
+              + f". The emergency actions take {res['operators']['rule']}.")
+        print("  stop: " + "; ".join(res["stop"]))
+        print("  agents: " + ("; ".join(f"{x['name']} on #{x['item']} under {x['stage']} ({x['state']})"
+                                       for x in res["agents"]) or "no agent works on it now"))
+        for m in res["moveback"]:
+            print(f"  moveback --stage {m['stage']}: " + (f"{(m['now'] or 'none')[:12]} -> {m['good'][:12]}" if m["good"]
+                                                          else "no earlier version passed there"))
+        for k in res["keys"]:
+            print(f"  revoke --key {k['key']}: {k['what']}" + (f"; WARNING: {', '.join(k['others'])} use(s) it too"
+                                                               if k["others"] else ""))
+        if not res["keys"]:
+            print("  revoke: the pipeline names no key")
+        return
+    p = res["pipeline"]
+    if a.action == "stop":
+        print(f"pipeline {p} stopped: nothing new starts" + (f"; {res['running']} running stage(s) stop after their "
+                                                             "present step" if res["running"] else "")
+              + f". Resume: maxpm pipeline emergency {p} resume")
+    elif a.action == "resume":
+        print(f"pipeline {p} goes on")
+    elif a.action == "agents":
+        print(f"pipeline {p}: " + (f"asked {', '.join(res['asked'])} to stop" if res["asked"] else
+                                   "no agent was asked to stop")
+              + "".join(f"\n  not stopped: {x}" for x in res["refused"]))
+    elif a.action == "moveback":
+        print(f"pipeline {p}: stage {res['stage']} goes back from {res['previous'] or 'none'} to {res['version']} (run "
+              f"#{res['run']}); the transition into it is blocked until maxpm pipeline unblock {p} {res['stage']}")
+    else:
+        print(f"pipeline {p}: revoked {res['key']}: {'; '.join(res['done']) or 'nothing held it'}"
+              + (f"\n  WARNING: {', '.join(res['others'])} still use(s) {res['key']}" if res["others"] else ""))
 
 
 def render_pipeline(a, res):
@@ -7944,6 +8013,16 @@ def render_pipeline(a, res):
         what = f"the transition into stage {res['stage']}" if res["stage"] else "every stage"
         print(f"pipeline {res['pipeline']}: {what} " + ((f"is blocked: {res['held']}" if res["stage"] else
                                                           f"is held: {res['held']}") if res["held"] else "goes on"))
+        return
+    if sub == "operators":
+        print(f"pipeline {res['pipeline']}: " + (f"{res['changed']}. " if res.get("changed") else "")
+              + f"the emergency actions take {res['rule']}; agents may be operators: {'yes' if res['agents'] else 'no'}")
+        for o in res["operators"]:
+            print(f"  {o['name']} ({o['kind']})" + ("" if o["may_act"] else ": may not act while agents may not")
+                  + (f", added by {o['added_by']}" if o["added_by"] else ""))
+        return
+    if sub == "emergency":
+        _render_emergency(a, res)
         return
     if sub == "runs":
         from .core import show_time
