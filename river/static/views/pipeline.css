@@ -10,11 +10,19 @@
 .pl-row { display: flex; align-items: stretch; min-width: min-content; }
 .pl-stage { flex: 1 0 var(--w-card); max-width: calc(var(--w-card) + var(--w-input-s)); text-align: left;
   padding: var(--sp-4); border: var(--hair) solid var(--line); border-radius: var(--r-l); background: var(--panel); color: var(--ink); }
-/* button.cardbtn is display: block; the parts of the card stack in this span (pl-in). */
+/* button.cardbtn is display: block; the parts of the card stack in this span (pl-in). A card that the row stretches
+   keeps them at its top: a button centers its content, which put a shorter card's name lower (#6182). */
+button.pl-stage { display: flex; flex-direction: column; justify-content: flex-start; }
+.pl-stage > .pl-in { width: 100%; }
 .pl-in { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
 .pl-stage.on { border-color: var(--accent); box-shadow: 0 0 0 var(--hair) var(--accent); }
 .pl-stage.pl-env { border-width: var(--hair-2); }
-.pl-kind { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; }
+/* The head of a card is one line (#6182: 'DEPLOY · TOOLSCALED-PROD · PROD' wrapped and put that card's version and
+   state lower than the others); the card's title has the whole text. */
+.pl-kind { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pl-ver.pl-words { font-family: inherit; }  /* words such as 'nothing waits', not a version */
+.pl-runs .pl-nowrap { white-space: nowrap; }
 .pl-kind .pl-tier { font-size: var(--fs-xs); padding: 0 var(--sp-1); margin-left: var(--sp-1); }
 .pl-name { font-weight: 600; }
 .pl-ver { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); }

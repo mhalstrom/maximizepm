@@ -2,12 +2,11 @@
 // step 6, then Plan > Releases, and since #6136 the Stages tab of the pipeline in Deploy that names the target (its
 // default pipeline, or a pipeline whose environment names it). The head names the target, its owner and its projects;
 // each open release is one state line in plain words, the button Open report (the review report, #6003: the main
-// action here), and its tasks as item rows grouped like the report (goal, then project), folded after a few. Release
+// action here; its tasks are in the report, not repeated on the card, #6182). Release
 // now is a plain button that opens a small dialog for the reason; Deploy now, the hooks and the past deploys stay.
 import { $, esc, toast, act, ago, left, clip } from "../lib.js";
-import { chip, ownerChip } from "../components/chip.js";
+import { ownerChip } from "../components/chip.js";
 import { button, iconButton } from "../components/button.js";
-import { itemRow } from "../components/itemRow.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, textarea, actions } from "../components/form.js";
 import { agentStart } from "../components/agentStart.js";
@@ -15,8 +14,6 @@ import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { hooksHtml } from "../components/targetHooks.js";
 import { S } from "../page.js";
 
-const FOLD = 5;                 // the tasks a release shows before Show all
-const shown = new Set();        // the releases whose whole list is open (by deploy id), over a refresh
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 
 // A time a person reads: "Tue 21:43" within a week, else "Nov 30 21:43".
@@ -43,37 +40,15 @@ function stateLine(t, d) {
   return `${lead} · collecting`;
 }
 
-// The tasks of a release as item rows, grouped like its report: each goal, then each project. Not-done tasks say so.
-function taskRows(d) {
-  const groups = new Map();
-  for (const x of d.ships) {
-    const key = x.goals && x.goals.length ? "g:" + x.goals[0] : "p:" + x.project;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(x);
-  }
-  const keys = [...groups.keys()].sort((a, b) => (a[0] === "g" ? 0 : 1) - (b[0] === "g" ? 0 : 1));  // goals first
-  const all = shown.has(d.id) || d.ships.length <= FOLD + 1;
-  let left_ = all ? Infinity : FOLD, out = "";
-  for (const key of keys) {
-    if (left_ <= 0) break;
-    const xs = groups.get(key), take = xs.slice(0, left_); left_ -= take.length;
-    out += `<div class="rel-g"><b>${esc(key.slice(2))}</b><span class="muted t-s">${key[0] === "g" ? "goal" : "project"} · ${plural(xs.length, "task")}</span></div>`
-      + take.map(x => itemRow(x, "", { chips: x.status === "done" ? "" : chip(x.status === "open" ? "c-waiting" : "c-" + x.status,
-        esc(x.status === "open" ? "not done" : x.status.replace("_", " "))) })).join("");
-  }
-  const more = d.ships.length > FOLD + 1 ? button(all ? "Show fewer" : `Show all ${d.ships.length}`, { data: { relall: d.id } }) : "";
-  return `<div class="rel-tasks">${out}</div>${more ? `<div class="rel-more">${more}</div>` : ""}`;
-}
-
-// One open release of a target: the state line with Open report, then its tasks.
+// One open release of a target: the state line with Open report. Its tasks are in the report only (#6182, mark
+// 2026-11-19: the card under the pipeline's tables listed the same tasks as Open report).
 function releaseHtml(t, d, first) {
   const report = d.ships.length ? button("Open report", { kind: first ? "primary" : "", data: { report: d.id },
     title: "What this release ships" }) : "";
   return `<section class="rel-rel">
       <div class="rel-state"><div class="rel-line t-m">${stateLine(t, d)}
         <div class="muted t-s">Release <span class="link" data-open="${d.id}">#${d.id}</span>${d.review ? ` · review <span class="link" data-open="${d.review.id}">#${d.review.id}</span>` : ""}</div></div>
-        ${report}</div>
-      ${d.ships.length ? taskRows(d) : ""}</section>`;
+        ${report}</div></section>`;
 }
 
 // A cadence as words: "1w" is "a week", "2h" is "every 2 hours"; another form stays as it is.
@@ -172,8 +147,6 @@ function openReleaseNow(name) {
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
   const el = (k) => t.closest && t.closest(`[data-${k}]`);
-  const all = el("relall");
-  if (all) { const id = +all.dataset.relall; shown.has(id) ? shown.delete(id) : shown.add(id); renderTargets(); return true; }
   const now = el("relnow");
   if (now) { openReleaseNow(now.dataset.relnow); return true; }
   if (el("relclose")) { relDlg.close(); return true; }

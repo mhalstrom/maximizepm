@@ -150,6 +150,17 @@ class TargetControls(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "takes no run again"):
             runner.run_again(self.c, "web-prod", "watch", "aaaaaaa", actor="mark")
 
+    def test_live_is_the_release_in_production_in_every_stage(self):
+        """#6182: the review table marked 9783eb1 live (the newest passed review) while production ran daa69ba. Live
+        is the newest done deploy in every stage; a plain release has no 'ran' and no 'the release of deploy #N'."""
+        out = self.release("aaaaaaa", "First change", done=True)
+        self.release("bbbbbbb", "Second change")  # cut, not out: its holding passed, its deploy waits
+        for stage in ("holding", "deploy"):
+            rows = store.stage_versions(self.c, "web-prod", stage)["runs"]
+            self.assertEqual([(r["rev"], r["live"]) for r in rows], [("bbbbbbb", False), ("aaaaaaa", True)], stage)
+            self.assertEqual({(r["what"], r["why"]) for r in rows}, {(None, None)}, stage)
+        self.assertEqual(self.c.execute("SELECT cut_rev FROM items WHERE id=?", (out,)).fetchone()[0], "aaaaaaa")
+
     def test_a_worker_may_not_and_an_operator_agent_may_only_when_agents_may(self):
         self.release("aaaaaaa", "First change", done=True)
         self.release("bbbbbbb", "Second change", done=True)

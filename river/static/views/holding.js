@@ -20,7 +20,7 @@ const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 export function holdingCardHtml(h) {
   const n = h.commits || 0;
   return `<span class="pl-kind">holding</span><span class="pl-name">holding</span>
-    <span class="pl-ver">${h.reading ? "reading…" : n ? plural(n, "commit") : h.folder ? "nothing waits" : "no git folder"}</span>
+    <span class="pl-ver pl-words">${h.reading ? "reading…" : n ? plural(n, "commit") : h.folder ? "nothing waits" : "no git folder"}</span>
     ${n ? `<span class="pl-st queued">● ${h.reviewed} of ${n} reviewed</span>` : `<span class="pl-st none">● empty</span>`}
     <span class="pl-meta pl-more-line">${n ? `+${h.added} −${h.removed}` : ""}${h.base_label ? ` · since ${esc(h.base_label)}` : ""}</span>`;
 }

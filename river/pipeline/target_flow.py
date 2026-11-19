@@ -283,13 +283,16 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     sends = {}
     for r in conn.execute("SELECT * FROM target_sends WHERE pipeline_id=? ORDER BY id", (p["id"],)):
         sends.setdefault(r["item_id"], r)  # the send that made the item says why; a later one reused it
-    out, live_seen = [], False
+    # The release that runs in production: the newest done deploy, as the default pipeline's environment says
+    # (#6182: the first passed review was marked live, 9783eb1, while production ran daa69ba).
+    live = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='done' AND closed_at IS NOT "
+                        "NULL ORDER BY id DESC LIMIT 1", (p["target"],)).fetchone()
+    out = []
     for rel in targets.release_runs(conn, p["target"], targets._deploys(conn, p["target"], limit)):
         r = rel["runs"].get(stage)
         if r is None:
             continue
-        is_live = not live_seen and r["state"] == "passed" and (stage != "deploy" or rel["status"] == "done")
-        live_seen = live_seen or is_live
+        is_live = bool(live) and rel["deploy"] == live["id"]
         sent = sends.get(rel["deploy"]) or (sends.get(r["item"]) if r.get("item") else None)
         took = None
         if r["started_at"] and r["ended_at"]:
@@ -297,9 +300,9 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
         out.append({"run": None, "item": r.get("item") or rel["deploy"], "deploy": rel["deploy"],
                     "rev": rel["cut_rev"] or r["version"], "pinned": bool(rel["cut_rev"]),
                     "released": rel["status"] == "done",
-                    "what": PURPOSE_WORDS.get(sent["purpose"]) if sent else store._what(None, targets.KINDS[stage]),
+                    "what": PURPOSE_WORDS.get(sent["purpose"]) if sent else None,  # #6182: a plain release says no 'ran'
                     "purpose": sent["purpose"] if sent else None, "by": sent["sent_by"] if sent else None,
-                    "why": (sent["reason"] if sent else f"the release of deploy #{rel['deploy']}"),
+                    "why": sent["reason"] if sent else None,  # #6182: not 'the release of deploy #N' on every row
                     "state": r["state"], "queued_at": r["started_at"], "started_at": r["started_at"],
                     "ended_at": r["ended_at"], "seconds": took, "errors": r["errors"], "live": is_live})
     return {"pipeline": p["name"], "stage": stage, "kind": targets.KINDS.get(stage), "env_id": None, "runs": out,

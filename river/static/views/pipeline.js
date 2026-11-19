@@ -113,7 +113,7 @@ function stageCardOnly(s) {
   }
   if (tokenFails(D) && s.workflow && !s.run) {
     const r = s.last_run, read = D.account.read_at;
-    return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
+    return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
       <span class="pl-name">${esc(s.name)}</span><span class="pl-ver">${esc(short(r && r.version))}</span>
       ${st("none", "no news")}<span class="pl-meta pl-more-line">${read ? "last read " + esc(ago(read)) : "not read yet"}</span></span>`,
       { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
@@ -123,7 +123,7 @@ function stageCardOnly(s) {
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
   const meta = !r ? "" : r.state === "queued" && r.gate_note ? r.gate_note
     : r.ended_at ? `${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}` : r.started_at ? `since ${ago(r.started_at)}` : "";
-  return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
+  return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}
@@ -322,6 +322,8 @@ async function refreshStageRuns(force) {
   box.innerHTML = stageRunsHtml(SR);
 }
 
+const RUNS_SHOWN = 5;  // the newest rows of Versions in <stage> before Show all (#6182)
+
 function stageRunsHtml(SR) {
   if (!SR.runs.length) return "";
   const liveRev = (SR.runs.find(r => r.live) || {}).rev;
@@ -332,7 +334,12 @@ function stageRunsHtml(SR) {
   const back = (r) => ours && r.state === "passed" && r.rev && r.rev !== liveRev && (!tg || (SR.stage === "deploy" && r.pinned));
   const again = (r) => ours && r.rev && (!tg || (r.pinned && (SR.stage === "deploy" ? !busy(r)
     : ["review", "build"].includes(SR.stage) && !r.released)));
-  const rows = SR.runs.map(r => {
+  // #6182 (mark 2026-11-19, the review and approval tables of toolscaled-prod): the newest RUNS_SHOWN rows, then Show
+  // all; the state in its own column (no 'ran' on every row), How long it took, the task and the buttons each under a
+  // heading, a release with no pin says so instead of 'deploy #N', and the columns that every row leaves empty go.
+  const all = V.allRuns === SR.stage, list = all ? SR.runs : SR.runs.slice(0, RUNS_SHOWN);
+  const plain = (w) => !w || w === "ran" || w === "deployed";
+  const cells = list.map(r => {
     const b = [];
     if (back(r))
       b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
@@ -340,16 +347,24 @@ function stageRunsHtml(SR) {
       b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
     if (ours && r.run != null && busy(r)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
     else if (again(r)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
-    if (tg && r.item) b.push(`<span class="link t-s" data-open="${r.item}">#${r.item}</span>`);
     const when = r.started_at || r.queued_at;
-    return `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
-      <td class="mono">${esc(short(r.rev))}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
-      <td>${st(r.state, r.what)}</td><td class="t-s pl-wide">${r.by ? esc(r.by) + (r.why ? ": " : "") : ""}${esc(r.why || "")}</td>
-      <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : esc(WORD[r.state] || r.state)}${r.errors ? " · " + esc(r.errors) : ""}</td>
-      <td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td></tr>`;
-  }).join("");
+    const why = (r.by ? esc(r.by) + (r.why ? ": " : "") : "") + esc(r.why || "") + (r.errors ? `${r.by || r.why ? " · " : ""}<span class="c-warn">${esc(r.errors)}</span>` : "");
+    return { r, b, why, when, task: tg && r.item ? `<span class="link" data-open="${r.item}">#${r.item}</span>` : "",
+      ver: tg && !r.pinned ? `<span class="muted">not pinned</span>` : esc(short(r.rev)) };
+  });
+  const hasWhy = cells.some(c => c.why), hasTask = cells.some(c => c.task), hasActs = cells.some(c => c.b.length);
+  const rows = cells.map(({ r, b, why, when, task, ver }) => `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
+      <td class="mono">${ver}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
+      <td class="pl-nowrap">${st(r.state)}${plain(r.what) ? "" : ` <span class="muted t-s">${esc(r.what)}</span>`}</td>
+      <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : ""}</td>
+      ${hasWhy ? `<td class="t-s pl-wide">${why}</td>` : ""}${hasTask ? `<td class="t-s">${task}</td>` : ""}
+      ${hasActs ? `<td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td>` : ""}</tr>`).join("");
+  const more = SR.runs.length > RUNS_SHOWN ? `<div class="t-s">${button(all ? "Show the newest " + RUNS_SHOWN : `Show all ${SR.runs.length}`,
+    { data: { "pl-allruns": SR.stage }, title: all ? "Fewer rows" : "Every run" })}</div>` : "";
   return `<div class="pl-card"><h3>Versions in ${esc(SR.stage)}</h3>
-    <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>What</th><th>Why, or who</th><th>How</th><th></th></tr>${rows}</table></div>
+    <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>State</th><th>Took</th>
+      ${hasWhy ? "<th>Why, or who</th>" : ""}${hasTask ? "<th>Task</th>" : ""}${hasActs ? "<th>Actions</th>" : ""}</tr>${rows}</table></div>
+    ${more}
     ${missLine(D, [...new Set(miss)])}
     <div class="muted t-s">${tg ? `Each row is a release of ${esc(SR.target)}. A move back or a run again of deploy adds a deploy item pinned at that version: it waits for the person's yes and goes out through the deploy hook, like every release. A move back also blocks the transition into deploy until someone unblocks it.`
       : ours ? `A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.`
@@ -716,8 +731,9 @@ $("#dpStages").addEventListener("click", (e) => {
   }
   const run = e.target.closest("[data-pl-run-stage]");  // Run: a stage that starts manually (#6138)
   if (run) return doAct("pipeline_run_stage", { stage: run.dataset.plRunStage, rev: run.dataset.rev || null });
-  const t = e.target.closest("[data-pl-stage],[data-pl-arrow],[data-pl-filter],[data-pl-copy],[data-pl-check]");
+  const t = e.target.closest("[data-pl-stage],[data-pl-arrow],[data-pl-filter],[data-pl-copy],[data-pl-check],[data-pl-allruns]");
   if (!t) return;
+  if (t.dataset.plAllruns) { V.allRuns = V.allRuns === t.dataset.plAllruns ? null : t.dataset.plAllruns; return refreshStageRuns(true); }  // #6182
   if (t.dataset.plCheck) return toggleCheck(t.dataset.plCheck);  // #6181: every run of the check in the watch
   if (t.dataset.plArrow) { V.arrow = t.dataset.plArrow; sig = ""; draw(); return; }
   if (t.dataset.plStage) { V.stage = t.dataset.plStage; V.arrow = null; V.run = null; runSig = ""; draw(); return refreshRun(true); }

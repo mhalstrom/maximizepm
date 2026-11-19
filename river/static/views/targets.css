@@ -9,20 +9,13 @@
 .rel-rel { display: flex; flex-direction: column; gap: var(--sp-3); border-top: var(--hair) solid var(--line); padding-top: var(--sp-4); }
 .rel-state { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-5); flex-wrap: wrap; }
 .rel-line { min-width: 0; overflow-wrap: anywhere; }
-.rel-tasks { display: flex; flex-direction: column; }
-.rel-g { display: flex; align-items: baseline; gap: var(--sp-3); padding: var(--sp-3) 0 var(--sp-1); }
-.rel-g:first-child { padding-top: 0; }
-.rel-more, .rel-acts { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.rel-acts { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
 .rel-fold { display: flex; flex-direction: column; gap: var(--sp-1); }
 .rel-past { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-1) 0; }
 #relNowDlg { --dlg-w: var(--w-dlg-s); }
 @media (max-width: 759px) {
   .rel { padding: var(--sp-4); }
   .rel-state .btn { width: 100%; min-height: var(--tap); }
-  /* A task row keeps its Open mark beside the title; most tasks are done and have no chips. */
-  .rel-tasks .row { grid-template-columns: var(--w-id) minmax(0, 1fr) auto; }
-  .rel-tasks .row .row-open { grid-column: 3; grid-row: 1; }
-  .rel-tasks .row .chips:empty { display: none; }
 }
 
 /* The review report of a release (#6003, components/reportDialog.js): left the summary, numbers and groups (risks

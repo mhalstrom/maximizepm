@@ -232,7 +232,7 @@ try {
                 self.assertIn(b, r["buttons"], r)
             self.assertEqual(r["over"], [], r)
             self.assertIn("abc1234", r["runs"], r)
-            self.assertIn("ran", r["runs"], r)
+            self.assertIn("waiting", r["runs"], r)  # its state, not 'ran' (#6182)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
     def test_the_watch_of_a_release_has_one_row_for_each_check(self):
@@ -304,6 +304,72 @@ try {
             self.assertLess(r["openHeight"], 1600, r)  # the runs scroll in their own box
             if size.startswith("1500"):
                 self.assertTrue(r["oneLine"], r)
+
+    def test_the_stages_of_a_target_line_up_and_its_tables_are_short(self):
+        """#6182 (mark 2026-11-19, the review and approval stages of toolscaled-prod): the stage cards line up (a long
+        head is one line), the hold button is not inside the sentence, Versions in <stage> shows the newest 5 rows with
+        Show all, each row's state (no 'ran'), live on the release in production, and the target card under the tables
+        does not repeat the report's tasks. At 1500 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        core.config_set(self.c, "release_approval", "person", project="web")
+        for n in range(8):
+            i = core.item_add(self.c, "web", f"Change {n}", actor="mark")["id"]
+            core.done(self.c, i, output="done", actor="mark", ship_it=True)
+            dep = self.c.execute("SELECT MAX(id) FROM items WHERE kind='deploy'").fetchone()[0]
+            core.target_cut(self.c, "toolscaled-prod", rev=f"{n:07x}abcdef", actor=None)
+            if n < 7:
+                self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?",
+                               (core.iso(core.now() - core.timedelta(hours=8 - n)), dep))
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('#plRow [data-pl-stage="deploy"]'), "the stages");
+  const tops = [...document.querySelectorAll('#plRow .pl-stage .pl-name')].map(e => Math.round(e.getBoundingClientRect().top));
+  const kind = q('#plRow [data-pl-stage="deploy"] .pl-kind');
+  const out = { tops, kindLines: kind.getClientRects().length, kindH: kind.getBoundingClientRect().height,
+    kindTitle: kind.title, holdInText: !!q('#plNote .pl-bar > span button'), hold: !!q('#plNote .pl-bar > button'),
+    holdFont: getComputedStyle(q('#plRow [data-pl-stage="holding"] .pl-ver')).fontFamily };
+  q('#plRow [data-pl-stage="deploy"]').click();
+  await until(() => q("#plStageRuns .pl-runs"), "Versions in deploy");
+  const rows = () => [...q("#plStageRuns").querySelectorAll(".pl-runs tr:not(.pl-th)")];
+  out.rows = rows().length;
+  out.head = [...q("#plStageRuns").querySelectorAll(".pl-runs th")].map(e => e.textContent.trim());
+  out.text = q("#plStageRuns").textContent.replace(/\s+/g, " ");
+  out.live = rows().filter(r => r.classList.contains("live")).map(r => r.querySelector(".mono").textContent.trim());
+  // A box that scrolls sideways on purpose (the tables, the stage row, the tabs since #6188) may hold wider parts.
+  const scrolls = e => { for (let p = e.parentElement; p; p = p.parentElement)
+    if (["auto", "scroll"].includes(getComputedStyle(p).overflowX)) return true; return false; };
+  out.over = [...document.querySelectorAll('#deploy-pipeline *')].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
+    && !scrolls(e)).map(e => e.tagName + "." + e.className).slice(0, 5);
+  q('#plStageRuns [data-pl-allruns]').click();
+  await until(() => rows().length > 5, "Show all");
+  out.all = rows().length;
+  out.tasks = !!document.querySelector(".rel-tasks");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            # Every card's name on one line across the row (the deploy card's border is 2 px: pl-env).
+            self.assertLessEqual(max(r["tops"]) - min(r["tops"]), 2, r)
+            self.assertLess(r["kindH"], 20, r)  # the deploy card's head is one line
+            self.assertEqual(r["kindTitle"], "deploy · toolscaled-prod", r)
+            self.assertFalse(r["holdInText"], r)
+            self.assertTrue(r["hold"], r)
+            self.assertNotIn("monospace", r["holdFont"].lower(), r)  # 'nothing waits' is words
+            self.assertEqual(r["rows"], 5, r)
+            self.assertEqual(r["head"], ["When", "Version", "State", "Took", "Task", "Actions"], r)
+            self.assertNotIn(" ran ", r["text"], r)
+            self.assertNotIn("the release of deploy", r["text"], r)
+            self.assertIn("Show all 8", r["text"], r)
+            self.assertEqual(r["live"], ["0000006 live"], r)  # the newest done deploy, not the newest row
+            self.assertEqual(r["all"], 8, r)
+            self.assertFalse(r["tasks"], r)
+            self.assertEqual(r["over"], [], r)
 
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one
