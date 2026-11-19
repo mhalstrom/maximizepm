@@ -487,6 +487,9 @@ class PulumiAgentJob(Base):
         self.assertIn("agent job in Pulumi Deployments set", define.history(self.c, "shop", 1)[0]["change"])
         shown = agent_job.setup_pulumi(self.c, "shop", show=True, actor="mark", test="make test")
         self.assertIn("env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN timeout 30m claude -p", shown["script"])
+        self.assertIn('env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN bash -c "$MAXPM_TEST"', shown["script"])
+        self.assertIn("git -c core.hooksPath=/dev/null push", shown["script"])
+        self.assertNotIn("python3 - ", shown["script"])  # isolated: no module of the checkout loads
         self.assertIn("'Bash(make:*)'", shown["script"])
         self.assertIn("pulumi", runners.choices(self.c, self.p()))
 

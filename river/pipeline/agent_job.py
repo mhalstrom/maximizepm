@@ -960,7 +960,10 @@ def pulumi_script(c):
         _PR_PY.rstrip("\n"),
         "MAXPM_PY",
         'if [ "$HEAD_SHA" != "$FAILED" ]; then',
-        '  if [ -n "$MAXPM_TEST" ]; then bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; TEST_EXIT=$?; fi',
+        "  # The test runs the agent's code: it gets no token either. Python runs isolated (-I): the checkout's own",
+        "  # modules never load in a step that holds a token.",
+        '  if [ -n "$MAXPM_TEST" ]; then env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN bash -c "$MAXPM_TEST" '
+        '> "$MAXPM_OUT/test.log" 2>&1; TEST_EXIT=$?; fi',
         '  if [ -n "$MAXPM_GIT_TOKEN" ]; then',
         "    REPO=$(git remote get-url origin | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\\1/#; s#\\.git$##')",
         "    # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
@@ -968,7 +971,7 @@ def pulumi_script(c):
         '"HEAD:refs/heads/$MAXPM_BRANCH" 2> "$MAXPM_OUT/push.err"; then',
         '      BRANCH="$MAXPM_BRANCH"',
         '      if [ "${REPO#github.com/}" != "$REPO" ]; then',
-        '        PR=$(python3 "$MAXPM_OUT/pr.py" "$REPO" 2> "$MAXPM_OUT/pr.err") || echo "no pull request: '
+        '        PR=$(python3 -I "$MAXPM_OUT/pr.py" "$REPO" 2> "$MAXPM_OUT/pr.err") || echo "no pull request: '
         '$(tail -1 "$MAXPM_OUT/pr.err")" > "$MAXPM_OUT/error"',
         "      fi",
         "    else",
@@ -978,7 +981,7 @@ def pulumi_script(c):
         '  [ -n "$BRANCH" ] || git format-patch --stdout "$FAILED..HEAD" > "$MAXPM_OUT/fix.patch"',
         "fi",
         "export FAILED HEAD_SHA BRANCH PR TEST_EXIT",
-        "python3 - <<'MAXPM_PY'",
+        "python3 -I - <<'MAXPM_PY'",
         _PROOF_PY.replace("__PATCH_MAX__", str(PATCH_MAX)).rstrip("\n"),
         "MAXPM_PY",
         "exit 0",
