@@ -2824,7 +2824,10 @@ def build_parser(only=None):
     db = sub.add_parser("db", help="where the queue database is")
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
-    sub.add_parser("mcp", help="an MCP server on stdin/stdout, for agents that cannot run shell commands")
+    x = sub.add_parser("mcp", help="an MCP server on stdin/stdout, for agents that cannot run shell commands")
+    x.add_argument("--plan", action="store_true",
+                   help="the planner tools only, for a chat app that plans with you: projects, goals, tasks and "
+                        "their links, as you (no tool takes, finishes or launches work)")
     x = sub.add_parser("connect", help="connect this computer to the MaximizePM relay, so that you can open this "
                                        "MaximizePM's page from any browser (maxpm serve keeps the connection open)")
     x.add_argument("--off", action="store_true", help="disconnect: revoke this computer's relay token and forget it")
@@ -2983,6 +2986,8 @@ INSIDE_AGENT = None  # tests: fn() -> bool, in place of the environment (the tes
 def _inside_agent():
     """Whether this command runs inside an agent session: its token, a chat, MAXPM_AGENT, or an agent CLI's own
     variables (agent_type_from_env). Outside one, it is a person's terminal."""
+    if core.PLANNER.get():  # a planner connection (#6190) is the person's chat app: mcp.Server checked it
+        return False
     if INSIDE_AGENT is not None:
         return INSIDE_AGENT()
     return bool(core.TOKEN_AGENT.get() or core.HTTP_CHAT.get() or os.environ.get("MAXPM_CHAT")
@@ -3233,7 +3238,7 @@ def _run_words(words, rec):
         return 0
     if args.cmd == "mcp":
         from . import mcp
-        mcp.serve()
+        mcp.serve(plan=args.plan)
         return 0
     if args.cmd == "agent-login":  # an agent CLI's sign-in with no browser (#5877): no queue needed
         from . import agentlogin

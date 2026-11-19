@@ -2680,6 +2680,9 @@ EVENT_VIA: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_ev
 # parent processes are maxpm serve's, not the chat's, so go records no agent type, model, process, or native
 # address from them, and records via='http'.
 HTTP_CHAT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_http_chat", default=None)
+# The person's name while mcp.Server runs a planner tool (#6190: maxpm mcp --plan, /mcp/plan): a chat app that plans
+# with the person acts as the person, as the page does (cli._inside_agent), with the planning commands only.
+PLANNER: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_planner", default=None)
 
 
 def set_via(conn, name, via):
@@ -2704,8 +2707,10 @@ def _event(conn, item_id, actor, change):
                      "AND (read_at IS NULL OR (blocked IS NOT NULL AND answered_at IS NULL))",
                      (t, t, item_id, actor, actor))
     via = EVENT_VIA.get()
-    if via and actor and not actor.endswith(f"@{via}"):
-        actor = f"{actor}@{via}"  # a command that came through the relay (mcp.Server.via): the history says so
+    if via and actor and actor != "maxpm" and not actor.endswith(f"@{via}"):
+        # A command that came through the relay, or a planner chat app (#6190: mark@claude-ai): the history says so.
+        # MaximizePM's own entries during it (needs you, ready) stay maxpm.
+        actor = f"{actor}@{via}"
     conn.execute("INSERT INTO events(item_id, at, actor, change, session) VALUES (?,?,?,?,?)",
                  (item_id, iso(now()), actor or "?", change, RUN_SESSION.get()))
 

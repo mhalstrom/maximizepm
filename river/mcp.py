@@ -145,6 +145,256 @@ TOOLS = [
          "as": _AS, "takeover": {"type": "string", "description": "why you take over from the active manager"}}}},
 ]
 
+# ---------------------------------------------------------------- the planner tools (#6190)
+# A chat app (Claude, ChatGPT, Gemini CLI, any MCP client) that plans with the person: it adds and changes projects,
+# goals, tasks and their links, and reads them back, while the manager runs the work. It acts as the person (the
+# history says <person>@<client>, from the client's name in initialize), and it has no tool that takes, finishes,
+# deploys, launches or stops work, nor one that runs any command: maxpm mcp --plan, or /mcp/plan in maxpm serve.
+
+_TASK = {"type": "integer", "description": "the task's number, as list_tasks and search_tasks show it (#12 is 12)"}
+_PROJECT = {"type": "string", "description": "the project's name, as list_projects shows it"}
+_DOER = {"type": "string", "enum": ["agent", "human", "any"],
+         "description": "who does it: agent (an AI session), human (the person: a decision, an approval, an account "
+                        "step), any (the default)"}
+_PRIORITY = {"type": "integer", "minimum": 0, "maximum": 4,
+             "description": "0 is the most urgent, 4 the least; 2 is the default. Give a high priority only to the "
+                            "outcome: the tasks it waits on take its priority by themselves"}
+_TIER = {"type": "string", "enum": ["normal", "expert"],
+         "description": "expert: a task the person talks through with an expert session over hours or days; normal: "
+                        "any worker (the default)"}
+PLAN_TOOLS = [
+    {"name": "list_projects",
+     "description": "The projects: what each one covers, its open and ready tasks, and its goals.",
+     "inputSchema": {"type": "object", "properties": {
+         "archived": {"type": "boolean", "description": "the archived projects instead"}}}},
+    {"name": "show_project",
+     "description": "One project: its description, folder, goals, who works there, and its ready tasks.",
+     "inputSchema": {"type": "object", "required": ["name"], "properties": {"name": _PROJECT}}},
+    {"name": "add_project",
+     "description": "Add a project. The description says what it covers: agents read it to pick their area.",
+     "inputSchema": {"type": "object", "required": ["name", "description"], "properties": {
+         "name": {"type": "string", "description": "a short name with no spaces, for example billing-site"},
+         "description": {"type": "string"},
+         "rank": {"type": "integer", "description": "its place among the projects (1 is first)"}}}},
+    {"name": "describe_project",
+     "description": "Replace a project's description.",
+     "inputSchema": {"type": "object", "required": ["name", "description"], "properties": {
+         "name": _PROJECT, "description": {"type": "string"}}}},
+    {"name": "list_goals",
+     "description": "The open goals (outcomes with a done-when test), with their owner and progress.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": _PROJECT, "all": {"type": "boolean", "description": "the done goals too"}}}},
+    {"name": "show_goal",
+     "description": "One goal: its outcome, its done-when test, and its tasks.",
+     "inputSchema": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}},
+    {"name": "add_goal",
+     "description": "Add a goal to a project: an outcome and the test that shows it is reached. Tag tasks with it "
+                    "(add_task goal) so one agent can own the outcome.",
+     "inputSchema": {"type": "object", "required": ["project", "name", "outcome"], "properties": {
+         "project": _PROJECT,
+         "name": {"type": "string", "description": "a short name with no spaces, for example faster-checkout"},
+         "outcome": {"type": "string", "description": "what is true when the goal is reached"},
+         "done_when": {"type": "string", "description": "the test that shows the outcome holds"},
+         "parent": {"type": "string", "description": "a sub-goal of this goal (one level, same project)"},
+         "shared": {"type": "boolean", "description": "no owner: several agents work on its tasks at the same time"},
+         "rank": {"type": "integer", "description": "its place among the project's goals (1 is first)"}}}},
+    {"name": "list_tasks",
+     "description": "The open tasks in queue order (the order in which agents take them), with what each waits on.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": _PROJECT, "goal": {"type": "string", "description": "only the tasks of this goal"},
+         "status": {"type": "string", "description": "open (the default), in_progress, held, done, dropped"},
+         "limit": {"type": "integer", "description": "at most this many"}}}},
+    {"name": "search_tasks",
+     "description": "Tasks in any state (open, backlog, done, dropped) that hold every word, newest first. Search "
+                    "before add_task: the work may be in the queue already, or done last week.",
+     "inputSchema": {"type": "object", "required": ["words"], "properties": {
+         "words": {"type": "string"}, "project": _PROJECT,
+         "status": {"type": "string", "description": "open, backlog, in_progress, held, done, dropped, closed, or "
+                                                     "all (the default)"},
+         "since": {"type": "string", "description": "created or closed since: 30d, 2h, or a date"},
+         "limit": {"type": "integer", "description": "at most this many (default 20)"}}}},
+    {"name": "show_task",
+     "description": "One task: its context, what it waits on and unblocks, its goals, its messages and history.",
+     "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": _TASK}}},
+    {"name": "add_task",
+     "description": "Add a task. One outcome per task; the context says what a new agent must know to start (why, "
+                    "where, what is decided). A task that must wait for others names them in waits_on. When "
+                    "MaximizePM finds a task like it, it adds nothing and shows them: add it again with new_reason "
+                    "only when it is different work. The manager sees the new task and starts an agent for it.",
+     "inputSchema": {"type": "object", "required": ["project", "title"], "properties": {
+         "project": _PROJECT,
+         "title": {"type": "string", "description": "the whole task in one line: start with a verb"},
+         "short": {"type": "string", "description": "about 6 plain words that every page shows"},
+         "context": {"type": "string"},
+         "goal": {"type": "array", "items": {"type": "string"}, "description": "the goals it works toward"},
+         "priority": _PRIORITY, "doer": _DOER, "tier": _TIER,
+         "waits_on": {"type": "array", "items": {"type": "integer"}, "description": "tasks that must be done first"},
+         "blocks": {"type": "integer", "description": "a task that must wait for this new one"},
+         "backlog": {"type": "string", "description": "add it to the backlog with this reason: kept, but nobody takes "
+                                                      "it until activate_task"},
+         "start": {"type": "string", "description": "it waits until then: tomorrow 9:00, 2026-12-01, 3d"},
+         "due": {"type": "string", "description": "a due date: 2026-12-15 or 'fri 17:00'"},
+         "new_reason": {"type": "string", "description": "how it differs from the like tasks MaximizePM showed"}}}},
+    {"name": "edit_task",
+     "description": "Change a task: give only the fields that change.",
+     "inputSchema": {"type": "object", "required": ["id"], "properties": {
+         "id": _TASK, "title": {"type": "string"}, "short": {"type": "string"},
+         "context": {"type": "string", "description": "replaces the context"},
+         "priority": _PRIORITY, "doer": _DOER, "tier": _TIER,
+         "project": {"type": "string", "description": "move it to this project"},
+         "add_goal": {"type": "array", "items": {"type": "string"}, "description": "tag it with these goals"},
+         "remove_goal": {"type": "array", "items": {"type": "string"}, "description": "remove these goal tags"},
+         "due": {"type": "string", "description": "a due date, or none to remove it"}}}},
+    {"name": "link_tasks",
+     "description": "Make a task wait on other tasks: it is ready only when they are done.",
+     "inputSchema": {"type": "object", "required": ["id", "waits_on"], "properties": {
+         "id": _TASK, "waits_on": {"type": "array", "items": {"type": "integer"}},
+         "kind": {"type": "string", "enum": ["blocks", "feeds", "conflicts"],
+                  "description": "blocks: wait (the default); feeds: wait, then read its output; conflicts: no "
+                                 "order, never in progress together"}}}},
+    {"name": "unlink_tasks",
+     "description": "Remove a wait between tasks.",
+     "inputSchema": {"type": "object", "required": ["id", "waits_on"], "properties": {
+         "id": _TASK, "waits_on": {"type": "array", "items": {"type": "integer"}}}}},
+    {"name": "backlog_task",
+     "description": "Move an open task to the backlog: kept, but nobody takes it until activate_task.",
+     "inputSchema": {"type": "object", "required": ["id", "reason"], "properties": {
+         "id": _TASK, "reason": {"type": "string", "description": "why nobody takes it now"}}}},
+    {"name": "activate_task",
+     "description": "Take a task out of the backlog: it is open again, and an agent takes it when it is ready.",
+     "inputSchema": {"type": "object", "required": ["id"], "properties": {
+         "id": _TASK, "reason": {"type": "string", "description": "why now"}}}},
+    {"name": "drop_task",
+     "description": "Drop a task that is no longer needed.",
+     "inputSchema": {"type": "object", "required": ["id", "reason"], "properties": {
+         "id": _TASK, "reason": {"type": "string"}}}},
+    {"name": "planning_guide",
+     "description": "How to write good tasks: one outcome each, the context, the waits, the priorities, the goals, "
+                    "and the backlog. Read it once before you add tasks.",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+PLAN_NAMES = frozenset(t["name"] for t in PLAN_TOOLS)
+PLAN_INSTRUCTIONS = ("MaximizePM is the person's project management system: projects, goals, and tasks with the order "
+                     "between them, which AI agents and people work through while a manager agent runs them. In this "
+                     "connection you plan with the person: you read and change projects, goals, tasks and their "
+                     "links, and you act as the person. You do no task yourself. Call planning_guide once, search "
+                     "before you add a task, and tell the person the numbers of the tasks you added.")
+
+
+def _words(flag, value):
+    return [] if value in (None, "", []) else [flag, str(value)]
+
+
+def plan_argv(name, a):
+    """The maxpm commands (lists of words) of one planner tool call. Every value goes in as flag=value or after --,
+    so a text that starts with - stays text."""
+    def need(key):
+        v = a.get(key)
+        if v in (None, "", []):
+            raise RiverError(f"{name} needs {key}")
+        return v
+
+    def task():
+        return str(int(need("id")))
+
+    def ids(key):
+        return [str(int(x)) for x in need(key)]
+
+    def opt(flag, key):
+        v = a.get(key)
+        return [] if v in (None, "", []) else [f"{flag}={v}"]
+    doer = {"agent": "ai", "human": "human", "any": "any"}
+    if a.get("doer") not in (None, "") and a["doer"] not in doer:
+        raise RiverError(f"{name}: doer is agent, human, or any")
+    if name == "list_projects":
+        return [["project", "list"] + (["--archived"] if a.get("archived") else [])]
+    if name == "show_project":
+        return [["project", "show", "--", need("name")]]
+    if name == "add_project":
+        return [["project", "add", f"--description={need('description')}"] + opt("--rank", "rank") + ["--", need("name")]]
+    if name == "describe_project":
+        return [["project", "describe", "--", need("name"), need("description")]]
+    if name == "list_goals":
+        return [["goal", "list"] + opt("--project", "project") + (["--all"] if a.get("all") else [])]
+    if name == "show_goal":
+        return [["goal", "show", "--", need("name")]]
+    if name == "add_goal":
+        return [["goal", "add", f"--outcome={need('outcome')}"] + opt("--done-when", "done_when")
+                + opt("--parent", "parent") + opt("--rank", "rank") + (["--shared"] if a.get("shared") else [])
+                + ["--", need("project"), need("name")]]
+    if name == "list_tasks":
+        return [["list"] + opt("--project", "project") + opt("--goal", "goal") + opt("--status", "status")
+                + opt("--limit", "limit")]
+    if name == "search_tasks":
+        return [["search"] + opt("--project", "project") + opt("--status", "status") + opt("--since", "since")
+                + opt("--limit", "limit") + ["--"] + str(need("words")).split()]
+    if name == "show_task":
+        return [["show", task()]]
+    if name == "add_task":
+        w = ["add", f"--project={need('project')}"]
+        w += opt("--short", "short") + opt("--context", "context") + opt("--priority", "priority")
+        w += opt("--tier", "tier") + opt("--start", "start") + opt("--due", "due") + opt("--new", "new_reason")
+        w += [f"--doer={doer[a['doer']]}"] if a.get("doer") else []
+        w += [f"--goal={g}" for g in a.get("goal") or []] or (["--no-goal"] if a.get("goal") == [] else [])
+        w += ["--after", *[str(int(x)) for x in a["waits_on"]]] if a.get("waits_on") else []
+        w += [f"--blocks={int(a['blocks'])}"] if a.get("blocks") not in (None, "") else []
+        w += [f"--backlog={a['backlog']}"] if a.get("backlog") else []
+        return [w + [f"--title={need('title')}"]]
+    if name == "edit_task":
+        w = ["edit"] + opt("--title", "title") + opt("--short", "short") + opt("--context", "context")
+        w += opt("--tier", "tier") + opt("--project", "project") + opt("--due", "due")
+        w += [f"--doer={doer[a['doer']]}"] if a.get("doer") else []
+        w += [f"--goal={g}" for g in a.get("add_goal") or []] + [f"--untag={g}" for g in a.get("remove_goal") or []]
+        out = [w + [task()]] if len(w) > 1 else []
+        if a.get("priority") not in (None, ""):
+            out.append(["prio", task(), str(int(a["priority"]))])
+        if not out:
+            raise RiverError("edit_task needs a field to change: title, short, context, priority, doer, tier, "
+                             "project, add_goal, remove_goal, or due")
+        return out
+    if name == "link_tasks":
+        return [["dep", task(), "--on", *ids("waits_on")] + opt("--kind", "kind")]
+    if name == "unlink_tasks":
+        return [["undep", task(), "--on", *ids("waits_on")]]
+    if name == "backlog_task":
+        return [["backlog", task(), f"--note={need('reason')}"]]
+    if name == "activate_task":
+        return [["activate", task()] + opt("--note", "reason")]
+    if name == "drop_task":
+        return [["drop", task(), f"--note={need('reason')}"]]
+    if name == "planning_guide":
+        return [["guide", "manager"]]
+    raise RiverError(f"{name} is not a planner tool: this connection plans projects, goals and tasks "
+                     f"({', '.join(sorted(PLAN_NAMES))}); an agent that works on tasks connects to /mcp "
+                     f"(maxpm mcp) instead")
+
+
+def writing_tasks(text):
+    """The section Writing tasks of the manager guide (planning_guide): the rest is about running agents."""
+    m = re.search(r"^## Writing tasks\n.*?(?=^## |\Z)", text, re.M | re.S)
+    return m.group(0).strip() if m else text
+
+
+def client_slug(info):
+    """The name of an MCP client (initialize clientInfo.name) as the history writes it after the person's name:
+    mark@claude-ai. Letters, digits and -, at most 32; mcp when the client gives none."""
+    name = (info or {}).get("name") if isinstance(info, dict) else None
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")[:32].strip("-")
+    return slug or "mcp"
+
+
+def planner_person():
+    """The person a planner connection acts as: the person seen last in this queue."""
+    conn = core.connect()
+    try:
+        r = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC, name LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    if not r:
+        raise RiverError("this queue has no person yet: on this computer, run maxpm register <your-name> --human")
+    return r["name"]
+
+
 INSTRUCTIONS = "Call go to take work from the MaximizePM queue, and follow its briefing."
 CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this chat (no folder, no shell) you can: "
                      "run the coding agents and plan work with the user (manage), go through what waits on the user "
@@ -292,11 +542,13 @@ class Server:
     """chat: a session with no folder (default: MAXPM_CHAT=1); go, plan, and manage get --chat. folders: whether a
     tool call may name a cwd (not over HTTP: a web chat has no folder on this computer)."""
 
-    def __init__(self, chat=None, folders=True):
+    def __init__(self, chat=None, folders=True, plan=False):
         # Over HTTP the session is a new chat: not the agent whose environment started maxpm serve.
-        self.agent = os.environ.get("MAXPM_AGENT") if folders else None
+        self.agent = os.environ.get("MAXPM_AGENT") if folders and not plan else None
         self.chat = os.environ.get("MAXPM_CHAT") == "1" if chat is None else chat
         self.folders = folders
+        self.plan = plan  # the planner tools only (#6190): it acts as the person, as <person>@<client>
+        self.client = "mcp"
 
     def argv(self, name, a):
         if name == "maxpm":
@@ -344,8 +596,35 @@ class Server:
             words = ["--as", who] + words
         return words
 
+    def plan_call(self, name, a):
+        """One planner tool (#6190): its fixed commands, run as the person, recorded as <person>@<client>. A name of
+        any other tool is refused (plan_argv), so a planner connection never claims, finishes, deploys or launches."""
+        cmds = plan_argv(name, a)
+        if self.folders and (os.environ.get(core.TOKEN_ENV) or os.environ.get("MAXPM_AGENT")):
+            raise RiverError("the planner acts as the person, and this server runs inside an agent session of "
+                             "MaximizePM: the session adds and changes tasks with its own maxpm commands")
+        person = planner_person()
+        texts, bad = [], False
+        with _CALL_LOCK:
+            tokens = (core.HTTP_CHAT.set(None if self.folders else "http"), core.PLANNER.set(person),
+                      core.EVENT_VIA.set(self.client))
+            try:
+                for words in cmds:
+                    text, bad = self._call(["--quiet", "--as", person] + words, {})
+                    # The footer of a command is the person's own state (what they hold, their inbox): not this chat's.
+                    texts.append(re.sub(rf"\n?^\[{re.escape(person)}: [^\n]*\]$", "", text, flags=re.M).strip())
+                    if bad:
+                        break
+            finally:
+                for var, tok in zip((core.HTTP_CHAT, core.PLANNER, core.EVENT_VIA), tokens):
+                    var.reset(tok)
+        text = "\n\n".join(texts)
+        return (writing_tasks(text) if name == "planning_guide" and not bad else text), bad
+
     def call(self, name, a):
         """Run one river command in-process; return (text, is_error)."""
+        if self.plan:
+            return self.plan_call(name, a)
         words = self.argv(name, a)
         if a.get("cwd") and not self.folders:
             raise RiverError("this session has no folder on this computer; leave out cwd")
@@ -366,7 +645,7 @@ class Server:
         try:
             if a.get("cwd"):
                 os.chdir(os.path.expanduser(a["cwd"]))
-            elif not self.folders:  # maxpm serve may run in a project folder; a web chat is in none
+            elif not self.folders or self.plan:  # serve may run in a project folder; a chat (and a planner) is in none
                 os.chdir(os.path.abspath(os.sep))
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
@@ -394,17 +673,19 @@ class Server:
         if mid is None:
             return None  # a notification, such as notifications/initialized
         if method == "initialize":
-            result = {"protocolVersion": msg.get("params", {}).get("protocolVersion") or PROTOCOL,
+            params = msg.get("params") or {}
+            self.client = client_slug(params.get("clientInfo"))
+            result = {"protocolVersion": params.get("protocolVersion") or PROTOCOL,
                       "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "maximizepm", "version": __version__},
-                      "instructions": CHAT_INSTRUCTIONS if self.chat else INSTRUCTIONS}
+                      "serverInfo": {"name": "maximizepm-planner" if self.plan else "maximizepm", "version": __version__},
+                      "instructions": PLAN_INSTRUCTIONS if self.plan else CHAT_INSTRUCTIONS if self.chat else INSTRUCTIONS}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": PLAN_TOOLS if self.plan else TOOLS}
         elif method == "tools/call":
             p = msg.get("params") or {}
             try:
                 text, bad = self.call(p.get("name"), p.get("arguments") or {})
-            except (RiverError, KeyError) as e:
+            except (RiverError, KeyError, TypeError, ValueError) as e:  # a bad argument, such as an id that is text
                 text, bad = f"maxpm: {e}", True
             result = {"content": [{"type": "text", "text": text}], "isError": bad}
         elif method == "ping":
@@ -414,9 +695,10 @@ class Server:
         return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
-def serve(stdin=None, stdout=None):
+def serve(stdin=None, stdout=None, plan=False):
+    """plan: the planner tools only (maxpm mcp --plan, #6190)."""
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
-    srv = Server()
+    srv = Server(plan=plan)
     for line in stdin:
         if not line.strip():
             continue
@@ -482,8 +764,8 @@ def tailnet_refusal(h, what):
     could write the header, but it can call maxpm serve directly anyway. /mcp stays on this computer only: its
     connectors come over Funnel (#5860), which has no login."""
     from . import tailnet
-    if what == "/mcp":
-        return "/mcp answers only on this computer, not over Tailscale"
+    if what in ("/mcp", "/mcp/plan"):
+        return f"{what} answers only on this computer, not over Tailscale"
     if any(x in h for x in PROXY_HEADERS if x not in TAILNET_PROXY_OK):
         return f"{what} refuses a request through another proxy in front of Tailscale"
     me = tailnet.self_info()
@@ -503,9 +785,10 @@ def tailnet_refusal(h, what):
     return None
 
 
-def http_post(body, session_id=None):
-    """One POST to /mcp: returns (status, reply or None, headers). A JSON-RPC request gets its reply; a
-    notification or a response gets 202 and no body. initialize starts a session (Mcp-Session-Id)."""
+def http_post(body, session_id=None, plan=False):
+    """One POST to /mcp (plan: /mcp/plan, the planner tools): returns (status, reply or None, headers). A JSON-RPC
+    request gets its reply; a notification or a response gets 202 and no body. initialize starts a session
+    (Mcp-Session-Id); a session works only on the endpoint that started it."""
     import secrets
     try:
         msg = json.loads(body or b"")
@@ -518,10 +801,12 @@ def http_post(body, session_id=None):
     if msg.get("method") == "initialize":
         session_id = secrets.token_urlsafe(24)
         with _SESSIONS_LOCK:
-            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False)
+            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False, plan=plan)
         headers["Mcp-Session-Id"] = session_id
     with _SESSIONS_LOCK:
         srv = HTTP_SESSIONS.get(session_id) if session_id else None
+    if srv is not None and srv.plan != plan:  # a planner session never reaches the agent tools, nor the reverse
+        srv = None
     if srv is None:
         if not session_id:
             return 400, {"jsonrpc": "2.0", "id": msg.get("id"),
@@ -533,6 +818,7 @@ def http_post(body, session_id=None):
     return 200, srv.handle(msg), headers
 
 
-def http_delete(session_id):
+def http_delete(session_id, plan=False):
     with _SESSIONS_LOCK:
-        return HTTP_SESSIONS.pop(session_id or "", None) is not None
+        srv = HTTP_SESSIONS.get(session_id or "")
+        return srv is not None and srv.plan == plan and HTTP_SESSIONS.pop(session_id) is not None

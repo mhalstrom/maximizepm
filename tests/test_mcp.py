@@ -344,5 +344,189 @@ class HttpEndpoint(unittest.TestCase):
         self.assertEqual(mcp._host_only("[::1]:8765"), "::1")
 
 
+class Planner(unittest.TestCase):
+    """#6190: /mcp/plan and maxpm mcp --plan: a chat app plans with the person (projects, goals, tasks, links), as the
+    person, with no tool that takes, finishes or launches work."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.addCleanup(os.environ.pop, "MAXPM_DB", None)
+        # A guard, not only an env line: these tests add projects and tasks as the person, so they never run on a
+        # queue outside a temporary folder (a #6190 run by hand once wrote to the real queue).
+        tmp = os.path.realpath(tempfile.gettempdir())
+        if not str(core.db_path().resolve()).startswith(tmp + os.sep):
+            raise RuntimeError(f"refused: the planner tests run only on a queue under {tmp}, not {core.db_path()}")
+        for k in ("MAXPM_AGENT", "MAXPM_CHAT", core.TOKEN_ENV):
+            old = os.environ.pop(k, None)
+            if old is not None:
+                self.addCleanup(os.environ.__setitem__, k, old)
+        self.addCleanup(mcp.HTTP_SESSIONS.clear)
+        c = core.connect()
+        core.register(c, "mark", human=True)
+        c.close()
+
+    def request(self, method, path, body=None, headers=None):
+        from river import server
+        import email.message
+        h = server.Handler.__new__(server.Handler)
+        data = json.dumps(body).encode() if body is not None else b""
+        msg = email.message.Message()
+        for k, v in {"Host": "127.0.0.1:8765", "Content-Length": str(len(data)), **(headers or {})}.items():
+            msg[k] = v
+        h.headers, h.path, h.client_address = msg, path, ("127.0.0.1", 5000)
+        h.rfile, h.wfile = io.BytesIO(data), io.BytesIO()
+        out = {"headers": {}}
+        h.send_response = lambda code, m=None: out.update(code=code)
+        h.send_header = lambda k, v: out["headers"].update({k: v})
+        h.end_headers = lambda: None
+        getattr(h, "do_" + method)()
+        raw = h.wfile.getvalue()
+        return out["code"], (json.loads(raw) if raw else None), out["headers"]
+
+    def session(self, path="/mcp/plan", client="claude-ai"):
+        code, r, hd = self.request("POST", path, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                                  "params": {"clientInfo": {"name": client, "version": "1"}}})
+        self.assertEqual(code, 200)
+        sid = {"Mcp-Session-Id": hd["Mcp-Session-Id"]}
+        n = iter(range(2, 1000))
+
+        def call(_tool, **args):
+            _, r, _ = self.request("POST", path, {"jsonrpc": "2.0", "id": next(n), "method": "tools/call",
+                                                  "params": {"name": _tool, "arguments": args}}, sid)
+            return r["result"]["content"][0]["text"], r["result"]["isError"]
+        return r["result"], sid, call
+
+    def test_plan_a_project_over_http(self):
+        init, sid, call = self.session()
+        self.assertEqual(init["serverInfo"]["name"], "maximizepm-planner")
+        _, r, _ = self.request("POST", "/mcp/plan", {"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, sid)
+        names = {t["name"] for t in r["result"]["tools"]}
+        self.assertEqual(names, mcp.PLAN_NAMES)
+        self.assertFalse(names & {"maxpm", "go", "done", "claim", "manage", "browser", "canvas", "inbox"})
+        text, bad = call("add_project", name="shop", description="The online shop")
+        self.assertFalse(bad, text)
+        text, bad = call("add_goal", project="shop", name="checkout", outcome="People pay in one step",
+                         done_when="a test order passes")
+        self.assertFalse(bad, text)
+        text, bad = call("add_task", project="shop", title="Choose the payment provider", doer="human",
+                         short="Choose the provider")
+        self.assertFalse(bad, text)
+        c = core.connect()
+        first = c.execute("SELECT id FROM items WHERE title='Choose the payment provider'").fetchone()["id"]
+        text, bad = call("add_task", project="shop", title="Build the payment form", goal=["checkout"], priority=1,
+                         waits_on=[first], context="Use the provider that the person chooses")
+        self.assertFalse(bad, text)
+        second = c.execute("SELECT id FROM items WHERE title='Build the payment form'").fetchone()
+        self.assertIsNotNone(second)
+        second = second["id"]
+        self.assertTrue(c.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?", (second, first)).fetchone())
+        self.assertEqual(c.execute("SELECT doer FROM items WHERE id=?", (first,)).fetchone()["doer"], "human")
+        # The person added them, through Claude: the history says mark@claude-ai.
+        actors = {r["actor"] for r in c.execute("SELECT actor FROM events WHERE item_id IN (?,?) AND actor<>'maxpm'",
+                                                (first, second))}
+        self.assertEqual(actors, {"mark@claude-ai"})  # MaximizePM's own entries (needs you) stay 'maxpm'
+        text, bad = call("show_task", id=second)
+        self.assertFalse(bad, text)
+        self.assertIn("Build the payment form", text)
+        self.assertIn(f"#{first}", text)
+        self.assertNotIn("[mark:", text)  # the person's own footer is not this chat's
+        text, _ = call("list_tasks", project="shop")
+        self.assertIn("Choose the payment provider", text)
+        text, _ = call("show_goal", name="checkout")
+        self.assertIn("Build the payment form", text)
+        text, bad = call("edit_task", id=second, priority=0, short="Payment form")
+        self.assertFalse(bad, text)
+        self.assertEqual(tuple(c.execute("SELECT priority, short FROM items WHERE id=?", (second,)).fetchone()),
+                         (0, "Payment form"))
+        self.assertFalse(call("unlink_tasks", id=second, waits_on=[first])[1])
+        self.assertFalse(call("link_tasks", id=second, waits_on=[first])[1])
+        self.assertFalse(call("backlog_task", id=second, reason="after the provider")[1])
+        self.assertFalse(call("activate_task", id=second)[1])  # a person's act: a session may not activate
+        self.assertFalse(call("drop_task", id=first, reason="the shop takes cash")[1])
+        self.assertEqual(c.execute("SELECT status FROM items WHERE id=?", (first,)).fetchone()["status"], "dropped")
+        self.assertIn("## Writing tasks", call("planning_guide")[0])
+        c.close()
+
+    def test_agent_tools_are_refused(self):
+        _, sid, call = self.session()
+        for name, args in (("go", {}), ("done", {"id": 1, "output": "x"}), ("maxpm", {"args": ["claim", "1"]}),
+                           ("manage", {}), ("browser", {"action": "open", "url": "https://example.com"})):
+            text, bad = call(name, **args)
+            self.assertTrue(bad)
+            self.assertIn(f"{name} is not a planner tool", text)
+        # A session of /mcp/plan never reaches /mcp's tools, nor the reverse.
+        code, _, _ = self.request("POST", "/mcp", {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, sid)
+        self.assertEqual(code, 404)
+        _, agent_sid, _ = self.session("/mcp")
+        code, _, _ = self.request("POST", "/mcp/plan", {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}, agent_sid)
+        self.assertEqual(code, 404)
+        self.assertEqual(self.request("DELETE", "/mcp", headers=sid)[0], 404)
+        self.assertEqual(self.request("DELETE", "/mcp/plan", headers=sid)[0], 200)
+        # Like /mcp: only this computer, straight to maxpm serve.
+        code, r, _ = self.request("POST", "/mcp/plan", {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                                  {"X-Forwarded-For": "203.0.113.9"})
+        self.assertEqual(code, 403)
+
+    def test_through_the_relay_path(self):
+        """A connector's request as the relay thread gives it to maxpm serve (relay.serve_page): Host 127.0.0.1, the
+        relay's own header, the connector's headers without the hop's (the relay Worker strips X-Forwarded-*)."""
+        from river import relay
+        local = "http://127.0.0.1:8765"
+        sent = relay.request_headers([["Content-Type", "application/json"], ["Accept", "application/json"],
+                                      ["Mcp-Protocol-Version", "2025-06-18"], ["Host", "x.relay.maximizepm.com"]],
+                                     local)
+        hdrs = {**dict(sent), "X-Maxpm-Relay": relay.PAGE_SECRET}
+        code, r, hd = self.request("POST", "/mcp/plan", {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                                         "params": {"clientInfo": {"name": "claude-ai"}}}, hdrs)
+        self.assertEqual(code, 200, r)
+        hdrs["Mcp-Session-Id"] = hd["Mcp-Session-Id"]
+        _, r, _ = self.request("POST", "/mcp/plan", {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "add_project", "arguments": {"name": "garden", "description": "The garden"}}}, hdrs)
+        self.assertFalse(r["result"]["isError"], r)
+        c = core.connect()
+        self.assertTrue(c.execute("SELECT 1 FROM projects WHERE name='garden'").fetchone())
+        c.close()
+
+    def test_stdio_and_its_refusals(self):
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Gemini CLI"}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "add_project", "arguments": {"name": "notes", "description": "My notes"}}},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                 "params": {"name": "edit_task", "arguments": {"id": 1}}}]
+
+        def talk():
+            out = io.StringIO()
+            mcp.serve(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out, plan=True)
+            return [json.loads(x)["result"] for x in out.getvalue().splitlines()]
+        r = talk()
+        self.assertFalse(r[1]["isError"], r[1])
+        self.assertIn("needs a field to change", r[2]["content"][0]["text"])
+        c = core.connect()
+        self.assertEqual(c.execute("SELECT actor FROM events WHERE change LIKE 'project notes added%'").fetchone()[0],
+                         "mark@gemini-cli")
+        c.close()
+        # Inside an agent session of MaximizePM the planner does not act as the person.
+        os.environ["MAXPM_AGENT"] = "worker-1"
+        self.addCleanup(os.environ.pop, "MAXPM_AGENT", None)
+        msgs[1]["params"]["arguments"]["name"] = "notes2"
+        r = talk()
+        self.assertTrue(r[1]["isError"])
+        self.assertIn("inside an agent session", r[1]["content"][0]["text"])
+
+    def test_no_person_yet(self):
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "empty.db")
+        srv = mcp.Server(plan=True)
+        with self.assertRaisesRegex(core.RiverError, "has no person yet"):
+            srv.call("list_projects", {})
+
+    def test_client_slug(self):
+        self.assertEqual(mcp.client_slug({"name": "claude-ai"}), "claude-ai")
+        self.assertEqual(mcp.client_slug({"name": "OpenAI MCP Client"}), "openai-mcp-client")
+        self.assertEqual(mcp.client_slug(None), "mcp")
+        self.assertEqual(mcp.client_slug({"name": "!!!"}), "mcp")
+
+
 if __name__ == "__main__":
     unittest.main()

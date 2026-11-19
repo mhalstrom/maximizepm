@@ -5410,6 +5410,7 @@ def canvas_opens():
 
 
 DICTATE_OPS = ("dictate_start", "dictate_audio", "dictate_stop")
+MCP_PATHS = ("/mcp", "/mcp/plan")  # the agent tools, and the planner tools of a chat app (#6190)
 
 
 def op_rights(conn, op, actor, page):
@@ -5924,7 +5925,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/mcp":
+        if path in MCP_PATHS:
             return self._mcp("GET")
         if self._refuse():
             return
@@ -6152,9 +6153,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(status, answer)
 
     def _mcp(self, method):
-        """/mcp: river's MCP tools over Streamable HTTP, for this computer only (mcp.local_refusal)."""
+        """/mcp: river's MCP tools over Streamable HTTP, for this computer only (mcp.local_refusal). /mcp/plan: the
+        planner tools only, for a chat app that plans with the person (#6190)."""
         from . import mcp
-        why = mcp.local_refusal(self.client_address[0], dict(self.headers.items()))
+        path = self.path.split("?")[0]
+        plan = path == "/mcp/plan"
+        why = mcp.local_refusal(self.client_address[0], dict(self.headers.items()), path)
         if why:
             return self._send(403, {"error": why})
         sid = self.headers.get("Mcp-Session-Id")
@@ -6165,8 +6169,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if method == "DELETE":
-            return self._send(200 if mcp.http_delete(sid) else 404, {})
-        code, reply, headers = mcp.http_post(self.rfile.read(int(self.headers.get("Content-Length", 0))), sid)
+            return self._send(200 if mcp.http_delete(sid, plan) else 404, {})
+        code, reply, headers = mcp.http_post(self.rfile.read(int(self.headers.get("Content-Length", 0))), sid, plan)
         data = b"" if reply is None else json.dumps(reply).encode()
         self.send_response(code)
         for k, v in headers.items():
@@ -6208,12 +6212,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, ans)
 
     def do_DELETE(self):
-        if self.path.split("?")[0] == "/mcp":
+        if self.path.split("?")[0] in MCP_PATHS:
             return self._mcp("DELETE")
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path.split("?")[0] == "/mcp":
+        if self.path.split("?")[0] in MCP_PATHS:
             return self._mcp("POST")
         if self._refuse():
             return
