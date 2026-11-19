@@ -1,5 +1,7 @@
 """The pipeline package: its records and the intake of events, '::step' lines and JUnit reports (#6112)."""
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -9,7 +11,7 @@ from unittest import mock
 
 from river import core
 from river.core import RiverError
-from river.pipeline import cdevents, junit, steps, store
+from river.pipeline import cdevents, define, junit, steps, store
 from tests import timing
 
 
@@ -25,13 +27,13 @@ class Base(unittest.TestCase):
         self.addCleanup(self.c.close)
 
     def toolscaled(self):
-        store.pipeline_add(self.c, "toolscaled", project="toolscaled", actor="mark")
-        store.env_add(self.c, "toolscaled", "beta")
-        store.env_add(self.c, "toolscaled", "prod", target="toolscaled-prod")
-        store.stage_add(self.c, "toolscaled", "build", "build", run="make prod-release-prepare")
-        store.stage_add(self.c, "toolscaled", "test", "test", run="make check-all-once")
-        store.stage_add(self.c, "toolscaled", "beta", "deploy", env="beta", run="make deploy ENV=beta")
-        store.stage_add(self.c, "toolscaled", "prod", "deploy", env="prod", run="make prod-release", gate="person")
+        define.pipeline_add(self.c, "toolscaled", project="toolscaled", actor="mark")
+        define.env_set(self.c, "toolscaled", "beta")
+        define.env_set(self.c, "toolscaled", "prod", target="toolscaled-prod")
+        define.stage_set(self.c, "toolscaled", "build", "build", run="make prod-release-prepare")
+        define.stage_set(self.c, "toolscaled", "test", "test", run="make check-all-once")
+        define.stage_set(self.c, "toolscaled", "beta", "deploy", env="beta", run="make deploy ENV=beta")
+        define.stage_set(self.c, "toolscaled", "prod", "deploy", env="prod", run="make prod-release", gate="person")
 
 
 class Definitions(Base):
@@ -43,7 +45,7 @@ class Definitions(Base):
 
     def test_stages_in_order_with_their_environment_and_gate(self):
         self.toolscaled()
-        store.stage_add(self.c, "toolscaled", "review", "review", pos=3)
+        define.stage_set(self.c, "toolscaled", "review", "review", pos=3)
         p = store.show(self.c, "toolscaled")
         self.assertEqual([s["name"] for s in p["stages"]], ["build", "test", "review", "beta", "prod"])
         prod = p["stages"][-1]
@@ -53,15 +55,106 @@ class Definitions(Base):
 
     def test_refusals(self):
         self.toolscaled()
-        for call in (lambda: store.pipeline_add(self.c, "toolscaled"),
-                     lambda: store.pipeline_add(self.c, "has space"),
-                     lambda: store.stage_add(self.c, "toolscaled", "x", "dance"),
-                     lambda: store.stage_add(self.c, "toolscaled", "x", "deploy"),
-                     lambda: store.stage_add(self.c, "toolscaled", "x", "deploy", env="nowhere"),
-                     lambda: store.stage_add(self.c, "toolscaled", "x", "build", gate="anyone"),
-                     lambda: store.stage_add(self.c, "nope", "x", "build")):
+        for call in (lambda: define.pipeline_add(self.c, "toolscaled"),
+                     lambda: define.pipeline_add(self.c, "has space"),
+                     lambda: define.stage_set(self.c, "toolscaled", "x", "dance"),
+                     lambda: define.stage_set(self.c, "toolscaled", "x", "deploy"),
+                     lambda: define.stage_set(self.c, "toolscaled", "x", "deploy", env="nowhere"),
+                     lambda: define.stage_set(self.c, "toolscaled", "x", "build", gate="anyone"),
+                     lambda: define.stage_set(self.c, "nope", "x", "build")):
             with self.assertRaises(RiverError):
                 call()
+
+
+class Commands(Base):
+    """maxpm pipeline (#6113): add, env, stage, gate, show, export, history."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+
+    def cli(self, *words, who="mark"):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            code = cli.run(["--as", who, *words])
+        return code, out.getvalue()
+
+    def test_the_manager_writes_a_pipeline_with_commands(self):
+        for words in (("add", "toolscaled", "--project", "toolscaled"),
+                      ("env", "toolscaled", "beta"), ("env", "toolscaled", "prod", "--target", "toolscaled-prod"),
+                      ("stage", "toolscaled", "build", "--kind", "build", "--run", "make prod-release-prepare"),
+                      ("stage", "toolscaled", "test", "--kind", "test", "--run", "make check-all-once"),
+                      ("stage", "toolscaled", "review", "--kind", "review"),
+                      ("stage", "toolscaled", "beta", "--kind", "deploy", "--env", "beta", "--run", "make deploy ENV=beta"),
+                      ("stage", "toolscaled", "prod", "--kind", "deploy", "--env", "prod", "--run", "make prod-release",
+                       "--gate", "person mark"),
+                      ("gate", "toolscaled", "prod", "auto", "after", "30m")):
+            code, out = self.cli("pipeline", *words)
+            self.assertEqual(code, 0, out)
+        code, out = self.cli("pipeline", "show", "toolscaled")
+        self.assertIn("5. prod  [deploy, env prod]  gate auto after 30m  run: make prod-release", out)
+        self.assertIn("env prod: no version yet  (target toolscaled-prod)", out)
+        path = os.path.join(self.dir.name, "toolscaled-pipeline.json")
+        self.cli("pipeline", "export", "toolscaled", "--file", path)
+        with open(path) as f:
+            exp = json.load(f)
+        self.assertEqual([s["name"] for s in exp["stages"]], ["build", "test", "review", "beta", "prod"])
+        self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
+                                             "workflow": None, "env": "prod", "gate": "auto after 30m"})
+        self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
+        code, out = self.cli("pipeline", "history", "toolscaled")
+        lines = out.strip().split("\n")
+        self.assertEqual(len(lines), 9)
+        self.assertIn("mark: stage prod changed: gate person mark -> auto after 30m", lines[0])
+        self.assertIn("mark: pipeline toolscaled added for project toolscaled", lines[-1])
+
+    def test_an_agent_may_not_change_a_pipeline(self):
+        define.pipeline_add(self.c, "web", actor="mark")
+        with self.assertRaises(RiverError) as e:
+            define.stage_set(self.c, "web", "build", "build", actor="w1")
+        self.assertIn("only a person or the manager changes a pipeline", str(e.exception))
+        with self.assertRaises(RiverError):  # the permission table, or define itself, refuses it
+            self.cli("pipeline", "stage", "web", "build", "--kind", "build", who="w1")
+        self.assertEqual(store.show(self.c, "web")["stages"], [])
+        self.assertEqual(self.cli("pipeline", "show", "web", who="w1")[0], 0)  # it reads it
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        define.stage_set(self.c, "web", "build", "build", actor="boss")
+
+    def test_change_move_remove_and_bring_back_a_stage(self):
+        self.toolscaled()
+        define.stage_set(self.c, "toolscaled", "test", pos=1, actor="mark")
+        names = lambda: [s["name"] for s in store.show(self.c, "toolscaled")["stages"]]
+        self.assertEqual(names(), ["test", "build", "beta", "prod"])
+        define.stage_set(self.c, "toolscaled", "build", workflow="build.yml", actor="mark")
+        s = store.show(self.c, "toolscaled")["stages"][1]
+        self.assertEqual((s["run"], s["workflow"]), (None, "build.yml"))  # one or the other
+        run = store.run_start(self.c, "toolscaled", "build")
+        define.stage_set(self.c, "toolscaled", "build", remove=True, actor="mark")
+        self.assertEqual(names(), ["test", "beta", "prod"])
+        self.assertEqual([s["pos"] for s in store.show(self.c, "toolscaled")["stages"]], [1, 2, 3])
+        self.assertEqual(store.run_show(self.c, run)["stage"], "build")  # its runs stay
+        r = define.stage_set(self.c, "toolscaled", "build", pos=1, actor="mark")
+        self.assertEqual((r["changed"], names()), ("added again", ["build", "test", "beta", "prod"]))
+        with self.assertRaises(RiverError):  # nothing to change
+            define.stage_set(self.c, "toolscaled", "build", actor="mark")
+        with self.assertRaises(RiverError):  # a deploy stage keeps its environment
+            define.stage_set(self.c, "toolscaled", "prod", env="", actor="mark")
+        with self.assertRaises(RiverError):  # a stage deploys to it
+            define.env_set(self.c, "toolscaled", "prod", remove=True, actor="mark")
+        define.env_set(self.c, "toolscaled", "prod", url="https://toolscaled.com", actor="mark")
+        self.assertEqual(store.show(self.c, "toolscaled")["envs"][1]["url"], "https://toolscaled.com")
+
+    def test_gate_rules(self):
+        self.assertEqual([define.parse_gate(t) for t in ("auto", "auto after 30m", "manager", "person", "person mark")],
+                         [("auto", None), ("auto", "30m"), ("manager", None), ("person", None), ("person", "mark")])
+        for bad in ("", "auto after", "auto after soon", "anyone", "person a b", "manager mark"):
+            with self.assertRaises(RiverError):
+                define.parse_gate(bad)
+        self.assertEqual(store.gate_text("auto", "30m"), "auto after 30m")
 
 
 class Events(Base):

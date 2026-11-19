@@ -61,7 +61,7 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config",
           "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "runs", "browser", "canvas",
-          "scope", "pause", "resume"}
+          "scope", "pause", "resume", "pipeline"}
 # #6009: commands of which only some subcommands go to serve. review pass runs the review command in the caller and
 # sends its result (cli: op review_record); expert start and fresh open a terminal through serve already.
 REMOTE_SUBS = {"review": {"fail"}, "expert": {None, "list", "adopt", "request", "end", "notes"}}

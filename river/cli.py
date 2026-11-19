@@ -1879,6 +1879,38 @@ def build_parser(only=None):
     x.add_argument("--to", required=True)
     tgs.add_parser("list")
 
+    # #6113: the definition of a pipeline (river/pipeline). Only a person or the manager changes one.
+    pl = sub.add_parser("pipeline", help="pipelines: the stages of a project's release, its environments, and the "
+                        "gate before each stage (a person or the manager changes one)")
+    pls = pl.add_subparsers(dest="plcmd", required=True)
+    pls.add_parser("list")
+    x = pls.add_parser("add", help="a new pipeline"); x.add_argument("name")
+    x.add_argument("--project", help="the project it releases"); x.add_argument("--notes")
+    x = pls.add_parser("show", help="its stages left to right with their last run, and what runs in each environment")
+    x.add_argument("name")
+    x = pls.add_parser("env", help="add or change an environment: a place that runs the code (dev, beta, prod, a "
+                       "server)")
+    x.add_argument("name"); x.add_argument("env")
+    x.add_argument("--target", help="the deploy target of today that it is"); x.add_argument("--url")
+    x.add_argument("--notes"); x.add_argument("--remove", action="store_true")
+    x = pls.add_parser("stage", help="add or change a stage: its kind, the command or forge workflow that does its "
+                       "work, its environment, its gate, its place")
+    x.add_argument("name"); x.add_argument("stage")
+    x.add_argument("--kind", choices=("build", "test", "review", "approve", "deploy", "check", "other"))
+    x.add_argument("--run", help="the project's command that does the work ('' clears it)")
+    x.add_argument("--workflow", help="or the forge workflow or job that does it ('' clears it)")
+    x.add_argument("--env", help="the environment a deploy stage deploys to")
+    x.add_argument("--gate", help="auto; auto after <time>; manager; person; person <name>")
+    x.add_argument("--pos", type=int, help="its place, 1 is the first")
+    x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
+    x = pls.add_parser("gate", help="the rule that lets a version into a stage: auto; auto after <time> (the checks "
+                       "of the stage before pass that long); manager; person; person <name>")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("rule", nargs="+")
+    x = pls.add_parser("export", help="print the pipeline as JSON, to keep in git")
+    x.add_argument("name"); x.add_argument("--file", help="write it to this file")
+    x = pls.add_parser("history", help="each change of the pipeline, with who made it")
+    x.add_argument("name"); x.add_argument("-n", type=int, default=50)
+
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
     x.add_argument("--project", dest="project_opt", help="the project (the same as the first word)")
@@ -4506,6 +4538,8 @@ def dispatch(conn, a, actor):
         if a.qcmd == "remove":
             return core.queue_remove(conn, a.agent, a.ref, actor)
         return core.queue_move(conn, a.agent, a.id, a.before, a.after, actor)
+    if c == "pipeline":
+        return _pipeline_cmd(conn, a, actor)
     if c == "target":
         if a.tcmd == "add":
             return core.target_add(conn, a.name, a.description, actor)
@@ -7421,8 +7455,85 @@ def phone_step(enable, command):
             f"  {enable['url']}\nThen tailscale serve finishes by itself; maxpm phone shows the address and its QR code.")
 
 
+def _pipeline_cmd(conn, a, actor):
+    """maxpm pipeline (#6113): the definition of a pipeline; river/pipeline/define.py does the work."""
+    from .pipeline import define, store
+    sub = a.plcmd  # who may run each one: river/rights.py
+    if sub == "list":
+        return store.pipelines(conn)
+    if sub == "add":
+        return define.pipeline_add(conn, a.name, a.project, a.notes, actor)
+    if sub == "show":
+        return store.show(conn, a.name)
+    if sub == "env":
+        return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
+    if sub == "stage":
+        return define.stage_set(conn, a.name, a.stage, a.kind, a.run, a.workflow, a.env, a.gate, a.pos, a.remove,
+                                actor)
+    if sub == "gate":
+        return define.gate_set(conn, a.name, a.stage, " ".join(a.rule), actor)
+    if sub == "export":
+        out = define.export(conn, a.name)
+        if a.file:
+            path = Path(a.file).expanduser()
+            path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+            return {"file": str(path), "export": out}
+        return out
+    return {"pipeline": a.name, "history": define.history(conn, a.name, a.n)}
+
+
+def render_pipeline(a, res):
+    sub = a.plcmd
+    if sub == "list":
+        if not res:
+            print("no pipelines; add one: maxpm pipeline add <name> --project <project>")
+        for p in res:
+            print(f"{p['name']}" + (f"  (project {p['project']})" if p["project"] else ""))
+        return
+    if sub == "export":
+        if "file" in res:
+            print(f"pipeline {res['export']['pipeline']} written to {res['file']}")
+        else:
+            print(json.dumps(res, indent=2))
+        return
+    if sub == "history":
+        for h in res["history"]:
+            print(f"{h['at']}  {h['actor'] or 'a person'}: {h['change']}")
+        if not res["history"]:
+            print(f"pipeline {res['pipeline']} has no changes")
+        return
+    if sub == "add":
+        print(f"pipeline {res['name']} added. Next: maxpm pipeline env {res['name']} <env>, then "
+              f"maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
+        return
+    if sub in ("env", "stage", "gate"):
+        what = f"environment {res['env']}" if sub == "env" else f"stage {res['stage']}"
+        d = res.get("detail") or {}
+        extra = ", ".join(f"{k} {v}" for k, v in d.items() if v and k != "name")
+        print(f"pipeline {res['pipeline']}: {what} {res['changed']}" + (f" ({extra})" if extra else ""))
+        return
+    # show
+    print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else ""))
+    if not res["stages"]:
+        print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
+    for s in res["stages"]:
+        does = f"run: {s['run']}" if s["run"] else f"workflow: {s['workflow']}" if s["workflow"] else "nothing to run"
+        print(f"  {s['pos']}. {s['name']}  [{s['kind']}{', env ' + s['env'] if s['env'] else ''}]  gate {s['gate_text']}"
+              f"  {does}")
+        r = s["last_run"]
+        if r:
+            print(f"       last run #{r['id']}: {r['state']}" + (f", version {r['version']}" if r["version"] else "")
+                  + (f", started {r['started_at']}" if r["started_at"] else "")
+                  + (f", ended {r['ended_at']}" if r["ended_at"] else ""))
+    for e in res["envs"]:
+        print(f"  env {e['name']}: " + (f"{e['rev']} since {e['since']}" if e["rev"] else "no version yet")
+              + (f"  (target {e['target']})" if e["target"] else ""))
+
+
 def render(a, res):
     c = a.cmd
+    if c == "pipeline":
+        return render_pipeline(a, res)
     if c == "schedule":
         return render_schedule(a, res)
     if c == "ops":

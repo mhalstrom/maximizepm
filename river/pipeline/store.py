@@ -3,7 +3,7 @@
 Every change of a run, a step, a test or an environment comes from an event (ingest): an adapter's CDEvents, the
 '::step' lines of a stage's output (steps.py), a JUnit report (junit.py), or a call of the runner (run_start,
 run_finish), which makes its own event. ingest keeps each event in pipeline_events and applies it to the records.
-The definitions (pipeline_add, env_add, stage_add) are direct writes; the maxpm pipeline commands (#6113) use them.
+The definitions of a pipeline (its stages, environments and gates) are in define.py, with their history.
 
 The reads (pipelines, show, versions, run_show, tests, events) are what the view, the runner and the MaximizePM
 connection read; each stays under 100 ms (policy p147) on indexed columns.
@@ -63,59 +63,9 @@ def _pipeline(conn, name):
     return row
 
 
-def pipeline_add(conn, name, project=None, notes=None, actor=None):
-    name = _name(name, "pipeline")
-    with core.tx(conn):
-        if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
-            raise core.RiverError(f"a pipeline named {name} exists already")
-        conn.execute("INSERT INTO pipelines(name, project, notes, created_by, created_at) VALUES (?,?,?,?,?)",
-                     (name, project, notes, actor, _now()))
-    return dict(_pipeline(conn, name))
-
-
-def env_add(conn, pipeline, name, target=None, notes=None, url=None):
-    name = _name(name, "environment")
-    with core.tx(conn):
-        pid = _pipeline(conn, pipeline)["id"]
-        if conn.execute("SELECT 1 FROM pipeline_envs WHERE pipeline_id=? AND name=?", (pid, name)).fetchone():
-            raise core.RiverError(f"pipeline {pipeline} has an environment named {name} already")
-        conn.execute("INSERT INTO pipeline_envs(pipeline_id, name, target, notes, url, created_at) "
-                     "VALUES (?,?,?,?,?,?)", (pid, name, target, notes, url, _now()))
-    return dict(conn.execute("SELECT * FROM pipeline_envs WHERE pipeline_id=? AND name=?", (pid, name)).fetchone())
-
-
-def stage_add(conn, pipeline, name, kind, run=None, workflow=None, env=None, gate="auto", gate_rule=None,
-              pos=None, actor=None):
-    """A stage at the end of the pipeline, or at pos (1 is the first; the later stages move right). A deploy stage
-    names its environment, which must exist."""
-    name = _name(name, "stage")
-    if kind not in STAGE_KINDS:
-        raise core.RiverError(f"the stage kind {kind!r} is not one of {', '.join(STAGE_KINDS)}")
-    if gate not in GATES:
-        raise core.RiverError(f"the gate {gate!r} is not one of {', '.join(GATES)}")
-    if kind == "deploy" and not env:
-        raise core.RiverError(f"a deploy stage names its environment: add env=<name> to stage {name}")
-    with core.tx(conn):
-        pid = _pipeline(conn, pipeline)["id"]
-        if conn.execute("SELECT 1 FROM pipeline_stages WHERE pipeline_id=? AND name=?", (pid, name)).fetchone():
-            raise core.RiverError(f"pipeline {pipeline} has a stage named {name} already")
-        env_id = None
-        if env:
-            row = conn.execute("SELECT id FROM pipeline_envs WHERE pipeline_id=? AND name=?", (pid, env)).fetchone()
-            if not row:
-                raise core.RiverError(f"pipeline {pipeline} has no environment named {env}; add it first")
-            env_id = row["id"]
-        last = conn.execute("SELECT COALESCE(MAX(pos), 0) FROM pipeline_stages WHERE pipeline_id=?",
-                            (pid,)).fetchone()[0]
-        if pos is None or pos > last:
-            pos = last + 1
-        else:
-            pos = max(1, int(pos))
-            conn.execute("UPDATE pipeline_stages SET pos=pos+1 WHERE pipeline_id=? AND pos>=?", (pid, pos))
-        conn.execute("INSERT INTO pipeline_stages(pipeline_id, name, pos, kind, run, workflow, env_id, gate, "
-                     "gate_rule, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                     (pid, name, pos, kind, run, workflow, env_id, gate, gate_rule, actor, _now()))
-    return dict(conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=?", (pid, name)).fetchone())
+def gate_text(gate, rule):
+    """A gate as the words of maxpm pipeline gate: auto, auto after 30m, manager, person, person mark."""
+    return f"{gate} after {rule}" if gate == "auto" and rule else f"{gate} {rule}" if rule else gate
 
 
 # ---------------------------------------------------------------- records an event names (inside a tx)
@@ -479,15 +429,17 @@ def show(conn, name):
     p = dict(_pipeline(conn, name))
     envs = {}
     for e in conn.execute("SELECT e.*, v.rev FROM pipeline_envs e LEFT JOIN pipeline_versions v ON v.id=e.version_id "
-                          "WHERE e.pipeline_id=? ORDER BY e.id", (p["id"],)):
+                          "WHERE e.pipeline_id=? AND e.removed_at IS NULL ORDER BY e.id", (p["id"],)):
         d = dict(e)
         d["history"] = [dict(h) for h in conn.execute(
             "SELECT d.kind, d.at, d.run_id, v.rev FROM pipeline_deploys d LEFT JOIN pipeline_versions v "
             "ON v.id=d.version_id WHERE d.env_id=? ORDER BY d.id DESC LIMIT 5", (e["id"],))]
         envs[e["id"]] = d
     stages = []
-    for s in conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? ORDER BY pos, id", (p["id"],)):
+    for s in conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
+                          (p["id"],)):
         d = dict(s)
+        d["gate_text"] = gate_text(s["gate"], s["gate_rule"])
         d["env"] = envs[s["env_id"]]["name"] if s["env_id"] in envs else None
         d["last_run"] = _run_dict(conn, conn.execute(
             "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())

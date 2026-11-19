@@ -44,11 +44,23 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   workflow     TEXT,                     -- or the forge workflow or job that does it
   env_id       INTEGER,                  -- a deploy stage's environment
   gate         TEXT NOT NULL DEFAULT 'auto',  -- who lets a version in: auto, manager, person
-  gate_rule    TEXT,                     -- more of the rule, in words ('after beta checks pass for 30m')
+  gate_rule    TEXT,                     -- auto: how long the checks before it must pass (30m); person: the name
   created_by   TEXT,                     -- 'event' when an event named a stage the pipeline did not have
   created_at   TEXT NOT NULL,
+  removed_at   TEXT,                     -- a removed stage keeps its runs; adding its name again brings it back
   UNIQUE (pipeline_id, name)
 );
+
+-- Each change of a pipeline's definition, with its actor (#6113). Readers: maxpm pipeline history, the view.
+CREATE TABLE IF NOT EXISTS pipeline_changes (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  at           TEXT NOT NULL,
+  actor        TEXT,
+  change       TEXT NOT NULL,            -- in words: 'stage prod added: kind deploy, env prod, gate person mark'
+  detail       TEXT                      -- the stage or environment after the change, as JSON
+);
+CREATE INDEX IF NOT EXISTS pipeline_changes_pipeline ON pipeline_changes(pipeline_id, id);
 
 -- A commit that moves through the stages. Readers: the view (the versions in each stage), the MaximizePM
 -- connection (the tasks of a version).
@@ -165,3 +177,10 @@ CREATE TABLE IF NOT EXISTS pipeline_events (
 CREATE INDEX IF NOT EXISTS pipeline_events_pipeline ON pipeline_events(pipeline_id, id);
 CREATE INDEX IF NOT EXISTS pipeline_events_run ON pipeline_events(run_id, id);
 """
+
+
+def migrate(conn):
+    """Add the columns that a queue made by an older version of these tables lacks. core._migrate calls it, inside
+    its tx; core.schema_print counts this function, so a change here runs again."""
+    if "removed_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}:  # #6113
+        conn.execute("ALTER TABLE pipeline_stages ADD COLUMN removed_at TEXT")

@@ -695,7 +695,7 @@ AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert")
 # launch_platforms() and the end of this module, where the built-in adapters' setting defaults go in DEFAULT_SETTINGS.
 
 # The pipeline package keeps its own tables (#6112); SCHEMA ends with them.
-from .pipeline.schema import SCHEMA as _PIPELINE_SCHEMA  # noqa: E402
+from .pipeline.schema import SCHEMA as _PIPELINE_SCHEMA, migrate as _pipeline_migrate  # noqa: E402
 
 SCHEMA = """
 -- One-time data changes that already ran (key: the change).
@@ -2156,7 +2156,7 @@ def schema_print():
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
     for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts,
-              _migrate_report_cards):
+              _migrate_report_cards, _pipeline_migrate):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -2270,6 +2270,7 @@ def graph_version(conn):
 
 def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
+    _pipeline_migrate(conn)  # the pipeline package's own tables (#6113)
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
     # The scope of a session (#5973).

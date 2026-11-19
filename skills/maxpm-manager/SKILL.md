@@ -510,6 +510,21 @@ project covers, where it lives (repository, directories), and what knowledge
 helps. Agents read `maxpm project list` to pick an area. `--result-look` says how the user looks
 at a finished result of the project (the guide of the worker explains both values).
 
+### Pipelines
+
+When the person asks for a release process with stages ("build, test, then beta,
+then prod after my yes"), write it as the project's pipeline. MaximizePM holds
+the order and the gates; the project's own commands do the work.
+
+```
+maxpm pipeline add <name> --project <project>
+maxpm pipeline env <name> <env> [--target <target>]
+maxpm pipeline stage <name> <stage> --kind build|test|review|approve|deploy|check --run "<command>" [--env <env>]
+maxpm pipeline gate <name> <stage> auto|"auto after 30m"|manager|"person <name>"
+maxpm pipeline show|history <name>
+maxpm pipeline export <name> --file <path>             # JSON, to keep in git
+```
+
 ### The commands
 
 ```
