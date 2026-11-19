@@ -635,6 +635,9 @@ DEFAULT_SETTINGS = {
     # The deploy hook of a target (maxpm target hook <target> deploy) is its release command: maxpm serve stops it
     # at deploy_timeout instead of hook_timeout, and the release then starts again as after a failure (#4971).
     "deploy_timeout": "2h",
+    # The command of a pipeline stage that maxpm serve runs (river/pipeline/runner.py, #6114) stops at stage_timeout,
+    # with every process it started, and the stage fails (0s: no limit). Set it on the pipeline's project.
+    "stage_timeout": "2h",
     # A person's list gets an operational cleanup task (maxpm serve, #4973) when it holds list_cleanup_min open items
     # older than list_cleanup_after; at most one such task for a person in each list_cleanup_after. 0s: never.
     "list_cleanup_after": "7d",
@@ -3104,7 +3107,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):

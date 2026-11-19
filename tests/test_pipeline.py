@@ -103,7 +103,8 @@ class Commands(Base):
             exp = json.load(f)
         self.assertEqual([s["name"] for s in exp["stages"]], ["build", "test", "review", "beta", "prod"])
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
-                                             "workflow": None, "env": "prod", "gate": "auto after 30m"})
+                                             "workflow": None, "env": "prod", "gate": "auto after 30m",
+                                             "junit": None})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
         code, out = self.cli("pipeline", "history", "toolscaled")
         lines = out.strip().split("\n")
@@ -393,6 +394,168 @@ class JUnit(Base):
         self.assertEqual((t["suite"], t["name"], t["state"], t["message"]),
                          ("unit", "test_refund_partial", "failed", "500 from Stripe"))
         self.assertEqual(store.run_show(self.c, self.run)["suites"][0]["failed"], 1)
+
+
+class Runner(Base):
+    """The no-forge runner (#6114): a fake pipeline of four stages whose commands print '::step' lines."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import runner
+        self.runner = runner
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        self.folder = os.path.join(self.dir.name, "app")
+        os.makedirs(self.folder)
+        core.project_add(self.c, "app", path=self.folder)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        define.pipeline_add(self.c, "app", project="app")
+        define.env_set(self.c, "app", "beta")
+        define.env_set(self.c, "app", "prod")
+        define.stage_set(self.c, "app", "build", "build", run=(
+            "printf '::step start compile kind=build\\ncompiling for %s\\n::step end compile passed\\n' $MAXPM_REV"))
+        define.stage_set(self.c, "app", "test", "test", junit="report.xml", run=(
+            "printf '::step start unit kind=test\\n'; printf '<testsuite name=\"unit\"><testcase name=\"a\"/>"
+            "<testcase name=\"b\"/></testsuite>' > report.xml; printf '::step end unit passed\\n'"))
+        define.stage_set(self.c, "app", "beta", "deploy", env="beta", run="echo deploying $MAXPM_REV to $MAXPM_ENV")
+        define.stage_set(self.c, "app", "prod", "deploy", env="prod", run="echo prod", gate="person mark")
+
+    def passes(self, n=6):
+        out = []
+        for _ in range(n):
+            out.append(self.runner.serve_pass(self.c))
+        return out
+
+    def runs(self):
+        return {r["stage"]: r for r in self.c.execute(
+            "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+    def test_a_version_goes_through_each_stage_and_waits_for_the_person(self):
+        self.runner.start(self.c, "app", rev="abc1234")
+        self.passes()
+        runs = self.runs()
+        self.assertEqual({k: v["state"] for k, v in runs.items()},
+                         {"build": "passed", "test": "passed", "beta": "passed", "prod": "queued"})
+        build = store.run_show(self.c, runs["build"]["id"])
+        self.assertEqual([(s["name"], s["state"], s["kind"]) for s in build["step_list"]],
+                         [("compile", "passed", "build")])
+        self.assertEqual(build["step_list"][0]["output"], "compiling for abc1234")
+        self.assertEqual(store.run_show(self.c, runs["test"]["id"])["tests"], {"passed": 2})
+        self.assertIn("deploying abc1234 to beta", store.run_show(self.c, runs["beta"]["id"])["output"])
+        envs = {e["name"]: e["rev"] for e in store.show(self.c, "app")["envs"]}
+        self.assertEqual(envs, {"beta": "abc1234", "prod": None})
+        # The person gate asked with an approval item; mark's done opens it.
+        card = runs["prod"]["gate_item"]
+        self.assertIn("waits for mark's yes on #", runs["prod"]["gate_note"])
+        self.assertEqual(core.item_show(self.c, card)["doer"], "human")
+        core.done(self.c, card, actor="mark")
+        self.passes(1)
+        runs = self.runs()
+        self.assertEqual((runs["prod"]["state"], runs["prod"]["approved_by"]), ("passed", "mark"))
+        self.assertEqual(store.show(self.c, "app")["envs"][1]["rev"], "abc1234")
+        self.assertEqual(self.runner.start(self.c, "app", rev="abc1234")["stage"], "build")  # it went through: again
+        with self.assertRaises(RiverError):  # but not twice at once
+            self.runner.start(self.c, "app", rev="abc1234")
+
+    def test_a_failed_stage_stops_the_version(self):
+        define.stage_set(self.c, "app", "build", run="echo broken; exit 3")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes()
+        runs = self.runs()
+        self.assertEqual(list(runs), ["build"])
+        self.assertEqual((runs["build"]["state"], runs["build"]["errors"]), ("failed", "exit 3"))
+
+    def test_failed_tests_fail_the_stage(self):
+        define.stage_set(self.c, "app", "test", run=(
+            "printf '<testsuite name=\"u\"><testcase name=\"a\"><failure message=\"no\"/></testcase></testsuite>' "
+            "> report.xml"))
+        self.runner.start(self.c, "app", rev="bad0002")
+        self.passes()
+        t = self.runs()["test"]
+        self.assertEqual((t["state"], t["errors"]), ("failed", "1 of 1 tests failed"))
+        self.assertNotIn("beta", self.runs())
+
+    def test_a_test_stage_with_no_report_fails(self):
+        define.stage_set(self.c, "app", "test", run="true")
+        self.runner.start(self.c, "app", rev="bad0003")
+        self.passes()
+        self.assertIn("no new JUnit report", self.runs()["test"]["errors"])
+
+    def test_stage_timeout_stops_the_command(self):
+        core.config_set(self.c, "stage_timeout", "1s")
+        define.stage_set(self.c, "app", "build", run="sleep 30")
+        self.runner.start(self.c, "app", rev="slow001")
+        t = time.monotonic()
+        self.passes(1)
+        self.assertLess(time.monotonic() - t, timing.limit(10, below=30))  # the command sleeps 30 s
+        self.assertEqual(self.runs()["build"]["errors"], "stopped at stage_timeout (1s)")
+
+    def test_the_person_declines(self):
+        define.stage_set(self.c, "app", "build", gate="person")
+        self.runner.start(self.c, "app", rev="nope001")
+        self.passes(1)
+        card = self.runs()["build"]["gate_item"]
+        core.drop(self.c, card, "mark", note="not this one")
+        self.passes(1)
+        self.assertEqual(self.runs()["build"]["state"], "cancelled")
+
+    def test_a_manager_gate_and_approve(self):
+        define.stage_set(self.c, "app", "build", gate="manager")
+        self.runner.start(self.c, "app", rev="mgr0001")
+        out = self.passes(2)
+        self.assertIn("waits for the manager: maxpm pipeline approve app build --rev mgr0001", out[-1]["waiting"][1])
+        with self.assertRaises(RiverError):
+            self.runner.approve(self.c, "app", "build", actor="w1")
+        self.runner.approve(self.c, "app", "build", rev="mgr0001", actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["build"]["state"], "passed")
+
+    def test_auto_after_a_time_while_the_checks_pass(self):
+        define.stage_set(self.c, "app", "test", gate="auto after 30m")
+        self.runner.start(self.c, "app", rev="wait001")
+        self.passes(2)
+        test = self.runs()["test"]
+        self.assertEqual(test["state"], "queued")
+        self.assertIn("(auto after 30m) while the checks pass", test["gate_note"])
+        # A failed check of the project since the build keeps it closed.
+        cid = self.c.execute("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
+                             "recover_after, timeout, severity, created_at) VALUES ('project','app','up','http','{}',"
+                             "'1m',1,1,'10s','item',?)", (core.iso(core.now()),)).lastrowid
+        self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, status) VALUES (?, 'ops:app:up', ?, "
+                       "'critical')", (cid, core.iso(core.now())))
+        self.c.execute("UPDATE stage_runs SET ended_at=? WHERE id=?",
+                       (core.iso(core.now() - core.timedelta(minutes=31)), self.runs()["build"]["id"]))
+        self.c.execute("UPDATE ops_runs SET started_at=?", (core.iso(core.now() - core.timedelta(minutes=5)),))
+        self.passes(1)
+        self.assertIn("check app/up failed", self.runs()["test"]["gate_note"])
+        self.c.execute("DELETE FROM ops_runs")
+        self.passes(1)
+        self.assertEqual(self.runs()["test"]["state"], "passed")
+
+    def test_a_run_that_serve_lost_fails(self):
+        self.runner.start(self.c, "app", rev="lost001")
+        rid = self.runs()["build"]["id"]
+        self.c.execute("UPDATE stage_runs SET state='running', runner='1:x' WHERE id=?", (rid,))
+        self.runner.serve_pass(self.c)
+        self.assertEqual(self.runs()["build"]["errors"], "maxpm serve stopped while it ran")
+
+    def test_restart_waits_for_a_running_stage(self):
+        self.runner.RUNNING[99] = True
+        self.addCleanup(self.runner.RUNNING.pop, 99, None)
+        self.assertEqual(self.runner.running_text(), "1 pipeline stage(s) run")
+
+    def test_cli_start_and_show(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "start", "app", "--rev", "cli0001"])
+            self.passes(4)
+            cli.run(["--as", "mark", "pipeline", "show", "app"])
+        text = out.getvalue()
+        self.assertIn("version cli0001 waits at stage build", text)
+        self.assertIn("gate: waits for mark's yes on #", text)
 
 
 class Speed(Base):

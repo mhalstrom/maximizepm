@@ -1662,6 +1662,10 @@ def restart_blocked(conn):
         return f"{HOOKS['running']} hook(s) of this process run"
     if OPS_RUNNING:
         return f"{len(OPS_RUNNING)} operations check(s) run"
+    from .pipeline import runner as pipeline_runner
+    stages = pipeline_runner.running_text()  # #6114: a restart would end the stage's command
+    if stages:
+        return stages
     runs = core.hooks_running(conn, serve=SERVE_PROCESS["id"], boot=_boot_iso())
     return core.hooks_running_text(runs) if runs else None
 

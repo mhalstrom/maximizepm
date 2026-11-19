@@ -17,7 +17,7 @@ import json
 from .. import core
 from . import store
 
-_FIELDS = ("kind", "run", "workflow", "env", "gate")
+_FIELDS = ("kind", "run", "workflow", "env", "gate", "junit")
 
 
 def _may(conn, actor):
@@ -126,11 +126,12 @@ def _place(conn, pid, stage_id, pos):
 def _stage_detail(conn, s):
     env = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (s["env_id"],)).fetchone() if s["env_id"] else None
     return {"name": s["name"], "pos": s["pos"], "kind": s["kind"], "run": s["run"], "workflow": s["workflow"],
-            "env": env["name"] if env else None, "gate": store.gate_text(s["gate"], s["gate_rule"])}
+            "env": env["name"] if env else None, "gate": store.gate_text(s["gate"], s["gate_rule"]),
+            "junit": s["junit"]}
 
 
 def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None, gate=None, pos=None, remove=False,
-              actor=None):
+              actor=None, junit=None):
     """Add a stage (kind needed), or change the fields given ('' clears run, workflow or env), or move it (pos), or
     remove it (its runs stay; adding the name again brings it back). A stage runs a command (run) or a forge
     workflow (workflow), not both; a deploy stage names its environment."""
@@ -173,6 +174,8 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
                 sets["env_id"] = e["id"]
         if rule is not None:
             sets["gate"], sets["gate_rule"] = rule
+        if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
+            sets["junit"] = junit.strip() or None
         if row is None:
             if kind is None:
                 raise core.RiverError(f"a new stage needs its kind: --kind {'|'.join(store.STAGE_KINDS)}")

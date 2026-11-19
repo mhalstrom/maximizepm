@@ -1902,7 +1902,15 @@ def build_parser(only=None):
     x.add_argument("--env", help="the environment a deploy stage deploys to")
     x.add_argument("--gate", help="auto; auto after <time>; manager; person; person <name>")
     x.add_argument("--pos", type=int, help="its place, 1 is the first")
+    x.add_argument("--junit", help="a test stage: the JUnit XML file its command writes, in the project folder "
+                   "('' clears it)")
     x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
+    x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
+                       "stage: maxpm serve runs each stage in order, each one after its gate opens")
+    x.add_argument("name"); x.add_argument("--rev")
+    x = pls.add_parser("approve", help="let a version that waits at a stage's gate in now (a person gate takes a "
+                       "person)")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev")
     x = pls.add_parser("gate", help="the rule that lets a version into a stage: auto; auto after <time> (the checks "
                        "of the stage before pass that long); manager; person; person <name>")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("rule", nargs="+")
@@ -7469,7 +7477,13 @@ def _pipeline_cmd(conn, a, actor):
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
         return define.stage_set(conn, a.name, a.stage, a.kind, a.run, a.workflow, a.env, a.gate, a.pos, a.remove,
-                                actor)
+                                actor, a.junit)
+    if sub == "start":
+        from .pipeline import runner
+        return runner.start(conn, a.name, a.rev, actor)
+    if sub == "approve":
+        from .pipeline import runner
+        return runner.approve(conn, a.name, a.stage, a.rev, actor)
     if sub == "gate":
         return define.gate_set(conn, a.name, a.stage, " ".join(a.rule), actor)
     if sub == "export":
@@ -7502,6 +7516,14 @@ def render_pipeline(a, res):
         if not res["history"]:
             print(f"pipeline {res['pipeline']} has no changes")
         return
+    if sub == "start":
+        print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"
+              f" maxpm serve runs each stage when its gate opens. Follow it: maxpm pipeline show {res['pipeline']}")
+        return
+    if sub == "approve":
+        print(f"pipeline {res['pipeline']}: version {res['version']} may enter stage {res['stage']} (run "
+              f"#{res['run']}); maxpm serve starts it at its next pass")
+        return
     if sub == "add":
         print(f"pipeline {res['name']} added. Next: maxpm pipeline env {res['name']} <env>, then "
               f"maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
@@ -7524,7 +7546,10 @@ def render_pipeline(a, res):
         if r:
             print(f"       last run #{r['id']}: {r['state']}" + (f", version {r['version']}" if r["version"] else "")
                   + (f", started {r['started_at']}" if r["started_at"] else "")
-                  + (f", ended {r['ended_at']}" if r["ended_at"] else ""))
+                  + (f", ended {r['ended_at']}" if r["ended_at"] else "")
+                  + (f": {r['errors']}" if r.get("errors") else ""))
+            if r["state"] == "queued" and r.get("gate_note"):
+                print(f"       gate: {r['gate_note']}")
     for e in res["envs"]:
         print(f"  env {e['name']}: " + (f"{e['rev']} since {e['since']}" if e["rev"] else "no version yet")
               + (f"  (target {e['target']})" if e["target"] else ""))

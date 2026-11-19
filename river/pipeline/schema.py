@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   created_by   TEXT,                     -- 'event' when an event named a stage the pipeline did not have
   created_at   TEXT NOT NULL,
   removed_at   TEXT,                     -- a removed stage keeps its runs; adding its name again brings it back
+  junit        TEXT,                     -- a test stage: the JUnit XML file its command writes (in the project folder)
   UNIQUE (pipeline_id, name)
 );
 
@@ -91,8 +92,14 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   source       TEXT,                     -- the event source: maxpm, a forge adapter
   errors       TEXT,                     -- the errors of a finished event
   output       TEXT,                     -- the last lines of the stage's output
+  gate_note    TEXT,                     -- a queued run: why its gate is closed now (the runner, #6114)
+  gate_item    INTEGER,                  -- a person gate: the approval item of MaximizePM that asks for the yes
+  approved_by  TEXT,                     -- who let this version in at a manager or person gate
+  approved_at  TEXT,
+  runner       TEXT,                     -- <pid>:<token> of the maxpm serve process that runs its command
   UNIQUE (pipeline_id, key)
 );
+CREATE INDEX IF NOT EXISTS stage_runs_state ON stage_runs(state);
 CREATE INDEX IF NOT EXISTS stage_runs_stage ON stage_runs(stage_id, id);
 CREATE INDEX IF NOT EXISTS stage_runs_version ON stage_runs(version_id);
 
@@ -182,5 +189,12 @@ CREATE INDEX IF NOT EXISTS pipeline_events_run ON pipeline_events(run_id, id);
 def migrate(conn):
     """Add the columns that a queue made by an older version of these tables lacks. core._migrate calls it, inside
     its tx; core.schema_print counts this function, so a change here runs again."""
-    if "removed_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}:  # #6113
-        conn.execute("ALTER TABLE pipeline_stages ADD COLUMN removed_at TEXT")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
+    for c in ("removed_at", "junit"):  # #6113, #6114
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
+    for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
+                 ("runner", "TEXT")):  # #6114
+        if c not in cols:
+            conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")

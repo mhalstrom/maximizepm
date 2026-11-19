@@ -523,7 +523,13 @@ maxpm pipeline stage <name> <stage> --kind build|test|review|approve|deploy|chec
 maxpm pipeline gate <name> <stage> auto|"auto after 30m"|manager|"person <name>"
 maxpm pipeline show|history <name>
 maxpm pipeline export <name> --file <path>             # JSON, to keep in git
+maxpm pipeline start <name> [--rev <commit>]           # maxpm serve runs each stage when its gate opens
+maxpm pipeline approve <name> <stage> [--rev <commit>] # a manager gate; a person gate takes the person's yes
 ```
+
+A test stage names its JUnit file (`--junit report.xml`); a stage's command
+prints `::step start <name>` and `::step end <name> passed|failed` lines to
+show its parts.
 
 ### The commands
 
