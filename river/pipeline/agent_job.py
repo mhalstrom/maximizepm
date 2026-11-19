@@ -37,10 +37,10 @@ GitLab CI (#6172) takes the same path with its own file:
 The job is in GitLab's own last stage .post with when: on_failure, so GitLab starts it in the pipeline of the failed
 commit, after a job failed. Its key is the stage run's own: the failed stage run gl-<pipeline id>-<stage> and the job
 are in one GitLab pipeline, and the gitlab plugin finds the job maxpm-agent among that pipeline's jobs. GitLab gives
-every CI/CD variable to every job, so the agent and the proof command run with a clean environment (env -i): only
-the model key goes in. The CI/CD variable MAXPM_GITLAB_TOKEN (a project access token that a person sets, policy g6)
-reads the failed jobs' logs and pushes the fix; push options open the merge request. The artifact holds the proof and
-the transcript, and the plugin reads the two files by path.
+every CI/CD variable to every job, so the agent and the proof command run as another user of the job (#6179, see
+_isolate): only the model key goes in. The CI/CD variable MAXPM_GITLAB_TOKEN (a project access token that a person
+sets, policy g6) reads the failed jobs' logs and pushes the fix; push options open the merge request. The artifact
+holds the proof and the transcript, and the plugin reads the two files by path.
 
 Pulumi Delivery (#6173). Delivery has no step that runs when a stage fails, no log of a job by its API, and no way to
 call this computer (Pulumi's docs, read 2026-11-19: stages run only after their upstream stages succeeded; a job that
@@ -57,8 +57,8 @@ fails fails its stage). So MaximizePM starts the job itself, as a Pulumi Deploym
    write the job's script and run it inside `pulumi env run <the ESC environment>`: the model key is there, set by a
    person (policy g6), and also MAXPM_GIT_TOKEN when the fix should go back as a branch. The plugin answers the
    deployment's id as the run's job.
-3. The script saves what Pulumi shows of the failed Delivery run, runs the agent with no terminal (with neither the
-   git token nor the Pulumi token in its environment), runs --test, and pushes the commit to maxpm/fix-pd-<run>-<stage>
+3. The script saves what Pulumi shows of the failed Delivery run, runs the agent with no terminal (as another user,
+   which cannot read the git token or the Pulumi token, #6179), runs --test, and pushes the commit to maxpm/fix-pd-<run>-<stage>
    with a pull request on GitHub; with no git token the fix comes back as a patch. It prints its proof, the end of the
    transcript and the patch as '::maxpm-' lines of the deployment's log, and always ends with 0 (the preview after it
    changes nothing).
@@ -622,9 +622,109 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
 BEGIN = "# >>> maxpm-agent"  # the marked lines around the job in .gitlab-ci.yml: a second write replaces what is between
 END = "# <<< maxpm-agent"
 _BLOCK = re.compile(r"^# >>> maxpm-agent\b.*?^# <<< maxpm-agent[^\n]*(?:\n|\Z)", re.M | re.S)
-# What the agent and the proof command get of the job's environment: GitLab gives every CI/CD variable (deploy
-# keys among them) to every job, so they start with env -i and only these, and the model key.
-CLEAN_ENV = 'env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 CI=true'
+
+
+# ---------------------------------------------------------------- the agent's own user (GitLab and Pulumi, #6179)
+
+# In GitLab and Pulumi the agent runs in the job that holds the tokens. A process of the job's own user reads them
+# from /proc/<pid>/environ of the job's shell, whatever env -i or env -u took out of its own environment. So the
+# agent and --test run as another user (the job runs as root), in a clone of their own, with a clean environment
+# (only the model key, HOME, PATH, LANG and CI). The fix comes back as a git bundle after every process of that
+# user has stopped, and the job's own checkout, which the agent cannot read or change, pushes it.
+AGENT_UID = 47100
+_DROP = "os.setgroups([]); os.setgid(uid); os.setuid(uid)"  # the change of user (a test that runs as one user skips it)
+# gate.py <uid> <home> [NAME=value ...] <command ...>: the command as that user, with a clean environment;
+# gate.py <uid> <home> --end: stop every process of that user (on Linux kill(-1) does not reach the caller).
+_GATE_PY = r'''import os, re, sys
+uid, home, args = int(sys.argv[1]), sys.argv[2], sys.argv[3:]
+env = {"HOME": home, "USER": "maxpm-agent", "LOGNAME": "maxpm-agent", "LANG": "C.UTF-8", "CI": "true",
+       "PATH": os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin"}
+while args and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", args[0]):
+    k, v = args.pop(0).split("=", 1)
+    env[k] = v
+__DROP__
+if args == ["--end"]:
+    if os.getuid() == uid != 0:
+        os.kill(-1, 9)
+    sys.exit(0)
+os.execvpe(args[0], args, env)
+'''
+
+
+def _isolate(email):
+    """Bash lines, run in the job's checkout at $FAILED: the agent's user, its clone in $WORK/repo, and the function
+    'agent' that runs a command as that user. When the agent cannot run apart from the tokens, they write why in
+    $MAXPM_OUT/error, and the job runs no agent."""
+    return [
+        f'MAXPM_UID={AGENT_UID}; WORK=""',
+        'if [ -s "$MAXPM_OUT/error" ]; then :',
+        'elif ! PRIV=$(mktemp -d "${TMPDIR:-/tmp}/maxpm.XXXXXX") || ! WORK=$(mktemp -d "${TMPDIR:-/tmp}/maxpm.XXXXXX"); then',
+        '  WORK=""; echo "the agent did not run: no temporary folder (mktemp -d)" > "$MAXPM_OUT/error"',
+        "else",
+        "cat > \"$PRIV/gate.py\" <<'MAXPM_PY'",
+        _GATE_PY.replace("__DROP__", _DROP).rstrip("\n"),
+        "MAXPM_PY",
+        'agent() { python3 -I "$PRIV/gate.py" "$MAXPM_UID" "$WORK/home" "$@" < /dev/null; }',
+        "# The agent's user changes nothing of this checkout and reads nothing of its .git (a remote may hold a token).",
+        "chmod -R go-w . 2>/dev/null; chmod -R go-rwx .git 2>/dev/null",
+        '{ grep -q "^maxpm-agent:" /etc/passwd || echo "maxpm-agent:x:$MAXPM_UID:$MAXPM_UID::$WORK/home:/bin/sh" '
+        ">> /etc/passwd; } 2>/dev/null",
+        '{ grep -q "^maxpm-agent:" /etc/group || echo "maxpm-agent:x:$MAXPM_UID:" >> /etc/group; } 2>/dev/null',
+        'mkdir -p "$WORK/home"',
+        'git clone -q --no-hardlinks --no-checkout . "$WORK/repo" 2> "$PRIV/clone.err" && '
+        'git -C "$WORK/repo" checkout -q --detach "$FAILED" 2>> "$PRIV/clone.err"',
+        'git -C "$WORK/repo" config user.name "maxpm-agent"',
+        f'git -C "$WORK/repo" config user.email "{email}"',
+        'chown -R "$MAXPM_UID:$MAXPM_UID" "$WORK" 2>/dev/null',
+        'if ! agent true 2> "$PRIV/gate.err"; then',
+        '  echo "the agent did not run: the job cannot start it as another user, apart from the tokens (the job '
+        'must run as root): $(tail -1 "$PRIV/gate.err")" > "$MAXPM_OUT/error"',
+        'elif agent cat "/proc/$$/environ" > /dev/null 2>&1; then',
+        '  echo "the agent did not run: its user can read the environment of the job, with the tokens" '
+        '> "$MAXPM_OUT/error"',
+        'elif [ ! -d "$WORK/repo/.git" ]; then',
+        '  echo "the agent did not run: no clone of the checkout: $(tail -1 "$PRIV/clone.err")" > "$MAXPM_OUT/error"',
+        "fi",
+        "fi",
+    ]
+
+
+def _after_agent():
+    """Bash lines after the agent: --test as its user, its commits as a git bundle, then every process of its user
+    stopped."""
+    return [
+        'agent git -C "$WORK/repo" rev-parse HEAD > "$PRIV/agent-head" 2> /dev/null',
+        'if [ "$(cat "$PRIV/agent-head")" != "$FAILED" ]; then',
+        "  # The test runs the agent's code: as the agent's user too.",
+        '  if [ -n "$MAXPM_TEST" ]; then',
+        '    (cd "$WORK/repo" && agent bash -c "$MAXPM_TEST") > "$MAXPM_OUT/test.log" 2>&1; TEST_EXIT=$?',
+        "  fi",
+        '  agent git -C "$WORK/repo" bundle create "$WORK/fix.bundle" HEAD "^$FAILED" > /dev/null '
+        '2> "$MAXPM_OUT/bundle.err"',
+        "fi",
+        "for i in 1 2 3; do agent --end; done",
+    ]
+
+
+def _take_fix():
+    """Bash lines: the bundle's commits into the job's own checkout, as data; $HEAD_SHA is the fix, else $FAILED.
+    Nothing of the agent's clone runs as the job's user."""
+    return [
+        'HEAD_SHA="$FAILED"',
+        'if [ -n "$WORK" ] && [ -f "$WORK/fix.bundle" ] && [ ! -L "$WORK/fix.bundle" ] && '
+        'cp "$WORK/fix.bundle" "$PRIV/fix.bundle"; then',
+        '  if git -c transfer.fsckObjects=true fetch -q "$PRIV/fix.bundle" HEAD 2> "$MAXPM_OUT/fetch.err"; then',
+        "    HEAD_SHA=$(git rev-parse FETCH_HEAD)",
+        "  else",
+        '    echo "the fix did not come from the agent\'s clone: $(tail -1 "$MAXPM_OUT/fetch.err")" > "$MAXPM_OUT/error"',
+        "  fi",
+        'elif [ -s "$MAXPM_OUT/bundle.err" ]; then',
+        '  echo "no bundle of the fix: $(tail -1 "$MAXPM_OUT/bundle.err")" > "$MAXPM_OUT/error"',
+        "fi",
+    ]
+
+
+# ---------------------------------------------------------------- the job in GitLab CI, continued
 
 
 def _gl(text):
@@ -653,101 +753,10 @@ def gitlab_text(pipeline, repo, ref, stages, cli="claude", secret=None, test=Non
     tools = tool_list(allow or ALLOW)
     if test and not allow:
         tools.append(f"Bash({shlex.split(test)[0]}:*)")
-    key = f'{SECRET[cli]}="${secret}"'
-    if cli == "codex":
-        agent = (f'{CLEAN_ENV} {key} codex exec --json --sandbox workspace-write --skip-git-repo-check '
-                 '"$MAXPM_PROMPT" > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > '
-                 '"$MAXPM_OUT/agent-exit"')
-    else:
-        agent = (f'{CLEAN_ENV} {key} claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose '
-                 f'--permission-mode dontAsk --max-budget-usd {float(max_cost):g} --add-dir "$MAXPM_OUT" '
-                 '--allowedTools ' + " ".join(shlex.quote(t) for t in tools)
-                 + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
     when = (f'$CI_COMMIT_BRANCH == "{ref}" && $CI_PROJECT_PATH == "{repo}" && '
             '$CI_PIPELINE_SOURCE != "merge_request_event"')
     text = gitlab_prompt(does or "Find the cause of the failure and fix it.", test)
-    script = [
-        "set +e",
-        'mkdir -p "$MAXPM_OUT"',
-        "echo /maxpm-agent/ >> .git/info/exclude",
-        'git remote set-url origin "$CI_PROJECT_URL.git"  # the clone\'s address holds the job token',
-        "python3 - <<'EOF'",
-        "import json, os, urllib.request",
-        f'out, tok = os.environ["MAXPM_OUT"], os.environ.get("{TOKEN_VAR}")',
-        'api = os.environ["CI_API_V4_URL"] + "/projects/" + os.environ["CI_PROJECT_ID"]',
-        'stages = os.environ.get("MAXPM_STAGES", "").split()',
-        "def get(path):",
-        '    req = urllib.request.Request(api + path, headers={"PRIVATE-TOKEN": tok})',
-        "    with urllib.request.urlopen(req, timeout=30) as r:",
-        "        return r.read()",
-        'log = ["The pipeline: " + os.environ["CI_PIPELINE_URL"]]',
-        "try:",
-        "    if not tok:",
-        f'        raise RuntimeError("the CI/CD variable {TOKEN_VAR} is not set: read the failed jobs of the '
-        f'pipeline above")',
-        '    jobs = json.loads(get("/pipelines/" + os.environ["CI_PIPELINE_ID"] + "/jobs?scope%5B%5D=failed&per_page=100"))',
-        f'    failed = [j for j in jobs if not j.get("allow_failure") and j.get("name") != "{JOB}"]',
-        '    mine = [j for j in failed if not stages or j.get("stage") in stages]',
-        "    if failed and not mine:",
-        '        open(os.path.join(out, "skip"), "w").write("no failed job in the stages " + " ".join(stages))',
-        "    for j in mine:",
-        '        trace = get("/jobs/%d/trace" % j["id"]).decode("utf-8", "replace")',
-        '        log.append("===== job %s (stage %s): %s\\n%s" % (j["name"], j["stage"], j.get("web_url"), trace[-100000:]))',
-        "except Exception as e:",
-        '    log.append("No log: %s" % e)',
-        'open(os.path.join(out, "failed.log"), "w").write("\\n".join(log)[-200000:])',
-        "EOF",
-        'if [ -f "$MAXPM_OUT/skip" ]; then',
-        f'  echo "{JOB}: $(cat "$MAXPM_OUT/skip"): no agent"',
-        "else",
-        f'  npm install -g {PACKAGE[cli]} > "$MAXPM_OUT/npm.log" 2>&1',
-        '  git config user.name "maxpm-agent"',
-        '  git config user.email "maxpm-agent@users.noreply.gitlab.com"',
-        f"  {agent}",
-        "fi",
-        'head=$(git rev-parse HEAD)',
-        'branch=""; mr=""; error=""; test_exit=""',
-        'if [ "$head" != "$CI_COMMIT_SHA" ]; then',
-        '  if [ -n "$MAXPM_TEST" ]; then',
-        f'    {CLEAN_ENV} bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; test_exit=$?',
-        "  fi",
-        '  branch="maxpm/fix-$CI_PIPELINE_ID"',
-        '  auth="gitlab-ci-token:$CI_JOB_TOKEN"',
-        f'  if [ -n "${TOKEN_VAR}" ]; then auth="oauth2:${TOKEN_VAR}"; fi',
-        "  # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
-        '  git -c core.hooksPath=/dev/null push -o merge_request.create -o "merge_request.target=$CI_COMMIT_BRANCH" '
-        '-o "merge_request.title=maxpm agent: fix pipeline $CI_PIPELINE_ID for $CI_COMMIT_SHORT_SHA" '
-        '-o merge_request.remove_source_branch '
-        '"$CI_SERVER_PROTOCOL://$auth@$CI_SERVER_HOST:$CI_SERVER_PORT/$CI_PROJECT_PATH.git" "HEAD:refs/heads/$branch" '
-        '> "$MAXPM_OUT/push.log" 2>&1',
-        "  pushed=$?",
-        '  sed -i "s|$auth|[masked]|g" "$MAXPM_OUT/push.log"',
-        '  if [ "$pushed" -eq 0 ]; then',
-        "    mr=$(grep -o 'https\\?://[^ ]*/-/merge_requests/[0-9]*' \"$MAXPM_OUT/push.log\" | tail -1)",
-        '    if [ -z "$mr" ]; then error="pushed $branch, but GitLab opened no merge request"; fi',
-        "  else",
-        '    error="the push of $branch failed: $(tail -1 "$MAXPM_OUT/push.log")"',
-        "  fi",
-        "fi",
-        'HEAD_SHA="$head" BRANCH="$branch" PR="$mr" ERROR="$error" TEST_EXIT="$test_exit" python3 - <<\'EOF\'',
-        "import json, os",
-        'out = os.environ["MAXPM_OUT"]',
-        "def tail(name):",
-        "    try:",
-        '        lines = [x.strip() for x in open(os.path.join(out, name), errors="replace") if x.strip()]',
-        "    except OSError:",
-        "        return None",
-        "    return lines[-1][:300] if lines else None",
-        'changed = os.environ["HEAD_SHA"] != os.environ["CI_COMMIT_SHA"]',
-        'test = {"command": os.environ["MAXPM_TEST"], "exit": int(os.environ["TEST_EXIT"]), "last": tail("test.log")} '
-        'if os.environ.get("TEST_EXIT") else None',
-        'proof = {"rev": os.environ["CI_COMMIT_SHA"], "commit": os.environ["HEAD_SHA"] if changed else None,',
-        '         "branch": os.environ["BRANCH"] or None, "pr": os.environ["PR"] or None, "test": test,',
-        '         "error": os.environ["ERROR"] or (tail("skip") if os.path.exists(os.path.join(out, "skip")) else None),',
-        '         "agent_exit": int(tail("agent-exit") or 0)}',
-        'json.dump({k: v for k, v in proof.items() if v is not None}, open(os.path.join(out, "proof.json"), "w"))',
-        "EOF",
-    ]
+    script = gitlab_script(cli, secret, max_cost, tools)
     lines = [
         f"{BEGIN}: the MaximizePM agent job of pipeline {pipeline} (#6172), written by maxpm {__version__}:",
         f"#   maxpm runner gitlab {pipeline}",
@@ -757,6 +766,7 @@ def gitlab_text(pipeline, repo, ref, stages, cli="claude", secret=None, test=Non
         f"# The model key: the CI/CD variable {secret} (Settings > CI/CD > Variables, masked).",
         f"# The logs, the push and the merge request: the CI/CD variable {TOKEN_VAR}, a project access token (role",
         "# Developer, scopes api and write_repository), masked.",
+        "# The job runs as root: the agent and the test run as another user, which cannot read the tokens (#6179).",
         f"{JOB}:",
         "  stage: .post",
         f"  image: {image or IMAGE}",
@@ -785,6 +795,104 @@ def gitlab_text(pipeline, repo, ref, stages, cli="claude", secret=None, test=Non
         "",
     ]
     return "\n".join(lines)
+
+
+def gitlab_script(cli, secret, max_cost, tools):
+    """The bash lines of the job maxpm-agent (its script), in the checkout of the failed commit."""
+    key = f'{SECRET[cli]}="${secret}"'
+    if cli == "codex":
+        agent = (f'(cd "$WORK/repo" && agent {key} codex exec --json --sandbox workspace-write --skip-git-repo-check '
+                 '"$MAXPM_PROMPT" > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > '
+                 '"$MAXPM_OUT/agent-exit")')
+    else:
+        agent = (f'(cd "$WORK/repo" && agent {key} claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose '
+                 f'--permission-mode dontAsk --max-budget-usd {float(max_cost):g} --add-dir "$MAXPM_OUT" '
+                 '--allowedTools ' + " ".join(shlex.quote(t) for t in tools)
+                 + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit")')
+    return [
+        "set +e",
+        "umask 022",
+        'mkdir -p "$MAXPM_OUT"',
+        'git remote set-url origin "$CI_PROJECT_URL.git"  # the clone\'s address holds the job token',
+        'FAILED="$CI_COMMIT_SHA"; TEST_EXIT=""; WORK=""',
+        "python3 -I - <<'EOF'",
+        "import json, os, urllib.request",
+        f'out, tok = os.environ["MAXPM_OUT"], os.environ.get("{TOKEN_VAR}")',
+        'api = os.environ["CI_API_V4_URL"] + "/projects/" + os.environ["CI_PROJECT_ID"]',
+        'stages = os.environ.get("MAXPM_STAGES", "").split()',
+        "def get(path):",
+        '    req = urllib.request.Request(api + path, headers={"PRIVATE-TOKEN": tok})',
+        "    with urllib.request.urlopen(req, timeout=30) as r:",
+        "        return r.read()",
+        'log = ["The pipeline: " + os.environ["CI_PIPELINE_URL"]]',
+        "try:",
+        "    if not tok:",
+        f'        raise RuntimeError("the CI/CD variable {TOKEN_VAR} is not set: read the failed jobs of the '
+        f'pipeline above")',
+        '    jobs = json.loads(get("/pipelines/" + os.environ["CI_PIPELINE_ID"] + "/jobs?scope%5B%5D=failed&per_page=100"))',
+        f'    failed = [j for j in jobs if not j.get("allow_failure") and j.get("name") != "{JOB}"]',
+        '    mine = [j for j in failed if not stages or j.get("stage") in stages]',
+        "    if failed and not mine:",
+        '        open(os.path.join(out, "skip"), "w").write("no failed job in the stages " + " ".join(stages))',
+        "    for j in mine:",
+        '        trace = get("/jobs/%d/trace" % j["id"]).decode("utf-8", "replace")',
+        '        log.append("===== job %s (stage %s): %s\\n%s" % (j["name"], j["stage"], j.get("web_url"), trace[-100000:]))',
+        "except Exception as e:",
+        '    log.append("No log: %s" % e)',
+        'open(os.path.join(out, "failed.log"), "w").write("\\n".join(log)[-200000:])',
+        "EOF",
+        'if [ -f "$MAXPM_OUT/skip" ]; then',
+        f'  echo "{JOB}: $(cat "$MAXPM_OUT/skip"): no agent"',
+        "else",
+        f'npm install -g {PACKAGE[cli]} > "$MAXPM_OUT/npm.log" 2>&1',
+        'chmod -R go-rwx "$CI_PROJECT_DIR.tmp" 2>/dev/null  # the CI/CD variables of type File',
+        *_isolate("maxpm-agent@users.noreply.gitlab.com"),
+        'if [ ! -s "$MAXPM_OUT/error" ]; then',
+        agent,
+        *_after_agent(),
+        "fi",
+        "fi",
+        *_take_fix(),
+        'branch=""; mr=""; error=""',
+        'if [ "$HEAD_SHA" != "$FAILED" ]; then',
+        '  branch="maxpm/fix-$CI_PIPELINE_ID"',
+        '  auth="gitlab-ci-token:$CI_JOB_TOKEN"',
+        f'  if [ -n "${TOKEN_VAR}" ]; then auth="oauth2:${TOKEN_VAR}"; fi',
+        "  # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
+        '  git -c core.hooksPath=/dev/null push -o merge_request.create -o "merge_request.target=$CI_COMMIT_BRANCH" '
+        '-o "merge_request.title=maxpm agent: fix pipeline $CI_PIPELINE_ID for $CI_COMMIT_SHORT_SHA" '
+        '-o merge_request.remove_source_branch '
+        '"$CI_SERVER_PROTOCOL://$auth@$CI_SERVER_HOST:$CI_SERVER_PORT/$CI_PROJECT_PATH.git" "$HEAD_SHA:refs/heads/$branch" '
+        '> "$MAXPM_OUT/push.log" 2>&1',
+        "  pushed=$?",
+        '  sed -i "s|$auth|[masked]|g" "$MAXPM_OUT/push.log"',
+        '  if [ "$pushed" -eq 0 ]; then',
+        "    mr=$(grep -o 'https\\?://[^ ]*/-/merge_requests/[0-9]*' \"$MAXPM_OUT/push.log\" | tail -1)",
+        '    if [ -z "$mr" ]; then error="pushed $branch, but GitLab opened no merge request"; fi',
+        "  else",
+        '    error="the push of $branch failed: $(tail -1 "$MAXPM_OUT/push.log")"',
+        "  fi",
+        "fi",
+        'HEAD_SHA="$HEAD_SHA" BRANCH="$branch" PR="$mr" ERROR="$error" TEST_EXIT="$TEST_EXIT" python3 -I - <<\'EOF\'',
+        "import json, os",
+        'out = os.environ["MAXPM_OUT"]',
+        "def tail(name):",
+        "    try:",
+        '        lines = [x.strip() for x in open(os.path.join(out, name), errors="replace") if x.strip()]',
+        "    except OSError:",
+        "        return None",
+        "    return lines[-1][:300] if lines else None",
+        'changed = os.environ["HEAD_SHA"] != os.environ["CI_COMMIT_SHA"]',
+        'test = {"command": os.environ["MAXPM_TEST"], "exit": int(os.environ["TEST_EXIT"]), "last": tail("test.log")} '
+        'if os.environ.get("TEST_EXIT") else None',
+        'proof = {"rev": os.environ["CI_COMMIT_SHA"], "commit": os.environ["HEAD_SHA"] if changed else None,',
+        '         "branch": os.environ["BRANCH"] or None, "pr": os.environ["PR"] or None, "test": test,',
+        '         "error": os.environ["ERROR"] or tail("error")',
+        '                  or (tail("skip") if os.path.exists(os.path.join(out, "skip")) else None),',
+        '         "agent_exit": int(tail("agent-exit") or 0)}',
+        'json.dump({k: v for k, v in proof.items() if v is not None}, open(os.path.join(out, "proof.json"), "w"))',
+        "EOF",
+    ]
 
 
 def put_block(old, block):
@@ -992,36 +1100,38 @@ def pulumi_script(c):
     """The bash script of the Pulumi job (its first pre-run command writes it to SCRIPT). It always ends with 0: the
     proof in the log, not the deployment's status, says what the agent did."""
     agent = _agent_cmd(c["cli"], _tools(c.get("allow"), c.get("test")), c["max_cost"])
+    key = SECRET[c["cli"]]
     return "\n".join([
         f"# The MaximizePM agent job in Pulumi Deployments (#6173), written by maxpm {__version__}:",
         "#   maxpm runner pulumi <pipeline>",
         "set +e",
+        "umask 022",
         f"export MAXPM_OUT={OUT}",
         'mkdir -p "$MAXPM_OUT"',
         'cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"',
-        "FAILED=$(git rev-parse HEAD)",
+        'FAILED=$(git rev-parse HEAD); BRANCH=""; PR=""; TEST_EXIT=""',
         'curl -sS -H "Authorization: token $PULUMI_ACCESS_TOKEN" "$MAXPM_RUN_URL" > "$MAXPM_OUT/failed-run.json" '
         '2> "$MAXPM_OUT/curl.err"',
         f'npm install -g {PACKAGE[c["cli"]]} > "$MAXPM_OUT/install.log" 2>&1 || echo "npm install -g '
         f'{PACKAGE[c["cli"]]} failed: $(tail -1 "$MAXPM_OUT/install.log")" > "$MAXPM_OUT/error"',
-        'git config user.name "maxpm-agent"',
-        'git config user.email "maxpm-agent@users.noreply.github.com"',
-        "# The agent gets neither the git token nor the Pulumi token: it cannot push, and it changes nothing in Pulumi.",
-        f'env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN timeout {int(c["max_minutes"])}m {agent}',
-        'HEAD_SHA=$(git rev-parse HEAD); BRANCH=""; PR=""; TEST_EXIT=""',
+        "# The agent and the test run as another user, with the model key and neither the git token nor the Pulumi",
+        "# token: they cannot push, change nothing in Pulumi, and cannot read the tokens of this shell (#6179).",
+        *_isolate("maxpm-agent@users.noreply.github.com"),
+        'if [ ! -s "$MAXPM_OUT/error" ]; then',
+        f'(cd "$WORK/repo" && agent {key}="${key}" timeout {int(c["max_minutes"])}m {agent})',
+        *_after_agent(),
+        "fi",
+        *_take_fix(),
         "cat > \"$MAXPM_OUT/pr.py\" <<'MAXPM_PY'",
         _PR_PY.rstrip("\n"),
         "MAXPM_PY",
         'if [ "$HEAD_SHA" != "$FAILED" ]; then',
-        "  # The test runs the agent's code: it gets no token either. Python runs isolated (-I): the checkout's own",
-        "  # modules never load in a step that holds a token.",
-        '  if [ -n "$MAXPM_TEST" ]; then env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN bash -c "$MAXPM_TEST" '
-        '> "$MAXPM_OUT/test.log" 2>&1; TEST_EXIT=$?; fi',
+        "  # Python runs isolated (-I) where a token is: no module of a checkout loads.",
         '  if [ -n "$MAXPM_GIT_TOKEN" ]; then',
         "    REPO=$(git remote get-url origin | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\\1/#; s#\\.git$##')",
         "    # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
         '    if git -c core.hooksPath=/dev/null push -q "https://x-access-token:${MAXPM_GIT_TOKEN}@${REPO}.git" '
-        '"HEAD:refs/heads/$MAXPM_BRANCH" 2> "$MAXPM_OUT/push.err"; then',
+        '"$HEAD_SHA:refs/heads/$MAXPM_BRANCH" 2> "$MAXPM_OUT/push.err"; then',
         '      BRANCH="$MAXPM_BRANCH"',
         '      if [ "${REPO#github.com/}" != "$REPO" ]; then',
         '        PR=$(python3 -I "$MAXPM_OUT/pr.py" "$REPO" 2> "$MAXPM_OUT/pr.err") || echo "no pull request: '
@@ -1031,7 +1141,7 @@ def pulumi_script(c):
         '      echo "the push of $MAXPM_BRANCH failed: $(tail -1 "$MAXPM_OUT/push.err")" > "$MAXPM_OUT/error"',
         "    fi",
         "  fi",
-        '  [ -n "$BRANCH" ] || git format-patch --stdout "$FAILED..HEAD" > "$MAXPM_OUT/fix.patch"',
+        '  [ -n "$BRANCH" ] || git format-patch --stdout "$FAILED..$HEAD_SHA" > "$MAXPM_OUT/fix.patch"',
         "fi",
         "export FAILED HEAD_SHA BRANCH PR TEST_EXIT",
         "python3 -I - <<'MAXPM_PY'",

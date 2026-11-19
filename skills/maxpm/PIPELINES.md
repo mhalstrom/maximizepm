@@ -1155,12 +1155,17 @@ What the job does, in order:
 1. Saves the logs of the failed jobs of the pipeline's stages in
    `maxpm-agent/failed.log`. A failure only in a stage that no MaximizePM stage
    names starts no agent.
-2. Runs the agent as the GitHub job does, with a clean environment: GitLab
-   gives every CI/CD variable to every job, so the agent and the `--test` run
-   get only the model key, `HOME`, `PATH` and `CI`.
-3. When the agent committed: runs `--test`, pushes the commit to
-   `maxpm/fix-<pipeline id>` with no hook of the checkout, and opens a merge
-   request into the failed branch (git push options).
+2. Runs the agent as the GitHub job does, as another user of the job, in a
+   clone of its own: GitLab gives every CI/CD variable to every job, and a
+   process of the job's own user could read them from the job's shell. The
+   agent and the `--test` run get only the model key, `HOME`, `PATH` and
+   `CI`. So the job must run as root (as in `node:20`); otherwise it runs no
+   agent and its proof says why.
+3. When the agent committed: runs `--test` as the agent's user, keeps the
+   commits as a git bundle, and stops every process of that user. Then the
+   job's own checkout, which the agent could not read or change, takes the
+   bundle's commits, pushes them to `maxpm/fix-<pipeline id>` with no hook,
+   and opens a merge request into the failed branch (git push options).
 4. Keeps the artifact `maxpm-agent/` for 14 days: `proof.json` (the same
    fields; `pr` is the merge request) and the transcript.
 
@@ -1210,11 +1215,16 @@ The script, in order:
 1. Saves what Pulumi shows of the failed Delivery run (its stages, their
    status and gates) in `/tmp/maxpm-agent/failed-run.json`.
 2. Runs the agent with no terminal and no prompt, as the GitHub job does
-   (`--allow`, `--max-cost`, `--max-minutes`), with neither the git token nor
-   the Pulumi token in its environment: it can commit, and it cannot push.
-3. When the agent committed: runs `--test`, then pushes the commit to the
-   branch `maxpm/fix-pd-<run>-<stage>` and opens a pull request on GitHub,
-   or, with no git token, makes a patch.
+   (`--allow`, `--max-cost`, `--max-minutes`), as another user, in a clone of
+   its own, with only the model key of the environment: it can commit, and
+   it cannot read the git token or the Pulumi token. When the deployment
+   cannot start a process as another user (it does not run as root), it runs
+   no agent and its proof says why.
+3. When the agent committed: runs `--test` as the agent's user, stops every
+   process of that user, takes the commits as a git bundle into the
+   deployment's own checkout, then pushes them to the branch
+   `maxpm/fix-pd-<run>-<stage>` and opens a pull request on GitHub, or, with
+   no git token, makes a patch.
 4. Prints its proof, the end of the transcript and the patch as lines that
    start with `::maxpm-` in the deployment's log, and ends with 0: the proof,
    not the deployment's status, says what the agent did.

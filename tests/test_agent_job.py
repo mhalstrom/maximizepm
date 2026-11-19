@@ -8,6 +8,7 @@ import io
 import json
 import os
 import subprocess
+import unittest
 import zipfile
 
 from river import cli, core, runners
@@ -295,7 +296,8 @@ class AgentJobGitLab(Base):
         self.assertEqual(res["workflows"], ["test"])
         for part in ("maxpm-agent:\n  stage: .post\n", "when: on_failure", "image: node:20", "timeout: 20 minutes",
                      '$CI_COMMIT_BRANCH == \\"main\\" && $CI_PROJECT_PATH == \\"grp/shop\\"',
-                     'MAXPM_STAGES: "test"', "env -i HOME=", 'ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" claude -p',
+                     'MAXPM_STAGES: "test"', 'agent ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" claude -p',
+                     "agent --end", 'fetch -q "$PRIV/fix.bundle" HEAD', '"$HEAD_SHA:refs/heads/$branch"',
                      "'Bash(git commit:*)' 'Bash(python3:*)'", "--permission-mode dontAsk",
                      "core.hooksPath=/dev/null push -o merge_request.create", "paths: [maxpm-agent/]",
                      "MAXPM_GITLAB_TOKEN"):
@@ -419,12 +421,71 @@ class AgentJobGitLab(Base):
         with self.assertRaisesRegex(RiverError, "only a person or the manager"):
             cli.run(["--as", "w1", "runner", "gitlab", "shop", "--print"])
 
+    def test_the_script_runs_the_agent_apart_from_the_tokens(self):
+        """The job's own script in a checkout, with fake npm and claude: the agent and the test run in a clone of
+        their own with only the model key, the fix comes into the job's checkout by a bundle, and the proof names it
+        (the push to a closed port fails) (#6179)."""
+        work = _checkout(self.dir.name)
+        bin_ = os.path.join(self.dir.name, "bin")
+        os.makedirs(bin_)
+        _exe(bin_, "npm", "exit 0\n")
+        _exe(bin_, "claude", FAKE_AGENT)
+        sha = subprocess.run(["git", "-C", work, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        out = os.path.join(work, "maxpm-agent")
+        script = "\n".join(agent_job.gitlab_script("claude", "ANTHROPIC_API_KEY", 5.0, ["Read"]))
+        env = {**NO_PROXY, "PATH": bin_ + os.pathsep + os.environ["PATH"], "GIT_TERMINAL_PROMPT": "0",
+               "MAXPM_OUT": out, "MAXPM_TEST": "test -f fix.txt", "MAXPM_PROMPT": "fix it", "MAXPM_STAGES": "",
+               "CI_COMMIT_SHA": sha, "CI_COMMIT_SHORT_SHA": sha[:8], "CI_COMMIT_BRANCH": "main",
+               "CI_PROJECT_URL": "http://127.0.0.1:9/grp/shop", "CI_API_V4_URL": "http://127.0.0.1:9/api/v4",
+               "CI_PROJECT_ID": "1", "CI_PIPELINE_ID": "7", "CI_PIPELINE_URL": "http://127.0.0.1:9/p/7",
+               "CI_SERVER_PROTOCOL": "http", "CI_SERVER_HOST": "127.0.0.1", "CI_SERVER_PORT": "9",
+               "CI_PROJECT_PATH": "grp/shop", "CI_PROJECT_DIR": work, "CI_JOB_TOKEN": "job-secret",
+               "MAXPM_GITLAB_TOKEN": "gitlab-secret", "ANTHROPIC_API_KEY": "model-key"}
+        r = subprocess.run(["bash", "-c", _one_user(script)], cwd=work, env=env, capture_output=True, text=True,
+                           timeout=90)
+        with open(os.path.join(out, "proof.json")) as f:
+            proof = json.load(f)
+        self.assertEqual(proof["test"], {"command": "test -f fix.txt", "exit": 0, "last": None}, r.stderr)
+        self.assertNotEqual(proof["commit"], sha)
+        self.assertEqual(proof["agent_exit"], 0)
+        self.assertIn("the push of maxpm/fix-7 failed", proof["error"])
+        self.assertFalse(os.path.exists(os.path.join(work, "fix.txt")))  # the agent worked in a clone of its own
+        msg = subprocess.run(["git", "-C", work, "log", "-1", "--format=%s", proof["commit"]], capture_output=True,
+                             text=True).stdout.strip()
+        self.assertEqual(msg, "Restore the fixture")  # the fix came into the job's own checkout from the bundle
+
 
 def _exe(folder, name, text):
     path = os.path.join(folder, name)
     with open(path, "w") as f:
         f.write("#!/bin/sh\n" + text)
     os.chmod(path, 0o755)
+
+
+# A fake agent CLI: it sees no token of the job, only the model key, and commits a fix.
+FAKE_AGENT = ('[ -z "$MAXPM_GITLAB_TOKEN$CI_JOB_TOKEN$MAXPM_GIT_TOKEN$PULUMI_ACCESS_TOKEN" ] || exit 9\n'
+              '[ "$ANTHROPIC_API_KEY" = model-key ] || exit 8\n'
+              "echo fixed > fix.txt\ngit add fix.txt\ngit commit -qm 'Restore the fixture'\n"
+              + "".join(f"echo '{line}'\n" for line in TRANSCRIPT.splitlines()))
+NO_PROXY = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}  # the closed port answers at once
+
+
+def _checkout(folder):
+    """A git checkout with one commit and a remote named origin."""
+    work = os.path.join(folder, "work")
+    subprocess.run(["git", "init", "-q", work], check=True)
+    for args in (["config", "user.name", "t"], ["config", "user.email", "t@x"],
+                 ["remote", "add", "origin", "https://example.invalid/grp/shop.git"],
+                 ["commit", "-q", "--allow-empty", "-m", "start"]):
+        subprocess.run(["git", "-C", work, *args], check=True)
+    return work
+
+
+def _one_user(script):
+    """The job's script for a test that runs as one user: no change of user, and no check that the agent's user
+    cannot read the job's environment (here it is the same user)."""
+    assert agent_job._DROP in script and '"/proc/$$/environ"' in script
+    return script.replace(agent_job._DROP, "pass").replace('"/proc/$$/environ"', '"/nonexistent/environ"')
 
 
 class PulumiAgentJob(Base):
@@ -460,30 +521,39 @@ class PulumiAgentJob(Base):
         triggers.serve_pass(self.c)
         return self.run_row()
 
-    def job_output(self, conf):
+    def job_output(self, conf, one_user=True):
         """Run the job's own script in a git checkout, with fake npm, curl, timeout and claude (the agent commits a
         fix), and return what it prints: the deployment's log."""
-        work = os.path.join(self.dir.name, "work")
+        work = _checkout(self.dir.name)
         bin_ = os.path.join(self.dir.name, "bin")
-        out = os.path.join(self.dir.name, "out")
+        self.out = os.path.join(self.dir.name, "out")
         os.makedirs(bin_)
-        subprocess.run(["git", "init", "-q", work], check=True)
-        for args in (["config", "user.name", "t"], ["config", "user.email", "t@x"], ["commit", "-q", "--allow-empty",
-                                                                                     "-m", "start"]):
-            subprocess.run(["git", "-C", work, *args], check=True)
         _exe(bin_, "npm", "exit 0\n")
         _exe(bin_, "curl", "echo '{\"summary\": {\"number\": 1}}'\n")
         _exe(bin_, "timeout", 'shift\nexec "$@"\n')
-        _exe(bin_, "claude", "test -z \"$MAXPM_GIT_TOKEN\" || exit 9\necho fixed > fix.txt\ngit add fix.txt\n"
-                             "git commit -qm 'Restore the fixture'\n" + "".join(
-                                 f"echo '{line}'\n" for line in TRANSCRIPT.splitlines()))
-        script = agent_job.pulumi_script(conf).replace(agent_job.OUT, out)
+        _exe(bin_, "claude", FAKE_AGENT)
+        script = agent_job.pulumi_script(conf).replace(agent_job.OUT, self.out)
         env = {**os.environ, "PATH": bin_ + os.pathsep + os.environ["PATH"], "MAXPM_PROMPT": "fix it",
-               "MAXPM_TEST": "true", "MAXPM_GIT_TOKEN": "", "MAXPM_BRANCH": "maxpm/fix-pd-1-checks",
-               "MAXPM_RUN_URL": "https://api.pulumi.com/x"}
-        r = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True, timeout=60)
+               "MAXPM_TEST": "test -f fix.txt", "MAXPM_GIT_TOKEN": "", "MAXPM_BRANCH": "maxpm/fix-pd-1-checks",
+               "MAXPM_RUN_URL": "https://api.pulumi.com/x", "PULUMI_ACCESS_TOKEN": "pulumi-secret",
+               "ANTHROPIC_API_KEY": "model-key"}
+        r = subprocess.run(["bash", "-c", _one_user(script) if one_user else script], cwd=work, env=env,
+                           capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(work, "fix.txt")))  # the agent worked in a clone of its own
         return r.stdout.splitlines()
+
+    @unittest.skipIf(os.geteuid() == 0, "root may start a process as another user")
+    def test_no_agent_runs_where_it_cannot_run_as_another_user(self):
+        """A job that cannot start the agent as another user (it does not run as root) runs no agent: in the same
+        user the agent could read the tokens from the job's shell (#6179)."""
+        agent_job.setup_pulumi(self.c, "shop", env="shop/agents", test="true", actor="mark")
+        lines = self.job_output(agent_job.conf(self.p()), one_user=False)
+        proof = json.loads(next(x for x in lines if x.startswith("::maxpm-proof "))[len("::maxpm-proof "):])
+        self.assertIn("the agent did not run: the job cannot start it as another user", proof["error"])
+        self.assertNotIn("commit", proof)
+        self.assertFalse(any(x.startswith(("::maxpm-patch", "::maxpm-transcript")) for x in lines))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "transcript.jsonl")))
 
     def test_setup_keeps_the_settings_and_moves_the_stage_failed_rule(self):
         with self.assertRaises(RiverError):
@@ -502,9 +572,12 @@ class PulumiAgentJob(Base):
         self.assertEqual(agent_job.conf(self.p())["env"], "shop/agents")
         self.assertIn("agent job in Pulumi Deployments set", define.history(self.c, "shop", 1)[0]["change"])
         shown = agent_job.setup_pulumi(self.c, "shop", show=True, actor="mark", test="make test")
-        self.assertIn("env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN timeout 30m claude -p", shown["script"])
-        self.assertIn('env -u MAXPM_GIT_TOKEN -u PULUMI_ACCESS_TOKEN bash -c "$MAXPM_TEST"', shown["script"])
+        self.assertIn('agent ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" timeout 30m claude -p', shown["script"])
+        self.assertIn('agent bash -c "$MAXPM_TEST"', shown["script"])
+        self.assertIn("for i in 1 2 3; do agent --end; done", shown["script"])
+        self.assertIn('git -c transfer.fsckObjects=true fetch -q "$PRIV/fix.bundle" HEAD', shown["script"])
         self.assertIn("git -c core.hooksPath=/dev/null push", shown["script"])
+        self.assertNotIn("env -u", shown["script"])
         self.assertNotIn("python3 - ", shown["script"])  # isolated: no module of the checkout loads
         self.assertIn("'Bash(make:*)'", shown["script"])
         self.assertIn("pulumi", runners.choices(self.c, self.p()))
@@ -550,7 +623,7 @@ class PulumiAgentJob(Base):
         run = self.run_row()
         self.assertEqual((run["state"], run["cost"]), ("ended", 1.1))
         proof = json.loads(run["proof"])
-        self.assertEqual(proof["test"], {"command": "true", "exit": 0, "last": None})
+        self.assertEqual(proof["test"], {"command": "test -f fix.txt", "exit": 0, "last": None})
         with open(proof["patch"]) as f:
             self.assertIn("Restore the fixture", f.read())
         self.assertIn("proof ready: commit", run["result"])
