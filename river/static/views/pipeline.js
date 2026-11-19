@@ -15,6 +15,7 @@ import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
 import { runsOut } from "./accounts.js";
+import { stageMarks } from "./agents.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
 let sig = "", runSig = "";
@@ -99,7 +100,8 @@ function stageCard(s) {
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}
     <span class="pl-meta pl-more-line">${esc(meta)}</span>
-    ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}</span>`,
+    ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
+    ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
       title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name });
 }

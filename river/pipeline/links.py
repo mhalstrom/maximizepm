@@ -7,6 +7,9 @@
 - The tasks of a version: the commits between the version before it and it that name #<id> (version_tasks).
 - The versions of a task: which environments run a commit that names it, and which versions carry one
   (item_versions).
+- The work under each stage (#6149, stage_work): the fault items of a stage and the sessions that work on them or on
+  their fix tasks, and on a deploy target's release (its review and deploy items), for the Deploy tab's Agents view
+  and the small marks on the stage cards.
 
 The git reads run in the project's folder (projects.path), each with a short timeout.
 """
@@ -165,3 +168,147 @@ def item_versions(conn, item_id):
                                                    "DESC LIMIT 10", (p["id"],)) if commits and carries(v["rev"])]
         out.append({"pipeline": p["name"], "envs": envs, "versions": versions})
     return {"item": item_id, "commits": commits, "pipelines": out}
+
+
+# ---------------------------------------------------------------- the work under each stage (#6149)
+
+DONE_SHOWN = 86400  # seconds: a done fault or fix stays under its stage this long, with its proof and its cost
+
+
+def _ago(at):
+    secs = int((core.now() - core.parse_iso(at)).total_seconds())
+    return f"{secs // 3600}h" if secs >= 3600 else f"{max(secs // 60, 0)}m"
+
+
+def _cost(conn, agent):
+    """The dollars of the session's model calls so far (river/cost.py reads its chat log, at most once a minute), or
+    None when its log gives none or its model has no price."""
+    from .. import cost
+    try:
+        reqs = cost._requests(conn, agent)
+    except Exception:  # noqa: BLE001 - a log that cannot be read shows no cost; the view still draws
+        return None
+    a = conn.execute("SELECT model FROM agents WHERE name=?", (agent,)).fetchone()
+    usd, any_price = 0.0, False
+    for _t, u in reqs:
+        got = cost.priced(conn, u.get("model") or (a["model"] if a else None),
+                          {k: u.get(k) or 0 for k in cost.TOKEN_KEYS})
+        if got["usd"] is not None:
+            usd, any_price = usd + got["usd"], True
+    return round(usd, 2) if any_price else None
+
+
+def _where(conn, a):
+    """Where a session runs and how: this computer or a host, and the agent CLI with its model."""
+    from .. import agents as adapters
+    t = a["agent_type"] or a["platform"]
+    ad = adapters.find(t) if t else None
+    label = (getattr(ad, "DESCRIBE", None) or {}).get("label") if ad else None
+    host = "this computer" if not a["host"] or a["host"] == core.this_host() else a["host"]
+    return host, " · ".join(x for x in (label or t, a["model"]) if x) or None
+
+
+def _agent_card(conn, name, item, started_by, cache):
+    """One agent under a stage: its state, present step, where it runs, its keys, what started it, its proof, its
+    cost, and its open question (a yes or a no on the page, never a prompt in a terminal)."""
+    if name in cache:
+        a = cache[name]
+    else:
+        a = cache[name] = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+    if a is None or a["kind"] != "ai":
+        return None
+    q = conn.execute("SELECT id, body, created_at FROM messages WHERE kind='question' AND state='open' AND "
+                     "from_agent=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+    live = core._agent_state(conn, a)
+    if item["status"] in core.CLOSED_STATES:
+        st, state = "ok", f"{item['status']} {_ago(item['closed_at'])} ago" if item["closed_at"] else item["status"]
+    elif q is not None:
+        st, state = "human", "waits for a yes"
+    elif live == "active":
+        st, state = "run", "working" + (f" {_ago(item['claimed_at'])}" if item["claimed_at"] else "")
+    elif live == "away":
+        st, state = "wait", "at its prompt"
+    else:
+        st, state = "wait", live  # gone or stopped: its item goes back to the queue when its lease ends
+    host, how = _where(conn, a)
+    from .. import vault
+    try:
+        keys = sorted({g["set"] for g in vault.grants(conn, for_agent=name)["grants"]})
+    except core.RiverError:
+        keys = []
+    return {"name": name, "item": item["id"], "title": item["short"] or item["title"], "st": st, "state": state,
+            "live": live, "step": a["doing"], "where": host, "how": how, "keys": keys, "started_by": started_by,
+            "proof": item["output"] if item["status"] == "done" else None, "cost": _cost(conn, name),
+            "question": {"id": q["id"], "body": q["body"], "at": q["created_at"]} if q else None}
+
+
+def _holder(conn, item):
+    """The session that holds an item now, or that closed it."""
+    if item["assignee"]:
+        return item["assignee"]
+    if item["status"] in core.CLOSED_STATES:
+        r = conn.execute("SELECT actor FROM events WHERE item_id=? AND (change LIKE 'done%' OR change LIKE 'dropped%') "
+                         "ORDER BY id DESC LIMIT 1", (item["id"],)).fetchone()
+        return r["actor"] if r else None
+    return None
+
+
+def stage_work(conn, pipeline=None, defaults=None):
+    """{pipeline: {stage: {"faults": [...], "agents": [...]}}}: the work under each stage now. A fault is an open
+    fault item of the stage (or one closed in the last DONE_SHOWN); its agents are the sessions that hold it or one
+    of its fix tasks (found during it), or closed one. A deploy target's release shows the sessions on its review
+    and deploy items under those stages. pipeline: only that one. defaults: {target: its default pipeline} that the
+    caller built already (targets.default_pipeline), so they are not built twice."""
+    since = core.iso(core.now() - core.timedelta(seconds=DONE_SHOWN))
+    out, cache = {}, {}
+
+    def slot(p, s):
+        return out.setdefault(p, {}).setdefault(s, {"faults": [], "agents": []})
+
+    def add_agent(p, s, item, started_by):
+        name = _holder(conn, item)
+        if not name or any(x["name"] == name and x["item"] == item["id"] for x in slot(p, s)["agents"]):
+            return
+        card = _agent_card(conn, name, item, started_by, cache)
+        if card:
+            slot(p, s)["agents"].append(card)
+
+    q = ("SELECT DISTINCT r.fault_item, s.name stage, p.name pipeline, MIN(r.ended_at) failed_at FROM stage_runs r "
+         "JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipelines p ON p.id=r.pipeline_id JOIN items i ON "
+         "i.id=r.fault_item WHERE r.fault_item>0 AND (i.status NOT IN ('done','dropped') OR i.closed_at>=?)")
+    args = [since]
+    if pipeline:
+        q, args = q + " AND p.name=?", args + [pipeline]
+    for f in conn.execute(q + " GROUP BY r.fault_item, s.name, p.name ORDER BY r.fault_item", args).fetchall():
+        it = conn.execute("SELECT * FROM items WHERE id=?", (f["fault_item"],)).fetchone()
+        rev = conn.execute("SELECT v.rev FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE "
+                           "r.fault_item=? ORDER BY r.id DESC LIMIT 1", (it["id"],)).fetchone()["rev"]
+        fixes = conn.execute("SELECT * FROM items WHERE found_during=? AND (status NOT IN ('done','dropped') OR "
+                             "closed_at>=?) ORDER BY id", (it["id"], since)).fetchall()
+        slot(f["pipeline"], f["stage"])["faults"].append(
+            {"id": it["id"], "title": it["short"] or it["title"], "status": it["status"], "rev": rev,
+             "at": f["failed_at"] or it["created_at"], "fixes": [x["id"] for x in fixes],
+             "nobody": not _holder(conn, it) and not any(_holder(conn, x) for x in fixes)})
+        add_agent(f["pipeline"], f["stage"], it,
+                  f"stage {f['stage']} failed for {(rev or '')[:12]} (fault #{it['id']})")
+        for x in fixes:
+            add_agent(f["pipeline"], f["stage"], x, f"a fix task of fault #{it['id']}")
+    from . import targets
+    if defaults is None:
+        names = [t["name"] for t in targets.default_list(conn)] if not pipeline else (
+            [pipeline] if not conn.execute("SELECT 1 FROM pipelines WHERE name=?", (pipeline,)).fetchone() else [])
+        defaults = {}
+        for t in names:
+            try:
+                defaults[t] = targets.default_pipeline(conn, t)
+            except core.RiverError:
+                continue
+    for t, d in defaults.items():
+        rel = (d.get("releases") or [None])[0]
+        for stage, run in ((rel or {}).get("stages") or {}).items():
+            if stage not in ("review", "deploy") or not run.get("item"):
+                continue
+            it = conn.execute("SELECT * FROM items WHERE id=?", (run["item"],)).fetchone()
+            if it and (it["status"] not in core.CLOSED_STATES or (it["closed_at"] or "") >= since):
+                add_agent(t, stage, it, f"the {stage} of release #{rel['deploy']} of target {t}")
+    return out

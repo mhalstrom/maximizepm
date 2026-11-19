@@ -4270,6 +4270,20 @@ class PipelineRoutes(unittest.TestCase):
         out = server.OPS["pipeline_correct"](self.c, {"line": A["lines"][0]["id"], "text": "a freeze of the release"},
                                              "mark")
         self.assertEqual(self.get("/api/pipeline-audit?pipeline=app")["body"]["lines"][0]["id"], out["line"])
+        # #6149: each stage carries its work: the fault of a failed run and the session that works on it.
+        from river.pipeline import links, store
+        r = store.run_start(self.c, "app", "build", version="v1")
+        store.run_finish(self.c, r, "failed", errors="boom")
+        fault = links.fault(self.c, r)
+        core.register(self.c, "w9")
+        core.claim(self.c, fault, "w9")
+        P = {p["name"]: p for p in self.get("/api/deploy")["body"]["pipelines"]}
+        build = next(s for s in P["app"]["stages"] if s["name"] == "build")
+        self.assertEqual(([f["id"] for f in build["work"]["faults"]], [a["name"] for a in build["work"]["agents"]]),
+                         ([fault], ["w9"]))
+        self.assertEqual(P["site"]["stages"][0]["work"], {"faults": [], "agents": []})
+        page = self.get("/api/pipeline/app")["body"]
+        self.assertEqual([a["name"] for a in page["stages"][0]["work"]["agents"]], ["w9"])
         # The page has an address for each part of Deploy and each pipeline's page.
         for path in ("/deploy", "/deploy/accounts", "/deploy/pipeline/app/emergency"):
             self.assertIn(b'id="tab-deploy"', server.page_html(path))

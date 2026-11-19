@@ -20,6 +20,7 @@ import { showPipeline, hidePipeline, renderPipeline, askReason } from "./pipelin
 import { showTargets } from "./targets.js";
 import { drawAudit } from "./audit.js";
 import { accountsHtml as accountsView } from "./accounts.js";
+import { agentsHtml, stageMarks } from "./agents.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -126,7 +127,7 @@ function stripHtml(p) {
     const [m, cls, title] = gateMark(s);
     return (i ? `<span class="dp-arrow ${cls ? "dp-" + cls : ""}" title="${esc(title)}">${m}</span>` : "")
       + `<span class="dp-mini" title="${esc(s.name)}: ${s.no_news ? "no news" : esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
-        <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${s.fault ? `<span class="dp-fault">⚠ #${s.fault}</span>` : ""}</span>`;
+        <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${stageMarks(s.work)}</span>`;
   }).join("") || `<span class="muted t-s">no stages yet</span>`;
 }
 function liveHtml(p) {
@@ -183,10 +184,11 @@ function drawList(force) {
 function drawPart(force) {
   if (D.part === "audit") { sig = ""; return drawAudit(null, $("#dpPart"), force); }
   const s = dataSig(D.part);
-  if (s === sig && !force) return;
+  // Agents (#6149): drawn again only when its data changed, so a button under the pointer stays in its place.
+  if (s === sig && (!force || D.part === "agents")) return;
   sig = s;
   const html = D.part === "where" ? whereHtml() : D.part === "accounts" ? accountsHtml() : D.part === "runners" ? runnersHtml()
-    : agentsHtml();
+    : agentsHtml(data);
   $("#dpPart").dataset.of = "";
   $("#dpPart").innerHTML = html;
 }
@@ -213,9 +215,6 @@ function runnersHtml() {
     <div class="muted t-s">A forge runs the stages of its own pipelines on its own runners.</div>`;
 }
 
-function agentsHtml() {
-  return empty("No agent works on a release here yet. Each agent that works on a stage or a fault of a pipeline shows here, with its step.");
-}
 
 
 // ---- a pipeline's own page

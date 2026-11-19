@@ -460,8 +460,16 @@ The person follows all of this on the page's Deploy tab:
   for each token that fails.
 - **Where each version runs**, **Accounts** (each forge token and its state),
   **Audit log** (every line of every pipeline, with filters by pipeline,
-  actor and time, a search, Correct on each line, and Export as a CSV file), and the pages
-  **Agents** and **Runners**.
+  actor and time, a search, Correct on each line, and Export as a CSV file), and the page
+  **Runners**.
+- **Agents**: each pipeline that has work now, left to right. Under each stage
+  stand its faults and the sessions that work on them: the session on a
+  fault task, on a fix task found during it, or on a release's review or
+  deploy. Each session's card shows its state, its step (`maxpm now`), where
+  it runs, the secret sets granted to it, what started it, its proof when it
+  is done, its cost, and Watch, Open the task and Stop. A done one stays a
+  day. The stage cards and the Pipelines rows show the same as small marks
+  (⚠ a fault, 🤖 a session).
 - **A pipeline's own page**: Stages (each stage's runs, steps, tests and the
   failure prompt; a target's release card), Versions, Triggers (what happens
   on a failure or a wait), Emergency (hold every stage, stop what runs, put an
@@ -470,6 +478,12 @@ The person follows all of this on the page's Deploy tab:
 
 When you tell the person about a release, name the pipeline and the stage:
 they find it there.
+
+When you work on a fault of a stage, or on its fix: keep `maxpm now` current,
+because your card under that stage shows it. Ask the person with
+`maxpm ask <person> "<question>" --item <your task>`, never in your terminal
+alone: your open question shows on your card with Yes and No, and the answer
+comes back to you as an answer to the question.
 
 ## Later
 

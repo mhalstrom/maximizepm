@@ -1816,6 +1816,39 @@ class Speed(Base):
             self.assertLess(time.monotonic() - t, timing.limit(0.1))
 
 
+class AgentsOnStages(RunnerBase):
+    """#6149: the faults of each stage and the sessions that work on them, for the Deploy tab's Agents view."""
+
+    def test_a_fault_and_the_agents_on_it_and_its_fix_stand_under_their_stage(self):
+        from river.pipeline import links
+        define.stage_set(self.c, "app", "test", run="echo broken; exit 3")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes(2)
+        fault = self.runs()["test"]["fault_item"]
+        self.assertEqual(links.stage_work(self.c)["app"]["test"]["faults"][0]["nobody"], True)  # nobody works on it
+        core.claim(self.c, fault, "w1")
+        core.agent_now(self.c, "w1", "Reads the test output of the failed run")
+        fix = links.fix_task(self.c, self.runs()["test"]["id"], actor="mark")["item"]
+        core.register(self.c, "w2")
+        core.claim(self.c, fix, "w2")
+        core.send(self.c, "question", "Skip the flaky test until Monday?", to="mark", item=fix, actor="w2")
+        w = links.stage_work(self.c)["app"]
+        self.assertEqual(set(w), {"test"})
+        f = w["test"]["faults"][0]
+        self.assertEqual((f["id"], f["rev"], f["fixes"], f["nobody"]), (fault, "bad0001", [fix], False))
+        A = {a["name"]: a for a in w["test"]["agents"]}
+        self.assertEqual((A["w1"]["step"], A["w1"]["where"], A["w1"]["item"]),
+                         ("Reads the test output of the failed run", "this computer", fault))
+        self.assertIn("stage test failed for bad0001", A["w1"]["started_by"])
+        self.assertEqual((A["w2"]["st"], A["w2"]["state"]), ("human", "waits for a yes"))
+        self.assertEqual(A["w2"]["question"]["body"], "Skip the flaky test until Monday?")
+        self.assertEqual(A["w2"]["started_by"], f"a fix task of fault #{fault}")
+        core.done(self.c, fix, actor="w2", output="skipped the flaky test, commit abc", force="test")
+        done = next(a for a in links.stage_work(self.c)["app"]["test"]["agents"] if a["name"] == "w2")
+        self.assertEqual((done["st"], done["proof"]), ("ok", "skipped the flaky test, commit abc"))
+        self.assertEqual(links.stage_work(self.c, "other"), {})
+
+
 class AuditLog(RunnerBase):
     """The audit log of pipelines (#6144): every change to a pipeline and its flow, with who did it; no line changes."""
 

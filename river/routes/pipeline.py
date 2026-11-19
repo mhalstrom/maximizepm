@@ -50,9 +50,13 @@ def pipeline(conn, path):
         p["versions"] = store.versions(conn, name)
         p["account"] = _accounts().for_pipeline(conn, conn.execute("SELECT * FROM pipelines WHERE name=?",
                                                                    (name,)).fetchone())  # #6147
-        return p
-    p = targets.default_pipeline(conn, name)
-    p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
+        work = _links().stage_work(conn, name).get(name) or {}
+    else:
+        p = targets.default_pipeline(conn, name)
+        work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
+        p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
+    for s in p["stages"]:  # the faults and agents under each stage card (#6149)
+        s["work"] = work.get(s["name"]) or {"faults": [], "agents": []}
     return p
 
 
@@ -205,8 +209,9 @@ def _with_account(src, a):
     return src
 
 
-def _strip(stages, no_news=False):
-    """The stages of a pipeline as the Deploy list draws them: a bar for each, the state of its last run."""
+def _strip(stages, no_news=False, work=None):
+    """The stages of a pipeline as the Deploy list draws them: a bar for each, the state of its last run, and the
+    faults and agents under it (work: links.stage_work of this pipeline, #6149)."""
     out = []
     for s in stages:
         r = s.get("last_run") or {}
@@ -217,7 +222,8 @@ def _strip(stages, no_news=False):
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
                     "run": r.get("id"), "by_source": bool(s.get("workflow") and not s.get("run")),
                     # its data comes from a forge whose token fails: what it shows is old (#6147)
-                    "no_news": bool(no_news and s.get("workflow") and not s.get("run"))})
+                    "no_news": bool(no_news and s.get("workflow") and not s.get("run")),
+                    "work": (work or {}).get(s["name"]) or {"faults": [], "agents": []}})
     return out
 
 
@@ -236,10 +242,13 @@ def _person_waits(conn, pipeline_id):
 def deploy(conn, path):
     """GET /api/deploy: every pipeline and every target's default pipeline in one read, for the Deploy tab: its
     stages as a row, its environments, where its runs come from (and that token's state), and the versions that wait
-    on a person's yes. `count` is the red number of the tab: those waits plus the tokens that fail."""
+    on a person's yes. `count` is the red number of the tab: those waits plus the tokens that fail. Each stage has its
+    work: the faults and the agents under it (#6149)."""
     saved = {r["name"] for r in conn.execute("SELECT name FROM secrets")}
     account_list = _accounts().listing(conn)
     accts = {(a["forge"], a["host"], a["secret"] or ""): a for a in account_list}
+    defaults = {t["name"]: targets.default_pipeline(conn, t["name"]) for t in targets.default_list(conn)}
+    work = _links().stage_work(conn, defaults=defaults)
     out = []
     for p in store.pipelines(conn):
         d = store.show(conn, p["name"])
@@ -248,12 +257,12 @@ def deploy(conn, path):
         src["actions"] = d["source"]["actions"]
         out.append({"name": p["name"], "project": p["project"], "default": False, "source": src,
                     "held": p.get("held_reason"), "held_by": p.get("held_by"),
-                    "stages": _strip(d["stages"], src["state"] in ("bad", "missing")),
+                    "stages": _strip(d["stages"], src["state"] in ("bad", "missing"), work.get(p["name"])),
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits})
     for t in targets.default_list(conn):
-        d = targets.default_pipeline(conn, t["name"])
+        d = defaults[t["name"]]
         approval = next((s for s in d["stages"] if s["name"] == "approval"), None)
         r = (approval or {}).get("last_run") or {}
         waits = ([{"stage": "approval", "rev": r.get("version"), "run": None, "item": r.get("item"),
@@ -261,7 +270,7 @@ def deploy(conn, path):
                  if r.get("state") == "queued" and r.get("item") else [])
         out.append({"name": t["name"], "project": d["project"], "default": True, "source": {"forge": None,
                     "label": "deploy target", "state": "local"}, "held": None, "held_by": None,
-                    "stages": _strip(d["stages"]), "envs": [{"name": e["name"], "target": e.get("target"),
+                    "stages": _strip(d["stages"], work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [t["name"]], "waits": waits})
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}

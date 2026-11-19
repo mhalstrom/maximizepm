@@ -25,7 +25,33 @@
 .dp-strip { display: flex; align-items: flex-start; gap: var(--sp-1); overflow-x: auto; min-width: 0; padding-bottom: var(--sp-0); }
 .dp-mini { flex: 1 0 var(--w-xs); max-width: var(--w-m); display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
 .dp-mn { font-size: var(--fs-s); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dp-fault { font-size: var(--fs-xs); color: var(--warn); white-space: nowrap; }
+/* Agents on releases (views/agents.js, #6149): the marks of a stage, and Deploy > Agents, one lane per pipeline. */
+.ag-marks { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.ag-mark { font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.ag-fault-mark { color: var(--warn); }
+.ag-mark.ag-run { color: var(--prog); }
+.ag-mark.ag-human { color: var(--human); }
+.ag-mark.ag-wait { color: var(--muted); }
+.pl-st.human { background: var(--human-bg); color: var(--human); }
+.ag-top { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-4); }
+.ag-lane { border: var(--hair) solid var(--line); border-radius: var(--r-l); padding: var(--sp-4) var(--sp-5);
+  margin-bottom: var(--sp-5); }
+.ag-lhead { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.ag-row { display: flex; align-items: flex-start; overflow-x: auto; padding-bottom: var(--sp-1); }
+.ag-col { flex: 1 0 var(--w-card); max-width: calc(var(--w-card) + var(--w-xs) + var(--w-xs));
+  display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.ag-arrow { flex: 0 0 var(--w-xs); padding: var(--sp-3) var(--sp-2) 0; text-align: center; color: var(--muted); }
+.ag-stage { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3);
+  display: flex; flex-direction: column; gap: var(--sp-1); align-items: flex-start; }
+.ag-fault { border: var(--hair) solid var(--warn); background: var(--warn-bg); color: var(--warn); border-radius: var(--r-m);
+  padding: var(--sp-2) var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-0); }
+.ag-fault.ag-closed { border-color: var(--line); background: var(--panel); color: var(--muted); }
+.ag-card { border: var(--hair) solid var(--line); background: var(--panel); border-radius: var(--r-m); padding: var(--sp-3);
+  display: flex; flex-direction: column; gap: var(--sp-1); align-items: flex-start; }
+.ag-head { display: flex; gap: var(--sp-3); align-items: baseline; flex-wrap: wrap; }
+.ag-q { border-left: var(--hair-2) solid var(--human); padding-left: var(--sp-3); display: flex; flex-direction: column;
+  gap: var(--sp-1); }
+.ag-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-1); }
 .dp-arrow { flex: none; align-self: flex-start; color: var(--muted); font-size: var(--fs-m); line-height: var(--sp-3); }
 .dp-arrow.dp-human { color: var(--human); }
 .dp-arrow.dp-warn { color: var(--warn); }
@@ -61,6 +87,10 @@
   .dp-mini { flex: 1 1 0; min-width: var(--w-tool); }
   .dp-pipe { padding: var(--sp-4); }
   .dp-audit .au-grow { display: none; }
+  /* A lane of Deploy > Agents: its stages one under the other, the transition as a line between them. */
+  .ag-row { flex-direction: column; overflow-x: visible; }
+  .ag-col { flex: 0 0 auto; width: 100%; max-width: none; }
+  .ag-arrow { flex: 0 0 auto; padding: var(--sp-1) 0; text-align: left; }
   .dp-audit select, .dp-audit .dp-q { flex: 1 1 var(--w-input-m); max-width: none; }
   /* Each line of the audit log is a block: its cells one under the other, no sideways scroll. */
   .au-table, .au-table tbody, .au-table tr, .au-table td { display: block; }
