@@ -43,11 +43,13 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
      shows the other controls (theme, relay, update, You are). "You are" shows by itself until a name is chosen. */
   header { padding: 8px 12px; gap: 8px 10px; }
   header h1.brand .logo { height: 20px; }
-  header nav { flex: 1 1 200px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 2px; }
+  /* The tabs keep their width before the search gets narrow (#6183: at 768 px Terminal and Deploy's red number were
+     cut off); they scroll only when the bar has no room for them. */
+  header nav { flex: 0 1 auto; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 2px; }
   header nav::-webkit-scrollbar { display: none; }
   nav button { flex: none; padding: 8px 10px; min-height: 40px; }
   header > .spacer { display: none; }
-  #search { flex: 1 1 200px; width: auto; min-width: 0; min-height: 40px; }
+  #search { flex: 1 1 80px; width: auto; min-width: 0; min-height: 40px; }
   #hdrMore { min-width: 44px; min-height: 40px; }
 
   /* Tap targets of 44 px. A select draws its own box (WebKit keeps a native select at its own small height), with

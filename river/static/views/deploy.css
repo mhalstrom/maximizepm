@@ -107,11 +107,27 @@ button.cardbtn.em-pick.on { border-color: var(--warn); background: var(--warn-bg
 .rn-line.rn-end { color: var(--done); }
 .rn-result { max-width: var(--w-l); overflow-wrap: anywhere; }
 .rn-acts { white-space: nowrap; }
+.rn-none { margin-top: var(--sp-3); }
 .rn-cmds { overflow-x: auto; font-size: var(--fs-s); padding: var(--sp-3); border-radius: var(--r-s);
   background: var(--panel); margin: var(--sp-4) 0 0; }
 
+/* A link in a table cell (#6183): its words start and stand on the line of the cell's text, not lower and further in
+   (the button's own padding). */
+#tab-deploy .pl-table td > button.btn.plain:first-child { padding-top: 0; padding-bottom: 0; text-align: left;
+  margin-left: calc(-1 * var(--sp-2)); }
+
+/* A tablet (#6183): the name and what runs where on the first line, the stages under them at the whole width; at
+   768 px the stages of a long pipeline were cut and the version was cut to "…". */
+@media (max-width: 1023px) {
+  .dp-row { grid-template-columns: minmax(0, 1fr) minmax(0, auto); }
+  .dp-strip { grid-column: 1 / -1; grid-row: 2; }
+  .dp-live { text-align: right; }
+}
+
 /* A phone: the row stacks (name, stages, what runs where), and the stages scroll sideways. */
 @media (max-width: 759px) {
+  .dp-strip { grid-row: auto; }
+  .dp-live { text-align: left; }
   .dp-row { grid-template-columns: minmax(0, 1fr); }
   .dp-mini { flex: 1 1 0; min-width: var(--w-tool); }
   .dp-pipe { padding: var(--sp-4); }

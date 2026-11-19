@@ -139,9 +139,11 @@ function stripHtml(p) {
         <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${stageMarks(s.work)}</span>`;
   }).join("") || `<span class="muted t-s">no stages yet</span>`;
 }
+// #6183: a deploy target's one environment has the pipeline's own name: the row names it once, so the version and its
+// time keep their room.
 function liveHtml(p) {
   const live = p.envs.filter(e => e.rev);
-  return live.length ? live.map(e => `<span class="dp-env"><b>${esc(e.name)}</b> <span class="pl-ver">${esc(short(e.rev))}</span>
+  return live.length ? live.map(e => `<span class="dp-env">${e.name === p.name ? "" : `<b>${esc(e.name)}</b> `}<span class="pl-ver">${esc(short(e.rev))}</span>
     ${e.since ? `<span class="muted">since ${esc(ago(e.since))}</span>` : ""}</span>`).join("") : `<span class="muted">runs nowhere yet</span>`;
 }
 
@@ -202,14 +204,20 @@ function drawPart(force) {
   $("#dpPart").innerHTML = html;
 }
 
+// #6183: no row tint (every row with a version had the person's color), and on a phone each row is a block with its
+// cells under their names (pl-blocks), not five columns that broke each word into letters.
 function whereHtml() {
-  const rows = data.pipelines.flatMap(p => p.envs.map(e => `<tr class="${e.rev ? "live" : ""}">
+  const rows = data.pipelines.flatMap(p => p.envs.map(e => {
+    const before = (e.history || []).filter(h => h.rev && h.rev !== e.rev).slice(0, 3).map(h => esc(short(h.rev))).join(", ");
+    return `<tr>
     <td>${button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open the pipeline" })}</td>
-    <td>${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
-    <td class="mono">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td><td>${e.since ? esc(ago(e.since)) : ""}</td>
-    <td class="t-s muted">${(e.history || []).filter(h => h.rev && h.rev !== e.rev).slice(0, 3).map(h => esc(short(h.rev))).join(", ")}</td></tr>`));
+    <td data-label="Environment">${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
+    <td class="mono" data-label="Version">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td>
+    <td data-label="Since">${e.since ? esc(ago(e.since)) : `<span class="muted">-</span>`}</td>
+    <td class="t-s muted"${before ? ` data-label="Before"` : ""}>${before}</td></tr>`;
+  }));
   if (!rows.length) return empty("No environment yet: a pipeline's deploy stage names one.");
-  return `<div class="pl-table"><table><tr><th>Pipeline</th><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows.join("")}</table></div>`;
+  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Pipeline</th><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows.join("")}</table></div>`;
 }
 
 // The accounts: views/accounts.js (#6147).

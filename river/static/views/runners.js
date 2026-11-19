@@ -77,7 +77,7 @@ export function runnersHtml(data) {
       <span class="spacer"></span>${button("Add a runner", { kind: "primary", data: { "rn-add": 1 }, title: "Add a server" })}</div>
     <div class="pl-table"><table class="pl-blocks"><tr><th>Runner</th><th>What it is</th><th>Agents</th><th>Last seen</th><th>Load</th><th>Used by</th><th></th></tr>
       ${rows}${here}</table></div>
-    ${R.runners.length || forges.length ? "" : empty("No runner yet. Add a server that you reach with ssh: MaximizePM installs itself there and runs the agents of the trigger rules that name it.")}
+    ${R.runners.length || forges.length ? "" : `<div class="muted t-m rn-none">No runner yet. Add a server that you reach with ssh: MaximizePM installs itself there and runs the agents of the trigger rules that name it.</div>`}
     <h3 class="tg-h">Agents on runners</h3>
     ${runs.length ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Run</th><th>Task</th><th>Started by</th><th>Since</th><th>Cost</th><th>Result</th><th></th></tr>
       ${runs.map(runRow).join("")}</table></div>` : `<div class="muted t-m">No agent ran on a runner yet.</div>`}

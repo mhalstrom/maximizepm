@@ -89,6 +89,8 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
 .pl-checks .pl-open { text-align: right; }
 .pl-checks tr.pl-allruns td { background: var(--bg); }
 .pl-runlist { display: flex; flex-direction: column; gap: var(--sp-1); max-height: var(--h-pre); overflow-y: auto; }
+/* The Versions tab (#6183): the version stays at the left while the stages scroll sideways (a phone, a long pipeline). */
+.pl-vtable th:first-child, .pl-vtable td:first-child { position: sticky; left: 0; z-index: 1; background: var(--bg); }
 .pl-suite { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .pl-suite .pl-sname { min-width: var(--w-xs); font-size: var(--fs-s); color: var(--muted); }
 .pl-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }

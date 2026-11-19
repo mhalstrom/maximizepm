@@ -81,17 +81,20 @@ function drawLines(box, A, name) {
       : "Nothing changed yet: each change of a pipeline, each action on it, each stage's end and each deploy goes here with who did it.");
     return;
   }
+  // #6183: a column that no line of the list fills (On, Version, Why, Result) is left out: four empty columns took the
+  // room of Did, which then wrapped into a narrow column.
+  const has = { place: L.some(l => l.place), rev: L.some(l => l.rev), why: L.some(l => l.reason || l.until), result: L.some(l => l.result) };
   box.querySelector(".dp-at").innerHTML = `<div class="pl-table"><table class="au-table"><tr><th>When</th><th>Who</th>
-    <th>Did</th>${one ? "" : "<th>Pipeline</th>"}<th>On</th><th>Version</th><th>Why</th><th>Result</th><th></th></tr>
+    <th>Did</th>${one ? "" : "<th>Pipeline</th>"}${has.place ? "<th>On</th>" : ""}${has.rev ? "<th>Version</th>" : ""}${has.why ? "<th>Why</th>" : ""}${has.result ? "<th>Result</th>" : ""}<th></th></tr>
     ${L.map(l => `<tr class="${l.corrected_by ? "au-fixed" : ""}">
       <td class="mono" title="${esc(l.at)}">${esc(ago(l.at))}</td>
       <td><span aria-hidden="true">${KIND_MARK[l.kind] || ""}</span> ${esc(l.actor || "")}<div class="muted t-s">${esc(l.kind || "")}</div></td>
       <td><b>${esc(l.action || "")}</b><div class="t-s">${esc(l.change)}</div>
         ${l.corrected_by ? `<div class="au-corr t-s">corrected by line ${l.corrected_by.map(esc).join(", ")}</div>` : ""}</td>
       ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline.split(", ")[0] }, title: "Open the pipeline" })}</td>`}
-      <td class="t-s">${esc(l.place || "")}</td><td class="mono" title="${esc(l.rev || "")}">${esc(short(l.rev))}</td>
-      <td class="t-s">${esc(l.reason || "")}${l.until ? `<div class="muted">until <span title="${esc(l.until)}">${esc(new Date(l.until).toLocaleString())}</span></div>` : ""}</td>
-      <td class="t-s">${esc(l.result || "")}</td>
+      ${has.place ? `<td class="t-s">${esc(l.place || "")}</td>` : ""}${has.rev ? `<td class="mono" title="${esc(l.rev || "")}">${esc(short(l.rev))}</td>` : ""}
+      ${has.why ? `<td class="t-s">${esc(l.reason || "")}${l.until ? `<div class="muted">until <span title="${esc(l.until)}">${esc(new Date(l.until).toLocaleString())}</span></div>` : ""}</td>` : ""}
+      ${has.result ? `<td class="t-s">${esc(l.result || "")}</td>` : ""}
       <td>${typeof l.id === "number" ? button("Correct", { cls: "plain", data: { "au-correct": l.id }, title: "Add a correction" }) : ""}</td>
     </tr>`).join("")}</table></div>${A.more ? `<div class="muted t-s">The newest ${L.length} lines. Narrow the time or search to find older ones; Export saves up to ${EXPORT_MAX}.</div>` : ""}`;
 }

@@ -70,11 +70,13 @@ export async function renderPipeline(force) {
 function draw() {
   const D = V.data;
   const envs = D.envs.length;
-  $("#plNote").innerHTML = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
+  // #6183: Hold all stages stands at the end of the bar, not inside the line of text.
+  const words = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
     + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : "")  // the page's head names the project
-    + (D.followed ? ` · followed: its own system runs the flow; its trigger rules and hooks act on its events` : "")  // #6167
-    + ((D.default && !D.controls) || D.followed ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
-      : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" })))
+    + (D.followed ? ` · followed: its own system runs the flow; its trigger rules and hooks act on its events` : "");  // #6167
+  const hold = (D.default && !D.controls) || D.followed ? "" : D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
+    : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" });
+  $("#plNote").innerHTML = `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>`
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
   if (V.tab === "stages") fit();
@@ -656,7 +658,7 @@ function versionsView(D) {
   const live = new Set(D.envs.map(e => e.rev).filter(Boolean));
   const cell = (c) => c ? st(c.state) : `<span class="muted">·</span>`;
   return `<div class="muted t-s">Each row is one version, newest on top. Read across to see how far it went.</div>
-    <div class="pl-table"><table><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
+    <div class="pl-table"><table class="pl-vtable"><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
     ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${v.deploy
         ? `<span class="link" data-report="${v.deploy}" title="The release report">${esc(short(v.rev))}</span>`
         : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Its tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
