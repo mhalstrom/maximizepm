@@ -208,7 +208,10 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   passed_by    TEXT,                     -- who let this version pass every control of the transition once (#6139)
   passed_at    TEXT,
   runner       TEXT,                     -- <pid>:<token> of the maxpm serve process that runs its command
-  purpose      TEXT,                     -- rerun, rollback, or failed:<run id> (its failed tests again); none: the flow
+  purpose      TEXT,                     -- rerun, rollback (a move back), or failed:<run id> (its failed tests again);
+                                         -- none: the flow
+  sent_by      TEXT,                     -- who sent this version here on purpose (a run again, a move back, #6141)
+  reason       TEXT,                     -- ... and why, as they said it
   fault_item   INTEGER,                  -- the fault item of MaximizePM that a failed run opened or joined (#6118)
   UNIQUE (pipeline_id, key)
 );
@@ -314,7 +317,7 @@ def migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
                  ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER"), ("passed_by", "TEXT"),
-                 ("passed_at", "TEXT")):  # #6114, #6117, #6118, #6139
+                 ("passed_at", "TEXT"), ("sent_by", "TEXT"), ("reason", "TEXT")):  # #6114, #6117, #6118, #6139, #6141
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_changes)")}

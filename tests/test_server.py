@@ -4186,6 +4186,10 @@ class PipelineRoutes(unittest.TestCase):
         self.assertEqual(v["code"], 404)
         self.assertIn("no project folder", v["body"]["error"])
         self.assertIn("no item #999", self.get("/api/pipeline-item/999")["body"]["error"])
+        # #6141: Versions in <stage>.
+        sr = self.get(f"/api/pipeline-stage?pipeline=web-app&stage={p['stages'][0]['name']}")["body"]
+        self.assertEqual([(r["run"], r["rev"], r["state"]) for r in sr["runs"]], [(run, "abc1234", "failed")])
+        self.assertEqual(self.get("/api/pipeline-stage?pipeline=web-app")["code"], 404)
 
     def test_the_page_s_pipeline_actions_are_for_a_person_or_the_manager(self):
         """#6117: the page's buttons are server OPS; the permission table gives each one to a person or the manager."""
@@ -4196,7 +4200,8 @@ class PipelineRoutes(unittest.TestCase):
         define.stage_set(self.c, "web", "build", "build")
         ops = ("pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
                "pipeline_rollback", "pipeline_stop", "pipeline_transition", "pipeline_block", "pipeline_unblock",
-               "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze")
+               "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze",
+               "pipeline_move_back")
         for op in ops:
             self.assertIn(op, server.OPS)
             self.assertEqual(rights.OPS[op], rights.LEAD)

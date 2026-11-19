@@ -547,8 +547,9 @@ def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None
     plugin.need(conn, p, _stage_row(conn, p, stage), plugin.action_for(purpose))  # a plugin may not list it (#6159)
     run = _queue(conn, p["name"], stage, rev)
     with core.tx(conn):
-        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, passed_by=?, passed_at=?, purpose=? "
-                     "WHERE id=?", (actor or "a person", store._now(), actor or "a person", store._now(), purpose, run))
+        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, passed_by=?, passed_at=?, purpose=?, "
+                     "sent_by=?, reason=? WHERE id=?", (actor or "a person", store._now(), actor or "a person",
+                                                        store._now(), purpose, actor or "a person", reason, run))
         _act(conn, p["id"], actor, note or f"run stage {stage} again for {rev} (run #{run})",
              "rerun-failed" if purpose.startswith("failed:") else purpose, f"stage {stage}", rev, run, reason)
     return {"pipeline": p["name"], "stage": stage, "version": rev, "run": run}
@@ -598,12 +599,34 @@ def rollback(conn, pipeline, env, rev, reason=None, actor=None):
                      (p["id"], env)).fetchone()
     if not s:
         raise core.RiverError(f"no stage of pipeline {p['name']} deploys to {env}")
+    # An environment's version may come from its forge's deploys with no run of the stage here: any version goes.
+    out = move_back(conn, p["name"], s["name"], rev, reason, actor, words=f"rolled back {env} to {rev}", ran=False)
+    return {**out, "env": env}
+
+
+def move_back(conn, pipeline, stage, rev, reason=None, actor=None, words=None, ran=True):
+    """maxpm pipeline move-back (#6141; 'Move back here' in Versions in <stage>): run the stage again with a version
+    that passed there before (a deploy stage puts it on its environment again), as one more run of the stage, and
+    block the transition into the stage, so the flow brings no newer version until a person unblocks it.
+    ran False (rollback of an environment): the version need not have passed the stage here."""
+    _lead(conn, actor, "moves a stage back")
+    p = store._pipeline(conn, pipeline)
     from . import plugin
-    plugin.need(conn, p, _stage_row(conn, p, s["name"]), "rollback")  # before the block (#6159)
-    why = f"rolled back {env} to {rev}" + (f": {reason}" if reason else "")
-    transitions.block(conn, p["name"], s["name"], why, actor=actor)
-    out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why, reason=reason)
-    return {**out, "env": env, "held": why}
+    plugin.need(conn, p, _stage_row(conn, p, stage), "rollback")  # a source that cannot: before the block (#6159)
+    if ran:
+        found = conn.execute(
+            "SELECT v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipeline_versions v ON "
+            "v.id=r.version_id WHERE s.pipeline_id=? AND s.name=? AND r.state='passed' AND (v.rev=? OR (length(?)>=7 "
+            "AND substr(v.rev,1,length(?))=?)) ORDER BY r.id DESC LIMIT 1", (p["id"], stage, rev, rev, rev, rev)).fetchone()
+        if not found:
+            raise core.RiverError(f"version {rev} never passed stage {stage} of pipeline {p['name']}: a move back takes "
+                                  f"a version that ran there (maxpm pipeline runs {p['name']} {stage}); to send another "
+                                  f"one: maxpm pipeline rerun {p['name']} {stage} --rev {rev}")
+        rev = found["rev"]
+    why = (words or f"moved stage {stage} back to {rev}") + (f": {reason}" if reason else "")
+    transitions.block(conn, p["name"], stage, why, actor=actor)
+    out = run_again(conn, p["name"], stage, rev, actor, purpose="rollback", note=why, reason=reason or why)
+    return {**out, "held": why}
 
 
 def rerun_failed(conn, run_id, actor=None):
@@ -617,7 +640,8 @@ def rerun_failed(conn, run_id, actor=None):
     if not bad:
         raise core.RiverError(f"run #{run_id} has no failed test")
     return run_again(conn, r["pipeline"], r["stage"], r["rev"], actor, purpose=f"failed:{run_id}",
-                     note=f"run the {len(bad)} failed test(s) of run #{run_id} again for {r['rev']}")
+                     note=f"run the {len(bad)} failed test(s) of run #{run_id} again for {r['rev']}",
+                     reason=f"the {len(bad)} failed test(s) of run #{run_id}")
 
 
 PROCS = {}  # run id -> the Popen of its command, in this process (stop)

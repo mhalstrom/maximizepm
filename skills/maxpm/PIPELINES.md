@@ -397,16 +397,28 @@ did it.
 ```
 maxpm pipeline hold <name> --reason "<why>"               # every stage: nothing new starts
 maxpm pipeline unhold <name>
-maxpm pipeline rerun <name> <stage> --rev <commit>       # run one stage again, an older version too
+maxpm pipeline runs <name> <stage>                       # Versions in <stage>: each run there, who and why
+maxpm pipeline rerun <name> <stage> --rev <commit> [--reason "<why>"]   # run one stage again, an older version too
+maxpm pipeline move-back <name> <stage> --rev <commit> --reason "<why>" # back to a version that passed there
 maxpm pipeline stop <run>                                # the command, the forge run, or the wait at the transition
 maxpm pipeline rollback <name> <env> --rev <older commit> --reason "<why>"
 ```
 
 `maxpm pipeline hold <name> <stage>` blocks the transition into that stage
 (the same as `block` with no end); `unhold <name> <stage>` unblocks it. A run
-again and a roll back pass the transition on purpose. A roll back runs the
-deploy stage with the older version and blocks the transition into it, so no
-newer version comes by itself. Unblock it when the cause is fixed.
+again and a move back pass the transition on purpose.
+
+**The way back.** `maxpm pipeline runs <name> <stage>` lists each version that
+ran in a stage, newest first: what it was (deployed or ran by the flow, moved
+back, run again, failed tests again), who sent it or said yes, and why; the
+version its environment runs now is marked live. A move back takes a version
+that passed there before: the stage runs again with it (a deploy stage puts
+it on its environment), as one more run in that list, and the transition into
+the stage is blocked, so no newer version comes by itself. Unblock it when the
+cause is fixed. `rollback <name> <env>` is the same move back for the deploy
+stage of an environment, and takes any version (a forge may have deployed it).
+On the page, a click on a stage shows "Versions in <stage>" with Move back
+here, Run again and Stop on each run.
 
 To find what a version carries: `maxpm pipeline version <name> <commit>`
 (the tasks its commits name). To find where a task runs: `maxpm pipeline item

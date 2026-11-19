@@ -167,6 +167,11 @@ try {
   out.buttons = [...q("#plDetail").querySelectorAll("button")].map(b => b.textContent.trim());
   out.over = [...q("#plDetail").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
     && !e.closest(".pl-table")).map(e => e.tagName + "." + e.className).slice(0, 5);
+  // #6141: a stage shows Versions in <stage>, each run with its buttons.
+  q('#plRow [data-pl-stage="test"]').click();
+  await until(() => q("#plStageRuns").textContent.includes("Versions in test"), "Versions in test");
+  out.runs = q("#plStageRuns").textContent.replace(/\s+/g, " ");
+  out.stop = !!q('#plStageRuns [data-pl-stop]');
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1280,900", "390,844"):
@@ -182,6 +187,9 @@ try {
                       "Change the mode or the window…"):
                 self.assertIn(b, r["buttons"], r)
             self.assertEqual(r["over"], [], r)
+            self.assertIn("abc1234", r["runs"], r)
+            self.assertIn("ran", r["runs"], r)
+            self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
     def test_every_view_draws_and_its_controls_answer(self):
         """#4656: each tab of the page is a module of its own (views/*.js); each one draws with the queue's data, and

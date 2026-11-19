@@ -1795,7 +1795,8 @@ class Plan(Base):
         for part in ("## Set up a pipeline for a project", "## Write a stage's script", "::step start", "MAXPM_REV",
                      "--junit", "## What happens when a stage fails", "## The Deploy tab",
                      "## Transitions", "maxpm pipeline pass",  # #6139
-                     "## The audit log", "maxpm pipeline correct"):  # #6144
+                     "## The audit log", "maxpm pipeline correct",  # #6144
+                     "**The way back.**", "maxpm pipeline move-back"):  # #6141
             self.assertIn(part, text)
         for skill in ("maxpm", "maxpm-manager"):
             self.assertIn("maxpm guide\npipelines", (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")

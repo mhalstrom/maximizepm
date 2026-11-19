@@ -640,6 +640,50 @@ class Actions(RunnerBase):
         with self.assertRaises(RiverError):
             self.runner.rollback(self.c, "app", "nowhere", "old0001", actor="mark")
 
+    def test_versions_in_a_stage_and_a_move_back_as_one_more_record(self):
+        """#6141: Versions in <stage> lists each run of the stage, newest first, with what it was, who and why; a move
+        back takes a version that passed there, runs the stage with it, and blocks the transition into the stage."""
+        for rev in ("old0001", "new0002"):
+            self.runner.start(self.c, "app", rev=rev)
+            self.passes(4)
+        runs = store.stage_versions(self.c, "app", "beta")["runs"]
+        self.assertEqual([(r["rev"], r["what"], r["state"], r["live"]) for r in runs],
+                         [("new0002", "deployed", "passed", True), ("old0001", "deployed", "passed", False)])
+        self.assertEqual(runs[0]["why"], "the flow: the stage before passed")
+        with self.assertRaises(RiverError):  # never passed there
+            self.runner.move_back(self.c, "app", "beta", "zzz9999", reason="x", actor="mark")
+        with self.assertRaises(RiverError):  # an agent
+            self.runner.move_back(self.c, "app", "beta", "old0001", reason="x", actor="w1")
+        r = self.runner.move_back(self.c, "app", "beta", "old0001", reason="new0002 breaks sign-in", actor="mark")
+        self.assertEqual(r["held"], "moved stage beta back to old0001: new0002 breaks sign-in")
+        self.passes(2)
+        runs = store.stage_versions(self.c, "app", "beta")["runs"]
+        self.assertEqual([(x["rev"], x["what"], x["live"]) for x in runs][:2],
+                         [("old0001", "moved back", True), ("new0002", "deployed", False)])
+        self.assertEqual((runs[0]["by"], runs[0]["why"]), ("mark", "new0002 breaks sign-in"))
+        sid = self.runs()["beta"]["stage_id"]
+        from river.pipeline import transitions
+        self.assertEqual(transitions.get(self.c, sid)["block_reason"],
+                         "moved stage beta back to old0001: new0002 breaks sign-in")
+        self.runner.run_again(self.c, "app", "beta", "new0002", actor="mark", reason="the sign-in fix is in")
+        self.passes(1)
+        top = store.stage_versions(self.c, "app", "beta")["runs"][0]
+        self.assertEqual((top["rev"], top["what"], top["why"], top["live"]), ("new0002", "run again",
+                                                                             "the sign-in fix is in", True))
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            self.assertEqual(cli.run(["--as", "w1", "pipeline", "runs", "app", "beta"]), 0)  # any session reads it
+            self.assertEqual(cli.run(["--as", "mark", "pipeline", "move-back", "app", "beta", "--rev", "old0001",
+                                      "--reason", "again"]), 0)
+        text = out.getvalue()
+        self.assertIn("Versions in beta (pipeline app), newest first:", text)
+        self.assertIn("new0002  run again: passed", text)
+        self.assertIn("(live)  by mark: the sign-in fix is in", text)
+        self.assertIn("old0001  moved back: passed", text)
+        self.assertIn("the transition into it is blocked until maxpm pipeline unblock app beta", text)
+
     def test_run_the_failed_tests_again(self):
         define.stage_set(self.c, "app", "test", run=(
             "printf '%s' \"$MAXPM_TESTS\" > asked.txt; printf '<testsuite name=\"u\"><testcase classname=\"u\" "

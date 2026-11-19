@@ -87,7 +87,11 @@ OPS = {
     "pipeline_hold": lambda c, a, who: _runner().hold(c, a["pipeline"], a.get("stage"), a.get("reason"), who),
     "pipeline_unhold": lambda c, a, who: _runner().release_hold(c, a["pipeline"], a.get("stage"), who),
     "pipeline_approve": lambda c, a, who: _runner().approve(c, a["pipeline"], a["stage"], a.get("rev"), who),
-    "pipeline_rerun": lambda c, a, who: _runner().run_again(c, a["pipeline"], a["stage"], a["rev"], who),
+    "pipeline_rerun": lambda c, a, who: _runner().run_again(c, a["pipeline"], a["stage"], a["rev"], who,
+                                                            reason=a.get("reason") or None),
+    # #6141: Move back here, in Versions in <stage>
+    "pipeline_move_back": lambda c, a, who: _runner().move_back(c, a["pipeline"], a["stage"], a["rev"],
+                                                                a.get("reason"), who),
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
     "pipeline_rollback": lambda c, a, who: _runner().rollback(c, a["pipeline"], a["env"], a["rev"], a.get("reason"), who),
     "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
@@ -145,7 +149,17 @@ def item(conn, path):
     return _links().item_versions(conn, int(path.rsplit("/", 1)[1]))
 
 
+def stage_runs(conn, path):
+    """GET /api/pipeline-stage?pipeline=<name>&stage=<stage>: Versions in <stage> (#6141)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    if not q.get("pipeline") or not q.get("stage"):
+        raise RiverError("name the pipeline and the stage: ?pipeline=<name>&stage=<stage>")
+    return store.stage_versions(conn, q["pipeline"][0], q["stage"][0])
+
+
 GET += [
+    (lambda path: path == "/api/pipeline-stage", _with(stage_runs, query=True)),
     (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
     (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),
 ]

@@ -1938,8 +1938,16 @@ def build_parser(only=None):
     x.add_argument("--secret", help="with --check: only this token")
     x = pls.add_parser("plugin", help="one plugin: its manifest, and its own describe, which must match it")
     x.add_argument("plugin")
-    x = pls.add_parser("rerun", help="run one stage again for a version, an older one too (a roll back)")
+    x = pls.add_parser("rerun", help="run one stage again for a version, an older one too")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True); x.add_argument("--reason")
+    # #6141: the versions of one stage, and the way back
+    x = pls.add_parser("runs", help="Versions in a stage: each version that ran there, newest first, with what it was "
+                       "(deployed, moved back, run again), who and why")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("-n", type=int, default=30)
+    x = pls.add_parser("move-back", help="run a stage again with a version that passed there before, and block the "
+                       "transition into it until you unblock it")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
+    x.add_argument("--reason", required=True)
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
     x.add_argument("id", type=int)
     x = pls.add_parser("hold", help="hold every stage (nothing new starts; work that runs goes on); with a stage: "
@@ -7602,7 +7610,12 @@ def _pipeline_cmd(conn, a, actor):
         return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin)
     if sub == "rerun":
         from .pipeline import runner
-        return runner.run_again(conn, a.name, a.stage, a.rev, actor)
+        return runner.run_again(conn, a.name, a.stage, a.rev, actor, reason=a.reason)
+    if sub == "runs":
+        return store.stage_versions(conn, a.name, a.stage, a.n)
+    if sub == "move-back":
+        from .pipeline import runner
+        return runner.move_back(conn, a.name, a.stage, a.rev, a.reason, actor)
     if sub == "stop":
         from .pipeline import runner
         return runner.stop(conn, a.id, actor)
@@ -7844,7 +7857,19 @@ def render_pipeline(a, res):
         print(f"pipeline {res['pipeline']}: {what} " + ((f"is blocked: {res['held']}" if res["stage"] else
                                                           f"is held: {res['held']}") if res["held"] else "goes on"))
         return
-    if sub in ("rollback", "rerun-failed"):
+    if sub == "runs":
+        from .core import show_time
+        print(f"Versions in {res['stage']} (pipeline {res['pipeline']}), newest first:")
+        for r in res["runs"]:
+            took = f", {r['seconds'] / 60:.0f}m" if r["seconds"] is not None else ""
+            print(f"  run #{r['run']}  {(r['rev'] or '')[:12]}  {r['what']}: {r['state']}{took}"
+                  + (f"  {show_time(r['started_at'] or r['queued_at'])}" if r["started_at"] or r["queued_at"] else "")
+                  + ("  (live)" if r["live"] else "")
+                  + (f"  by {r['by']}" if r["by"] else "") + (f": {r['why']}" if r["why"] else ""))
+        if not res["runs"]:
+            print("  no version ran there yet")
+        return
+    if sub in ("rollback", "rerun-failed", "move-back"):
         print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']})"
               + (f"; {res['held']}: the transition into it is blocked until maxpm pipeline unblock {res['pipeline']} "
                  f"{res['stage']}" if res.get("held") else ""))

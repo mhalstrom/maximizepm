@@ -471,6 +471,52 @@ def versions(conn, name, limit=20):
     return vs
 
 
+def _what(purpose, kind):
+    """What a run of a stage was, in words: the flow (deployed, ran), a move back, a run again, ..."""
+    p = purpose or ""
+    if p == "rollback":
+        return "moved back"
+    if p == "rerun":
+        return "run again"
+    if p.startswith("failed:"):
+        return f"failed tests of run #{p.split(':', 1)[1]} again"
+    if p in ("override", "whole"):  # #6146
+        return {"override": "override", "whole": "whole pipeline run"}[p]
+    return "deployed" if kind == "deploy" else "ran"
+
+
+STAGE_VERSIONS = 30  # the runs that 'Versions in <stage>' lists
+
+
+def stage_versions(conn, pipeline, stage, limit=STAGE_VERSIONS):
+    """'Versions in <stage>' (#6141): each run of the stage, newest first, with its version, what it was (deployed,
+    moved back, run again, ...), who sent it or let it in and why, its state and times, and whether that version is
+    the one the stage's environment runs now. A move back is one more run, so the list is the stage's own record."""
+    p = _pipeline(conn, pipeline)
+    s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=?", (p["id"], stage)).fetchone()
+    if not s:
+        raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
+    live = conn.execute("SELECT version_id FROM pipeline_envs WHERE id=?", (s["env_id"],)).fetchone() \
+        if s["env_id"] else None
+    out, live_seen = [], False
+    for r in conn.execute("SELECT r.*, v.rev FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id "
+                          "WHERE r.stage_id=? ORDER BY r.id DESC LIMIT ?", (s["id"], limit)):
+        is_live = bool(not live_seen and live and live["version_id"] and r["version_id"] == live["version_id"]
+                       and r["state"] == "passed")
+        live_seen = live_seen or is_live
+        who = r["sent_by"] or r["passed_by"] or r["approved_by"]
+        why = r["reason"] or (f"{r['approved_by']} said yes" if r["approved_by"] and not r["sent_by"] else
+                              "the flow: the stage before passed" if not r["purpose"] else None)
+        took = None
+        if r["started_at"] and r["ended_at"]:
+            took = (core.parse_iso(r["ended_at"]) - core.parse_iso(r["started_at"])).total_seconds()
+        out.append({"run": r["id"], "rev": r["rev"], "what": _what(r["purpose"], s["kind"]), "purpose": r["purpose"],
+                    "by": who, "why": why, "state": r["state"], "queued_at": r["queued_at"],
+                    "started_at": r["started_at"], "ended_at": r["ended_at"], "seconds": took, "errors": r["errors"],
+                    "live": is_live})
+    return {"pipeline": p["name"], "stage": s["name"], "kind": s["kind"], "env_id": s["env_id"], "runs": out}
+
+
 def run_show(conn, run_id):
     """One stage run for its detail: the steps on a time line, the test suites, the last lines."""
     r = conn.execute("SELECT r.*, s.name stage, s.kind, p.name pipeline FROM stage_runs r JOIN pipeline_stages s "

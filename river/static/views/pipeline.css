@@ -93,4 +93,12 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
   .pl-blocks tr { padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }
   .pl-table .pl-blocks td { border-bottom: 0; padding: var(--sp-0) 0; }
   .pl-blocks td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: var(--fs-s); }
+  /* Versions in <stage> (#6141): when, version, what and how on a line; who and why, then the buttons, below. */
+  .pl-runs .pl-th { display: none; }
+  .pl-runs tr { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--sp-1) var(--sp-3); align-items: center;
+    padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }
+  .pl-runs td { border: 0; padding: 0; }
+  .pl-runs td.pl-wide { grid-column: 1 / -1; }
+  .pl-runs tr.live { background: var(--human-bg); }
+  .pl-table .pl-runs tr.live td { background: none; }
 }

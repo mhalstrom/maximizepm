@@ -133,6 +133,7 @@ function stagesView(D) {
   const row = D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
   return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row" id="plRow">${row}</div></div>
     <div class="pl-card" id="plDetail">${detail()}</div>
+    <div id="plStageRuns"></div>
     ${envTable(D)}${sourceCard(D)}`;
 }
 
@@ -211,7 +212,46 @@ function envTable(D) {
 
 function chosen() { return V.data && V.data.stages.find(s => s.name === V.stage); }
 
+// Versions in <stage> (#6141): each run of the chosen stage, from GET api/pipeline-stage; the box under the detail.
+let srSig = "";
+async function refreshStageRuns(force) {
+  const s = chosen(), box = $("#plStageRuns");
+  if (!box) return;
+  if (!s || V.data.default || V.arrow) { box.innerHTML = ""; srSig = ""; return; }
+  let SR;
+  try { SR = await getJson(`api/pipeline-stage?pipeline=${encodeURIComponent(V.name)}&stage=${encodeURIComponent(s.name)}`); }
+  catch (e) { return; }
+  const sg = JSON.stringify(SR);
+  if (sg === srSig && !force && box.innerHTML) return;
+  srSig = sg;
+  box.innerHTML = stageRunsHtml(SR);
+}
+
+function stageRunsHtml(SR) {
+  if (!SR.runs.length) return "";
+  const liveRev = (SR.runs.find(r => r.live) || {}).rev;
+  const D = V.data, s = D.stages.find(x => x.name === SR.stage), miss = [];
+  const rows = SR.runs.map(r => {
+    const b = [];
+    if (r.state === "passed" && r.rev && r.rev !== liveRev)
+      b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
+    if (["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
+    else if (r.rev) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
+    const when = r.started_at || r.queued_at;
+    return `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
+      <td class="mono">${esc(short(r.rev))}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
+      <td>${st(r.state, r.what)}</td><td class="t-s pl-wide">${r.by ? esc(r.by) + (r.why ? ": " : "") : ""}${esc(r.why || "")}</td>
+      <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : esc(WORD[r.state] || r.state)}${r.errors ? " · " + esc(r.errors) : ""}</td>
+      <td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td></tr>`;
+  }).join("");
+  return `<div class="pl-card"><h3>Versions in ${esc(SR.stage)}</h3>
+    <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>What</th><th>Why, or who</th><th>How</th><th></th></tr>${rows}</table></div>
+    ${missLine(D, [...new Set(miss)])}
+    <div class="muted t-s">A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.</div></div>`;
+}
+
 async function refreshRun(force) {
+  refreshStageRuns(force);
   const s = chosen(), r = s && s.last_run;
   if (!r || r.id == null) { V.run = r || null; if (force && $("#plDetail")) $("#plDetail").innerHTML = detail(); return; }
   let R;
@@ -412,7 +452,7 @@ function arrowAct(d) {
 
 async function doAct(op, args) {
   try { await act(op, { pipeline: V.name, ...args }); } catch (e) { return; }
-  runSig = ""; sig = "";
+  runSig = ""; sig = ""; srSig = "";
   renderPipeline(true);
 }
 
@@ -478,9 +518,12 @@ $("#dpStages").addEventListener("click", (e) => {
   })();
   const tr = e.target.closest("[data-pl-block],[data-pl-unblock],[data-pl-delay],[data-pl-undelay],[data-pl-disable],[data-pl-enable],[data-pl-pass],[data-pl-freeze],[data-pl-unfreeze],[data-pl-change]");
   if (tr) return arrowAct(tr.dataset);
-  const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback]");
+  const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback],[data-pl-moveback]");
   if (a) {
     const d = a.dataset;
+    if (d.plMoveback) return askReason(`Move ${d.plMoveback} back to ${short(d.rev)}?`,
+      `The stage runs again with this version, as one more run, and the transition into ${d.plMoveback} is blocked until someone unblocks it, so no newer version comes by itself.`,
+      "Move back", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason }));
     if (d.plHold !== undefined) return askReason("Hold every stage?",
       "Nothing new starts in any stage. Work that runs goes on to its end.", "Hold",
       (reason) => doAct("pipeline_hold", { stage: null, reason }));
