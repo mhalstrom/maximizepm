@@ -2192,7 +2192,7 @@ try {
         board = str(proj / "site" / "img/board.png")
         self.assertEqual(got["files"], [["img/board.png", board], [shot, shot], ["the shot", shot]])
         self.assertEqual(got["refused"][0], "/etc/not-here.png")
-        self.assertIn("cannot show this file: the side panel shows files only from", got["refused"][1])
+        self.assertTrue(got["refused"][1].startswith("Not shown: the side panel shows files only from"), got["refused"])
         self.assertFalse(got["plain"])  # a name it finds nothing for is plain text
         self.assertEqual(got["tabs"], [board, shot, "http://localhost:5173/app", f"#{self.it} header"])
 
