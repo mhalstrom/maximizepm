@@ -467,7 +467,7 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
             r = self.drive(driver, "/", size=size)
-            self.assertIn("Releasing 9783eb1 · step test · 2m · log · report", r["next"], r)
+            self.assertRegex(r["next"], r"Releasing 9783eb1 · step test · 2m 0\ds · log · report", r)  # #6210: it counts
             self.assertEqual(r["buttons"], 0, r)  # nothing that starts another release
             self.assertNotIn("stage", r["note"].replace("Hold all stages", ""), r)
             self.assertNotIn("Each row is a release", r["runs"], r)
@@ -475,6 +475,85 @@ try {
             self.assertTrue(all("plain" in x[1] and "warn" not in x[1] for x in r["links"]), r)
             for words in ("starts an agent session", "as a pipeline", "Deploy now"):
                 self.assertNotIn(words, r["page"], r)
+
+    def test_a_running_release_moves_on_its_own_and_a_new_step_comes_in_place(self):
+        """#6210 (mark 2026-11-19: 'animations/ updates that are showing progress continuously not
+        discontinuously'): while a release runs, its times count each second and the running step's bar grows with
+        no new read; a new step reaches the page within about a second and is patched into the same bars (no new
+        draw); the running card and the transition into it carry the moving light. At 1500 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MIN(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        self.c.commit()
+
+        def start():  # a fresh run for each size: a check that passed and a test that runs, 20 s ago
+            c = core.connect()
+            try:
+                with core.tx(c):
+                    c.execute("DELETE FROM hook_steps"); c.execute("DELETE FROM hook_runs")
+                    t0 = core.iso(core.now() - core.timedelta(seconds=20))
+                    h = c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, item_id, rev, queued_at, "
+                                  "started_at) VALUES ('toolscaled-prod','deploy','make it',?,?,'9783eb1abcdef',?,?)",
+                                  (dep, dep, t0, t0)).lastrowid
+                    t5 = core.iso(core.now() - core.timedelta(seconds=15))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at, ended_at, seconds) "
+                              "VALUES (?,'check','passed',?,?,5)", (h, t0, t5))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'test','running',?)",
+                              (h, t0))
+            finally:
+                c.close()
+
+        def step():  # the test passes and a push starts
+            c = core.connect()
+            try:
+                with core.tx(c):
+                    t = core.iso(core.now())
+                    h = c.execute("SELECT MAX(id) FROM hook_runs").fetchone()[0]
+                    c.execute("UPDATE hook_steps SET state='passed', ended_at=? WHERE name='test'", (t,))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'push','running',?)",
+                              (h, t))
+            finally:
+                c.close()
+        start()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  await fetch("/__step/start");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('#plDetail .pl-gantt .pl-seg.running'), "the running step");
+  const g = q("#plDetail .pl-gantt"); g.__kept = 1;
+  const seg = () => q('#plDetail .pl-gantt [data-pl-k^="1|test"] .pl-seg');
+  const tickText = () => q(".pl-next [data-pl-tick]").textContent;
+  const out = { t1: tickText(), w1: parseFloat(seg().style.width), passed1: parseFloat(q('#plDetail .pl-gantt .pl-seg.passed').style.width),
+    moving: [...document.querySelectorAll("#plRow .pl-moving")].map(e => e.dataset.plStage || "→" + e.dataset.plArrow),
+    transition: getComputedStyle(seg()).transitionProperty };
+  await sleep(2200);
+  out.t2 = tickText(); out.passed2 = parseFloat(q('#plDetail .pl-gantt .pl-seg.passed').style.width);
+  out.keptBefore = q("#plDetail .pl-gantt").__kept === 1;
+  await fetch("/__step/step");
+  await until(() => q('#plDetail .pl-gantt [data-pl-k^="2|push"]'), "the new step");
+  out.kept = q("#plDetail .pl-gantt").__kept === 1;
+  out.test = seg().className;
+  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", steps={"start": start, "step": step}, size=size)
+            self.assertNotIn("error", r, r)
+            self.assertRegex(r["t1"], r"^2\ds$", r)
+            self.assertNotEqual(r["t1"], r["t2"], r)  # the time counts with no new read of the page
+            self.assertLess(r["passed2"], r["passed1"], r)  # the running bar grows, so the others get narrower
+            self.assertEqual(r["moving"], ["→deploy", "deploy"], r)
+            self.assertIn("width", r["transition"], r)
+            self.assertTrue(r["keptBefore"], r)  # the reads each second draw no new bars
+            self.assertTrue(r["kept"], r)  # the new step is patched into the same bars
+            self.assertIn("passed", r["test"], r)
+            self.assertIn("step push", r["next"], r)
 
     def test_the_window_of_a_transition_is_marked_on_a_week_calendar(self):
         """#6205 (mark 2026-11-19: 'probably a better way to do this is with a calander'): the Window of a transition

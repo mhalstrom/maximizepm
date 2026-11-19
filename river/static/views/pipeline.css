@@ -94,6 +94,21 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
 .pl-seg.passed { background: var(--ready); }
 .pl-seg.running { background: var(--prog); }
 .pl-seg.failed { background: var(--warn); }
+/* #6210: progress that moves on its own. Each second the page places the bars (pipeline.js placeGantt); this moves
+   them there in that second, so a running bar grows smoothly and a finished one slides to its real length. */
+.pl-seg { transition: left 1s linear, width 1s linear, background-color 0.3s; }
+/* The running stage card and the transition into it: a light runs along their bottom edge. --pl-phase (set by the
+   page from the clock) keeps the light where it was when the page draws the card again. */
+.pl-stage.pl-moving { position: relative; }
+.pl-moving::after { content: ""; position: absolute; left: var(--r-l); right: var(--r-l); bottom: 0; height: var(--hair-2);
+  background: linear-gradient(to right, transparent, var(--prog), transparent) no-repeat; background-size: 40% 100%;
+  animation: pl-sweep 1.6s linear infinite; animation-delay: var(--pl-phase, 0s); pointer-events: none; }
+button.pl-arrow.pl-moving::after { left: var(--r-s); right: var(--r-s); }
+@keyframes pl-sweep { from { background-position: -70% 0; } to { background-position: 170% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .pl-seg { transition: none; }
+  .pl-moving::after { animation: none; background: var(--prog); }
+}
 .pl-pre { background: var(--bg); border-radius: var(--r-s); padding: var(--sp-3); font-size: var(--fs-xs); overflow-x: auto;
   margin: 0; max-height: var(--h-pre); white-space: pre-wrap; }
 .pl-table { overflow-x: auto; }

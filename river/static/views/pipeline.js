@@ -43,8 +43,9 @@ const secs = (n) => n == null ? "" : n < 90 ? `${Math.round(n)}s` : n < 5400 ? `
 export function showPipeline(name, tab) {
   if (name !== V.name) { V.stage = null; V.arrow = null; V.run = null; V.version = null; V.data = null; sig = ""; runSig = ""; }
   V.name = name; V.tab = tab; V.shown = !!name && ["stages", "versions"].includes(tab);
+  pace();
 }
-export function hidePipeline() { V.shown = false; }
+export function hidePipeline() { V.shown = false; pace(); }
 // Choose a stage of pipeline name before the Deploy tab shows it (#6189: after Release now, its deploy stage).
 export function pickStage(name, stage) {
   if (name !== V.name) showPipeline(name, "stages");
@@ -68,7 +69,8 @@ export async function renderPipeline(force) {
     || V.data.stages.find(s => s.last_run && !s.holding) || V.data.stages[0] || {}).name || null;
   if (!V.data.stages.some(s => s.name === V.arrow)) V.arrow = null;
   const s = JSON.stringify([V.name, V.data, V.stage, V.arrow, V.tab, V.filter]);
-  if (s === sig && !force) { tickRunning(); return refreshRun(force); }
+  pace();
+  if (s === sig && !force) return refreshRun(force);
   sig = s;
   draw();
   refreshRun(true);
@@ -127,26 +129,60 @@ function yesWaits(D) {
     return w && NEEDS_YES.includes(t.mode) && !w.approved_by && t.state !== "blocked" && t.state !== "disabled"; }) || null;
 }
 
-// A stage that runs now (#6209, mark 2026-11-19 on a running release: 'fix the wordy text'): the first stage of the
-// pipeline whose last run is running, with the step that runs and how long; the Next bar names it and offers nothing
-// that starts another release. The log is the stage's detail (its steps and output): a click selects the stage.
+// The first stage of the pipeline whose last run is running, or null.
+const runningStage = (D) => D.stages.find(x => !x.holding && x.last_run && x.last_run.state === "running") || null;
+
+// A stage that runs now (#6209, mark 2026-11-19 on a running release: 'fix the wordy text'): the Next bar names it,
+// the step that runs and how long, and offers nothing that starts another release. The log is the stage's detail
+// (its steps and output): a click selects the stage.
 function running(D) {
-  const s = D.stages.find(x => !x.holding && x.last_run && x.last_run.state === "running");
+  const s = runningStage(D);
   if (!s) return "";
   const r = s.last_run, step = (r.step_list || []).find(x => x.state === "running");
   const what = r.version ? `<span class="pl-ver">${esc(short(r.version))}</span>` : r.item ? `#${r.item}` : esc(s.name);
   const bits = [`${D.default ? "Releasing" : "Running " + esc(s.name)} ${what}`];
   if (step) bits.push(`step ${esc(step.name)}`);
-  if (r.started_at) bits.push(esc(secs((Date.now() - Date.parse(r.started_at)) / 1000)));
+  if (r.started_at) bits.push(runFor(r.started_at));
   const log = `<span class="link" data-pl-stage="${esc(s.name)}">log</span>`;
   const report = D.default && r.item ? ` · <span class="link" data-report="${r.item}">report</span>` : "";
   return `<div class="pl-next"><span class="t-m">${bits.join(" · ")} · ${log}${report}</span></div>`;
 }
 
-// The time of a running stage goes on with each read of the pipeline, also when nothing else changed.
-function tickRunning() {
-  const bar = V.tab === "stages" && $("#plBody .pl-next"), run = bar && V.data && running(V.data);
-  if (run && bar.outerHTML !== run) bar.outerHTML = run;
+// ---- progress that moves on its own (#6210, mark 2026-11-19 while release #6047 ran: 'animations/ updates that
+// are showing progress continuously not discontinuously'). Before, a time and a step bar changed only when the page
+// read the pipeline again (every 3 s), and each read drew the page again. Now:
+// - a time that runs is a span with data-pl-tick=<start>; tick() counts it each second (clock: 2m 05s);
+// - the step bars carry their start and end (data-a, data-b; no end: running); tick() places them each second and a
+//   CSS transition of 1 s moves them in between (pipeline.css .pl-seg), so the running bar grows smoothly;
+// - a new read patches the bars in place (syncGantt): a finished step slides to its real length, a new step grows in;
+// - while a stage runs, the page reads the pipeline each second (pace), not every 3 s: a new step or state shows
+//   at once. Nothing runs: no timer.
+const clock = (n) => {
+  const s = Math.max(0, Math.floor(n)), two = (v) => String(v).padStart(2, "0");
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${two(s % 60)}s` : `${Math.floor(s / 3600)}h ${two(Math.floor(s / 60) % 60)}m`;
+};
+const sinceIso = (iso) => (Date.now() - Date.parse(iso)) / 1000;
+const runFor = (iso) => `<span data-pl-tick="${esc(iso)}">${clock(sinceIso(iso))}</span>`;
+// The moving stripe of a running card or arrow keeps its phase when the page draws it again (pipeline.css pl-sweep).
+const SWEEP = 1.6;
+const phase = () => `--pl-phase:-${((Date.now() / 1000) % SWEEP).toFixed(2)}s`;
+
+function tick() {
+  for (const e of document.querySelectorAll("#plBody [data-pl-tick]")) e.textContent = clock(sinceIso(e.dataset.plTick));
+  for (const g of document.querySelectorAll("#plBody .pl-gantt")) placeGantt(g);
+}
+
+let fast = null, reading = false;
+function pace() {
+  const on = V.shown && V.tab === "stages" && !!V.data && !!runningStage(V.data);
+  if (on && !fast) fast = setInterval(() => {
+    if (document.hidden) return;
+    tick();
+    if (reading) return;
+    reading = true;
+    renderPipeline().catch(() => {}).finally(() => { reading = false; });
+  }, 1000);
+  if (!on && fast) { clearInterval(fast); fast = null; }
 }
 
 function nextBar(D) {
@@ -178,7 +214,10 @@ function draw() {
     : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" });
   $("#plNote").innerHTML = (words || hold ? `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>` : "")
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
+  const bars = $("#plDetail .pl-gantt");  // #6210: the step bars stay, patched in place
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
+  const fresh = $("#plDetail .pl-gantt");
+  if (bars && fresh && sameSteps(bars, fresh)) { fresh.replaceWith(bars); syncGantt(bars, fresh); }
   if (V.tab === "stages") fit();
   drawArrow();  // #6189: an open transition dialog shows the new state
 }
@@ -222,21 +261,23 @@ function stageCardOnly(s) {
   }
   const r = s.last_run, live = r && s.env && r.state === "passed";
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
-  const meta = !r ? "" : r.state === "queued" && r.gate_note ? r.gate_note
-    : r.ended_at ? `${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}` : r.started_at ? `since ${ago(r.started_at)}` : "";
+  const meta = !r ? "" : r.state === "queued" && r.gate_note ? esc(r.gate_note)
+    : r.ended_at ? esc(`${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}`)
+    : r.started_at ? `for ${runFor(r.started_at)}` : "";  // #6210: it counts each second
+  const moving = r && r.state === "running";
   return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}
-    <span class="pl-meta pl-more-line">${esc(meta)}</span>
+    <span class="pl-meta pl-more-line">${meta}</span>
     ${s.start === "manual" ? `<span class="pl-meta">✋ ${s.waits_for_run ? "waits for Run" : "starts manually"}</span>` : ""}
     ${keysLine(s)}
     ${s.override ? `<span class="pl-meta c-warn" title="Skipped: ${esc(s.override.skipped.join(", "))}">⚠ not through the pipeline</span>` : ""}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
-    { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : "") + (nextAt(V.data) === s.name ? " pl-waits" : ""),
+    { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : "") + (nextAt(V.data) === s.name ? " pl-waits" : "") + (moving ? " pl-moving" : ""),
       pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
-      title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name });
+      title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name, attrs: moving ? `style="${phase()}"` : "" });
 }
 
 // The keys a stage may read (#6153), by name only: the secrets of the credential sets granted to the stage or its
@@ -281,11 +322,13 @@ function arrowEl(s, i) {
     .filter(Boolean).join(" · ") : "";
   // A join (#6142): it lets a version in when it passed every branch; it names the branches a version still waits for.
   const join = (t.from || []).length > 1 ? (t.join ? `⋈ ${short(t.join.rev)} waits for ${t.join.missing.join(", ")}` : "⋈ every branch") : "";
+  const passing = s.last_run && s.last_run.state === "running";  // #6210: a version passes into the stage that runs
   return `<div class="pl-gate">${button(`${chip(cls, `${esc(m)}<span class="pl-long"> ${esc(word)}</span>`)}
     ${join ? `<span class="pl-anote pl-join">${esc(join)}</span>` : ""}
     ${by ? `<span class="pl-anote pl-long">${esc(by)}</span>` : ""}${w ? `<span class="pl-anote pl-ver pl-long">${esc(short(w.rev))} waits</span>` : ""}`,
-    { kind: "card", cls: "pl-arrow" + (nextAt(V.data) === "→" + s.name ? " pl-waits" : ""), pressed: V.arrow === s.name, data: { "pl-arrow": s.name },
-      title: `Transition into ${s.name}` })}</div>`;
+    { kind: "card", cls: "pl-arrow" + (nextAt(V.data) === "→" + s.name ? " pl-waits" : "") + (passing ? " pl-moving" : ""),
+      pressed: V.arrow === s.name, data: { "pl-arrow": s.name }, title: `Transition into ${s.name}`,
+      attrs: passing ? `style="${phase()}"` : "" })}</div>`;
 }
 
 function stagesView(D) {
@@ -462,7 +505,7 @@ function stageRunsHtml(SR) {
   const rows = cells.map(({ r, b, why, when, task, ver }) => `<tr class="${r.live ? "live" : ""}"><td class="t-s pl-nowrap">${when ? esc(ago(when)) : ""}</td>
       <td class="mono">${ver}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
       <td class="pl-nowrap">${st(r.state)}${plain(r.what) ? "" : ` <span class="muted t-s">${esc(r.what)}</span>`}</td>
-      <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : ""}</td>
+      <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : r.state === "running" && when ? runFor(when) : ""}</td>
       ${hasWhy ? `<td class="t-s pl-wide">${why}</td>` : ""}${hasTask ? `<td class="t-s">${task}</td>` : ""}
       ${hasActs ? `<td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td>` : ""}</tr>`).join("");
   const more = SR.runs.length > RUNS_SHOWN ? `<div class="t-s">${button(all ? "Show the newest " + RUNS_SHOWN : `Show all ${SR.runs.length}`,
@@ -477,28 +520,90 @@ function stageRunsHtml(SR) {
 async function refreshRun(force) {
   refreshStageRuns(force);
   const s = chosen(), r = s && s.last_run;
-  if (!r || r.id == null) { V.run = r || null; if (force && $("#plDetail")) $("#plDetail").innerHTML = detail(); return; }
+  if (!r || r.id == null) { V.run = r || null; if (force) putDetail(); return; }
   let R;
   try { R = await getJson("api/pipeline-run/" + r.id); } catch (e) { return; }
   const s2 = JSON.stringify([R, V.filter]);
   if (s2 === runSig && !force) return;
   runSig = s2; V.run = R;
-  if ($("#plDetail")) $("#plDetail").innerHTML = detail();
+  putDetail();
 }
 
+// The steps on a time line: a label and a track for each step, keyed (data-pl-k) so a new read patches them in place
+// (syncGantt). Each bar carries its start and end (data-a, data-b; no end while it runs) for placeGantt (#6210).
 function gantt(steps) {
   const t = (x) => Date.parse(x);
   const timed = steps.filter(x => x.started_at || x.ended_at);
   if (!timed.length) return "";
-  const t0 = Math.min(...timed.map(x => t(x.started_at || x.ended_at)));
-  const t1 = Math.max(...timed.map(x => x.ended_at ? t(x.ended_at) : Date.now()), t0 + 1000);
-  const pct = (v) => ((v - t0) / (t1 - t0) * 100).toFixed(1);
-  return `<div class="pl-gantt">${timed.map(x => {
-    const a = t(x.started_at || x.ended_at), b = x.ended_at ? t(x.ended_at) : Date.now();
-    const w = Math.max(1.5, (b - a) / (t1 - t0) * 100).toFixed(1);
-    return `<div>${esc(x.name)}${x.host ? ` <span class="muted">${esc(x.host)}</span>` : ""} <span class="muted">${esc(secs(x.seconds ?? (b - a) / 1000))}</span></div>
-      <div class="pl-track" title="${esc(x.name)}: ${esc(WORD[x.state] || x.state)}${x.note ? " · " + esc(x.note) : ""}"><div class="pl-seg ${esc(x.state)}" style="left:${pct(a)}%;width:${w}%"></div></div>`;
+  const at = timed.map(x => [t(x.started_at || x.ended_at), x.ended_at ? t(x.ended_at) : null]);
+  const [t0, t1] = span(at);
+  return `<div class="pl-gantt">${timed.map((x, i) => {
+    const [a, b] = at[i], k = `${i}|${x.name}|${x.host || ""}`, [left, width] = place(a, b, t0, t1);
+    const took = b == null ? runFor(x.started_at || x.ended_at) : esc(secs(x.seconds ?? (b - a) / 1000));
+    return `<div data-pl-k="${esc(k)}">${esc(x.name)}${x.host ? ` <span class="muted">${esc(x.host)}</span>` : ""} <span class="muted">${took}</span></div>
+      <div class="pl-track" data-pl-k="${esc(k)}" title="${esc(x.name)}: ${esc(WORD[x.state] || x.state)}${x.note ? " · " + esc(x.note) : ""}"><div class="pl-seg ${esc(x.state)}" data-a="${a}" data-b="${b ?? ""}" style="left:${left};width:${width}"></div></div>`;
   }).join("")}</div>`;
+}
+
+// The time span of the bars [t0, t1]: a running bar ends now.
+function span(at) {
+  const t0 = Math.min(...at.map(([a]) => a));
+  return [t0, Math.max(...at.map(([, b]) => b ?? Date.now()), t0 + 1000)];
+}
+const place = (a, b, t0, t1) => [((a - t0) / (t1 - t0) * 100).toFixed(2) + "%",
+  Math.max(1.5, ((b ?? Date.now()) - a) / (t1 - t0) * 100).toFixed(2) + "%"];
+
+// Each bar at its place now; the CSS transition moves it there in 1 s.
+function placeGantt(g) {
+  const segs = [...g.querySelectorAll(".pl-seg")];
+  if (!segs.length) return;
+  const at = segs.map(s => [+s.dataset.a, s.dataset.b ? +s.dataset.b : null]);
+  const [t0, t1] = span(at);
+  segs.forEach((s, i) => { const [left, width] = place(...at[i], t0, t1); s.style.left = left; s.style.width = width; });
+}
+
+const stepKeys = (g) => [...g.querySelectorAll(":scope > .pl-track")].map(e => e.dataset.plK);
+// The new read keeps the steps of the bars on the page, in their order (and may add steps after them).
+const sameSteps = (old, neu) => { const a = stepKeys(old), b = stepKeys(neu); return a.length <= b.length && a.every((k, i) => k === b[i]); };
+
+// The bars on the page take the new read: each step's label, state, start and end; a new step grows in from its
+// start. Then placeGantt moves them all, with the transition.
+function syncGantt(old, neu) {
+  if (!sameSteps(old, neu)) { old.innerHTML = neu.innerHTML; return; }
+  const n = old.children.length, kids = [...neu.children];
+  let added = false;
+  kids.forEach((e, i) => {
+    if (i >= n) { if (e.classList.contains("pl-track")) { e.firstElementChild.style.width = "0%"; added = true; } old.append(e); return; }
+    const o = old.children[i];
+    if (e.classList.contains("pl-track")) {
+      o.title = e.title;
+      const so = o.firstElementChild, sn = e.firstElementChild;
+      so.className = sn.className; so.dataset.a = sn.dataset.a; so.dataset.b = sn.dataset.b;
+    } else if (o.innerHTML !== e.innerHTML) o.innerHTML = e.innerHTML;
+  });
+  if (added) void old.offsetWidth;  // the new bars start at 0 wide, so they grow
+  placeGantt(old);
+}
+
+// The detail of the chosen stage drawn again, with its step bars kept in place when the steps are the same (#6210).
+function putDetail() {
+  const box = $("#plDetail");
+  if (!box) return;
+  const html = detail(), bars = box.querySelector(":scope > .pl-gantt");
+  if (bars) {
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    const fresh = [...t.content.children].find(e => e.classList.contains("pl-gantt"));  // :scope is no element here
+    if (fresh && sameSteps(bars, fresh)) {
+      const kids = [...t.content.childNodes], i = kids.indexOf(fresh);
+      while (bars.previousSibling) bars.previousSibling.remove();
+      while (bars.nextSibling) bars.nextSibling.remove();
+      bars.before(...kids.slice(0, i));
+      bars.after(...kids.slice(i + 1));
+      return syncGantt(bars, fresh);
+    }
+  }
+  box.innerHTML = html;
 }
 
 // The watch of a release (#6181): one row for each check of the target, its name on one line, its last result in the
@@ -539,9 +644,9 @@ async function toggleCheck(k) {
     const [check, from, to] = k.split("|");
     getJson(`api/pipeline-check-runs?check=${encodeURIComponent(check)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
       .then(R => { if (WV.key === k) WV.runs = R; }, e => { if (WV.key === k) WV.runs = { error: String(e.message || e) }; })
-      .then(() => { if ($("#plDetail")) $("#plDetail").innerHTML = detail(); });
+      .then(() => putDetail());
   }
-  if ($("#plDetail")) $("#plDetail").innerHTML = detail();
+  putDetail();
 }
 
 // ---- the detail of the chosen transition: each control with who set it and until when, and its buttons
@@ -686,7 +791,8 @@ function detail() {
   const r = V.run && (V.run.id == null || (s.last_run && V.run.id === s.last_run.id)) ? V.run : s.last_run;
   const head = `<h3>${esc(s.name)}${r && r.version ? ` · <span class="pl-ver">${esc(short(r.version))}</span>` : ""}</h3>`;
   if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>` + keysHtml(s);
-  const when = r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
+  const when = r.started_at && r.state === "running" ? `running for ${runFor(r.started_at)}`  // #6210: it counts
+    : r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
   const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
     + (r.fault_item ? ` · fault <span class="link" data-open="${r.fault_item}">#${r.fault_item}</span>` : "");
   return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ${Date.parse(r.ended_at) > Date.now() ? "" : "ended "}${esc(endText(r.ended_at))}` : ""}${item}</span></div>`
