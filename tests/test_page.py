@@ -160,7 +160,9 @@ try {
   q('#dpList [data-dp-open="app"]').click();
   await until(() => q('#plRow [data-pl-arrow="prod"]'), "the arrows of app");
   const arrow = n => q(`#plRow [data-pl-arrow="${n}"]`).textContent.replace(/\s+/g, " ").trim();
-  const out = { test: arrow("test"), beta: arrow("beta"), prod: arrow("prod"), first: !!q('#plRow [data-pl-arrow="build"]'),
+  const out = { test: arrow("test"), beta: arrow("beta"), prod: arrow("prod"),
+    // The first stage (the Holding stage since #6140) has no arrow: one arrow fewer than the stages.
+    first: document.querySelectorAll('#plRow [data-pl-arrow]').length !== document.querySelectorAll('#plRow [data-pl-stage]').length - 1,
     tier: q('#plRow [data-pl-stage="prod"] .pl-tier') && q('#plRow [data-pl-stage="prod"] .pl-tier').textContent };  // #6137
   q('#plRow [data-pl-arrow="test"]').click();
   await until(() => q("#plDetail").textContent.includes("The transition build → test"), "the controls of build → test");
