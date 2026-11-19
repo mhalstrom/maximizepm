@@ -1023,6 +1023,161 @@ class Links(RunnerBase):
         self.assertEqual(where["versions"], [v2])
 
 
+class Triggers(RunnerBase):
+    """The trigger rules of a pipeline (#6150): generic events, what the agent does, where, which keys, on and off."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import triggers
+        self.t = triggers
+
+    def ops(self):
+        return self.c.execute("SELECT * FROM items WHERE kind='operational' ORDER BY id").fetchall()
+
+    def test_a_pipeline_starts_with_the_rule_of_before_and_it_can_go_off(self):
+        rules = self.t.rules(self.c, "app")["rules"]
+        self.assertEqual([(r["event"], r["stage"], r["runner"], r["enabled"]) for r in rules],
+                         [("stage-failed", None, "this computer", True)])
+        self.assertEqual(define.export(self.c, "app")["triggers"][0]["event"], "stage-failed")
+        with self.assertRaises(RiverError):  # a reason is asked
+            self.t.rule_switch(self.c, "app", rules[0]["name"], False, actor="mark")
+        self.t.rule_switch(self.c, "app", rules[0]["name"], False, "a known flaky build", actor="mark")
+        define.stage_set(self.c, "app", "build", run="exit 3")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes(2)
+        self.assertEqual(self.ops(), [])  # off: no fault task
+        self.assertIsNone(self.runs()["build"]["fault_item"])
+        with core.tx(self.c):  # the failure happened while the rule was off (the times have whole seconds)
+            self.c.execute("UPDATE stage_runs SET started_at=?, ended_at=?",
+                           (core.iso(core.now() - core.timedelta(seconds=5)),) * 2)
+        self.t.rule_switch(self.c, "app", "t" + str(rules[0]["id"]), True, actor="mark")
+        self.passes(1)
+        self.assertEqual(self.ops(), [])  # on again: it acts only on what happens from now
+        self.runner.start(self.c, "app", rev="bad0002")
+        self.passes(2)
+        self.assertEqual(len(self.ops()), 1)
+        audit = [h["change"] for h in define.history(self.c, "app")]
+        self.assertTrue(any(h.startswith(f"trigger {rules[0]['name']} turned off: a known flaky build") for h in audit))
+        last = self.c.execute("SELECT actor, change FROM pipeline_changes ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(last[0], f"trigger {rules[0]['name']}")  # the audit log names the rule
+        self.assertIn("stage build failed for bad0002", last[1])
+
+    def test_a_rule_for_one_stage_and_a_second_rule_on_the_same_failure(self):
+        r = self.t.rule_add(self.c, "app", "stage-failed", "Propose a move back as a card.", stage="beta",
+                            actor="mark")
+        self.assertEqual(r["when"], "Stage beta fails")
+        define.stage_set(self.c, "app", "beta", run="exit 4")
+        self.runner.start(self.c, "app", rev="bad0003")
+        self.passes(4)
+        items = self.ops()
+        self.assertEqual(len(items), 1)  # both rules act on one fault task
+        ctx = items[0]["context"]
+        self.assertIn("Find the cause", ctx)
+        self.assertIn(f"What to do (trigger rule {r['name']}): Propose a move back as a card.", ctx)
+        fired = self.t.rules(self.c, "app")["fired"]
+        self.assertEqual(sorted(f["result"] for f in fired), [f"joined fault #{items[0]['id']}",
+                                                               f"opened fault #{items[0]['id']}"])
+        self.passes(2)
+        self.assertEqual(len(self.t.rules(self.c, "app")["fired"]), 2)  # each event acts once for each rule
+
+    def test_run_and_transition_events_add_a_task_with_the_rules_words(self):
+        self.t.rule_add(self.c, "app", "run-ended", "Read the deploy log and note anything odd.", stage="beta",
+                        actor="mark")
+        self.t.rule_add(self.c, "app", "transition-opened", "Watch the prod deploy step by step.", stage="prod",
+                        actor="mark")
+        with self.assertRaises(RiverError):  # these events have no default words
+            self.t.rule_add(self.c, "app", "run-started", actor="mark")
+        self.runner.start(self.c, "app", rev="ok00001")
+        self.passes(5)
+        titles = [i["title"] for i in self.ops()]
+        self.assertEqual(titles, ["pipeline:app:beta a run ended for ok00001: Read the deploy log and note anything "
+                                  "odd."])
+        core.done(self.c, self.runs()["prod"]["gate_item"], actor="mark")
+        self.passes(2)
+        it = self.ops()[-1]
+        self.assertTrue(it["title"].startswith("pipeline:app:prod a transition opened"))
+        self.assertIn("version ok00001 went into stage prod (let in by mark)", it["context"])
+        self.assertIn("What to do: Watch the prod deploy step by step.", it["context"])
+
+    def test_a_check_that_fails_after_a_deploy(self):
+        core.ops_add(self.c, "app", "home", "url", {"url": "https://example.test/"}, actor="mark")
+        check = self.c.execute("SELECT id FROM checks WHERE name='home'").fetchone()[0]
+        self.t.rule_add(self.c, "app", "check-failed", stage="beta", actor="mark")
+        self.runner.start(self.c, "app", rev="ok00002")
+        self.passes(4)
+
+        def fault():
+            with core.tx(self.c):
+                self.c.execute("INSERT INTO ops_events(check_id, key, state, at, note) VALUES (?,?,?,?,?)",
+                               (check, "ops:app:home", "fault", core.iso(core.now()), "HTTP 500"))
+        fault()
+        self.passes(1)
+        it = self.ops()[-1]
+        self.assertTrue(it["title"].startswith("pipeline:app:beta a check failed after a deploy for ok00002"))
+        self.assertIn("check app/home failed at", it["context"])
+        self.assertIn("after version ok00002 went to beta", it["context"])
+        # With the check's own fault task open, the rule adds its words there.
+        own = core.item_add(self.c, "app", "ops:app:home failed: HTTP 500", kind="operational", actor="maxpm",
+                            goals=[])["id"]
+        fault()
+        self.passes(1)
+        self.assertIn("propose a move back", core.item_show(self.c, own)["context"])
+        self.assertEqual(len(self.ops()), 2)
+
+    def test_who_may_change_rules_and_the_keys_of_a_task(self):
+        with self.assertRaises(RiverError):  # an agent that is not the manager
+            self.t.rule_add(self.c, "app", "stage-failed", stage="build", actor="w1")
+        with self.assertRaises(RiverError):  # no such set
+            self.t.rule_add(self.c, "app", "stage-failed", stage="build", keys="logs", actor="mark")
+        with self.assertRaises(RiverError):  # only this computer runs agents now
+            self.t.rule_add(self.c, "app", "stage-failed", runner="ci-1", actor="mark")
+        with self.assertRaises(RiverError):
+            self.t.rule_add(self.c, "app", "stage-failed", stage="nope", actor="mark")
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO secret_sets(name, created_at) VALUES ('logs', ?)", (core.iso(core.now()),))
+        base = self.t.rules(self.c, "app")["rules"][0]["name"]
+        r = self.t.rule_edit(self.c, "app", base, keys="logs", actor="mark")
+        self.assertEqual(r["keys"], ["logs"])
+        define.stage_set(self.c, "app", "build", run="exit 5")
+        self.runner.start(self.c, "app", rev="bad0004")
+        self.passes(2)
+        item = self.ops()[0]["id"]
+        g = self.c.execute("SELECT scope, value, granted_by FROM secret_grants").fetchone()
+        self.assertEqual((g[0], g[1], g[2]), ("item", str(item), f"trigger {base} (set by mark)"))
+        self.assertIn("; keys logs", self.t.rules(self.c, "app")["fired"][0]["result"])
+        self.t.rule_remove(self.c, "app", base, actor="mark")
+        self.assertEqual(self.t.rules(self.c, "app")["rules"], [])
+
+    def test_the_commands(self):
+        out = io.StringIO()
+        from river import cli
+
+        def run(*words):
+            out.truncate(0); out.seek(0)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+                code = cli.run(["--as", "mark", *words])
+            return code, out.getvalue()
+        code, text = run("pipeline", "trigger", "app", "add", "--when", "run-started", "--stage", "prod",
+                         "--does", "Watch it.")
+        self.assertEqual(code, 0, text)
+        self.assertIn("Stage prod starts a run", text)
+        code, text = run("pipeline", "trigger", "app", "off", "t1", "--reason", "too many tasks")
+        self.assertEqual(code, 0, text)
+        code, text = run("pipeline", "triggers", "app")
+        self.assertIn("t1  Any stage fails  [off: too many tasks]", text)
+        self.assertIn("runs on this computer; no keys", text)
+
+    def test_a_pipeline_of_before_gets_the_rule_once(self):
+        with core.tx(self.c):
+            self.c.execute("DELETE FROM pipeline_triggers")
+            self.c.execute("DELETE FROM meta WHERE key='pipeline_default_triggers'")
+            from river.pipeline import schema
+            schema.migrate(self.c)
+            schema.migrate(self.c)
+        self.assertEqual(len(self.t.rules(self.c, "app")["rules"]), 1)
+
+
 class DefaultPipelines(Base):
     """Each deploy target of today as a default pipeline, computed from its records (#6115)."""
 

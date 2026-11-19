@@ -55,6 +55,8 @@ def pipeline_add(conn, name, project=None, notes=None, actor=None):
         pid = conn.execute("INSERT INTO pipelines(name, project, notes, created_by, created_at) VALUES (?,?,?,?,?)",
                            (name, project, notes, actor, store._now())).lastrowid
         _change(conn, pid, actor, f"pipeline {name} added" + (f" for project {project}" if project else ""))
+        from . import triggers
+        triggers.add_default(conn, pid, actor)  # #6150: the rule 'any stage fails' (maxpm pipeline triggers)
     return dict(store._pipeline(conn, name))
 
 
@@ -275,7 +277,9 @@ def gate_set(conn, pipeline, stage, rule, actor=None):
 
 
 def export(conn, name):
-    """The definition of a pipeline as one JSON object, to keep in git: its environments and its stages in order."""
+    """The definition of a pipeline as one JSON object, to keep in git: its environments, its stages in order, and
+    its trigger rules (#6150)."""
+    from . import triggers
     p = store._pipeline(conn, name)
     envs = [{k: e[k] for k in ("name", "target", "url", "notes")} for e in conn.execute(
         "SELECT * FROM pipeline_envs WHERE pipeline_id=? AND removed_at IS NULL ORDER BY id", (p["id"],))]
@@ -291,7 +295,7 @@ def export(conn, name):
             "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"],
                       "url": p["forge_url"], **({"plugin": json.loads(p["plugin_settings"])}
                                                 if p["plugin_settings"] else {})} if p["forge"] else None,
-            "environments": envs, "stages": stages}
+            "environments": envs, "stages": stages, "triggers": triggers.export(conn, p["id"])}
 
 
 def history(conn, name, limit=50):

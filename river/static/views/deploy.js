@@ -5,8 +5,8 @@
 //   them, what runs where, where its runs come from; above them what waits for the person's yes and the tokens that
 //   fail), Agents, Runners, Where each version runs, Accounts, Audit log.
 //   A pipeline's own page: Stages and Versions (views/pipeline.js, with the release card of each target it names,
-//   views/targets.js), Triggers, Emergency and Audit log (mark 2026-11-18: emergency actions and triggers are on the
-//   pipeline's own page).
+//   views/targets.js), Triggers (views/triggers.js, #6150), Emergency and Audit log (mark 2026-11-18: emergency
+//   actions and triggers are on the pipeline's own page).
 // The red number on the tab counts what waits on the person here: a version that waits for a person's yes, a release that waits
 // for the person's yes, and each token that is refused or not saved. Reads: GET api/deploy (each pipeline in one
 // read, river/routes/pipeline.py) and api/pipeline-audit (views/audit.js). The address: /deploy, /deploy/<part>,
@@ -21,6 +21,7 @@ import { showTargets } from "./targets.js";
 import { drawAudit } from "./audit.js";
 import { accountsHtml as accountsView } from "./accounts.js";
 import { agentsHtml, stageMarks } from "./agents.js";
+import { drawTriggers, defaultTriggersHtml } from "./triggers.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -238,28 +239,13 @@ function drawPage(force) {
     if (p && p.default) return setPage(empty("A deploy target keeps no audit log here: each release's history is on its items (Past deploys on the Stages tab)."), force);
     return drawAudit(D.pipeline, $("#dpPage"), force);
   }
-  setPage(!p ? empty(`No pipeline or deploy target ${esc(D.pipeline)}.`) : D.tab === "triggers" ? triggersHtml(p) : emergencyHtml(p), force);
+  if (D.tab === "triggers" && p && !p.default) { pageSig = ""; return drawTriggers(D.pipeline, $("#dpPage"), force); }
+  setPage(!p ? empty(`No pipeline or deploy target ${esc(D.pipeline)}.`) : D.tab === "triggers" ? defaultTriggersHtml(p) : emergencyHtml(p), force);
 }
 function setPage(html, force) {
   const box = $("#dpPage");
-  if (html === pageSig && !force && !box.querySelector(".dp-audit")) return;
+  if (html === pageSig && !force && !box.querySelector(".dp-audit, .tg-view")) return;
   pageSig = html; box.dataset.of = ""; box.innerHTML = html;
-}
-
-// What starts work when something happens in this pipeline: today the same rules for every pipeline (#6114, #6118).
-function triggersHtml(p) {
-  const rule = (when, then) => `<div class="dp-rule"><div class="t-m"><b>When</b> ${when}</div><div class="t-m"><b>Then</b> ${then}</div></div>`;
-  const rules = p.default ? [
-    rule("a release waits for a person's yes", "MaximizePM asks the person (a task in What waits for you)."),
-    rule("a check fails while the watch of a release runs", "its check opens an operational task with the evidence, and a new session takes it."),
-  ] : [
-    rule("a stage fails", p.project ? `MaximizePM opens a fault task in ${esc(p.project)} with the failure and the command that runs the stage again; a later failure of the same stage joins that task.`
-      : "nothing: the pipeline names no project to hold a fault task."),
-    rule("a version waits at a transition for a person's yes", "MaximizePM asks that person for a yes (a task in What waits for you), unless the transition is blocked, disabled or frozen."),
-    rule("a version waits at a transition for the manager's yes or the release", "MaximizePM alerts the manager once."),
-    rule("a fault of the pipeline is open", "each transition with the fault rule is blocked until the fault closes."),
-  ];
-  return `<div class="dp-cards">${rules.join("")}</div><div class="muted t-s">These rules are the same for every pipeline now.</div>`;
 }
 
 // The emergency actions of this pipeline (#6117 actions; the operators of Decision 7 come later): each asks why and

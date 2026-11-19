@@ -299,7 +299,53 @@ CREATE TABLE IF NOT EXISTS pipeline_events (
 );
 CREATE INDEX IF NOT EXISTS pipeline_events_pipeline ON pipeline_events(pipeline_id, id);
 CREATE INDEX IF NOT EXISTS pipeline_events_run ON pipeline_events(run_id, id);
+
+-- The trigger rules of a pipeline (#6150): when a generic event happens (triggers.EVENTS), an agent does what the
+-- rule says. Readers: maxpm serve (triggers.serve_pass), maxpm pipeline triggers, the Triggers tab, the export.
+CREATE TABLE IF NOT EXISTS pipeline_triggers (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  event        TEXT NOT NULL,            -- stage-failed, check-failed, transition-opened, run-started, run-ended
+  stage        TEXT,                     -- only this stage (a name); none: any stage
+  tier         TEXT,                     -- or only the stages of this tier (#6137)
+  does         TEXT NOT NULL,            -- what the agent does: the instructions of its task
+  runner       TEXT NOT NULL DEFAULT 'this computer',  -- where the agent runs
+  keys         TEXT,                     -- the credential sets its task gets, comma-separated
+  keys_by      TEXT,                     -- the person or the manager who named them (vault._may_grant checked)
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  since        TEXT NOT NULL,            -- it acts on events from this time on (added, or turned on again)
+  off_reason   TEXT,
+  off_by       TEXT,
+  off_at       TEXT,
+  created_by   TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pipeline_triggers_pipeline ON pipeline_triggers(pipeline_id, id);
+
+-- Each time a rule acted: one row for each (rule, event), so an event starts one agent once. Readers: maxpm serve
+-- (what it did already), the Triggers tab (what the rules did lately).
+CREATE TABLE IF NOT EXISTS pipeline_trigger_fires (
+  id           INTEGER PRIMARY KEY,
+  trigger_id   INTEGER NOT NULL,
+  pipeline_id  INTEGER NOT NULL,
+  key          TEXT NOT NULL,            -- <event>:<stage run id>, or check-failed:<ops_events id>
+  event        TEXT NOT NULL,
+  at           TEXT NOT NULL,            -- when the event happened
+  fired_at     TEXT NOT NULL,
+  run_id       INTEGER,
+  stage        TEXT,
+  rev          TEXT,
+  item         INTEGER,                  -- the task of MaximizePM that the agent takes
+  result       TEXT,                     -- in words: 'opened fault #12', 'no project to hold the task'
+  UNIQUE (trigger_id, key)
+);
+CREATE INDEX IF NOT EXISTS pipeline_trigger_fires_pipeline ON pipeline_trigger_fires(pipeline_id, id);
 """
+
+# The rule each pipeline starts with (#6150): what MaximizePM did for every pipeline before rules (#6118). The
+# words of 'does' are triggers.DEFAULT_DOES; schema.py imports nothing, so the text is here and triggers reads it.
+DEFAULT_RULE = ("stage-failed", "Find the cause; say whether it is the code, the stage's command or the environment; "
+                                "fix it, then run the stage again.")
 
 
 def migrate(conn):
@@ -329,6 +375,15 @@ def migrate(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_run ON pipeline_changes(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_at ON pipeline_changes(at)")
     _gates_to_transitions(conn, stage_cols)
+    # #6150, once: each pipeline made before trigger rules gets the rule that acted for every pipeline until then.
+    if not conn.execute("SELECT 1 FROM meta WHERE key='pipeline_default_triggers'").fetchone():
+        from datetime import datetime, timezone
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for p in conn.execute("SELECT id FROM pipelines WHERE id NOT IN (SELECT pipeline_id FROM pipeline_triggers)"
+                              ).fetchall():
+            conn.execute("INSERT INTO pipeline_triggers(pipeline_id, event, does, since, created_by, created_at) "
+                         "VALUES (?,?,?,?,?,?)", (p["id"], *DEFAULT_RULE, at, "maxpm", at))
+        conn.execute("INSERT INTO meta(key, value) VALUES ('pipeline_default_triggers', ?)", (at,))
 
 
 _OLD_MODES = {"manager": ("yes", "manager"), "forge": ("forge", None)}

@@ -2020,6 +2020,20 @@ def build_parser(only=None):
     x.add_argument("-n", type=int, default=50, help="at most this many lines (default 50)")
     x = pls.add_parser("correct", help="correct a line of the audit log: a new line that names it (the old one stays)")
     x.add_argument("line", type=int); x.add_argument("text")
+    x = pls.add_parser("triggers", help="the trigger rules of a pipeline (what starts an agent when something "
+                       "happens in it) and what they did lately")
+    x.add_argument("name")
+    x = pls.add_parser("trigger", help="add, change, turn off or on, or remove a trigger rule of a pipeline")
+    x.add_argument("name"); x.add_argument("action", choices=("add", "edit", "off", "on", "remove"))
+    x.add_argument("rule", nargs="?", help="the rule (t3) for edit, off, on and remove")
+    x.add_argument("--when", dest="event", help="the event: stage-failed, check-failed, transition-opened, "
+                   "run-started, run-ended")
+    x.add_argument("--stage", help="only this stage ('' for any stage)")
+    x.add_argument("--tier", help="only the stages of this tier ('' for any)")
+    x.add_argument("--does", help="what the agent does: the instructions of its task")
+    x.add_argument("--runs-on", dest="runner", help="where the agent runs (this computer)")
+    x.add_argument("--keys", help="credential sets its task gets, comma-separated ('' for none)")
+    x.add_argument("--reason", help="off: why")
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
@@ -7660,6 +7674,22 @@ def _pipeline_cmd(conn, a, actor):
         if sub == "pass":
             return tr.let_pass(conn, a.name, a.stage, a.rev, a.reason, actor)
         return tr.freeze(conn, a.name, a.stage, a.start, a.end, a.reason, a.clear, actor)
+    if sub in ("triggers", "trigger"):  # #6150
+        from .pipeline import triggers
+        if sub == "triggers":
+            return triggers.rules(conn, a.name)
+        if a.action == "add":
+            if not a.event:
+                raise RiverError("name the event: --when " + "|".join(triggers.EVENTS))
+            return triggers.rule_add(conn, a.name, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor)
+        if not a.rule:
+            raise RiverError(f"name the rule: maxpm pipeline trigger {a.name} {a.action} t<n> (maxpm pipeline "
+                             f"triggers {a.name} lists them)")
+        if a.action == "edit":
+            return triggers.rule_edit(conn, a.name, a.rule, a.event, a.does, a.stage, a.tier, a.runner, a.keys, actor)
+        if a.action == "remove":
+            return triggers.rule_remove(conn, a.name, a.rule, actor)
+        return triggers.rule_switch(conn, a.name, a.rule, a.action == "on", a.reason, actor)
     if sub == "gate":
         return define.gate_set(conn, a.name, a.stage, " ".join(a.rule), actor)
     if sub == "export":
@@ -7819,6 +7849,29 @@ def render_pipeline(a, res):
     if sub == "forge" and res.get("plugin"):
         print(f"pipeline {res['pipeline']}: its runs come from plugin {res['forge']} {res['version']} "
               f"({res['level']}; actions: {', '.join(res['actions']) or 'none'}); maxpm serve polls it")
+        return
+    if sub == "triggers":
+        print(f"pipeline {res['pipeline']}: what starts an agent")
+        for r in res["rules"]:
+            print(f"  {r['name']}  {r['when']}" + ("" if r["enabled"] else f"  [off: {r['off_reason']}]"))
+            print(f"      the agent: {r['does']}")
+            print(f"      runs on {r['runner']}" + (f"; keys {', '.join(r['keys'])}" if r["keys"] else "; no keys"))
+        if not res["rules"]:
+            print(f"  no rules: nothing starts an agent. Add one: maxpm pipeline trigger {res['pipeline']} add --when "
+                  "stage-failed")
+        if res["fired"]:
+            print("lately:")
+            for f in res["fired"][:10]:
+                print(f"  {f['fired_at']}  {f['rule']} on {f['event']} of {f['stage']}"
+                      + (f" ({f['rev'][:12]})" if f["rev"] else "") + f": {f['result'] or 'acting'}")
+        return
+    if sub == "trigger":
+        if "removed" in res:
+            print(f"pipeline {res['pipeline']}: rule {res['removed']} removed")
+        else:
+            print(f"rule {res['name']}: {res['when']}" + ("" if res["enabled"] else " [off]")
+                  + f"\n  the agent: {res['does']}\n  runs on {res['runner']}"
+                  + (f"; keys {', '.join(res['keys'])}" if res["keys"] else ""))
         return
     if sub == "forge":
         print(f"pipeline {res['pipeline']}: " + ("its stages run here" if res["forge"] == "none" else

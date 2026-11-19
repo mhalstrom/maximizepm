@@ -42,7 +42,8 @@ COMMANDS = {
                  "plugins": ANY, "plugin": ANY,  # #6159
                  "audit": ANY, "correct": ANY,  # #6144: correct checks itself (the line's actor, a person, the manager)
                  "accounts": ANY,  # #6147: --check takes a person or the manager (accounts.check_now)
-                 "runs": ANY, "move-back": LEAD},  # #6141
+                 "runs": ANY, "move-back": LEAD,  # #6141
+                 "triggers": ANY, "trigger": LEAD},  # #6150
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -74,7 +75,7 @@ READS = {"project show", "project list", "canvas list", "canvas show", "canvas c
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
-         "pipeline plugins", "pipeline audit", "pipeline runs"}
+         "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
@@ -99,7 +100,7 @@ OPS.update({op: LEAD for op in (
     "resume", "pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
     "pipeline_rollback", "pipeline_stop", "pipeline_transition", "pipeline_block", "pipeline_unblock",
     "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze",
-    "pipeline_account_check", "pipeline_move_back")})
+    "pipeline_account_check", "pipeline_move_back", "pipeline_trigger")})
 OPS.update({op: ONLY_PERSON for op in (
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
     "relay_disconnect", "release_changes", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",

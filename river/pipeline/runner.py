@@ -781,8 +781,8 @@ def serve_pass(conn):
             _execute(conn, r["id"])
         else:
             _launch(r["id"])
-    from . import links
-    links.serve_pass(conn)  # a failed stage opens a fault item (#6118)
+    from . import triggers
+    triggers.serve_pass(conn)  # the pipelines' trigger rules (#6150): a failed stage opens a fault item (#6118), ...
     from . import accounts
     try:
         accounts.serve_pass(conn)  # the forge tokens: who, until when, refused; the manager's alerts (#6147)

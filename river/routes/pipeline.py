@@ -121,6 +121,9 @@ OPS = {
                                                                bool(a.get("clear")), who),
     # #6144: a correction of a line of the audit log is a new line (the actor of that line, a person or the manager)
     "pipeline_correct": lambda c, a, who: _audit().correct(c, int(a["line"]), a.get("text"), who),
+    # #6150: a trigger rule: {pipeline, action add|edit|off|on|remove, rule, event, stage, tier, does, runner, keys,
+    # reason}, as maxpm pipeline trigger
+    "pipeline_trigger": lambda c, a, who: trigger_op(c, a, who),
 }
 
 
@@ -132,6 +135,28 @@ def _transitions():
 def _audit():
     from ..pipeline import audit
     return audit
+
+
+def trigger_op(conn, a, who):
+    from ..pipeline import triggers
+    act = a.get("action")
+    if act == "add":
+        return triggers.rule_add(conn, a["pipeline"], a.get("event"), a.get("does"), a.get("stage"), a.get("tier"),
+                                 a.get("runner"), a.get("keys"), who)
+    if act == "edit":
+        return triggers.rule_edit(conn, a["pipeline"], a["rule"], a.get("event"), a.get("does"), a.get("stage"),
+                                  a.get("tier"), a.get("runner"), a.get("keys"), who)
+    if act == "remove":
+        return triggers.rule_remove(conn, a["pipeline"], a["rule"], who)
+    if act in ("on", "off"):
+        return triggers.rule_switch(conn, a["pipeline"], a["rule"], act == "on", a.get("reason"), who)
+    raise RiverError("the action of a trigger rule is add, edit, off, on or remove")
+
+
+def trigger_rules(conn, path):
+    """GET /api/pipeline-triggers/<name>: the trigger rules of a pipeline and what they did lately (#6150)."""
+    from ..pipeline import triggers
+    return triggers.rules(conn, unquote(path.split("/api/pipeline-triggers/", 1)[1]))
 
 
 def _links():
@@ -164,6 +189,7 @@ def stage_runs(conn, path):
 
 GET += [
     (lambda path: path == "/api/pipeline-stage", _with(stage_runs, query=True)),
+    (lambda path: path.startswith("/api/pipeline-triggers/"), _with(trigger_rules)),
     (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
     (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),
 ]

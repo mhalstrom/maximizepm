@@ -558,6 +558,16 @@ servers: `--waves "web-1; web-2, web-3" --check "<cmd>" --rollback "<cmd>"`.
 A failed stage opens a fault item; `maxpm pipeline fix <run> [--start]` adds
 a fix task from its prompt.
 
+Trigger rules start agents: each pipeline has its own, and a new one starts
+with "any stage fails: find the cause and fix it". When the person asks for
+another ("when prod lets a version in, an agent watches the deploy"), add it:
+`maxpm pipeline trigger <name> add --when
+stage-failed|check-failed|transition-opened|run-started|run-ended [--stage
+<stage>] --does "<instructions>" [--keys <set>]`. `maxpm pipeline triggers
+<name>` lists them and what they did; `off t<n> --reason`, `on`, `edit`,
+`remove` change one. Name only the keys the task needs. The table of events
+is in `maxpm guide pipelines`.
+
 ```
 maxpm pipeline hold <name> --reason "<why>"            # every stage; unhold <name> ends it
 maxpm pipeline block <name> <stage> --reason "<why>" [--until <time> | --until-done <id>]   # unblock ends it

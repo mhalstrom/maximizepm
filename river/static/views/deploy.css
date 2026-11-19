@@ -74,6 +74,13 @@
 .plan-vbtn.dp-em { color: var(--warn); }
 /* The audit log (views/audit.js, #6144): the filters in one bar; a corrected line is muted, its correction names it. */
 .dp-audit { display: flex; flex-direction: column; gap: var(--sp-3); }
+/* The Triggers tab (#6150, views/triggers.js): a card for each rule, a rule that is off is faint. */
+.tg-head { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; }
+.dp-rule.tg-off { opacity: 0.7; }
+.tg-h { margin: var(--sp-6) 0 var(--sp-3); font-size: var(--fs-base); }
+.tg-view > .pl-bar { margin-bottom: var(--sp-3); }
+.tg-nw { white-space: nowrap; }
+#tgDlg { --dlg-w: var(--w-dlg-m); }
 .dp-audit .dp-q { min-width: 0; flex: 1 1 var(--w-l); max-width: calc(var(--w-l) + var(--w-l)); }
 .dp-audit select { width: auto; max-width: 100%; }
 .dp-audit .au-grow { flex: 1 1 0; }

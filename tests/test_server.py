@@ -4288,6 +4288,37 @@ class PipelineRoutes(unittest.TestCase):
         for path in ("/deploy", "/deploy/accounts", "/deploy/pipeline/app/emergency"):
             self.assertIn(b'id="tab-deploy"', server.page_html(path))
 
+    def test_the_triggers_tab_reads_and_changes_the_rules(self):
+        """#6150: api/pipeline-triggers/<name> gives the rules, the choices of a rule's fields and what the rules did;
+        the op pipeline_trigger adds, changes, turns off and on, and removes one, for a person or the manager."""
+        from river import rights
+        from river.pipeline import define
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        core.project_add(self.c, "shop")
+        define.pipeline_add(self.c, "app", project="shop", actor="mark")
+        define.stage_set(self.c, "app", "prod", "build", actor="mark")
+        d = self.get("/api/pipeline-triggers/app")["body"]
+        self.assertEqual([(r["name"], r["when"]) for r in d["rules"]], [("t1", "Any stage fails")])
+        self.assertEqual((d["stages"], d["runners"], d["fired"]), (["prod"], ["this computer"], []))
+        self.assertIn("check-failed", d["events"])
+        self.assertEqual(rights.OPS["pipeline_trigger"], rights.LEAD)
+        op = server.OPS["pipeline_trigger"]
+        r = op(self.c, {"pipeline": "app", "action": "add", "event": "run-started", "stage": "prod",
+                        "does": "Watch the deploy."}, "mark")
+        self.assertEqual(r["when"], "Stage prod starts a run")
+        op(self.c, {"pipeline": "app", "action": "edit", "rule": r["name"], "stage": "", "does": "Watch it."}, "mark")
+        op(self.c, {"pipeline": "app", "action": "off", "rule": r["name"], "reason": "noisy"}, "mark")
+        rules = self.get("/api/pipeline-triggers/app")["body"]["rules"]
+        self.assertEqual([(x["when"], x["enabled"], x["off_reason"]) for x in rules][1],
+                         ("Any stage starts a run", False, "noisy"))
+        with self.assertRaises(RiverError):
+            op(self.c, {"pipeline": "app", "action": "remove", "rule": r["name"]}, "w1")
+        op(self.c, {"pipeline": "app", "action": "remove", "rule": r["name"]}, "mark")
+        self.assertEqual(len(self.get("/api/pipeline-triggers/app")["body"]["rules"]), 1)
+        self.assertEqual(self.get("/api/pipeline-triggers/nope")["code"], 404)
+        self.assertIn(b'id="tab-deploy"', server.page_html("/deploy/pipeline/app/triggers"))
+
 
 if __name__ == "__main__":
     unittest.main()

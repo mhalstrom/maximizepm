@@ -1010,11 +1010,16 @@ def _set_name(conn, set_id):
     return r["name"] if r else None
 
 
-def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
+def grant(conn, set_name, scope, value, until=None, note=None, actor=None, checked_by=None):
     """Grant a set to one scope, until a revoke or until (a time a person types: 7d, 2026-12-01). A person, or the
-    manager for a set marked 'the manager may grant' (#5828)."""
+    manager for a set marked 'the manager may grant' (#5828). checked_by: a pipeline's trigger rule grants the set
+    to the task it adds (#6150); _may_grant checked the person or the manager who named the set on the rule then,
+    and actor names the rule."""
     s = _set(conn, set_name)
-    actor = _may_grant(conn, actor, s, "grant")["name"] or actor
+    if checked_by is None:
+        actor = _may_grant(conn, actor, s, "grant")["name"] or actor
+    else:
+        actor = f"{actor} (set by {checked_by})"
     v = _scope_value(conn, scope, value)
     end = core.iso(core.parse_when(until, core.setting(conn, "timezone"))) if until else None
     with core.tx(conn):

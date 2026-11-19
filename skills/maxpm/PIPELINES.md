@@ -322,6 +322,8 @@ form that MaximizePM keeps for every source:
   `pipeline:<pipeline>:<stage> failed for <version>`, with the failed tests
   and the command that runs the stage again. A later failure of the same
   stage joins that task. It is an operational task: a new session takes it.
+  The pipeline's trigger rule "any stage fails" does this (next section): with
+  that rule off, a failure opens no task.
 - `maxpm pipeline run <run> [--prompt]` prints the run, its failed tests and
   the prompt that analyzes them. `maxpm pipeline fix <run> [--start]` adds a
   fix task from that prompt (`--start`: and a session on it now).
@@ -388,6 +390,56 @@ maxpm pipeline pass <name> <stage> [--rev <commit>] --reason "<why>"   # one ver
 The page shows the same on each arrow: the mode or the control that holds it,
 who set it, until when and the version that waits. A click on the arrow opens
 its controls and their buttons.
+
+## Trigger rules: what starts an agent
+
+Each pipeline has its own trigger rules. A rule says: when this happens in the
+pipeline, an agent does this. A new pipeline starts with one rule, "any stage
+fails: find the cause and fix it".
+
+A rule names a generic event, never an event of GitHub, GitLab or Pulumi:
+every source reports its runs the same way, so one rule works for a script and
+for a forge.
+
+| Event | When it happens |
+|---|---|
+| `stage-failed` | a stage run failed (a run of only its failed tests again does not count) |
+| `check-failed` | a check of an environment's target, or of the pipeline's project, became a fault within a day after a version went to that environment, and before the next one did |
+| `transition-opened` | a version went into a stage: its transition let it in |
+| `run-started` | a stage run started |
+| `run-ended` | a stage run ended: passed, failed or stopped |
+
+Each rule also names the stages it watches (one stage, or any stage), what the
+agent does (the instructions of its task), where the agent runs (this
+computer: `maxpm serve` starts a new session), and the keys its task gets
+(credential sets, granted to that task alone until it closes).
+
+```
+maxpm pipeline triggers <name>                           # the rules, and what they did lately
+maxpm pipeline trigger <name> add --when <event> [--stage <stage>] --does "<instructions>" [--keys <set>,<set>]
+maxpm pipeline trigger <name> edit t<n> [--when ...] [--stage ""] [--does ...] [--keys ""]
+maxpm pipeline trigger <name> off t<n> --reason "<why>"  # on t<n>: it acts again on what happens from then
+maxpm pipeline trigger <name> remove t<n>
+```
+
+What a rule does when it acts:
+
+- `stage-failed`: it opens the stage's fault task, or joins the open one, and
+  adds its instructions to the task.
+- `check-failed`: it adds its instructions and the version that went out to
+  the check's open fault task (`ops:<scope>:<check>`), or adds a task when the
+  check has none.
+- The other events: it adds a task, `pipeline:<pipeline>:<stage> <event> for
+  <version>: <instructions>`, with the run and the commands to read it.
+
+Each task is operational: a new session takes it. An event acts once for each
+rule. Each act is a line of the pipeline's audit log, by `trigger t<n>`.
+
+Only a person or the manager changes the rules, on the Triggers tab of the
+pipeline's page or with these commands. Keys: only a person names a credential
+set, or the manager names one that the person lets the manager grant. When
+you work on a task that a rule added, its context names the rule and the
+event; do what the instructions say, and close the task as any other.
 
 ## Actions on a running pipeline
 
@@ -471,9 +523,9 @@ The person follows all of this on the page's Deploy tab:
   day. The stage cards and the Pipelines rows show the same as small marks
   (⚠ a fault, 🤖 a session).
 - **A pipeline's own page**: Stages (each stage's runs, steps, tests and the
-  failure prompt; a target's release card), Versions, Triggers (what happens
-  on a failure or a wait), Emergency (hold every stage, stop what runs, put an
-  environment back) and its Audit log.
+  failure prompt; a target's release card), Versions, Triggers (its trigger
+  rules: add, edit, turn off or on; what they did lately), Emergency (hold
+  every stage, stop what runs, put an environment back) and its Audit log.
 - The red number on the tab counts what waits on the person there.
 
 When you tell the person about a release, name the pipeline and the stage:
@@ -489,4 +541,5 @@ comes back to you as an answer to the question.
 
 Each Deploy tab task adds its part to this guide when it is built: tiers,
 manual starts, the holding stage, branches, operators and the override,
-trigger rules, and runners that start agents with no person's computer.
+and runners that start agents with no person's computer (a rule then names
+one of them).

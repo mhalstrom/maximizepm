@@ -2,7 +2,8 @@
 
 - A failed stage run opens a fault item, as a failed check does (an operational item, which starts in a new session
   by itself): its context holds the prompt that analyzes the failure. A later failure of the same stage, while that
-  item is open, joins it with a line in its history. serve_pass does it, from runner.serve_pass.
+  item is open, joins it with a line in its history. A trigger rule of the pipeline does it (triggers.py, #6150;
+  each pipeline starts with the rule 'any stage fails').
 - The prompt of a failed test run adds a fix task, or adds it and starts a session on it (fix_task).
 - The tasks of a version: the commits between the version before it and it that name #<id> (version_tasks).
 - The versions of a task: which environments run a commit that names it, and which versions carry one
@@ -21,7 +22,6 @@ import subprocess
 from .. import core
 from . import audit, prompt, store
 
-FAULT_WITHIN = 86400  # seconds: a failed run older than this when serve first sees it opens no fault item
 _REF = re.compile(r"#(\d+)\b")
 
 
@@ -44,54 +44,63 @@ def _run(conn, run_id):
                         "pipeline_versions v ON v.id=r.version_id WHERE r.id=?", (run_id,)).fetchone()
 
 
-def _what(conn, r):
-    """The text of a failed run for its fault item: the test prompt, or its errors, failed steps and last lines."""
+def _what(conn, r, does=None, rule=None):
+    """The text of a failed run for its fault item: the test prompt, or its errors, failed steps and last lines;
+    then what the agent does (the trigger rule's words, #6150) and the command that runs the stage again."""
     if any(t["state"] in ("failed", "error") for t in store.tests(conn, r["id"], limit=1)):
-        return prompt.failure_prompt(conn, r["id"])["text"]
-    return prompt.run_text(conn, r["id"]) + ("\n\nFind the cause; say whether it is the code, the stage's command or "
-                                             "the environment; fix it, then run the stage again "
-                                             f"(maxpm pipeline rerun {r['pipeline']} {r['stage']} --rev {r['rev']}).")
+        text = prompt.failure_prompt(conn, r["id"])["text"]
+    else:
+        text = prompt.run_text(conn, r["id"])
+    return text + (f"\n\nWhat to do (trigger rule {rule}): " if rule else "\n\n") + (does or (
+        "Find the cause; say whether it is the code, the stage's command or the environment; fix it, then run the "
+        "stage again.")) + f"\nRun the stage again: maxpm pipeline rerun {r['pipeline']} {r['stage']} --rev {r['rev']}"
+
+
+def add_does(conn, item_id, rule, does, what):
+    """A second trigger rule's words on a fault item that exists (inside the caller's tx): a line of its history,
+    and its context, which the next session reads, when the context does not hold them yet."""
+    core._event(conn, item_id, f"trigger {rule}", f"{what}; what to do: {does}")
+    ctx = conn.execute("SELECT context FROM items WHERE id=?", (item_id,)).fetchone()["context"] or ""
+    if does not in ctx:
+        conn.execute("UPDATE items SET context=? WHERE id=?",
+                     (ctx + f"\n\nWhat to do (trigger rule {rule}): {does}", item_id))
 
 
 def fault(conn, run_id):
     """Open the fault item of a failed run, or join the open one of its stage. Returns the item's id, or None when
-    the pipeline has no project to hold it."""
+    the run did not fail or the pipeline has no project to hold it."""
+    return fault_for(conn, run_id)[0]
+
+
+def fault_for(conn, run_id, does=None, rule=None):
+    """fault for the trigger rule named rule (triggers.py) with its words does. Returns (item id, 'opened' or
+    'joined'), or (None, why) when there is no failed run or no project to hold the item."""
     r = _run(conn, run_id)
-    if r is None or r["state"] != "failed" or r["fault_item"]:
-        return r["fault_item"] if r else None
+    if r is None or r["state"] != "failed":
+        return None, "the run did not fail"
     if not r["project"] or not conn.execute("SELECT 1 FROM projects WHERE name=?", (r["project"],)).fetchone():
-        return None
-    old = conn.execute("SELECT x.fault_item FROM stage_runs x JOIN items i ON i.id=x.fault_item WHERE x.stage_id=? AND "
-                       "i.status NOT IN ('done','dropped') ORDER BY x.id DESC LIMIT 1", (r["stage_id"],)).fetchone()
+        return None, "no project to hold the task"
+    old = r["fault_item"] or None
+    if not old:
+        row = conn.execute("SELECT x.fault_item FROM stage_runs x JOIN items i ON i.id=x.fault_item WHERE x.stage_id=? "
+                           "AND i.status NOT IN ('done','dropped') ORDER BY x.id DESC LIMIT 1",
+                           (r["stage_id"],)).fetchone()
+        old = row["fault_item"] if row else None
     if old:
         with core.tx(conn):
-            conn.execute("UPDATE stage_runs SET fault_item=? WHERE id=?", (old["fault_item"], run_id))
-            core._event(conn, old["fault_item"], "maxpm", f"pipeline {r['pipeline']}: stage {r['stage']} failed again "
-                                                          f"for {r['rev']} (run #{run_id}): {r['errors'] or 'failed'}")
-        return old["fault_item"]
+            if not r["fault_item"]:
+                conn.execute("UPDATE stage_runs SET fault_item=? WHERE id=?", (old, run_id))
+                core._event(conn, old, "maxpm", f"pipeline {r['pipeline']}: stage {r['stage']} failed again for "
+                                                f"{r['rev']} (run #{run_id}): {r['errors'] or 'failed'}")
+            if does and rule:
+                add_does(conn, old, rule, does, f"stage {r['stage']} failed for {r['rev']} (run #{run_id})")
+        return old, "joined"
     item = core.item_add(conn, r["project"], f"pipeline:{r['pipeline']}:{r['stage']} failed for {(r['rev'] or '')[:12]}"
                          f": {(r['errors'] or 'failed')[:120]}", doer="ai", kind="operational", actor="maxpm", goals=[],
-                         short=f"{r['stage']} stage failed", context=_what(conn, r))
+                         short=f"{r['stage']} stage failed", context=_what(conn, r, does, rule))
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET fault_item=? WHERE id=?", (item["id"], run_id))
-        audit.write(conn, r["pipeline_id"], "the rule 'a stage fails'", "fault",
-                    f"opened fault #{item['id']} for stage {r['stage']}: a new session takes it", kind="trigger",
-                    place=f"stage {r['stage']}", rev=r["rev"], result=f"fault #{item['id']}")
-    return item["id"]
-
-
-def serve_pass(conn):
-    """The failed runs that have no fault item yet get one (runs of some failed tests again do not)."""
-    since = core.iso(core.now() - core.timedelta(seconds=FAULT_WITHIN))
-    out = []
-    for r in conn.execute("SELECT id FROM stage_runs WHERE state='failed' AND fault_item IS NULL AND ended_at>=? AND "
-                          "(purpose IS NULL OR purpose NOT LIKE 'failed:%') ORDER BY id", (since,)).fetchall():
-        item = fault(conn, r["id"])
-        if item is None:  # no project to hold it: do not look again
-            with core.tx(conn):
-                conn.execute("UPDATE stage_runs SET fault_item=0 WHERE id=?", (r["id"],))
-        out.append(item)
-    return out
+    return item["id"], "opened"  # the rule that acted writes the line of the audit log (triggers._fire)
 
 
 def fix_task(conn, run_id, actor=None, start=False):
