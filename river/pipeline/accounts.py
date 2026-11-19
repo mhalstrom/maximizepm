@@ -298,3 +298,108 @@ def serve_pass(conn):
                     conn.execute("UPDATE pipeline_accounts SET alert_expiry=? WHERE id=?", (r["expires_at"], r["id"]))
                 alerts.append(("expiry", k[2]))
     return {"checked": checked, "alerts": alerts}
+
+
+# ---------------------------------------------------------------- a new token from the page (#6148)
+
+# Where a person makes a token on each forge, and what it needs (canvas deploy-tab-mockup picture 8).
+NEW_TOKEN_PAGE = {"github": "https://github.com/settings/personal-access-tokens/new",
+                  "gitlab": "{url}/-/user_settings/personal_access_tokens",
+                  "gitea": "{url}/user/settings/applications", "forgejo": "{url}/user/settings/applications",
+                  "pulumi": "https://app.pulumi.com/account/tokens"}
+NEEDS = {"github": "a fine-grained token for the repositories of the pipelines, with Actions: read and write (to start "
+                   "a workflow after a transition), Deployments: read, Contents: read, Metadata: read",
+         "gitlab": "a personal or project access token with the scope api",
+         "gitea": "a token with repository: read and write", "forgejo": "a token with repository: read and write",
+         "pulumi": "a personal or organization access token"}
+
+
+def _forge_args(forge, url):
+    if forge not in FORGE_NAMES:
+        raise core.RiverError(f"the forge is one of {', '.join(FORGE_NAMES)}, not {forge!r}")
+    url = (url or "").strip().rstrip("/") or None
+    if forge in ("gitea", "forgejo") and not url:
+        raise core.RiverError(f"name the address of the {FORGE_NAMES[forge]} server: https://<host>")
+    if url and not re.match(r"^https://[\w.-]+(:\d+)?(/[\w.-]+)*$", url):
+        raise core.RiverError("the server's address is https://<host>[/<path>]")
+    return url
+
+
+def add_token(conn, forge, token, name=None, url=None, actor=None):
+    """Check a token with its forge and save it (Deploy > Accounts > Add a token): the forge says who it is before
+    anything is saved, so a wrong token never goes into the list. name: the maxpm secret it is saved as; none: <forge>-
+    <owner>. The value goes only to the forge and the vault (level hidden: no command prints it); the answer has the
+    account, never the value. A person, on the page."""
+    from .. import vault
+    url = _forge_args(forge, url)
+    token = (token or "").strip()
+    if not token:
+        raise core.RiverError("paste the token")
+    p = {"forge": forge, "forge_url": url}
+    try:
+        got = _ask(p, token, [])
+    except OSError as e:
+        raise core.RiverError(f"{FORGE_NAMES[forge]} did not answer: {e}") from e
+    if "refused" in got:
+        raise core.RiverError(f"{got['refused']}. Nothing was saved.")
+    owner = got["owner"] or "unknown"
+    name = (name or "").strip() or re.sub(r"[^a-z0-9._-]+", "-", f"{forge}-{owner}".lower()).strip("-")
+    vault.check_name(name)
+    saved = vault.put(conn, name, token.encode(), actor, note=f"{FORGE_NAMES[forge]} token of {owner}", how="page")
+    from . import forge as forges
+    forges.forget(name)  # a pipeline that read the old value reads the new one
+    k = (forge, _host(p), name)
+    with core.tx(conn):
+        conn.execute("INSERT OR IGNORE INTO pipeline_accounts(forge, host, secret) VALUES (?,?,?)", k)
+        conn.execute("UPDATE pipeline_accounts SET state='ok', error=NULL, checked_at=?, refused_since=NULL, "
+                     "alert_refused=NULL, owner=?, kind=?, expires_at=?, scopes=? WHERE forge=? AND host=? AND secret=?",
+                     (core.iso(core.now()), got["owner"], got["kind"], got["expires_at"], got["scopes"], *k))
+    users = _users(conn).get(k)
+    if users:
+        check(conn, k, users)  # the repositories of the pipelines that name it
+    return {"secret": name, "forge": forge, "label": FORGE_NAMES[forge], "host": _host(p), "owner": got["owner"],
+            "kind": got["kind"], "expires_at": got["expires_at"], "scopes": got["scopes"], "replaced": saved["replaced"],
+            "used_by": [x["name"] for x in users or []]}
+
+
+def make_token(conn, forge, name, url=None, project=None, actor=None, start=True):
+    """'Make the token for me': a task for a session that opens the forge's new-token page in the project's browser,
+    fills in the name and the permissions, lets the person sign in and press Generate, and saves the token unseen
+    (maxpm secret put --from-browser). With start, a session starts on it now. A person, on the page."""
+    url = _forge_args(forge, url)
+    name = (name or "").strip()
+    if not name:
+        raise core.RiverError(f"name the token first, such as {forge}-<account>")
+    from .. import vault
+    vault.check_name(name)
+    if not project:
+        r = conn.execute("SELECT project FROM pipelines WHERE forge=? AND secret=? AND project IS NOT NULL ORDER BY name "
+                         "LIMIT 1", (forge, name)).fetchone() or conn.execute(
+            "SELECT project FROM pipelines WHERE project IS NOT NULL ORDER BY name LIMIT 1").fetchone()
+        project = r["project"] if r else None
+    if not project:
+        raise core.RiverError("name the project whose browser makes the token: no pipeline names a project")
+    page = NEW_TOKEN_PAGE[forge].format(url=url or "")
+    repos = sorted({r["repo"] for r in conn.execute("SELECT repo FROM pipelines WHERE forge=? AND secret=? AND repo IS "
+                                                     "NOT NULL", (forge, name))})
+    label = FORGE_NAMES[forge]
+    context = (f"The person asked for a new {label} token on the page (Deploy > Accounts > Make the token for me). "
+               f"Make it in the project's browser and save it as the maxpm secret {name}; nobody sees its value.\n"
+               f"1. maxpm browser open {page}\n"
+               f"2. When the page asks for a sign-in, the person signs in: maxpm ask the person to sign in to {label} in "
+               f"the browser on the Sessions tab (policy p157: do every click yourself; never type a password).\n"
+               f"3. Fill in the form: the name 'maxpm {name}', an end date in 90 days, "
+               + (f"the repositories {', '.join(repos)}, " if repos else "")
+               + f"and the permissions: {NEEDS[forge]}.\n"
+               f"4. Ask the person to press Generate (maxpm ask ... --item <this task>), and wait for the answer.\n"
+               f"5. Save it unseen: maxpm secret put {name} --from-browser \"<the field or text that shows the token>\" "
+               f"--note \"{label} token for the pipelines\"\n"
+               f"6. Check it: maxpm pipeline accounts --check --secret {name}; the Accounts tab shows its owner and end "
+               f"date. Then close this task.")
+    item = core.item_add(conn, project, f"Make a {label} token and save it as {name}", doer="ai", actor=actor,
+                         context=context, short=f"Make the {label} token")
+    out = {"item": item["id"], "started": None, "page": page}
+    if start:
+        from .. import server
+        out["started"] = server.dispatch_item(conn, item["id"], actor=actor)
+    return out

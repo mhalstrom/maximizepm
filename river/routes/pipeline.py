@@ -151,6 +151,12 @@ OPS = {
     # #6140: the release after holding: the reviewed commits, all of them, or up to one commit
     "pipeline_release": lambda c, a, who: targets.release(c, a["pipeline"], a.get("upto") or None, bool(a.get("all")),
                                                           who),
+    # #6148: a person adds a forge token on the page (checked with the forge before it is saved), or has a session
+    # make it in the project's browser
+    "pipeline_token_add": lambda c, a, who: _accounts().add_token(c, a.get("forge"), a.get("token"), a.get("name"),
+                                                                  a.get("url"), who),
+    "pipeline_token_make": lambda c, a, who: _accounts().make_token(c, a.get("forge"), a.get("name"), a.get("url"),
+                                                                    a.get("project"), who),
 }
 
 

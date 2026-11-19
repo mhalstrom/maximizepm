@@ -206,5 +206,53 @@ class Commands(Base):
         self.assertEqual(res[0]["state"], "ok")
 
 
+class AddToken(Base):
+    """#6148: a person adds a token on the page: the forge says who it is before it is saved; or a session makes it."""
+
+    def setUp(self):
+        super().setUp()
+        from river import vault
+        old = vault.BACKEND
+        vault.BACKEND = vault.Files()
+        self.addCleanup(setattr, vault, "BACKEND", old)
+        self.vault = vault
+
+    def test_the_forge_checks_the_token_before_it_is_saved(self):
+        self.api.routes[("api.github.com", "/user")] = (401, {}, {"message": "Bad credentials"})
+        with self.assertRaises(RiverError) as e:
+            accounts.add_token(self.c, "github", "ghp_wrong", actor="mark")
+        self.assertIn("GitHub answered 401: Bad credentials. Nothing was saved", str(e.exception))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM secrets").fetchone()[0], 1)  # only the one of setUp
+        self.api.routes[("api.github.com", "/user")] = (
+            200, {"github-authentication-token-expiration": "2027-02-01 00:00:00 UTC"},
+            {"login": "Example-Team", "type": "Organization"})
+        r = accounts.add_token(self.c, "github", " ghp_good ", actor="mark")
+        self.assertEqual((r["secret"], r["owner"], r["kind"], r["expires_at"], r["used_by"]),
+                         ("github-example-team", "Example-Team", "organization", "2027-02-01T00:00:00Z", []))
+        self.assertNotIn("ghp_good", str(r))  # the answer never carries the value
+        self.assertEqual(self.vault.BACKEND.get(self.c, "github-example-team"), b"ghp_good")
+        self.assertEqual(self.vault.log(self.c, "github-example-team")["log"][0]["detail"], "page")
+        self.assertEqual([c[2] for c in self.api.calls][-1], "Bearer ghp_good")
+        with self.assertRaises(RiverError):
+            accounts.add_token(self.c, "gitea", "x", actor="mark")  # a Gitea server needs its address
+        with self.assertRaises(RiverError):
+            accounts.add_token(self.c, "github", "  ", actor="mark")
+
+    def test_the_page_actions_are_a_persons_and_a_session_makes_the_token(self):
+        from river import rights
+        self.assertIs(rights.OPS["pipeline_token_add"], rights.ONLY_PERSON)
+        self.assertIs(rights.OPS["pipeline_token_make"], rights.ONLY_PERSON)
+        core.project_add(self.c, "web")
+        out = accounts.make_token(self.c, "github", "github-mhalstrom", project="web", actor="mark", start=False)
+        it = core.item_show(self.c, out["item"])
+        self.assertEqual(out["page"], "https://github.com/settings/personal-access-tokens/new")
+        self.assertIn("maxpm browser open https://github.com/settings/personal-access-tokens/new", it["context"])
+        self.assertIn("the repositories mhalstrom/app, mhalstrom/site", it["context"])
+        self.assertIn("maxpm secret put github-mhalstrom --from-browser", it["context"])
+        self.assertEqual(it["doer"], "ai")
+        with self.assertRaises(RiverError):
+            accounts.make_token(self.c, "github", "", project="web", actor="mark", start=False)
+
+
 if __name__ == "__main__":
     unittest.main()

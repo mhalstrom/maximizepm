@@ -153,6 +153,23 @@ maxpm pipeline accounts --check [--secret <name>]   # ask the forges now (a pers
 The Deploy tab shows the same: Deploy > Accounts lists the tokens, and the
 head of each pipeline names its forge, account, token and last read.
 
+**Add a token.** A person adds a token on Deploy > Accounts (Add a token, or
+Add it and Replace on a missing or refused one): forge, server (a server of
+their own), the token, and its name. MaximizePM asks the forge who the token
+is before it saves anything: a refused token is not saved, and the form says
+the forge's words. A token that works is saved as a hidden secret (no command
+prints it; with no name: `<forge>-<account>`), and the form shows its
+account, end date and the pipelines that use it. Make the token for me adds
+a task for a session (and starts it): it opens the forge's new-token page in
+the project's browser, the person signs in and presses Generate there, and
+the session saves the token unseen. When you work on such a task, follow its
+context: `maxpm browser open <page>`, fill in the name, the end date, the
+repositories and the permissions, ask the person to press Generate (`maxpm
+ask`), save it with `maxpm secret put <name> --from-browser "<field>"`,
+check it with `maxpm pipeline accounts --check --secret <name>`, and close
+the task. Only a person adds or makes a token; an agent with no task for it
+asks the manager.
+
 When the forge refuses a token (401 or 403), or nobody saved it:
 
 - the pipeline's head turns red, a banner on its page quotes the forge's own
