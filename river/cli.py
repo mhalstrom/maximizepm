@@ -1500,8 +1500,12 @@ def build_parser(only=None):
     x = gls.add_parser("list", help="open goals in order (--all: complete ones too)")
     x.add_argument("--project"); x.add_argument("--all", action="store_true")
     x = gls.add_parser("show", help="a goal, its owner, and its items"); x.add_argument("name")
-    # goal edit is gone (#5991, mark 2026-11-15: unused commands go; 2 uses, the last 2026-10-20): the goal's Edit and
-    # Share buttons in the Projects view do it (page action goal_edit).
+    # goal edit is gone (#5991, mark 2026-11-15: unused commands go; 2 uses, the last 2026-10-20): the goal's Edit
+    # button in the Projects view does it (page action goal_edit). Share has a command too (#6168): the manager shares
+    # a goal that several scoped sessions work on.
+    x = gls.add_parser("share", help="no owner from now on: maxpm go gives the goal to no agent, and its items are "
+                       "open to every agent (--off: one agent can own it again)"); x.add_argument("name")
+    x.add_argument("--off", action="store_true", help="end the sharing: one agent can own the goal again")
     x = gls.add_parser("own", help="own a goal: you create and take the items that reach it; its agent items "
                        "are reserved for you"); x.add_argument("name")
     x.add_argument("--lease", help="how long the claim lasts without a maxpm command, and your leases on its "
@@ -4507,6 +4511,8 @@ def dispatch(conn, a, actor):
             return core.goal_show(conn, a.name)
         if g == "own":
             return core.goal_own(conn, a.name, actor, a.lease)
+        if g == "share":
+            return core.goal_edit(conn, a.name, actor=actor, shared=not a.off)
         if g == "give":
             return core.goal_give(conn, a.name, a.to, actor, a.no_handoff)
         if g == "release":
@@ -5790,6 +5796,9 @@ def render_go(b):
             out.append(f"  e{n['id']} {'STOP REQUEST' if n['kind'] == 'stop' else 'instruction'}"
                        + (f" from {n['added_by']}" if n["added_by"] else "") + f": {n['body']}")
         out += [f"  When you have acted on one: {r} queue remove {me} e<id>", ""]
+    for name in b.get("goals_freed") or []:
+        out.append(f"You do not own goal {name} any more: it is outside your scope ({b.get('scope')}), so its "
+                   f"items are open to the sessions whose scopes hold them.")
     gb = b.get("goal")
     if gb:
         out.append(f"YOUR GOAL {gb['name']} [{gb['project']}]: {gb['outcome'] or '(no outcome written)'}"

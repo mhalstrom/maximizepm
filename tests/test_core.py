@@ -15036,6 +15036,48 @@ class Scopes(Base):
         core.scope_set(self.c, "w2", [], "boss", "end")
         self.assertIsNone(core.agent_scope(self.c, "w2"))
 
+    def test_scope_tasks_never_make_a_goal_owner_nor_reach_past_the_scope(self):
+        """#6168: four sessions, each with tasks of one goal. go made one the owner, which reserved every task of
+        the goal for it, and it took a task outside its scope."""
+        core.goal_add(self.c, "a", "g", "the outcome", "it works")
+        x = core.item_add(self.c, "a", "first part", goals=["g"], priority=0)["id"]
+        y = core.item_add(self.c, "a", "second part", goals=["g"])["id"]
+        core.scope_set(self.c, "w", [f"tasks:{x}"], "boss")
+        core.scope_set(self.c, "w2", [f"tasks:{y}"], "boss")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual(b["item"]["id"], x)
+        self.assertIsNone(core._goal(self.c, "g")["owner"])  # a list of tasks names no goal
+        self.assertEqual(core.go(self.c, self.dir.name, "w2")["item"]["id"], y)
+        core.done(self.c, x, "ok", "w")
+        # A session that owns the goal already (before the fix) frees it, and takes no task outside its scope.
+        z = core.item_add(self.c, "a", "third part", goals=["g"])["id"]
+        core.goal_own(self.c, "g", "w")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual((b["role"], b["goals_freed"]), ("idle", ["g"]))
+        self.assertIsNone(core._goal(self.c, "g")["owner"])
+        self.assertNotEqual(core._item(self.c, z)["status"], "in_progress")
+        # A goal scope may own its goal.
+        core.release(self.c, y, "w2")
+        core.scope_set(self.c, "w2", ["goal:g"], "boss")
+        b = core.go(self.c, self.dir.name, "w2", role="owner")
+        self.assertEqual(core._goal(self.c, "g")["owner"], "w2")
+
+    def test_goal_share_command_frees_the_owner(self):
+        from river import cli
+        core.goal_add(self.c, "a", "g", "the outcome", "it works")
+        core.goal_own(self.c, "g", "w")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "boss", "goal", "share", "g"])
+        self.assertIn("shared: no owner", out.getvalue())
+        g = core._goal(self.c, "g")
+        self.assertEqual((g["shared"], g["owner"]), (1, None))
+        with self.assertRaisesRegex(RiverError, "a person or a manager decides"):
+            cli.run(["--as", "w2", "goal", "share", "g", "--off"])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "boss", "goal", "share", "g", "--off"])
+        self.assertEqual(core._goal(self.c, "g")["shared"], 0)
+
     def test_scope_command_and_launch(self):
         from river import cli
         x = core.item_add(self.c, "b", "for the scope")["id"]

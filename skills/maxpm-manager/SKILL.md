@@ -231,10 +231,12 @@ ends the session, and tell the user.
   names it; tag its tasks and let them run. A no closes the goal.
 - **A goal that several agents must work on at the same time**: an owner
   reserves the goal's agent items, so one agent does them in sequence. When
-  the user wants its items open to every agent, the user makes the goal
-  shared with its Share button in the Projects view. The owner goes (and is
-  told), `maxpm go` never gives the goal to an agent again, and nothing is
-  reserved. The same button undoes it.
+  the user wants its items open to every agent, or you split its tasks
+  between several sessions (scopes `tasks:<ids>`), share it: `maxpm goal
+  share <name>`, or its Share button in the Projects view. The owner goes (and
+  is told), `maxpm go` never gives the goal to an agent again, and nothing is
+  reserved. `--off` (or the same button) undoes it. A session with a scope
+  owns only a goal of its scope (`goal:`, or a goal of its `project:`).
 - **A question held for you** (a session asked the user with `maxpm ask` or
   `maxpm send question`; while you are the active manager it comes to you
   first, and your watch wakes at once): the user does not see it yet. Decide

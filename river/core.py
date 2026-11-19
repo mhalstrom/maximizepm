@@ -15570,7 +15570,8 @@ def work_refusal(conn, a, view):
         return (f"reserved for {a['reserved_for']}", False)
     if view.tree is not None and a["id"] not in view.tree and not view.chosen(a):
         return ("not in this session's tree", False)
-    if view.scope is not None and a["id"] not in view.scope and not view.chosen(a):
+    # A goal that the session owns does not widen its scope: only a push or its own queue does (#6168).
+    if view.scope is not None and a["id"] not in view.scope and not (view.chosen(a) and not a.get("goal_reserved")):
         return (f"outside this session's scope ({scope_text(view.parts)})", False)
     if a["kind"] == "deploy" and actor and a["target"] not in view.targets:
         return (f"deploys to target {a['target']}, which this session does not own", False)
@@ -15709,6 +15710,21 @@ def scope_items(conn, parts, ann=None):
             out |= {i for i, a in ann.items() if a["kind"] == "deploy" and a["target"] == v}
         else:  # tasks, joined
             out |= set(v)
+    return out
+
+
+def scope_goals(conn, parts):
+    """The goals that a session with this scope may own (#6168): a goal of the scope and its sub-goals, and the goals
+    of a project of the scope. A list of tasks, a release or a target holds no goal: owning one would reserve its
+    items for this session, so the other sessions on the goal would have nothing to take."""
+    out = set()
+    for p in parts or []:
+        if p["kind"] == "goal":
+            out |= {p["value"]} | {r["name"] for r in conn.execute(
+                "SELECT c.name FROM goals c JOIN goals g ON g.id=c.parent_id WHERE g.name=?", (p["value"],))}
+        elif p["kind"] == "project":
+            out |= {r["name"] for r in conn.execute(
+                "SELECT g.name FROM goals g JOIN projects p ON p.id=g.project_id WHERE p.name=?", (p["value"],))}
     return out
 
 
@@ -23209,6 +23225,20 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             _set_role_note(conn, actor, "idle", None)
             return brief
     if role in (None, "owner", "worker"):
+        allowed = scope_goals(conn, scope) if scope else None
+        if allowed is not None:
+            # A scoped session owns no goal outside its scope (#6168): it frees one it owns, so that the goal's items
+            # are open to the sessions whose scopes hold them.
+            out = [r["name"] for r in conn.execute("SELECT name FROM goals WHERE owner=? AND status='open'", (actor,))
+                   if r["name"] not in allowed]
+            if out:
+                with tx(conn):
+                    for n in out:
+                        conn.execute("UPDATE goals SET owner=NULL, owner_expires_at=NULL, owner_lease=NULL "
+                                     "WHERE name=?", (n,))
+                        _event(conn, None, "maxpm", f"goal {n} released: it is outside the scope of {actor} "
+                                                    f"({scope_text(scope)})")
+                brief["goals_freed"] = out
         g = _owned_goal(conn, actor, names)
         if g is None and role in (None, "owner"):
             # Agents own outcomes: take an open goal nobody owns. --role owner takes the highest-ranked one.
@@ -23233,6 +23263,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                         if a["goals"] and a["status"] in OPEN_STATES and best[0]["id"] in _prereq_closure(ann, a["id"]):
                             serves.update(a["goals"])
                 free = [f for f in free if f["name"] in serves]
+            free = [f for f in free if allowed is None or f["name"] in allowed]
             for f in free:
                 try:
                     goal_own(conn, f["name"], actor)

@@ -26,7 +26,8 @@ COMMANDS = {
     "realquicksite": {"status": ANY, "connect": ONLY_PERSON, "disconnect": ONLY_PERSON},
     "secret": {"*": ANY},  # each credential has its own levels and grants (river/vault.py)
     "goal": {"add": ANY, "list": ANY, "show": ANY, "own": ANY, "give": ANY, "release": ANY,
-             "base": ANY, "handoff": ANY, "done": ANY},
+             "base": ANY, "handoff": ANY, "done": ANY,
+             "share": ANY},  # goal_edit lets only a person, the manager, or the goal's owner change it (#6168)
     "schedule": {"*": ANY},
     "ops": {"*": ANY, "setup": LEAD, "profile": LEAD},
     "target": {"add": LEAD, "describe": LEAD, "deployer": LEAD, "watch": LEAD, "cadence": LEAD, "cut": ANY,
