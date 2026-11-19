@@ -104,7 +104,8 @@ class Commands(Base):
         self.assertEqual([s["name"] for s in exp["stages"]], ["build", "test", "review", "beta", "prod"])
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
                                              "workflow": None, "env": "prod", "gate": "auto after 30m",
-                                             "junit": None})
+                                             "junit": None, "waves": None, "check": None, "rollback": None,
+                                             "wave_wait": None})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
         code, out = self.cli("pipeline", "history", "toolscaled")
         lines = out.strip().split("\n")
@@ -647,6 +648,55 @@ class Actions(RunnerBase):
         with self.assertRaises(RiverError):
             self.runner.rerun_failed(self.c, self.runs()["build"]["id"], actor="mark")  # no failed test
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], build_runs)
+
+
+class Waves(RunnerBase):
+    """A stage over many servers in waves (#6120): three fake servers (local commands), one fails its check."""
+
+    def setUp(self):
+        super().setUp()
+        define.stage_set(self.c, "app", "prod", gate="auto", waves="web-1; web-2, web-3",
+                         run='echo "deploy $MAXPM_REV to $MAXPM_HOST" >> deploys.log',
+                         check='test "$MAXPM_HOST" != web-3 || { echo "readyz 503"; exit 1; }',
+                         rollback='echo "back to $MAXPM_PREV_REV on $MAXPM_HOST" >> deploys.log')
+
+    def log(self):
+        with open(os.path.join(self.folder, "deploys.log")) as f:
+            return f.read().splitlines()
+
+    def test_a_failed_check_stops_the_waves_and_rolls_back_that_wave(self):
+        store.deployed(self.c, "app", "prod", "old0001")
+        self.runner.start(self.c, "app", rev="new0002")
+        self.passes(5)
+        prod = self.runs()["prod"]
+        self.assertEqual(prod["state"], "failed")
+        self.assertEqual(prod["errors"], "wave 2: web-3 failed its check (exit 1); rolled back web-2, web-3")
+        self.assertEqual(self.log(), ["deploy new0002 to web-1", "deploy new0002 to web-2", "deploy new0002 to web-3",
+                                      "back to old0001 on web-2", "back to old0001 on web-3"])
+        steps_ = [(s["name"], s["host"], s["state"]) for s in store.run_show(self.c, prod["id"])["step_list"]]
+        self.assertEqual(steps_, [("deploy", "web-1", "passed"), ("check", "web-1", "passed"),
+                                  ("deploy", "web-2", "passed"), ("check", "web-2", "passed"),
+                                  ("deploy", "web-3", "passed"), ("check", "web-3", "failed"),
+                                  ("rollback", "web-2", "passed"), ("rollback", "web-3", "passed")])
+        self.assertEqual(store.show(self.c, "app")["envs"][1]["rev"], "old0001")  # a failed stage records no deploy
+
+    def test_a_first_wave_that_fails_stops_the_others(self):
+        define.stage_set(self.c, "app", "prod", waves="web-3; web-1, web-2")
+        self.runner.start(self.c, "app", rev="new0003")
+        self.passes(5)
+        self.assertEqual(self.runs()["prod"]["errors"], "wave 1: web-3 failed its check (exit 1); rolled back web-3; "
+                                                        "2 server(s) of later waves not started")
+
+    def test_all_waves_pass_and_the_definition(self):
+        define.stage_set(self.c, "app", "prod", check="true", wave_wait="0s")
+        self.runner.start(self.c, "app", rev="new0004")
+        self.passes(5)
+        self.assertEqual(self.runs()["prod"]["state"], "passed")
+        self.assertEqual(store.show(self.c, "app")["envs"][1]["rev"], "new0004")
+        stage = next(s for s in define.export(self.c, "app")["stages"] if s["name"] == "prod")
+        self.assertEqual((stage["waves"], stage["wave_wait"]), ("web-1; web-2, web-3", "0s"))
+        with self.assertRaises(RiverError):
+            define.stage_set(self.c, "app", "prod", waves="web 1;$(rm)")
 
 
 class Links(RunnerBase):

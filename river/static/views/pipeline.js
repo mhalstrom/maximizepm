@@ -168,9 +168,26 @@ function detail() {
     + (r.gate_note && r.state === "queued" ? `<div class="t-s">Gate: ${esc(r.gate_note)}</div>` : "")
     + stageActions(s, r)
     + (r.errors ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
+    + wavesHtml(s, r)
     + gantt(r.step_list || [])
     + (r.output ? `<pre class="pl-pre">${esc(r.output)}</pre>` : "")
     + (r.test_list && r.test_list.length ? tests(r) : "");
+}
+
+// A stage over many servers (#6120): one card for each wave, each server with the state of its deploy, its check
+// and, after a failed wave, its roll back (the steps of the run with where=<host>).
+function wavesHtml(s, r) {
+  let waves;
+  try { waves = s.waves ? JSON.parse(s.waves) : null; } catch (e) { waves = null; }
+  if (!waves || !waves.length) return "";
+  const of = (host, name) => (r.step_list || []).filter(x => x.host === host && x.name === name).pop();
+  const cell = (x, word) => x ? st(x.state, `${word} ${WORD[x.state] || x.state}`) : "";
+  const card = (w, n) => `<div class="pl-wave"><b class="t-m">Wave ${n + 1}</b>${w.map(h => {
+    const d = of(h, "deploy"), c = of(h, "check"), b = of(h, "rollback");
+    return `<div class="pl-host"><span class="pl-ver">${esc(h)}</span><span class="pl-bar">${d ? cell(d, "deploy") + cell(c, "check")
+      + cell(b, "roll back") : st("queued", "not started")}</span></div>`;
+  }).join("")}</div>`;
+  return `<div class="pl-waves">${waves.map(card).join("")}</div>`;
 }
 
 // The actions on a stage (#6117): only a person or the manager acts; a default pipeline (a target's releases) has

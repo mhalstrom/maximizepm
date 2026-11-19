@@ -19,7 +19,19 @@ import re
 from .. import core
 from . import store
 
-_FIELDS = ("kind", "run", "workflow", "env", "gate", "junit")
+_FIELDS = ("kind", "run", "workflow", "env", "gate", "junit", "waves", "check", "rollback", "wave_wait")
+
+
+def parse_waves(text):
+    """Servers in waves from 'web-1; web-2, web-3' (a ';' between waves, a ',' or a space between servers): the
+    list of lists that pipeline_stages.waves keeps as JSON. '' clears it."""
+    waves = [[h for h in re.split(r"[,\s]+", w.strip()) if h] for w in (text or "").split(";")]
+    waves = [w for w in waves if w]
+    for h in (h for w in waves for h in w):
+        if not re.match(r"^[\w.@:-]{1,100}$", h):
+            raise core.RiverError(f"the server name {h!r} has a character that is not a letter, digit, '.', '-', "
+                                  "'_', '@' or ':'")
+    return waves
 
 
 def _may(conn, actor):
@@ -131,11 +143,13 @@ def _stage_detail(conn, s):
     env = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (s["env_id"],)).fetchone() if s["env_id"] else None
     return {"name": s["name"], "pos": s["pos"], "kind": s["kind"], "run": s["run"], "workflow": s["workflow"],
             "env": env["name"] if env else None, "gate": store.gate_text(s["gate"], s["gate_rule"]),
-            "junit": s["junit"]}
+            "junit": s["junit"],
+            "waves": "; ".join(", ".join(w) for w in json.loads(s["waves"])) if s["waves"] else None,
+            "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"]}
 
 
 def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None, gate=None, pos=None, remove=False,
-              actor=None, junit=None):
+              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None):
     """Add a stage (kind needed), or change the fields given ('' clears run, workflow or env), or move it (pos), or
     remove it (its runs stay; adding the name again brings it back). A stage runs a command (run) or a forge
     workflow (workflow), not both; a deploy stage names its environment."""
@@ -180,6 +194,17 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             sets["gate"], sets["gate_rule"] = rule
         if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
             sets["junit"] = junit.strip() or None
+        if waves is not None:  # a stage over many servers (#6120)
+            w = parse_waves(waves)
+            sets["waves"] = json.dumps(w) if w else None
+        if check is not None:
+            sets["check_cmd"] = check.strip() or None
+        if rollback is not None:
+            sets["rollback_cmd"] = rollback.strip() or None
+        if wave_wait is not None:
+            if wave_wait.strip():
+                core.parse_duration(wave_wait.strip())
+            sets["wave_wait"] = wave_wait.strip() or None
         if row is None:
             if kind is None:
                 raise core.RiverError(f"a new stage needs its kind: --kind {'|'.join(store.STAGE_KINDS)}")

@@ -21,6 +21,7 @@ forge workflow and no command is left to that forge's adapter.
 No session types a stage's command: serve runs it, outside every sandbox, as it runs a target's hooks.
 """
 
+import json
 import os
 import queue
 import subprocess
@@ -41,7 +42,8 @@ FLUSH_LINES = 200
 def _row(conn, run_id):
     return conn.execute(
         "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.gate, s.gate_rule, s.pos, s.env_id, "
-        "s.held_reason stage_hold, s.held_by stage_hold_by, p.held_reason pipe_hold, p.held_by pipe_hold_by, "
+        "s.held_reason stage_hold, s.held_by stage_hold_by, p.held_reason pipe_hold, p.held_by pipe_hold_by, s.waves, "
+        "s.check_cmd, s.rollback_cmd, s.wave_wait, "
         "p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
         "JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?",
         (run_id,)).fetchone()
@@ -310,21 +312,10 @@ def _execute(conn, run_id):
             env["MAXPM_TESTS"] = "\n".join(f"{t['suite']}.{t['name']}" for t in store.tests(
                 conn, int(r["purpose"].split(":", 1)[1])) if t["state"] in ("failed", "error"))
         began = time.time()
-        try:
-            if folder and not os.path.isdir(folder):
-                raise OSError(f"the folder {folder} does not exist")
-            try:
-                code, timed_out = _command(r["cmd"], folder, limit, env,
-                                           lambda lines: steps.ingest_output(conn, run_id, lines), run_id)
-            finally:
-                PROCS.pop(run_id, None)
-        except OSError as e:
-            code, timed_out = None, False
-            errors = f"the command did not start: {e}"
-        if timed_out:
-            state, errors = "failed", f"stopped at stage_timeout ({limit_text})"
-        elif code != 0:
-            state, errors = "failed", errors or f"exit {code}"
+        if r["waves"]:
+            state, errors = _waves(conn, r, folder, limit, limit_text, env)
+        else:
+            state, errors = _single(conn, r, r["cmd"], folder, limit, limit_text, env)
         if r["junit"]:
             path = os.path.join(folder or "", os.path.expanduser(r["junit"]))
             try:
@@ -344,6 +335,80 @@ def _execute(conn, run_id):
     if state == "passed":
         _hand_on(conn, _row(conn, run_id))
     return state
+
+
+def _single(conn, r, cmd, folder, limit, limit_text, env, on_lines=None):
+    """Run one command of a stage run to its end: ("passed", None) or ("failed", why)."""
+    run_id = r["id"]
+    try:
+        if folder and not os.path.isdir(folder):
+            raise OSError(f"the folder {folder} does not exist")
+        try:
+            code, timed_out = _command(cmd, folder, limit, env, on_lines or (lambda lines: steps.ingest_output(
+                conn, run_id, lines)), run_id)
+        finally:
+            PROCS.pop(run_id, None)
+    except OSError as e:
+        return "failed", f"the command did not start: {e}"
+    if timed_out:
+        return "failed", f"stopped at stage_timeout ({limit_text})"
+    if code != 0:
+        return "failed", f"exit {code}"
+    return "passed", None
+
+
+def _waves(conn, r, folder, limit, limit_text, env):
+    """A stage over many servers (#6120): for each wave, each server's deploy (the stage's command with MAXPM_HOST)
+    and its check, as steps with where=<host>; after a wave, wave_wait, then its checks again. A failed deploy or
+    check stops the rollout: the servers of that wave go back to the version before (the roll back command), and
+    the next waves do not start. Returns (state, errors)."""
+    waves = json.loads(r["waves"])
+    prev = None
+    if r["env_id"]:
+        v = conn.execute("SELECT v.rev FROM pipeline_envs e JOIN pipeline_versions v ON v.id=e.version_id WHERE e.id=?",
+                         (r["env_id"],)).fetchone()
+        prev = v["rev"] if v else None
+    run_id = r["id"]
+
+    def step(name, host, kind, cmd):
+        steps.ingest_output(conn, run_id, [f"::step start {name} kind={kind} where={host}"])
+        st, why = _single(conn, r, cmd, folder, limit, limit_text,
+                          {**env, "MAXPM_HOST": host, "MAXPM_PREV_REV": prev or "", "MAXPM_WAVE": str(n)})
+        steps.ingest_output(conn, run_id, [f"::step end {name} where={host} {st}" + (f" {why}" if why else "")])
+        return st == "passed", why
+
+    for n, wave in enumerate(waves, 1):
+        done, bad = [], None
+        for host in wave:
+            ok, why = step("deploy", host, "deploy", r["cmd"])
+            done.append(host)
+            if not ok:
+                bad = f"wave {n}: {host} did not deploy ({why})"
+                break
+            if r["check_cmd"]:
+                ok, why = step("check", host, "check", r["check_cmd"])
+                if not ok:
+                    bad = f"wave {n}: {host} failed its check ({why})"
+                    break
+        if bad is None and r["wave_wait"] and n < len(waves):
+            steps.ingest_output(conn, run_id, [f"::step start wait kind=wait where=wave-{n}"])
+            time.sleep(core.parse_duration(r["wave_wait"]).total_seconds())  # timing: the stage's own wait
+            steps.ingest_output(conn, run_id, [f"::step end wait where=wave-{n} passed"])
+            for host in wave if r["check_cmd"] else []:
+                ok, why = step("check", host, "check", r["check_cmd"])
+                if not ok:
+                    bad = f"wave {n}: {host} failed its check after {r['wave_wait']} ({why})"
+                    break
+        if bad:
+            back = []
+            if r["rollback_cmd"]:
+                for host in done:
+                    ok, _why = step("rollback", host, "deploy", r["rollback_cmd"])
+                    back.append(host + ("" if ok else " (failed)"))
+            left = sum(len(w) for w in waves[n:])
+            return "failed", bad + (f"; rolled back {', '.join(back)}" if back else "") + (
+                f"; {left} server(s) of later waves not started" if left else "")
+    return "passed", None
 
 
 def _hand_on(conn, r):

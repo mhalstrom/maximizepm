@@ -1905,6 +1905,11 @@ def build_parser(only=None):
     x.add_argument("--pos", type=int, help="its place, 1 is the first")
     x.add_argument("--junit", help="a test stage: the JUnit XML file its command writes, in the project folder "
                    "('' clears it)")
+    x.add_argument("--waves", help="a stage over many servers: 'web-1; web-2, web-3' (';' between waves); --run then "
+                   "runs once for each server with MAXPM_HOST set (ssh \"$MAXPM_HOST\" ...)")
+    x.add_argument("--check", help="the check of one server after its deploy (MAXPM_HOST); a failure stops the waves")
+    x.add_argument("--rollback", help="puts the version before back on one server (MAXPM_HOST, MAXPM_PREV_REV)")
+    x.add_argument("--wave-wait", help="how long the checks of a wave must hold before the next wave (10m)")
     x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
@@ -7510,7 +7515,7 @@ def _pipeline_cmd(conn, a, actor):
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
         return define.stage_set(conn, a.name, a.stage, a.kind, a.run, a.workflow, a.env, a.gate, a.pos, a.remove,
-                                actor, a.junit)
+                                actor, a.junit, a.waves, a.check, a.rollback, a.wave_wait)
     if sub == "start":
         from .pipeline import runner
         return runner.start(conn, a.name, a.rev, actor)

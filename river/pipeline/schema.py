@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   created_at   TEXT NOT NULL,
   removed_at   TEXT,                     -- a removed stage keeps its runs; adding its name again brings it back
   junit        TEXT,                     -- a test stage: the JUnit XML file its command writes (in the project folder)
+  waves        TEXT,                     -- a stage over many servers (#6120): JSON [["web-1"], ["web-2", "web-3"]]
+  check_cmd    TEXT,                     -- ... the check of one server after its deploy (MAXPM_HOST)
+  rollback_cmd TEXT,                     -- ... puts the version before back on one server (MAXPM_HOST, MAXPM_PREV_REV)
+  wave_wait    TEXT,                     -- ... how long the checks of a wave must hold before the next wave
   held_reason  TEXT,                     -- a hold of its gate: no new version enters (one sent on purpose does, #6117)
   held_by      TEXT,
   held_at      TEXT,
@@ -226,7 +230,8 @@ def migrate(conn):
         if c not in cols:  # #6119, #6117
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
-    for c in ("removed_at", "junit", "held_reason", "held_by", "held_at"):  # #6113, #6114, #6117
+    for c in ("removed_at", "junit", "held_reason", "held_by", "held_at", "waves", "check_cmd", "rollback_cmd",
+              "wave_wait"):  # #6113, #6114, #6117, #6120
         if c not in cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
