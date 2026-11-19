@@ -159,7 +159,7 @@ class Manifests(Base):
         rows = {p["name"]: p for p in plugin.listing()}
         self.assertIn("error", rows["bad0"])
         with self.assertRaises(RiverError) as e:
-            plugin.find("gitlab")  # an adapter that is still a module, not a plugin
+            plugin.find("gitea")  # a forge name that the plugin github serves; no plugin has that name
         self.assertIn("no plugin", str(e.exception))
 
     def test_a_reserved_name_is_refused(self):
@@ -332,7 +332,7 @@ class Actions(Base):
             runner.stop(self.c, self.runs()["deploy"]["id"])
         self.assertIn("stop is not available for this source", str(e.exception))
 
-    def test_built_in_adapters_and_commands_here(self):
+    def test_shipped_plugins_and_commands_here(self):
         self.assertEqual(store.show(self.c, "app")["source"]["kind"], "here")
         define.forge_set(self.c, "app", "pulumi", repo="o/p/s", secret="pd")
         self.assertNotIn("rollback", store.show(self.c, "app")["source"]["actions"])
@@ -352,6 +352,11 @@ class GitHubPlugin(Base):
         p = self.pipeline()
         self.assertEqual(plugin._config(p), {"settings": {"forge": "gitea", "repo": "o/app",
                                                           "url": "https://git.example.com"}, "secrets": {"token": "tok"}})
+
+    def test_the_gitlab_plugin_does_every_action(self):
+        out = plugin.describe("gitlab")  # #6162: a process, as maxpm serve runs it
+        self.assertEqual(out["actions"], ["start", "stop", "rerun", "rollback"])
+        self.assertEqual(sorted(out["settings"]), ["repo", "url"])
 
     def test_the_pulumi_plugin_lists_no_roll_back(self):
         out = plugin.describe("pulumi")  # #6161: a process, as maxpm serve runs it

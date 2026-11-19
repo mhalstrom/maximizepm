@@ -46,15 +46,13 @@ MANIFEST = "plugin.json"
 LEVELS = ("report", "act", "gate")
 ACTIONS = ("start", "stop", "rerun", "rollback")  # the calls of a plugin besides describe and poll
 ALL_ACTIONS = list(ACTIONS)
-# The adapters that are still Python modules (runner.FORGES): what each one can do. Pulumi Delivery has no roll back
-# by its API (#6133). GitHub, Gitea and Forgejo are the shipped plugin github (#6160): PLUGIN_OF names the plugin of a
-# forge name, and the events of those pipelines keep the forge's name as their source.
-BUILTIN_ACTIONS = {"gitlab": ALL_ACTIONS}
+# Every forge is a shipped plugin (#6160-#6162). GitHub, Gitea and Forgejo are the plugin github: PLUGIN_OF names the
+# plugin of a forge name, and the events of those pipelines keep the forge's name as their source.
 PLUGIN_OF = {"gitea": "github", "forgejo": "github"}
-RESERVED = set(BUILTIN_ACTIONS) | set(PLUGIN_OF) | {"none", "maxpm", "here", "plugin"}
-# Pipelines that keep repo, url, ref and secret in their own columns (maxpm pipeline forge <p> github|...|pulumi):
-# their shipped plugin gets them as its settings repo, url, ref and its secret token (#6160, #6161).
-SHIPPED_FORGES = ("github", "gitea", "forgejo", "pulumi")
+RESERVED = set(PLUGIN_OF) | {"none", "maxpm", "here", "plugin"}
+# Pipelines that keep repo, url, ref and secret in their own columns (maxpm pipeline forge <p> github|...|gitlab):
+# their shipped plugin gets them as its settings repo, url, ref and its secret token (#6160, #6161, #6162).
+SHIPPED_FORGES = ("github", "gitea", "forgejo", "pulumi", "gitlab")
 RUNS_SENT = 100  # the newest stage runs that a request lists besides the open ones
 
 
@@ -174,7 +172,7 @@ def find(name, need=True):
 
 def is_plugin(forge):
     """Whether a pipeline's source (pipelines.forge) is a plugin that is installed and usable."""
-    return bool(forge) and forge not in BUILTIN_ACTIONS and find(plugin_name(forge), need=False) is not None
+    return bool(forge) and forge != "none" and find(plugin_name(forge), need=False) is not None
 
 
 def listing():
@@ -523,9 +521,7 @@ def poll_due(conn):
     poll_every old. An error stays on its pipeline (poll_error) and does not stop the others."""
     out = {}
     now = core.now()
-    skip = sorted(set(BUILTIN_ACTIONS) | {"none"})
-    for p in conn.execute("SELECT * FROM pipelines WHERE forge IS NOT NULL AND forge NOT IN (%s)"
-                          % ",".join("?" * len(skip)), skip).fetchall():
+    for p in conn.execute("SELECT * FROM pipelines WHERE forge IS NOT NULL AND forge<>'none'").fetchall():
         m = find(plugin_name(p["forge"]), need=False)
         every = m["poll_every"] if m else POLL_EVERY
         if p["polled_at"] and core.parse_iso(p["polled_at"]) > now - core.timedelta(seconds=every):
@@ -557,13 +553,11 @@ def action_for(purpose):
 
 def actions(conn, p):
     """What the source of pipeline p can do, for the page and the refusals: {'kind', 'name', 'actions', ...}.
-    kind here: the stages' commands run on this computer (every action); adapter: a built-in forge adapter;
-    plugin: an installed plugin (its level, version and actions); missing: a plugin that is not installed."""
+    kind here: the stages' commands run on this computer (every action); plugin: an installed plugin, a shipped
+    forge too (its level, version and actions); missing: a plugin that is not installed."""
     src = p["forge"]
-    if not src:
+    if not src or src == "none":
         return {"kind": "here", "name": None, "actions": ALL_ACTIONS}
-    if src in BUILTIN_ACTIONS:
-        return {"kind": "adapter", "name": src, "actions": BUILTIN_ACTIONS[src]}
     try:
         m = find(plugin_name(src))
     except core.RiverError as e:
@@ -579,8 +573,8 @@ def need(conn, p, stage, action):
     src = actions(conn, p)
     if action not in src["actions"]:
         from .runner import FORGES
-        if src["kind"] == "adapter" or p["forge"] in FORGES:
-            name = FORGES.get(p["forge"]) or FORGES.get(src["name"], src["name"])
+        if p["forge"] in FORGES:  # a forge that MaximizePM ships the plugin of: its API has no such call
+            name = FORGES[p["forge"]]
             raise core.RiverError(f"{action} is not available for this source: MaximizePM cannot do it through the "
                                   f"{name} API; do it on {name}'s own page")
         raise core.RiverError(f"{action} is not available for this source: " + (
@@ -631,6 +625,6 @@ def act(conn, run_id, action):
 def plugin_run(conn, r):
     """Whether stage run r (runner._row) is in the hands of a plugin: started by it, or made by its events."""
     src = r["forge"]
-    if not src or src in BUILTIN_ACTIONS or src == "none" or not (r["workflow"] and not r["cmd"]):
+    if not src or src == "none" or not (r["workflow"] and not r["cmd"]):
         return False
     return (r["runner"] or "") == f"forge:{src}" or r["source"] == src

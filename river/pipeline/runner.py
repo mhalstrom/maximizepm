@@ -18,7 +18,7 @@ comes, and its '::step' lines become steps (steps.ingest_output). A test stage t
 (maxpm pipeline stage ... --junit <path>) has the file read after its command. A stage that passes hands the version
 to the next stage (and a deploy stage records it in its environment); a stage that fails stops the pipeline for
 that version. A stage with no command (a review or an approval only) passes when it may enter. A stage with a
-forge workflow and no command is left to that forge's adapter.
+forge workflow and no command is left to the plugin of its source (river/pipeline/plugin.py).
 
 No session types a stage's command: serve runs it, outside every sandbox, as it runs a target's hooks.
 """
@@ -36,14 +36,8 @@ from . import audit, cdevents, junit, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
           "pulumi": "Pulumi Delivery"}  # the forges that MaximizePM knows by name (Pulumi Delivery: #6133)
-# GitHub, Gitea and Forgejo run through the shipped plugin github (plugins/github, #6160), Pulumi Delivery through the
-# plugin pulumi (#6161); GitLab is still a Python module (river/pipeline/gitlab.py) until its plugin replaces it.
-
-
-def _adapter(forge):
-    """The module of a forge's adapter that is still a Python module: river/pipeline/<forge>.py."""
-    import importlib
-    return importlib.import_module(f"{__package__}.{forge}")
+# Each forge runs through a shipped plugin (river/pipeline/plugins): github for GitHub, Gitea and Forgejo (#6160),
+# pulumi (#6161), gitlab (#6162). plugin.py polls them and asks them to act.
 
 
 RUNNING = {}  # run id -> the thread of this process that runs it; server.restart_blocked waits for them
@@ -152,7 +146,7 @@ def _mode(conn, r, t):
     mode, arg = t["mode"], t["mode_arg"]
     if mode == "auto":
         return True, None
-    if mode == "forge":  # #6119: a push or a tag starts it on the forge; the adapter links its run to this one
+    if mode == "forge":  # #6119: a push or a tag starts it on the forge; its plugin links that run to this one
         return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
     if r["approved_at"]:
         return True, None
@@ -671,11 +665,6 @@ def stop(conn, run_id, actor=None):
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})", "stop",
              f"stage {r['stage']}", r["rev"], run_id)
-    forge = (r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
-        r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-", "pd-")) else None
-    if forge in FORGES:
-        _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
-        return {"run": run_id, "stopped": f"on {FORGES[forge]}"}
     p = PROCS.get(run_id)
     if p is not None:
         core._stop_group(p)  # the run's thread records the end
@@ -726,7 +715,6 @@ def serve_pass(conn):
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
     transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
-    _adapter("gitlab").poll_due(conn)  # the GitLab pipelines, once a minute each (#6121)
     from . import plugin
     plugin.poll_due(conn)  # and the pipelines whose source is a plugin: GitHub, Gitea, Forgejo too (#6159, #6160)
     started, waiting = [], {}
@@ -735,8 +723,8 @@ def serve_pass(conn):
     for row in rows:
         r = _row(conn, row["id"])
         forge = r["workflow"] and not r["cmd"]
-        if forge and (r["runner"] or not (r["forge"] in FORGES or plugin.is_plugin(r["forge"]))):
-            continue  # started on the forge already (its adapter reads the run), or a forge with no adapter here
+        if forge and (r["runner"] or not plugin.is_plugin(r["forge"])):
+            continue  # started in its system already (its plugin reads the run), or no plugin serves its source
         busy = conn.execute("SELECT id FROM stage_runs WHERE stage_id=? AND state='running'", (r["stage_id"],)).fetchone()
         if busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
             open_, note = False, f"waits for run #{busy['id'] if busy else started[-1]} of stage {r['stage']}"
@@ -766,17 +754,12 @@ def serve_pass(conn):
                      f"#{r['gate_item']} (run #{r['id']})", "approve", f"the transition into {r['stage']}", r["rev"],
                      r["id"])
         started.append(r["id"])
-        if forge and r["forge"] not in plugin.BUILTIN_ACTIONS:  # the gate opened: the plugin starts it (#6159)
+        if forge:  # the gate opened: the source's plugin starts it in its system (#6159)
             try:
                 plugin.act(conn, r["id"], plugin.action_for(r["purpose"]))
             except core.RiverError as e:
                 store.run_finish(conn, r["id"], "failed", errors=f"{FORGES.get(r['forge']) or 'plugin ' + r['forge']} "
                                  f"did not start it: {e}")
-        elif forge:  # the gate opened: the forge runs it (#6119, #6121)
-            try:
-                _adapter(r["forge"]).dispatch(conn, r["id"])
-            except core.RiverError as e:
-                store.run_finish(conn, r["id"], "failed", errors=f"{FORGES[r['forge']]} did not start it: {e}")
         elif SYNC["on"]:
             _execute(conn, r["id"])
         else:

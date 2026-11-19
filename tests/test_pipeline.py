@@ -1743,19 +1743,18 @@ def gl_job(n, name, stage, status, at="2026-11-18T10:00:00Z"):
 
 
 class GitLab(Base):
-    """The GitLab adapter (#6121): a MaximizePM stage is a GitLab stage; its jobs, the test report and the
-    environments become events; a gated stage plays its manual jobs; a roll back retries the jobs of an older pipeline."""
+    """GitLab, the shipped plugin gitlab (#6121, #6162): a MaximizePM stage is a GitLab stage; its jobs, the test
+    report and the environments become events; a gated stage plays its manual jobs; a roll back retries the jobs of an
+    older pipeline. The plugin runs in this process against the fake API."""
 
     P = "/projects/grp%2Fshop"
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import forge, gitlab, runner
-        self.gl, self.runner = gitlab, runner
+        from river.pipeline import plugin, runner
+        self.runner, self.plugin = runner, plugin
         self.api = FakeGitLab()
-        old = (gitlab.FETCH, forge.token)
-        gitlab.FETCH, forge.token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(gitlab, "FETCH", old[0]) or setattr(forge, "token", old[1]))
+        self.gl = plugin_hooks(self, self.api)
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "shop")
@@ -1838,9 +1837,11 @@ class GitLab(Base):
     def test_the_forge_command_for_gitlab(self):
         define.forge_set(self.c, "shop", "gitlab", repo="grp/sub/shop", secret="x", url="https://git.example.com",
                          actor="mark")
-        p = self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
-        self.assertEqual(self.gl._base(p) + "/projects/" + self.gl._pid(p),
-                         "https://git.example.com/api/v4/projects/grp%2Fsub%2Fshop")
+        urls = []
+        self.plugin.RUNNER = in_process_plugin(lambda method, url, headers, body: urls.append(url) or (404, b"{}"))
+        self.c.execute("UPDATE pipelines SET polled_at=NULL")
+        self.assertIn("GitLab answered 404", self.plugin.poll_due(self.c)["shop"]["error"])
+        self.assertTrue(urls[0].startswith("https://git.example.com/api/v4/projects/grp%2Fsub%2Fshop/pipelines"), urls)
         for bad in ({"repo": "shop"}, {"repo": "g/s", "url": "http://plain"}):
             with self.assertRaises(RiverError):
                 define.forge_set(self.c, "shop", "gitlab", secret="x", **{"repo": None, **bad})

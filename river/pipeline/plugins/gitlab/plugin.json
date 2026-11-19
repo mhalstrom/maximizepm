@@ -1,0 +1,18 @@
+{
+  "contract": 1,
+  "name": "gitlab",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "GitLab CI (gitlab.com or your own server): one MaximizePM stage for each GitLab stage; reads the jobs of the newest pipelines, their test report and the environments' deployments; plays a stage's manual jobs when its transition lets the version in, retries them for a run again or a roll back, and cancels them.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop", "rerun", "rollback"],
+  "settings": {
+    "repo": {"required": true, "help": "group/project (or group/subgroup/project)"},
+    "url": {"help": "your GitLab server, when not https://gitlab.com"}
+  },
+  "secrets": {
+    "token": {"help": "a project access token with the api scope"}
+  },
+  "poll_every": 60,
+  "timeout": 120
+}

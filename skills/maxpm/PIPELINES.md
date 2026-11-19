@@ -183,11 +183,15 @@ shows an action that the plugin does not do (run again, roll back, stop) as
 "not available for this source", and the command for it is refused: do that
 step in the system itself.
 
-MaximizePM ships three plugins. Read their code before you write a plugin:
+MaximizePM ships four plugins; every forge above is one of them. Read their
+code before you write a plugin:
 
 - `github` (`river/pipeline/plugins/github/`): the GitHub, Gitea and
   Forgejo source above, the full example. `maxpm pipeline forge <name>
   github|gitea|forgejo` uses it.
+- `gitlab` (`river/pipeline/plugins/gitlab/`): GitLab CI, the example for a
+  system where one pipeline holds every stage of a commit. `maxpm pipeline
+  forge <name> gitlab` uses it.
 - `pulumi` (`river/pipeline/plugins/pulumi/`): Pulumi Delivery, the example
   for a system with no list of runs and with gates of its own. `maxpm
   pipeline forge <name> pulumi` uses it.
@@ -218,6 +222,28 @@ MaximizePM ships three plugins. Read their code before you write a plugin:
   so a test passes recorded API answers instead of the network
   (`tests/test_pipeline.py`, classes GitHub and GiteaForgejo). Test your own
   plugin the same way.
+
+### The gitlab plugin
+
+- **What it reads**, once a minute: the newest 10 pipelines of the project.
+  For each MaximizePM stage (`--workflow` names its GitLab stage), the jobs of
+  that GitLab stage are one stage run, with the key `gl-<pipeline>-<stage>`: a
+  failed job that may not fail fails it, a manual job that waits keeps it
+  waiting. A finished pipeline's test report gives the tests, each suite to
+  the stage of the job that made it. Each environment's last successful
+  deployment gives the version that runs there.
+- **What it does**: start plays the stage's manual jobs (`when: manual` in
+  `.gitlab-ci.yml`) in the pipeline of the version's commit; run again and
+  roll back retry the stage's jobs in that commit's pipeline (GitLab's own
+  roll back of an environment); stop cancels the stage's running jobs.
+- **What it cannot do, and why**: jobs that start by themselves (no `when:
+  manual`) run before MaximizePM's transition opens; give that stage's
+  transition the mode `forge`, so MaximizePM only reads it. An approval gate
+  in GitLab needs a paid plan; MaximizePM's transitions need none.
+- **Its token**: a project access token with the `api` scope, saved as a
+  maxpm secret (`--url` for your own GitLab server).
+- **Its test**: `tests/test_pipeline.py`, class GitLab, against recorded
+  answers.
 
 ### The pulumi plugin
 

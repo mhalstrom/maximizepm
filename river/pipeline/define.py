@@ -247,10 +247,11 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
         return plugin.use(conn, pipeline, forge, settings, secrets if secrets is not None else
                           ([secret] if secret else None), repo, url, ref, actor)
     if secrets and len(secrets) > 1:
-        raise core.RiverError(f"the {forge} adapter takes one secret: --secret <name>")
+        raise core.RiverError(f"the {forge} source takes one secret: --secret <name>")
     secret = secret or (secrets[0] if secrets else None)
     if settings:
-        raise core.RiverError(f"the {forge} adapter has no --set settings; a plugin has them")
+        raise core.RiverError(f"the {forge} source takes --repo, --url and --ref, not --set; a plugin of your own "
+                              "takes --set")
     if forge != "none":
         shape, words = _SHAPES.get(forge, (r"^[\w.-]+/[\w.-]+$", "owner/name"))
         if not repo or not re.match(shape, repo):
