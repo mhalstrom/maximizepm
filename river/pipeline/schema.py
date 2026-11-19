@@ -35,6 +35,20 @@ CREATE TABLE IF NOT EXISTS pipelines (
   plugin_pin      TEXT                   -- the kept version of its plugin that it runs (#6166); NULL: the plugin's folder
 );
 
+-- The numbered versions of a pipeline's definition (#6143): each change of it makes version n+1 with the whole
+-- definition as maxpm pipeline export prints it (less the freezes). Writer: versions.snapshot (define._change,
+-- transitions._line); readers: maxpm pipeline versions, the head of the pipeline's page. A line is never changed.
+CREATE TABLE IF NOT EXISTS pipeline_def_versions (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  n            INTEGER NOT NULL,
+  at           TEXT NOT NULL,
+  actor        TEXT,
+  why          TEXT,                     -- the change's line, or 'back to version N: <reason>'
+  definition   TEXT NOT NULL,            -- JSON
+  UNIQUE (pipeline_id, n)
+);
+
 -- The operators of a pipeline (#6145; Decision 7, mark 2026-11-18: "operators can, we audit who does them"): the
 -- people, and the agent sessions when pipelines.agents_operate allows, who may press its emergency actions. A pipeline
 -- with none: a person or the manager. Readers: operators.check, the Emergency tab.

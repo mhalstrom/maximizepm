@@ -353,6 +353,9 @@ def _line(conn, pid, actor, text, reason=None, until=None, detail=None):
         re.match(r"(?:froze|removed the freezes of) (.+?)(?: from |$)", text).group(1)
         if action == "freeze" and re.match(r"(?:froze|removed the freezes of) ", text) else None)
     audit.write(conn, pid, actor, action, text, place=place, reason=reason, until=until, detail=detail)
+    if action == "transition":  # the mode, the window or the fault rule: a version of the definition (#6143)
+        from . import versions
+        versions.snapshot(conn, pid, actor, text + (f": {reason}" if reason else ""))
 
 
 def _lead(conn, actor, what):

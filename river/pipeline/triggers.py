@@ -243,9 +243,14 @@ def rules(conn, pipeline, fired=20):
 
 def export(conn, pid):
     """The rules as the export of the pipeline keeps them."""
-    return [{k: r[k] for k in ("event", "stage", "tier", "does", "runner")}
-            | {"keys": _keys(r["keys"] or ""), "on": bool(r["enabled"])}
-            for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id", (pid,))]
+    return [export_one(r) for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id",
+                                                (pid,))]
+
+
+def export_one(r):
+    """One rule as the export keeps it (a version of the definition compares rules in this form, #6143)."""
+    return ({k: r[k] for k in ("event", "stage", "tier", "does", "runner")}
+            | {"keys": _keys(r["keys"] or ""), "on": bool(r["enabled"])})
 
 
 # ---------------------------------------------------------------- the generic events

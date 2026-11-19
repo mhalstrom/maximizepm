@@ -1026,6 +1026,70 @@ class Branches(RunnerBase):
             self.runner.move_back_branches(self.c, "app", "test", "brn0001", "x", "mark")  # on no branch
 
 
+class DefinitionVersions(RunnerBase):
+    """#6143: each change of a pipeline's definition makes a numbered version (who, when, why); compare two; go back
+    to one as one more version. Actions of a moment (a block, a hold) make none."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import versions
+        self.v = versions
+
+    def ns(self):
+        return [x["n"] for x in self.v.listing(self.c, "app")["versions"]]
+
+    def test_each_change_is_a_version_and_a_block_is_not(self):
+        first = self.v.listing(self.c, "app")["versions"]
+        self.assertEqual(first[-1]["why"], "pipeline app added for project app")
+        n = first[0]["n"]
+        from river.pipeline import transitions, triggers
+        define.stage_set(self.c, "app", "beta", run="make beta", actor="mark")
+        transitions.change(self.c, "app", "prod", window="22:00-04:00 UTC", reason="region b at night", actor="mark")
+        triggers.rule_add(self.c, "app", "stage-failed", does="find the cause", actor="mark")
+        transitions.block(self.c, "app", "beta", "a freeze", actor="mark")  # not a definition
+        self.runner.hold(self.c, "app", reason="x", actor="mark")
+        self.assertEqual(self.ns()[:4], [n + 3, n + 2, n + 1, n])
+        top = self.v.listing(self.c, "app")["versions"][:3]
+        self.assertEqual([x["actor"] for x in top], ["mark"] * 3)
+        self.assertIn("window none -> 22:00-04:00 UTC: region b at night", top[1]["why"])
+        diff = self.v.compare(self.c, "app", n, n + 2)["changes"]
+        self.assertEqual([(c["what"], c["a"], c["b"]) for c in diff],
+                         [("stage beta run", "echo deploying $MAXPM_REV to $MAXPM_ENV", "make beta"),
+                          ("stage prod transition window", None, "22:00-04:00 UTC")])
+        self.assertEqual(self.v.show(self.c, "app", n + 1)["definition"]["stages"][2]["run"], "make beta")
+
+    def test_go_back_to_a_version_is_one_more_version(self):
+        n = self.ns()[0]
+        from river.pipeline import transitions, triggers
+        define.env_set(self.c, "app", "beta-b", actor="mark")
+        define.stage_set(self.c, "app", "beta-b", "deploy", env="beta-b", pos=4, after="test", run="echo b", actor="mark")
+        define.stage_set(self.c, "app", "build", tier="alpha", start="manual", actor="mark")
+        transitions.change(self.c, "app", "beta", window="01:00-02:00 UTC", actor="mark")
+        triggers.rule_add(self.c, "app", "stage-failed", does="find the cause", actor="mark")
+        define.stage_set(self.c, "app", "test", remove=True, actor="mark")
+        with self.assertRaises(RiverError):
+            self.v.restore(self.c, "app", n, " ", actor="mark")  # no reason
+        with self.assertRaises(RiverError):
+            self.v.restore(self.c, "app", n, "x", actor="w1")  # an agent that is not the manager
+        r = self.v.restore(self.c, "app", n, "the split went wrong", actor="mark")
+        self.assertEqual(r["back_to"], n)
+        self.assertEqual(self.v.compare(self.c, "app", n, r["version"])["changes"], [])
+        self.assertEqual(self.ns()[0], r["version"])
+        self.assertEqual(self.v.listing(self.c, "app")["versions"][0]["why"], f"back to version {n}: the split went wrong")
+        self.assertEqual([s["name"] for s in store.show(self.c, "app")["stages"]], ["build", "test", "beta", "prod"])
+        # Back to the newer one again: the branch, the tier, the window and the rule come back.
+        r2 = self.v.restore(self.c, "app", r["version"] - 1, "it was right", actor="mark")
+        self.assertEqual(self.v.compare(self.c, "app", r["version"] - 1, r2["version"])["changes"], [])
+        from river import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "versions", "app", "--compare", str(n), str(r2["version"])])
+            cli.run(["--as", "mark", "pipeline", "versions", "app"])
+        self.assertIn('stage build tier: null -> "alpha"', buf.getvalue())
+        self.assertIn(f"  v{r2['version']}  ", buf.getvalue())
+
+
 class ManualStart(RunnerBase):
     """#6138: a stage starts automatically when its transition lets a version in, or manually: the version waits in
     the stage until someone presses Run (maxpm pipeline run-stage)."""

@@ -195,6 +195,50 @@ try {
             self.assertIn("ran", r["runs"], r)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
+    def test_the_head_names_the_definition_version_and_versions_go_back(self):
+        """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one
+        changed, and Go back makes one more version. At 1280 and at 390 px, nothing wider than the page."""
+        from river.pipeline import define, versions
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "api", project="site", actor="mark")
+        define.stage_set(self.c, "api", "build", "build", run="make", actor="mark")
+        define.stage_set(self.c, "api", "build", run="make all", actor="mark")
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="api"]'), "Deploy: the pipeline api");
+  q('#dpList [data-dp-open="api"]').click();
+  await until(() => q('[data-dv-open="api"]'), "the head's Versions");
+  const out = { head: q("#dpHead").textContent.replace(/\s+/g, " ") };
+  q('[data-dv-open="api"]').click();
+  await until(() => q('#dvDlg:not(.hidden) [data-dv-diff="3"]'), "the versions");
+  q('#dvDlg [data-dv-diff="3"]').click();
+  await until(() => q("#dvDlg .dv-diff"), "what v3 changed");
+  out.diff = q("#dvDlg .dv-diff").textContent;
+  out.over = [...q("#dvDlg .box").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5).length;
+  const back = q('#dvDlg [data-dv-back="2"]');
+  if (back) {
+    back.click();
+    await until(() => [...document.querySelectorAll("textarea")].find(t => t.offsetParent), "the reason");
+    const t = [...document.querySelectorAll("textarea")].find(t => t.offsetParent);
+    t.value = "the old command was right";
+    [...document.querySelectorAll("button")].find(b => b.offsetParent && b.textContent.trim() === "Go back").click();
+    await until(() => q("#dvDlg").textContent.includes("back to version 2"), "the new version");
+  }
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="1280,900")
+        self.assertIn("definition v3 · mark", r["head"], r)
+        self.assertIn("stage build run: make → make all", r["diff"], r)
+        self.assertEqual(r["over"], 0, r)
+        self.assertEqual(versions.listing(self.c, "api")["versions"][0]["why"], "back to version 2: the old command was right")
+        self.assertEqual(self.c.execute("SELECT run FROM pipeline_stages WHERE name='build' AND pipeline_id=(SELECT id "
+                                        "FROM pipelines WHERE name='api')").fetchone()[0], "make")
+        r = self.drive(driver, "/", size="390,844")
+        self.assertIn("definition v4 · mark", r["head"], r)
+        self.assertEqual(r["over"], 0, r)
+
     def test_branches_draw_as_rows_that_fan_out_and_join(self):
         """#6142: a pipeline that splits draws each branch as a row of its own, with the lines that fan out and in;
         the join's arrow says what it waits for; no two stages overlap. At 1280 and at 390 px."""

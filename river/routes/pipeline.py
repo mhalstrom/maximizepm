@@ -119,6 +119,9 @@ OPS = {
         None if a.get("agents") is None else bool(a["agents"]), who),
     "pipeline_emergency": lambda c, a, who: _emergency(c, a, who),
     # #6138: Run on a stage that starts manually (the function checks: an operator, a person or the manager)
+    # #6143: the definition back to a version (a person or the manager; one more version)
+    "pipeline_definition_back": lambda c, a, who: _versions().restore(c, a["pipeline"], int(a["n"]), a.get("reason"),
+                                                                     who),
     "pipeline_run_stage": lambda c, a, who: _runner().run_stage(c, a["pipeline"], a["stage"], a.get("rev"), who),
     "pipeline_move_back": lambda c, a, who: (_runner().move_back_branches if a.get("every_branch")  # #6142
                                              else _runner().move_back)(c, a["pipeline"], a["stage"], a["rev"],
@@ -200,6 +203,24 @@ def _emergency(conn, a, who):
     raise RiverError(f"the emergency action {act!r} is not one of: stop, resume, agents, moveback, revoke")
 
 
+def _versions():
+    from ..pipeline import versions
+    return versions
+
+
+def definition_versions(conn, path):
+    """GET /api/pipeline-versions?pipeline=<name>[&compare=A,B]: the versions of a pipeline's definition, newest
+    first, or what changed from A to B (#6143)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    if not q.get("pipeline"):
+        raise RiverError("name the pipeline: ?pipeline=<name>")
+    if q.get("compare"):
+        a, b = (int(x) for x in q["compare"][0].split(","))
+        return _versions().compare(conn, q["pipeline"][0], a, b)
+    return _versions().listing(conn, q["pipeline"][0])
+
+
 def emergency_plan(conn, path):
     """GET /api/pipeline-emergency?pipeline=<name>: what each emergency action acts on, and the operators (#6145)."""
     from urllib.parse import parse_qs, urlsplit
@@ -267,6 +288,7 @@ def stage_runs(conn, path):
 GET += [
     (lambda path: path == "/api/pipeline-stage", _with(stage_runs, query=True)),
     (lambda path: path == "/api/pipeline-emergency", _with(emergency_plan, query=True)),
+    (lambda path: path == "/api/pipeline-versions", _with(definition_versions, query=True)),  # #6143
     (lambda path: path.startswith("/api/pipeline-triggers/"), _with(trigger_rules)),
     (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
     (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),
@@ -369,7 +391,8 @@ def deploy(conn, path):
                                      work.get(p["name"])),
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],
-                    "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits})
+                    "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits,
+                    "definition": _versions().current(conn, p["id"])})  # #6143: the head's 'definition vN'
     for t in targets.default_list(conn):
         d = defaults[t["name"]]
         approval = next((s for s in d["stages"] if s["name"] == "approval"), None)

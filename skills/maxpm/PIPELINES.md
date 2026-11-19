@@ -950,6 +950,30 @@ To find what a version carries: `maxpm pipeline version <name> <commit>`
 (the tasks its commits name). To find where a task runs: `maxpm pipeline item
 <id>`.
 
+## Versions of the definition
+
+Each change of a pipeline's definition (its environments, stages, commands
+and workflows, branches, the mode, window and fault rule of a transition, its
+trigger rules with their runners and keys, its runners, its source) makes a
+numbered version: the whole definition, who changed it, when, and the change's
+own line as the why. A block, a delay, a hold or a freeze is an action of a
+moment and makes none. The head of the pipeline's page says "definition v12 ·
+who, when"; Versions there lists them, shows what each one changed, and goes
+back to one.
+
+```
+maxpm pipeline versions <name>                        # newest first: vN, when, who, why
+maxpm pipeline versions <name> --show 7               # version 7 as JSON (the form of maxpm pipeline export)
+maxpm pipeline versions <name> --compare 7 12         # what changed from 7 to 12
+maxpm pipeline versions <name> --back 7 --reason "<why>"
+```
+
+`--back` makes one more version, the same as version 7 (version 7 itself never
+changes): its environments, stages with their order and branches, the
+standing rules of each transition, its trigger rules and its runners. The
+source (forge or plugin, its token) and the freezes stay as they are now. A
+person or the manager goes back.
+
 ## Emergency actions and operators
 
 Each pipeline has its own emergency actions, on the Emergency tab of its page

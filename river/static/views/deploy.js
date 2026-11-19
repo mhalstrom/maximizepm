@@ -22,6 +22,7 @@ import { accountsHtml as accountsView } from "./accounts.js";
 import { agentsHtml, stageMarks } from "./agents.js";
 import { drawTriggers, defaultTriggersHtml } from "./triggers.js";
 import { drawEmergency } from "./emergency.js";
+import { definitionHead, openVersions } from "./defversions.js";
 import { runnersHtml, runnerClick } from "./runners.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
@@ -215,7 +216,7 @@ function drawPage(force) {
   const p = pipe(D.pipeline);
   const head = `${button("Pipelines ›", { cls: "plain", data: { "dp-part": "pipelines" }, title: "All pipelines" })}
     <b class="dp-pname">${esc(D.pipeline)}</b>${p ? (p.default ? `<span class="muted t-s">deploy target</span>` : "")
-      + (p.project ? `<span class="muted t-s">project ${esc(p.project)}</span>` : "") + sourceChip(p) : ""}`;
+      + (p.project ? `<span class="muted t-s">project ${esc(p.project)}</span>` : "") + sourceChip(p) + definitionHead(p) : ""}`;
   if ($("#dpHead").dataset.sig !== head) { $("#dpHead").innerHTML = head; $("#dpHead").dataset.sig = head; }
   const tabs = PAGE_TABS.map(([k, n]) => button(n, { cls: "plan-vbtn" + (k === "emergency" ? " dp-em" : ""), pressed: D.tab === k,
     data: { "dp-tab": k }, attrs: `role="tab" aria-selected="${D.tab === k}"` })).join("");
@@ -256,6 +257,8 @@ async function pipeAct(op, args, done) {
 $("#tab-deploy").addEventListener("click", (e) => {
   const r = e.target.closest("[data-rn-add],[data-rn-watch],[data-rn-check],[data-rn-stop]");
   if (r) return runnerClick(r, () => renderDeploy(true));  // Deploy > Runners (#6151)
+  const dv = e.target.closest("[data-dv-open]");  // the versions of the definition (#6143)
+  if (dv) return openVersions(dv.dataset.dvOpen, () => renderDeploy(true));
   const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-check],[data-dp-triggers]");
   if (!t) return;
   const d = t.dataset;

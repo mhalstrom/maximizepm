@@ -87,6 +87,9 @@ button.cardbtn.em-pick.on { border-color: var(--warn); background: var(--warn-bg
 .tg-h { margin: var(--sp-6) 0 var(--sp-3); font-size: var(--fs-base); }
 .tg-view > .pl-bar { margin-bottom: var(--sp-3); }
 .tg-nw { white-space: nowrap; }
+/* The versions of a pipeline's definition (#6143, views/defversions.js): long commands in a why break anywhere. */
+.dv-why { overflow-wrap: anywhere; }
+.dv-diff { margin: var(--sp-2) 0 0; padding-left: var(--sp-6); }
 #tgDlg { --dlg-w: var(--w-dlg-m); }
 .dp-audit .dp-q { min-width: 0; flex: 1 1 var(--w-l); max-width: calc(var(--w-l) + var(--w-l)); }
 .dp-audit select { width: auto; max-width: 100%; }

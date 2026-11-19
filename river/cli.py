@@ -1924,6 +1924,12 @@ def build_parser(only=None):
     x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
     x = pls.add_parser("run-stage", help="Run: start the version that waits in a stage that starts manually")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", help="that version, when several wait")
+    # #6143: the numbered versions of a pipeline's definition
+    x = pls.add_parser("versions", help="the versions of a pipeline's definition, newest first; --show N, --compare A B, "
+                       "--back N (one more version, the same as N)")
+    x.add_argument("name"); x.add_argument("--show", type=int, metavar="N")
+    x.add_argument("--compare", type=int, nargs=2, metavar=("A", "B"))
+    x.add_argument("--back", type=int, metavar="N"); x.add_argument("--reason")
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
@@ -7717,6 +7723,15 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "run-stage":
         from .pipeline import runner
         return runner.run_stage(conn, a.name, a.stage, a.rev, actor)
+    if sub == "versions":
+        from .pipeline import versions
+        if a.back is not None:
+            return versions.restore(conn, a.name, a.back, a.reason, actor)
+        if a.compare:
+            return versions.compare(conn, a.name, *a.compare)
+        if a.show is not None:
+            return versions.show(conn, a.name, a.show)
+        return versions.listing(conn, a.name)
     if sub == "start":
         from .pipeline import runner
         return runner.start(conn, a.name, a.rev, actor)
@@ -8147,6 +8162,22 @@ def render_pipeline(a, res):
         what = f"the transition into stage {res['stage']}" if res["stage"] else "every stage"
         print(f"pipeline {res['pipeline']}: {what} " + ((f"is blocked: {res['held']}" if res["stage"] else
                                                           f"is held: {res['held']}") if res["held"] else "goes on"))
+        return
+    if sub == "versions":  # #6143
+        if "back_to" in res:
+            print(f"pipeline {res['pipeline']}: the definition is version {res['back_to']} again, as version "
+                  f"{res['version']}")
+        elif "changes" in res:
+            print(f"pipeline {res['pipeline']}: version {res['a']} -> {res['b']}: "
+                  + (f"{len(res['changes'])} change(s)" if res["changes"] else "the same"))
+            for c in res["changes"]:
+                print(f"  {c['what']}: {json.dumps(c['a'])} -> {json.dumps(c['b'])}")
+        elif "definition" in res:
+            print(f"pipeline {res['pipeline']} version {res['n']} ({res['actor'] or 'maxpm'}, {res['at']}): {res['why']}")
+            print(json.dumps(res["definition"], indent=2))
+        else:
+            for v in res["versions"]:
+                print(f"  v{v['n']}  {v['at']}  {v['actor'] or 'maxpm'}: {v['why']}")
         return
     if sub == "operators":
         print(f"pipeline {res['pipeline']}: " + (f"{res['changed']}. " if res.get("changed") else "")

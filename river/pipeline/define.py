@@ -47,6 +47,8 @@ def _change(conn, pid, actor, text, detail=None):
     m = re.match(r"(stage|environment) (\S+)", text)
     place = f"{m.group(1)} {m.group(2)}" if m else "the pipeline"
     audit.write(conn, pid, actor, "define", text, place=place, detail=detail)
+    from . import versions
+    versions.snapshot(conn, pid, actor, text)  # a numbered version when the definition changed (#6143)
 
 
 def pipeline_add(conn, name, project=None, notes=None, actor=None):
