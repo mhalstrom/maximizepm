@@ -19,6 +19,7 @@ import { tab, nav } from "../page.js";
 import { showPipeline, hidePipeline, renderPipeline, askReason } from "./pipeline.js";
 import { showTargets } from "./targets.js";
 import { drawAudit } from "./audit.js";
+import { accountsHtml as accountsView } from "./accounts.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -89,6 +90,7 @@ function drawParts() {
 
 // The state of a stage as the list draws it: a version that waits for a person's yes is the person's color.
 function barState(p, s) {
+  if (s.no_news) return "none";  // its forge refuses the token: its last state is old (#6147)
   if (s.state === "queued" && p.waits.some(w => w.stage === s.name)) return "human";
   return s.state || "none";
 }
@@ -111,15 +113,19 @@ function sourceChip(p) {
   // A plugin (#6159) may need no token, and its failed read may have another cause than a token.
   const word = s.state === "bad" ? (s.plugin ? " · read failed" : " · token refused") : s.state === "missing" ? " · token not saved" : "";
   const tip = s.secret ? "Token " + s.secret : s.plugin ? "No token needed" : "No token named";
-  return `<span class="dp-src t-s ${s.state === "bad" || s.state === "missing" ? "dp-bad" : ""}" title="${esc(tip)}">${icon}
-    ${esc(s.label)}${s.repo ? " · " + esc(s.repo) : ""}${word}</span>`;
+  // The account and the token (#6147): "GitHub · mhalstrom · token github-mhalstrom · read 2m ago".
+  const acct = s.owner ? " · " + esc(s.owner) : s.repo ? " · " + esc(s.repo) : "";
+  const tok = s.secret && !s.plugin ? ` · token <span class="mono">${esc(s.secret)}</span>` : "";
+  const read = s.state === "ok" && s.read_at ? ` · read ${esc(ago(s.read_at))}` : "";
+  return button(`${icon} ${esc(s.label)}${acct}${tok}${read}${word}`, { cls: "plain dp-src t-s"
+    + (s.state === "bad" || s.state === "missing" ? " dp-bad" : ""), data: { "dp-part": "accounts" }, title: tip });
 }
 
 function stripHtml(p) {
   return p.stages.map((s, i) => {
     const [m, cls, title] = gateMark(s);
     return (i ? `<span class="dp-arrow ${cls ? "dp-" + cls : ""}" title="${esc(title)}">${m}</span>` : "")
-      + `<span class="dp-mini" title="${esc(s.name)}: ${esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
+      + `<span class="dp-mini" title="${esc(s.name)}: ${s.no_news ? "no news" : esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
         <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${s.fault ? `<span class="dp-fault">⚠ #${s.fault}</span>` : ""}</span>`;
   }).join("") || `<span class="muted t-s">no stages yet</span>`;
 }
@@ -195,30 +201,8 @@ function whereHtml() {
   return `<div class="pl-table"><table><tr><th>Pipeline</th><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows.join("")}</table></div>`;
 }
 
-function accountsHtml() {
-  const groups = new Map();
-  for (const p of data.pipelines) {
-    const s = p.source, key = s.state === "local" ? s.label : `${s.forge}|${s.url || ""}|${s.secret || ""}`;
-    if (!groups.has(key)) groups.set(key, { s, pipes: [] });
-    groups.get(key).pipes.push(p);
-  }
-  const card = ({ s, pipes }) => {
-    const names = pipes.map(p => button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open the pipeline" })).join(" ");
-    if (s.state === "local") return `<div class="pl-card"><h3>${s.label === "this computer" ? "This computer" : "Deploy targets"}</h3>
-      <div class="t-m muted">${s.label === "this computer" ? "maxpm serve runs these stages here: no token." : "MaximizePM's own releases: no token."}</div>
-      <div class="t-m">${names}</div></div>`;
-    const state = { ok: chip("c-ready", "works"), new: chip("c-waiting", "not read yet"), bad: chip("c-warn", "refused"),
-      missing: chip("c-warn", "not saved") }[s.state];
-    const repos = [...new Set(pipes.map(p => p.source.repo).filter(Boolean))];
-    return `<div class="pl-card"><h3>${esc(s.label)}${s.url ? ` <span class="muted t-s">${esc(s.url)}</span>` : ""} ${state}</h3>
-      <div class="t-m">Token <span class="pl-ver">${esc(s.secret || "none named")}</span>${s.read_at ? ` · read ${esc(ago(s.read_at))}` : ""}</div>
-      ${s.error ? `<div class="t-s c-warn">${esc(s.error)}</div>` : ""}
-      ${s.state === "missing" && s.secret ? `<div class="t-s muted">Save it in a terminal: <code>maxpm secret put ${esc(s.secret)}</code></div>` : ""}
-      ${repos.length ? `<div class="t-s muted">${esc(repos.join(", "))}</div>` : ""}
-      <div class="t-m">${names}</div></div>`;
-  };
-  return groups.size ? `<div class="dp-cards">${[...groups.values()].map(card).join("")}</div>` : empty("No pipeline yet.");
-}
+// The accounts: views/accounts.js (#6147).
+function accountsHtml() { return `<div class="dp-cards">${accountsView(data)}</div>`; }
 
 function runnersHtml() {
   const local = data.pipelines.filter(p => !p.default && p.source.state === "local");
@@ -316,9 +300,10 @@ async function pipeAct(op, args, done) {
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-hold],[data-dp-unhold],[data-dp-stop],[data-dp-rollback]");
+  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-hold],[data-dp-unhold],[data-dp-stop],[data-dp-rollback],[data-dp-check]");
   if (!t) return;
   const d = t.dataset;
+  if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the forge");
   if (d.dpPart) return go({ part: d.dpPart, pipeline: null, tab: "stages" });
   if (d.dpOpen) return go({ part: null, pipeline: d.dpOpen, tab: "stages" });
   if (d.dpTab) return go({ part: null, pipeline: D.pipeline, tab: d.dpTab });

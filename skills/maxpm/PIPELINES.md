@@ -127,8 +127,37 @@ Delivery a Delivery stage. The person saves the token first (`maxpm secret put
 - A stage that the forge starts by itself (a push, a tag) has the mode
   `forge`: MaximizePM only reads its run.
 
-When the forge refuses the token, the pipeline shows the error, and the
-Deploy tab counts it in its red number.
+### Accounts and tokens
+
+Each token is an account: one token on one forge server. Several pipelines
+can name the same token, such as `github-mhalstrom` for every pipeline of
+that GitHub account. Use one token for each account, and save it once.
+
+`maxpm serve` asks the forge about each token once an hour: the account it
+acts as, when it runs out, and which of the pipelines' repositories it
+reaches. GitHub sends the end date of a fine-grained token, GitLab of each
+access token; Gitea, Forgejo and Pulumi Cloud send none.
+
+```
+maxpm pipeline accounts                         # each token: account, state, end date, repositories, pipelines
+maxpm pipeline accounts --check [--secret <name>]   # ask the forges now (a person or the manager)
+```
+
+The Deploy tab shows the same: Deploy > Accounts lists the tokens, and the
+head of each pipeline names its forge, account, token and last read.
+
+When the forge refuses a token (401 or 403), or nobody saved it:
+
+- the pipeline's head turns red, a banner on its page quotes the forge's own
+  words, and its forge stages show "no news" instead of a state that may be
+  old;
+- the Deploy tab counts the token once in its red number;
+- the manager gets one alert. It makes a new token and saves it under the
+  same name (`maxpm secret put <name>`), and asks the person only for the
+  forge's sign-in. The next check finds that it works.
+
+Seven days before a token runs out, the manager gets one alert to make a new
+one.
 
 ## Connect another system with a plugin
 

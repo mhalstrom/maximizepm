@@ -759,4 +759,9 @@ def serve_pass(conn):
             _launch(r["id"])
     from . import links
     links.serve_pass(conn)  # a failed stage opens a fault item (#6118)
+    from . import accounts
+    try:
+        accounts.serve_pass(conn)  # the forge tokens: who, until when, refused; the manager's alerts (#6147)
+    except (core.RiverError, OSError, ValueError) as e:  # a check that fails waits for the next pass
+        print(f"pipeline accounts: {type(e).__name__}: {e}", flush=True)
     return {"started": started, "waiting": waiting}

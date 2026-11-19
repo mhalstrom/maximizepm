@@ -48,6 +48,8 @@ def pipeline(conn, path):
     if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
         p = store.show(conn, name)
         p["versions"] = store.versions(conn, name)
+        p["account"] = _accounts().for_pipeline(conn, conn.execute("SELECT * FROM pipelines WHERE name=?",
+                                                                   (name,)).fetchone())  # #6147
         return p
     p = targets.default_pipeline(conn, name)
     p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
@@ -74,6 +76,11 @@ def _runner():
     return runner
 
 
+def _accounts():
+    from ..pipeline import accounts
+    return accounts
+
+
 # The page's pipeline actions (#6117), as the person chosen in "You are": each one is the maxpm pipeline command of the
 # same name, with its checks (only a person or the manager acts) and a line in the pipeline's history.
 OPS = {
@@ -84,6 +91,8 @@ OPS = {
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
     "pipeline_rollback": lambda c, a, who: _runner().rollback(c, a["pipeline"], a["env"], a["rev"], a.get("reason"), who),
     "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
+    # #6147: Check now on the Accounts view (a person or the manager)
+    "pipeline_account_check": lambda c, a, who: _accounts().check_now(c, a.get("secret") or None, who),
     # #6118: the prompt of a failed run as a fix task, and with start a session on it
     "pipeline_fix": lambda c, a, who: _links().fix_task(c, int(a["run"]), who, bool(a.get("start"))),
     # #6139: the controls of a transition (the arrow into a stage)
@@ -170,7 +179,19 @@ def _source(p, saved):
             "read_at": p.get("polled_at")}
 
 
-def _strip(stages):
+def _with_account(src, a):
+    """The source of a pipeline with its account (#6147): who the token is, until when, and its refusal. A refusal
+    that the account's check saw counts as bad, also before the next read of the pipeline."""
+    if not a:
+        return src
+    src = dict(src, owner=a["owner"], kind=a["kind"], expires_at=a["expires_at"], days_left=a["days_left"],
+               checked_at=a["checked_at"], host=a["host"])
+    if a["state"] == "refused":
+        src.update(state="bad", error=a["error"], refused_since=a["refused_since"])
+    return src
+
+
+def _strip(stages, no_news=False):
     """The stages of a pipeline as the Deploy list draws them: a bar for each, the state of its last run."""
     out = []
     for s in stages:
@@ -180,7 +201,9 @@ def _strip(stages):
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
-                    "run": r.get("id"), "by_source": bool(s.get("workflow") and not s.get("run"))})
+                    "run": r.get("id"), "by_source": bool(s.get("workflow") and not s.get("run")),
+                    # its data comes from a forge whose token fails: what it shows is old (#6147)
+                    "no_news": bool(no_news and s.get("workflow") and not s.get("run"))})
     return out
 
 
@@ -201,12 +224,17 @@ def deploy(conn, path):
     stages as a row, its environments, where its runs come from (and that token's state), and the versions that wait
     on a person's yes. `count` is the red number of the tab: those waits plus the tokens that fail."""
     saved = {r["name"] for r in conn.execute("SELECT name FROM secrets")}
+    account_list = _accounts().listing(conn)
+    accts = {(a["forge"], a["host"], a["secret"] or ""): a for a in account_list}
     out = []
     for p in store.pipelines(conn):
         d = store.show(conn, p["name"])
         waits = [] if p.get("held_reason") else _person_waits(conn, p["id"])
-        out.append({"name": p["name"], "project": p["project"], "default": False, "source": {**_source(p, saved), "actions": d["source"]["actions"]},
-                    "held": p.get("held_reason"), "held_by": p.get("held_by"), "stages": _strip(d["stages"]),
+        src = _with_account(_source(p, saved), accts.get(_accounts().key_of(p)))
+        src["actions"] = d["source"]["actions"]
+        out.append({"name": p["name"], "project": p["project"], "default": False, "source": src,
+                    "held": p.get("held_reason"), "held_by": p.get("held_by"),
+                    "stages": _strip(d["stages"], src["state"] in ("bad", "missing")),
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits})
@@ -223,7 +251,7 @@ def deploy(conn, path):
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [t["name"]], "waits": waits})
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}
-    return {"pipelines": out, "count": sum(len(x["waits"]) for x in out) + len(bad)}
+    return {"pipelines": out, "accounts": account_list, "count": sum(len(x["waits"]) for x in out) + len(bad)}
 
 
 def audit(conn, path):

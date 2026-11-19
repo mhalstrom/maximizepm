@@ -118,6 +118,28 @@ CREATE TABLE IF NOT EXISTS hook_steps (
 );
 CREATE INDEX IF NOT EXISTS hook_steps_run ON hook_steps(hook_run, id);
 
+-- An account of a forge: one token (a maxpm secret) on one forge server, which any number of pipelines name
+-- (#6147). What the forge said about it at the last check. Readers: the Accounts view and each pipeline's head
+-- (routes/pipeline.py), maxpm pipeline accounts, and accounts.serve_pass (the manager's alerts).
+CREATE TABLE IF NOT EXISTS pipeline_accounts (
+  id            INTEGER PRIMARY KEY,
+  forge         TEXT NOT NULL,           -- github, gitlab, gitea, forgejo, pulumi
+  host          TEXT NOT NULL,           -- github.com, gitlab.example.net, api.pulumi.com
+  secret        TEXT NOT NULL,           -- the name of the maxpm secret; its value never comes here
+  owner         TEXT,                    -- the account the token acts as (the forge's login)
+  kind          TEXT,                    -- user, organization, bot, when the forge says
+  expires_at    TEXT,                    -- when the token runs out, when the forge says (UTC)
+  repos         TEXT,                    -- JSON {repository: true when the token reaches it}
+  scopes        TEXT,                    -- what the token may do, when the forge says
+  state         TEXT NOT NULL DEFAULT 'new',  -- ok, refused (401/403), error (the check did not get an answer)
+  error         TEXT,                    -- the forge's own words at the last failed check
+  checked_at    TEXT,
+  refused_since TEXT,
+  alert_refused TEXT,                    -- when the manager got the alert of this refusal (cleared when it works)
+  alert_expiry  TEXT,                    -- the expires_at that the manager got the 7-day alert for
+  UNIQUE (forge, host, secret)
+);
+
 -- The audit log of a pipeline (#6113, #6144): each change of its definition, each action on it and each change of
 -- its flow (a stage's end, a deploy, a fault), with its actor. Readers: maxpm pipeline history and audit, the Deploy
 -- tab's Audit log (river/pipeline/audit.py). A line is never changed or deleted (the triggers below): a correction is

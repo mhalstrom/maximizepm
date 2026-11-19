@@ -1932,6 +1932,10 @@ def build_parser(only=None):
     x.add_argument("--url", help="the forge's address: Gitea and Forgejo need it (https://codeberg.org); a "
                    "self-hosted GitLab")
     x = pls.add_parser("plugins", help="the installed plugins: name, version, level and the actions each one does")
+    x = pls.add_parser("accounts", help="the forge tokens of the pipelines: the account each one is, when it runs "
+                       "out, the repositories it reaches, refused or missing, and which pipelines use it")
+    x.add_argument("--check", action="store_true", help="ask the forges now (a person or the manager)")
+    x.add_argument("--secret", help="with --check: only this token")
     x = pls.add_parser("plugin", help="one plugin: its manifest, and its own describe, which must match it")
     x.add_argument("plugin")
     x = pls.add_parser("rerun", help="run one stage again for a version, an older one too (a roll back)")
@@ -7590,6 +7594,9 @@ def _pipeline_cmd(conn, a, actor):
                 raise RiverError(f"--set takes KEY=VALUE, not {kv!r}")
             settings[k] = v
         return define.forge_set(conn, a.name, a.forge, a.repo, None, a.ref, actor, a.url, settings or None, a.secret)
+    if sub == "accounts":  # #6147
+        from .pipeline import accounts
+        return accounts.check_now(conn, a.secret, actor) if a.check else accounts.listing(conn)
     if sub in ("plugins", "plugin"):  # #6159
         from .pipeline import plugin
         return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin)
@@ -7748,6 +7755,26 @@ def render_pipeline(a, res):
         return
     if sub == "run":
         print(res["text"])
+        return
+    if sub == "accounts":
+        if not res:
+            print("no pipeline uses a forge token")
+        for x in res:
+            state = {"ok": "works", "new": "not checked yet", "refused": "REFUSED", "missing": "NOT SAVED",
+                     "error": "check failed"}[x["state"]]
+            left = x["days_left"]
+            ends = ("" if not x["expires_at"] else f"; runs out {x['expires_at'][:10]}"
+                    + (" (ran out)" if left < 0 else f" (in {int(left)} days)" if left <= 30 else ""))
+            print(f"{x['label']} {x['host']}: token {x['secret'] or '(none named)'}"
+                  + (f", account {x['owner']}" + (f" ({x['kind']})" if x["kind"] else "") if x["owner"] else "")
+                  + f": {state}{ends}")
+            if x["error"]:
+                print(f"    {x['error']}")
+            if x["repos"]:
+                print("    reaches: " + ", ".join(r if ok else f"{r} (NOT reached)" for r, ok in x["repos"].items()))
+            if x["scopes"]:
+                print(f"    may: {x['scopes']}")
+            print(f"    used by: {', '.join(x['used_by'])}" + (f"; checked {x['checked_at']}" if x["checked_at"] else ""))
         return
     if sub == "plugins":
         if not res:

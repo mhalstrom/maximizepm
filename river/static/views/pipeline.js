@@ -14,6 +14,7 @@ import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
+import { runsOut } from "./accounts.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
 let sig = "", runSig = "";
@@ -75,7 +76,20 @@ function draw() {
 
 // ---- the stages left to right
 
+// The forge token of the pipeline fails (#6147): what the forge said is old, so a stage that the forge runs shows "no
+// news" with the time of the last read, never a green that may be stale.
+const tokenFails = D => D.account && ["refused", "missing"].includes(D.account.state);
+
 function stageCard(s) {
+  const D = V.data;
+  if (tokenFails(D) && s.workflow && !s.run) {
+    const r = s.last_run, read = D.account.read_at;
+    return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}</span>
+      <span class="pl-name">${esc(s.name)}</span><span class="pl-ver">${esc(short(r && r.version))}</span>
+      ${st("none", "no news")}<span class="pl-meta pl-more-line">${read ? "last read " + esc(ago(read)) : "not read yet"}</span></span>`,
+      { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
+        title: "Forge workflow: " + s.workflow });
+  }
   const r = s.last_run, live = r && s.env && r.state === "passed";
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
   const meta = !r ? "" : r.state === "queued" && r.gate_note ? r.gate_note
@@ -117,9 +131,34 @@ function arrowEl(s, i) {
 function stagesView(D) {
   if (!D.stages.length) return empty(`Pipeline ${esc(D.name)} has no stages yet: maxpm pipeline stage ${esc(D.name)} &lt;stage&gt; --kind &lt;kind&gt;`);
   const row = D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
-  return `<div class="pl-scroll" id="plScroll"><div class="pl-row" id="plRow">${row}</div></div>
+  return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row" id="plRow">${row}</div></div>
     <div class="pl-card" id="plDetail">${detail()}</div>
-    ${envTable(D)}`;
+    ${envTable(D)}${sourceCard(D)}`;
+}
+
+// The forge's own words when it refuses the token, or that nobody saved it (#6147).
+function tokenBanner(D) {
+  if (!tokenFails(D)) return "";
+  const a = D.account;
+  const why = a.state === "refused" ? `${a.error || a.label + " refuses the token " + a.secret}`
+    + (a.refused_since ? ` (since ${ago(a.refused_since)})` : "") : a.error;
+  return `<div class="pl-banner">✕ ${esc(why)}. This page shows what ${esc(a.label)} said before then; nothing new starts there until a token works. The manager knows.
+    ${a.secret ? `Save a new one: <code>maxpm secret put ${esc(a.secret)}</code>` : ""}</div>`;
+}
+
+// Where the pipeline's runs come from: the forge, the account, the token and when it runs out (#6147).
+function sourceCard(D) {
+  const a = D.account;
+  if (!a) return "";
+  const state = a.state === "refused" ? `<span class="c-warn">✕ refused</span>` : a.state === "missing" ? `<span class="c-warn">○ not saved</span>`
+    : a.read_at ? `● read ${esc(ago(a.read_at))}` : `<span class="muted">not read yet</span>`;
+  return `<div class="pl-card"><h3>Where its runs come from</h3><div class="pl-table"><table class="pl-blocks">
+    <tr><th>Forge</th><th>Account</th><th>Token</th><th>Last read</th><th>The token runs out</th></tr>
+    <tr><td data-label="Forge">${esc(a.label)} <span class="muted t-s">${esc(a.host)}</span></td>
+      <td data-label="Account">${esc(a.owner || "?")}${a.kind ? ` <span class="muted t-s">${esc(a.kind)}</span>` : ""}</td>
+      <td class="mono" data-label="Token">${esc(a.secret || "none named")}</td><td data-label="Last read">${state}</td>
+      <td class="${a.days_left != null && a.days_left <= 7 ? "c-warn" : ""}" data-label="Runs out">${esc(runsOut(a)) || `<span class="muted">-</span>`}</td></tr></table></div>
+    <div class="pl-bar">${button("All accounts", { data: { "dp-part": "accounts" }, title: "See the accounts" })}</div></div>`;
 }
 
 // Narrow cards first; when even those do not fit, the row scrolls and its right edge fades while more is there.

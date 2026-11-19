@@ -87,4 +87,10 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
     padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }
   .pl-tests td { border: 0; padding: 0; }
   .pl-tests td.mono { grid-column: 1 / -1; white-space: normal; word-break: break-all; }
+  /* The tables of accounts and of a pipeline's source (#6147): each row a block, each cell under its name. */
+  .pl-blocks, .pl-blocks tbody, .pl-blocks tr, .pl-blocks td { display: block; }
+  .pl-blocks tr:first-child { display: none; }
+  .pl-blocks tr { padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }
+  .pl-table .pl-blocks td { border-bottom: 0; padding: var(--sp-0) 0; }
+  .pl-blocks td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: var(--fs-s); }
 }
