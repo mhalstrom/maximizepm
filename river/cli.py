@@ -1995,6 +1995,15 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--file", help="write it to this file")
     x = pls.add_parser("history", help="each change of the pipeline, with who made it")
     x.add_argument("name"); x.add_argument("-n", type=int, default=50)
+    x = pls.add_parser("audit", help="the audit log: every change to a pipeline and its flow, with who did it, why "
+                       "and the result, newest first (of every pipeline when no name); no line is ever changed")
+    x.add_argument("name", nargs="?")
+    x.add_argument("--who", help="person, agent, trigger, hook or forge (a comma list), or one actor's name")
+    x.add_argument("--since", help="today, a time back (7d, 2h) or a date (2026-11-01)")
+    x.add_argument("--search", help="words that each line holds (a version, a reason, a stage)")
+    x.add_argument("-n", type=int, default=50, help="at most this many lines (default 50)")
+    x = pls.add_parser("correct", help="correct a line of the audit log: a new line that names it (the old one stays)")
+    x.add_argument("line", type=int); x.add_argument("text")
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
@@ -7631,6 +7640,11 @@ def _pipeline_cmd(conn, a, actor):
             path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
             return {"file": str(path), "export": out}
         return out
+    if sub in ("audit", "correct"):  # #6144
+        from .pipeline import audit
+        if sub == "correct":
+            return audit.correct(conn, a.line, a.text, actor)
+        return audit.lines(conn, a.name, a.who, a.since, a.search, a.n)
     return {"pipeline": a.name, "history": define.history(conn, a.name, a.n)}
 
 
@@ -7707,6 +7721,21 @@ def render_pipeline(a, res):
             print(f"{h['at']}  {h['actor'] or 'a person'}: {h['change']}")
         if not res["history"]:
             print(f"pipeline {res['pipeline']} has no changes")
+        return
+    if sub == "audit":
+        for l in res["lines"]:
+            extra = "".join(f"  {k}: {v}" for k, v in (("why", l["reason"]), ("result", l["result"]),
+                                                       ("corrected by", ", ".join(map(str, l.get("corrected_by") or []))))
+                            if v and not (k == "why" and v in l["change"]))
+            print(f"{l['id']}  {l['at']}  {l['pipeline']}  {l['actor']} ({l['kind']}): {l['change']}{extra}")
+        if not res["lines"]:
+            print("no lines" + (f" in the audit log of {a.name}" if a.name else " in the audit log")
+                  + (" for these filters" if a.who or a.since or a.search else ""))
+        elif res["more"]:
+            print(f"(more lines: -n {a.n * 2}, or --since, --who, --search)")
+        return
+    if sub == "correct":
+        print(f"line {res['line']} corrects line {res['corrects']}")
         return
     if sub == "run":
         print(res["text"])

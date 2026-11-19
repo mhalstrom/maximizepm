@@ -32,7 +32,7 @@ import time
 import uuid
 
 from .. import core
-from . import cdevents, junit, steps, store, transitions
+from . import audit, cdevents, junit, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
           "pulumi": "Pulumi Delivery"}  # the forges with an adapter (Pulumi Delivery: #6133)
@@ -110,7 +110,8 @@ def start(conn, pipeline, rev=None, actor=None):
                                   f"{busy['name']}")
     run = _queue(conn, p["name"], first["name"], rev)
     with core.tx(conn):
-        _act(conn, p["id"], actor, f"started version {rev} at stage {first['name']} (run #{run})")
+        _act(conn, p["id"], actor, f"started version {rev} at stage {first['name']} (run #{run})", "start",
+             f"stage {first['name']}", rev, run)
     return {"pipeline": p["name"], "stage": first["name"], "version": rev, "run": run}
 
 
@@ -293,7 +294,8 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, gate_note=NULL WHERE id=?",
                      (actor or "a person", store._now(), r["id"]))
-        _act(conn, p["id"], actor, f"approved version {r['rev']} into stage {stage} (run #{r['id']})")
+        _act(conn, p["id"], actor, f"approved version {r['rev']} into stage {stage} (run #{r['id']})", "approve",
+             f"the transition into {stage}", r["rev"], r["id"])
     if r["gate_item"]:
         it = conn.execute("SELECT status FROM items WHERE id=?", (r["gate_item"],)).fetchone()
         if it and it["status"] not in core.CLOSED_STATES:
@@ -522,10 +524,9 @@ def _lead(conn, actor, what):
         raise core.RiverError(why)
 
 
-def _act(conn, pid, actor, text, reason=None):
-    """Each action is a line of the pipeline's history with its actor (inside a tx; maxpm pipeline history)."""
-    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change, reason) VALUES (?,?,?,?,?)",
-                 (pid, store._now(), actor, text, reason))
+def _act(conn, pid, actor, text, action, place=None, rev=None, run=None, reason=None, kind=None):
+    """Each action is a line of the pipeline's audit log with its actor (inside a tx; maxpm pipeline audit, #6144)."""
+    audit.write(conn, pid, actor, action, text, kind=kind, place=place, rev=rev, run_id=run, reason=reason)
 
 
 def _stage_row(conn, p, stage):
@@ -536,7 +537,7 @@ def _stage_row(conn, p, stage):
     return s
 
 
-def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None):
+def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None, reason=None):
     """maxpm pipeline rerun: run one stage again for a version, an older one too. The person or the manager sends
     it on purpose, so it passes the transition before the stage (its yes and its controls); a hold of the whole
     pipeline still stops it."""
@@ -548,7 +549,8 @@ def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, passed_by=?, passed_at=?, purpose=? "
                      "WHERE id=?", (actor or "a person", store._now(), actor or "a person", store._now(), purpose, run))
-        _act(conn, p["id"], actor, note or f"run stage {stage} again for {rev} (run #{run})")
+        _act(conn, p["id"], actor, note or f"run stage {stage} again for {rev} (run #{run})",
+             "rerun-failed" if purpose.startswith("failed:") else purpose, f"stage {stage}", rev, run, reason)
     return {"pipeline": p["name"], "stage": stage, "version": rev, "run": run}
 
 
@@ -566,7 +568,7 @@ def hold(conn, pipeline, stage=None, reason=None, actor=None):
     with core.tx(conn):
         conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=? WHERE id=?",
                      (reason, actor, store._now(), p["id"]))
-        _act(conn, p["id"], actor, f"held every stage: {reason}", reason)
+        _act(conn, p["id"], actor, f"held every stage: {reason}", "hold", "every stage", reason=reason)
     return {"pipeline": p["name"], "stage": None, "held": reason}
 
 
@@ -581,7 +583,7 @@ def release_hold(conn, pipeline, stage=None, actor=None):
         if not p["held_reason"]:
             raise core.RiverError(f"pipeline {p['name']} is not held")
         conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (p["id"],))
-        _act(conn, p["id"], actor, "ended the hold of every stage")
+        _act(conn, p["id"], actor, "ended the hold of every stage", "unhold", "every stage")
     return {"pipeline": p["name"], "stage": None, "held": None}
 
 
@@ -600,7 +602,7 @@ def rollback(conn, pipeline, env, rev, reason=None, actor=None):
     plugin.need(conn, p, _stage_row(conn, p, s["name"]), "rollback")  # before the block (#6159)
     why = f"rolled back {env} to {rev}" + (f": {reason}" if reason else "")
     transitions.block(conn, p["name"], s["name"], why, actor=actor)
-    out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why)
+    out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why, reason=reason)
     return {**out, "env": env, "held": why}
 
 
@@ -636,12 +638,14 @@ def stop(conn, run_id, actor=None):
         p = conn.execute("SELECT * FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
         plugin.need(conn, p, {"workflow": r["workflow"], "run": r["cmd"]}, "stop")
         with core.tx(conn):
-            _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
+            _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})", "stop",
+                 f"stage {r['stage']}", r["rev"], run_id)
         plugin.act(conn, run_id, "stop")  # the next poll records its end
         return {"run": run_id, "stopped": f"by plugin {r['forge']}"}
     with core.tx(conn):
-        _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
-    forge =(r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
+        _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})", "stop",
+             f"stage {r['stage']}", r["rev"], run_id)
+    forge = (r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
         r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-", "pd-")) else None
     if forge in FORGES:
         _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
@@ -716,6 +720,12 @@ def serve_pass(conn):
         else:
             open_, note = gate(conn, r)
         if note == "declined":
+            by = conn.execute("SELECT actor FROM events WHERE item_id=? AND change LIKE 'drop%' ORDER BY id DESC "
+                              "LIMIT 1", (r["gate_item"],)).fetchone() if r["gate_item"] else None
+            with core.tx(conn):  # #6144: the person's no on the card is a line of the audit log, with that person
+                _act(conn, r["pipeline_id"], by["actor"] if by else None,
+                     f"declined version {r['rev']} at the transition into stage {r['stage']} (#{r['gate_item']})",
+                     "decline", f"the transition into {r['stage']}", r["rev"], r["id"])
             store.run_finish(conn, r["id"], "cancelled", errors=f"the yes at the gate was declined (#{r['gate_item']})")
             continue
         if not open_:
@@ -726,8 +736,12 @@ def serve_pass(conn):
             continue
         if note and r["gate_item"] and not r["approved_at"]:  # approved through the card
             with core.tx(conn):
+                by = core._done_by(conn, r["gate_item"])
                 conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
-                             (core._done_by(conn, r["gate_item"]), store._now(), r["id"]))
+                             (by, store._now(), r["id"]))
+                _act(conn, r["pipeline_id"], by, f"approved version {r['rev']} into stage {r['stage']} on "
+                     f"#{r['gate_item']} (run #{r['id']})", "approve", f"the transition into {r['stage']}", r["rev"],
+                     r["id"])
         started.append(r["id"])
         if forge and r["forge"] not in FORGES:  # the gate opened: the plugin starts it in its system (#6159)
             try:

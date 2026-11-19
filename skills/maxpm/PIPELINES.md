@@ -383,6 +383,32 @@ To find what a version carries: `maxpm pipeline version <name> <commit>`
 (the tasks its commits name). To find where a task runs: `maxpm pipeline item
 <id>`.
 
+## The audit log
+
+Every change to a pipeline and its flow is one line of its audit log: who did
+it (a person, an agent session, a trigger, a hook such as a stage's command,
+or a forge), what (a definition change, start, approve, decline, hold, end of
+a hold, a change of a transition, block, unblock, delay, disable, enable,
+freeze, let one version pass, run again, roll back, stop, a stage that passed
+or failed, a deploy, a fault task, a fix task, a token or grant change), on
+which stage or transition, the version, why, until when, and the result (the
+state of the run that the line started or ended, as it is now).
+
+```
+maxpm pipeline audit [<name>] [--who person|agent|trigger|hook|forge|<actor>] [--since today|7d|<date>] [--search "<words>"] [-n 50]
+maxpm pipeline correct <line> "<what is wrong and what is right>"
+```
+
+- MaximizePM writes each line when the thing happens. You write none by
+  hand: run the command or press the button, and its line follows.
+- No line is ever changed or deleted, not even by a person. A mistake (a
+  wrong reason, the wrong version) gets a correction: a new line that names
+  the old one. The actor of that line, a person or the manager may add it.
+- The changes of a token that a pipeline names (`--secret`), and the grants
+  of the sets that hold it, show in that pipeline's log too.
+- Before you report on a release or a failure, read the log of its pipeline:
+  it says who approved, held, ran again or rolled back, and when.
+
 ## The Deploy tab
 
 The person follows all of this on the page's Deploy tab:
@@ -392,7 +418,8 @@ The person follows all of this on the page's Deploy tab:
   a line for each version that waits for the person's yes (with Approve) and
   for each token that fails.
 - **Where each version runs**, **Accounts** (each forge token and its state),
-  **Audit log** (each change and action, with who did it), and the pages
+  **Audit log** (every line of every pipeline, with filters by pipeline,
+  actor and time, a search, Correct on each line, and Export as a CSV file), and the pages
   **Agents** and **Runners**.
 - **A pipeline's own page**: Stages (each stage's runs, steps, tests and the
   failure prompt; a target's release card), Versions, Triggers (what happens

@@ -16,7 +16,7 @@ import re
 import subprocess
 
 from .. import core
-from . import prompt, store
+from . import audit, prompt, store
 
 FAULT_WITHIN = 86400  # seconds: a failed run older than this when serve first sees it opens no fault item
 _REF = re.compile(r"#(\d+)\b")
@@ -71,6 +71,9 @@ def fault(conn, run_id):
                          short=f"{r['stage']} stage failed", context=_what(conn, r))
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET fault_item=? WHERE id=?", (item["id"], run_id))
+        audit.write(conn, r["pipeline_id"], "the rule 'a stage fails'", "fault",
+                    f"opened fault #{item['id']} for stage {r['stage']}: a new session takes it", kind="trigger",
+                    place=f"stage {r['stage']}", rev=r["rev"], result=f"fault #{item['id']}")
     return item["id"]
 
 
@@ -102,6 +105,10 @@ def fix_task(conn, run_id, actor=None, start=False):
     if start:
         from .. import server
         out["started"] = server.dispatch_item(conn, item["id"], actor=actor)
+    with core.tx(conn):
+        audit.write(conn, r["pipeline_id"], actor, "fix", f"added fix task #{item['id']} for the failed {r['stage']} "
+                    f"stage (run #{run_id})" + ("; a session starts on it" if start else ""), place=f"stage {r['stage']}",
+                    rev=r["rev"], result=f"task #{item['id']}" + (", a session started" if out["started"] else ""))
     return out
 
 

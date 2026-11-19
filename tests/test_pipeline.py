@@ -1772,5 +1772,124 @@ class Speed(Base):
             self.assertLess(time.monotonic() - t, timing.limit(0.1))
 
 
+class AuditLog(RunnerBase):
+    """The audit log of pipelines (#6144): every change to a pipeline and its flow, with who did it; no line changes."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import audit
+        self.audit = audit
+
+    def lines(self, **kw):
+        return self.audit.lines(self.c, **kw)["lines"]
+
+    def test_each_action_and_each_change_of_the_flow_is_a_line_with_its_actor(self):
+        self.runner.start(self.c, "app", rev="abc1234", actor="w1")
+        self.passes()
+        core.done(self.c, self.runs()["prod"]["gate_item"], actor="mark")  # mark's yes on the card
+        self.passes(1)
+        self.runner.hold(self.c, "app", "prod", "the payment provider has an outage", actor="mark")
+        got = [(l["actor"], l["kind"], l["action"], l["place"]) for l in reversed(self.lines()) if l["action"] != "define"]
+        self.assertEqual(got[0], ("w1", "agent", "start", "stage build"))
+        self.assertIn(("mark", "person", "approve", "the transition into prod"), got)
+        self.assertIn(("mark", "person", "block", "the transition into prod"), got)  # a hold of a stage blocks it
+        hooks = [g for g in got if g[1] == "hook"]
+        self.assertEqual([g[2] for g in hooks], ["passed", "passed", "deployed", "deployed"])
+        self.assertEqual(hooks[2][0], "echo deploying $MAXPM_REV to $MAXPM_ENV")  # the stage's command ran it
+        approve = next(l for l in self.lines() if l["action"] == "approve")
+        self.assertEqual((approve["rev"], approve["result"].split(",")[0]), ("abc1234", "passed"))  # the run's state now
+        from river.pipeline import transitions
+        transitions.delay(self.c, "app", "beta", "2h", "a quiet night first", actor="mark")
+        d = self.lines()[0]
+        self.assertEqual((d["action"], d["place"], d["reason"]), ("delay", "the transition into beta",
+                                                                  "a quiet night first"))
+        self.assertTrue(d["until"])
+        hold = self.lines(who="person", search="outage")
+        self.assertEqual([(l["action"], l["reason"]) for l in hold], [("block", "the payment provider has an outage")])
+        self.assertEqual({l["kind"] for l in self.lines(who="trigger,hook")}, {"hook"})
+        self.assertEqual([l["actor"] for l in self.lines(who="w1")], ["w1"])
+        self.assertEqual(len(self.lines(since="today")), len(self.lines()))
+        self.assertEqual(self.lines(search="nothing-like-this"), [])
+        with self.assertRaises(RiverError):
+            self.lines(since="someday")
+        with self.assertRaises(RiverError):
+            self.lines(pipeline="nope")
+
+    def test_a_declined_card_a_stop_a_fault_and_a_forge_run_name_who_did_them(self):
+        self.runner.start(self.c, "app", rev="abc1234")
+        self.passes()
+        core.drop(self.c, self.runs()["prod"]["gate_item"], "mark", note="not today")
+        self.passes(1)
+        decline = self.lines(search="declined")
+        self.assertEqual([(l["actor"], l["action"]) for l in decline], [("mark", "decline")])
+        self.assertEqual(self.lines(search="stopped"), [])  # the cancelled run adds no second line
+        define.stage_set(self.c, "app", "build", run="echo broken; exit 3")
+        self.runner.start(self.c, "app", rev="bad0001")
+        self.passes(2)
+        fault = self.lines(who="trigger")
+        self.assertEqual(fault[0]["action"], "fault")
+        self.assertIn(f"fault #{self.runs()['build']['fault_item']}", fault[0]["result"])
+        failed = next(l for l in self.lines() if l["action"] == "failed")
+        self.assertEqual((failed["kind"], failed["reason"]), ("hook", "exit 3"))
+        r = store.run_start(self.c, "app", "test", version="f00d001", source="github", key="gh-run-9")
+        store.run_finish(self.c, r, "passed", source="github")
+        store.run_finish(self.c, r, "passed", source="github")  # the same end read again
+        forge = self.lines(who="forge")
+        self.assertEqual([(l["actor"], l["action"]) for l in forge], [("GitHub", "passed")])
+
+    def test_no_line_is_changed_or_deleted_and_a_correction_is_a_new_line(self):
+        import sqlite3
+        self.runner.hold(self.c, "app", None, "release freez", actor="mark")
+        line = self.lines()[0]["id"]
+        for sql in ("UPDATE pipeline_changes SET change='x'", "DELETE FROM pipeline_changes"):
+            with self.assertRaises(sqlite3.DatabaseError) as e:
+                self.c.execute(sql)
+            self.assertIn("maxpm pipeline correct", str(e.exception))
+        with self.assertRaises(RiverError):
+            self.audit.correct(self.c, line, "it says freeze", actor="w1")  # an agent, not the line's actor
+        with self.assertRaises(RiverError):
+            self.audit.correct(self.c, line, " ", actor="mark")
+        out = self.audit.correct(self.c, line, "the reason is: release freeze", actor="mark")
+        L = self.lines()
+        self.assertEqual((L[0]["id"], L[0]["corrects"], L[0]["action"]), (out["line"], line, "correct"))
+        self.assertEqual(L[1]["corrected_by"], [out["line"]])
+        self.assertEqual(L[1]["change"], "held every stage: release freez")  # the old line stays as it was
+
+    def test_a_token_and_its_grants_show_in_the_log_of_each_pipeline_that_names_it(self):
+        from river import vault
+        old = vault.BACKEND
+        vault.BACKEND = vault.Files()
+        self.addCleanup(setattr, vault, "BACKEND", old)
+        define.pipeline_add(self.c, "gh", actor="mark")
+        define.forge_set(self.c, "gh", "github", repo="o/r", secret="github-o", actor="mark")
+        vault.put(self.c, "github-o", b"tok-1", "mark")
+        vault.put(self.c, "github-o", b"tok-2", "mark")
+        vault.put(self.c, "other", b"x", "mark")  # no pipeline names it
+        vault.set_change(self.c, "ci", add=["github-o"], actor="mark")
+        vault.grant(self.c, "ci", "project", "app", actor="mark")
+        tok = [l["change"] for l in self.lines(pipeline="gh") if l["action"] in ("token", "grant")]
+        self.assertTrue(any(t.startswith("granted the set ci (token github-o) to project") for t in tok), tok)
+        self.assertIn("replaced the token github-o (stdin)", tok)
+        self.assertIn("saved the token github-o (stdin)", tok)
+        self.assertFalse(any("other" in t for t in tok))
+        self.assertEqual([l for l in self.lines(pipeline="app") if l["action"] in ("token", "grant")], [])
+
+    def test_the_commands_print_the_log_and_add_a_correction(self):
+        from river import cli
+        self.runner.hold(self.c, "app", "prod", "an outage", actor="mark")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["--as", "mark", "pipeline", "audit", "app", "--who", "person", "--search",
+                                      "outage"]), 0)
+        text = out.getvalue()
+        self.assertIn("mark (person): blocked the transition beta -> prod until someone unblocks it  why: an outage",
+                      text)
+        line = int(text.split()[0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["--as", "mark", "pipeline", "correct", str(line), "the outage was at Stripe"]), 0)
+        self.assertIn(f"corrects line {line}", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

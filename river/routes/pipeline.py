@@ -102,12 +102,19 @@ OPS = {
     "pipeline_freeze": lambda c, a, who: _transitions().freeze(c, a["pipeline"], a.get("stage") or None,
                                                                a.get("from") or None, a.get("to"), a.get("reason"),
                                                                bool(a.get("clear")), who),
+    # #6144: a correction of a line of the audit log is a new line (the actor of that line, a person or the manager)
+    "pipeline_correct": lambda c, a, who: _audit().correct(c, int(a["line"]), a.get("text"), who),
 }
 
 
 def _transitions():
     from ..pipeline import transitions
     return transitions
+
+
+def _audit():
+    from ..pipeline import audit
+    return audit
 
 
 def _links():
@@ -220,19 +227,16 @@ def deploy(conn, path):
 
 
 def audit(conn, path):
-    """GET /api/pipeline-audit[?pipeline=<name>]: the changes of every pipeline (or of one), newest first: the
-    definition and each action (hold, approve, roll back, run again, stop), with who did it (pipeline_changes)."""
+    """GET /api/pipeline-audit[?pipeline=&who=&since=&q=&limit=]: the audit log of every pipeline (or of one), newest
+    first (river/pipeline/audit.py, #6144): who (a kind: person, agent, trigger, hook, forge, a comma list; or a name),
+    since (today, 7d, a date), q (words that each line holds). limit: at most audit.EXPORT_MAX (the export)."""
     from urllib.parse import parse_qs, urlsplit
-    q = parse_qs(urlsplit(path).query)
-    name = (q.get("pipeline") or [None])[0]
-    sql = ("SELECT c.id, c.at, c.actor, c.change, c.reason, c.until_at, p.name pipeline FROM pipeline_changes c "
-           "JOIN pipelines p "
-           "ON p.id=c.pipeline_id")
-    args = []
-    if name:
-        sql, args = sql + " WHERE p.name=?", [name]
-    return {"lines": [dict(r) for r in conn.execute(sql + " ORDER BY c.id DESC LIMIT ?", args + [AUDIT_MAX])],
-            "max": AUDIT_MAX}
+    from ..pipeline import audit as log
+    q = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+    out = log.lines(conn, q.get("pipeline") or None, q.get("who") or None, q.get("since") or None, q.get("q") or None,
+                    int(q["limit"]) if (q.get("limit") or "").isdigit() else AUDIT_MAX)
+    names = [r["name"] for r in conn.execute("SELECT name FROM pipelines ORDER BY name")]
+    return {**out, "max": AUDIT_MAX, "pipelines": names}
 
 
 GET += [

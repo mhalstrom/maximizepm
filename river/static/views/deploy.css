@@ -46,11 +46,26 @@
 .dp-envrow:first-of-type { border-top: 0; }
 .dp-em-card { border-color: var(--warn-bg); }
 .plan-vbtn.dp-em { color: var(--warn); }
+/* The audit log (views/audit.js, #6144): the filters in one bar; a corrected line is muted, its correction names it. */
+.dp-audit { display: flex; flex-direction: column; gap: var(--sp-3); }
 .dp-audit .dp-q { min-width: 0; flex: 1 1 var(--w-l); max-width: calc(var(--w-l) + var(--w-l)); }
+.dp-audit select { width: auto; max-width: 100%; }
+.dp-audit .au-grow { flex: 1 1 0; }
+.au-table td { vertical-align: top; }
+.au-table tr.au-fixed td { color: var(--muted); }
+.au-corr { color: var(--warn); }
 
 /* A phone: the row stacks (name, stages, what runs where), and the stages scroll sideways. */
 @media (max-width: 759px) {
   .dp-row { grid-template-columns: minmax(0, 1fr); }
   .dp-mini { flex: 1 1 0; min-width: var(--w-tool); }
   .dp-pipe { padding: var(--sp-4); }
+  .dp-audit .au-grow { display: none; }
+  .dp-audit select, .dp-audit .dp-q { flex: 1 1 var(--w-input-m); max-width: none; }
+  /* Each line of the audit log is a block: its cells one under the other, no sideways scroll. */
+  .au-table, .au-table tbody, .au-table tr, .au-table td { display: block; }
+  .au-table tr:first-child { display: none; }
+  .au-table tr { padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+  .pl-table .au-table td { border-bottom: 0; padding: var(--sp-0) 0; }
+  .au-table td:empty { display: none; }
 }

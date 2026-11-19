@@ -30,7 +30,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from .. import core
-from . import store
+from . import audit, store
 
 MODES = ("auto", "yes", "delay", "release", "forge")
 _NAME = re.compile(r"^[\w.@-]{1,64}$")
@@ -303,12 +303,21 @@ def plain(mode, arg=None):
 
 # ---------------------------------------------------------------- changes
 
+# The short word of each change for the audit log (#6144), from the first words of its text.
+_ACTIONS = (("transition ", "transition"), ("blocked ", "block"), ("unblocked ", "unblock"), ("ended the delay", "delay"),
+            ("delayed ", "delay"), ("disabled ", "disable"), ("enabled ", "enable"), ("removed the freezes", "freeze"),
+            ("froze ", "freeze"), ("let version ", "pass"))
+
+
 def _line(conn, pid, actor, text, reason=None, until=None, detail=None):
-    """A line of the pipeline's audit log (inside a tx)."""
-    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change, detail, reason, until_at) "
-                 "VALUES (?,?,?,?,?,?,?)", (pid, store._now(), actor, text,
-                                            json.dumps(detail, separators=(",", ":")) if detail else None,
-                                            reason, until))
+    """A line of the pipeline's audit log (inside a tx): river/pipeline/audit.py. It acts on the transition that the
+    text names (build -> prod: the transition into prod), or on what a freeze names."""
+    action = next((a for start, a in _ACTIONS if text.startswith(start)), "transition")
+    m = re.search(r"transition \S+ -> (\S+?):?(?:\s|$)", text)
+    place = f"the transition into {m.group(1)}" if m else (
+        re.match(r"(?:froze|removed the freezes of) (.+?)(?: from |$)", text).group(1)
+        if action == "freeze" and re.match(r"(?:froze|removed the freezes of) ", text) else None)
+    audit.write(conn, pid, actor, action, text, place=place, reason=reason, until=until, detail=detail)
 
 
 def _lead(conn, actor, what):

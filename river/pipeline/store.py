@@ -16,7 +16,7 @@ import uuid
 from datetime import timedelta
 
 from .. import core
-from . import cdevents
+from . import audit, cdevents
 
 STAGE_KINDS = ("build", "test", "review", "approve", "deploy", "check", "other")
 RUN_STATES = ("queued", "running", "passed", "failed", "cancelled", "skipped")
@@ -181,9 +181,12 @@ def _apply_pipelinerun(conn, pid, ev):
                      "ELSE 'running' END WHERE id=?", (at, final, rid))
     elif pred == "finished":
         errors = c.get("errors")
+        state = cdevents.outcome(c.get("outcome"))
         conn.execute("UPDATE stage_runs SET state=?, ended_at=?, errors=COALESCE(?, errors) WHERE id=?",
-                     (cdevents.outcome(c.get("outcome")), at, _cut(errors, MESSAGE_MAX) if errors else None, rid))
+                     (state, at, _cut(errors, MESSAGE_MAX) if errors else None, rid))
         _close_steps(conn, rid, at)
+        if not (final and run["state"] == state):  # the same end read again is no new line (#6144)
+            audit.run_end(conn, rid, state, _cut(errors, MESSAGE_MAX) if errors else None)
     else:
         return rid, f"pipelinerun.{pred}: kept; no change of the run"
     return rid, None
@@ -300,6 +303,8 @@ def _apply_service(conn, pid, ev):
     run = _run_of(conn, pid, ev, need=False)
     conn.execute("INSERT INTO pipeline_deploys(env_id, version_id, run_id, kind, at) VALUES (?,?,?,?,?)",
                  (eid, vid, run["id"] if run else None, pred, at))
+    if run is None:  # a deploy of a stage run is the line of that run's end (#6144)
+        audit.deploy_event(conn, pid, ev["source"], name, rev, pred)
     # An event older than the environment's current version changes only the history.
     conn.execute("UPDATE pipeline_envs SET version_id=?, since=? WHERE id=? AND (since IS NULL OR since<=?)",
                  (vid, at, eid, at))

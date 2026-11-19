@@ -118,7 +118,10 @@ CREATE TABLE IF NOT EXISTS hook_steps (
 );
 CREATE INDEX IF NOT EXISTS hook_steps_run ON hook_steps(hook_run, id);
 
--- Each change of a pipeline's definition, with its actor (#6113). Readers: maxpm pipeline history, the view.
+-- The audit log of a pipeline (#6113, #6144): each change of its definition, each action on it and each change of
+-- its flow (a stage's end, a deploy, a fault), with its actor. Readers: maxpm pipeline history and audit, the Deploy
+-- tab's Audit log (river/pipeline/audit.py). A line is never changed or deleted (the triggers below): a correction is
+-- a new line that names the old one.
 CREATE TABLE IF NOT EXISTS pipeline_changes (
   id           INTEGER PRIMARY KEY,
   pipeline_id  INTEGER NOT NULL,
@@ -126,10 +129,26 @@ CREATE TABLE IF NOT EXISTS pipeline_changes (
   actor        TEXT,
   change       TEXT NOT NULL,            -- in words: 'stage prod added: kind deploy, env prod, mode yes mark'
   detail       TEXT,                     -- the stage or environment after the change, as JSON
-  reason       TEXT,                     -- why, as the actor said it (#6139)
-  until_at     TEXT                      -- a block, delay or freeze: until when
+  reason       TEXT,                     -- why, as the actor said it (#6139), or a run's errors
+  until_at     TEXT,                     -- a block, delay or freeze: until when
+  kind         TEXT,                     -- the actor: person, agent, trigger, hook, forge (none: before #6144)
+  action       TEXT,                     -- a short word: define, start, approve, decline, hold, unhold, rerun,
+                                         -- rollback, stop, transition, block, unblock, delay, disable, enable,
+                                         -- freeze, pass, passed, failed, stopped, deployed, rolled back, fault, fix,
+                                         -- correct
+  place        TEXT,                     -- what it acts on: 'stage prod', 'the transition test → prod', 'every stage'
+  rev          TEXT,                     -- the version
+  run_id       INTEGER,                  -- the stage run it started or ended: its state now is the line's result
+  result       TEXT,                     -- what came of it, when no run says it
+  corrects     INTEGER                   -- a correction: the line it corrects
 );
 CREATE INDEX IF NOT EXISTS pipeline_changes_pipeline ON pipeline_changes(pipeline_id, id);
+CREATE TRIGGER IF NOT EXISTS pipeline_changes_no_update BEFORE UPDATE ON pipeline_changes BEGIN
+  SELECT RAISE(ABORT, 'a line of the audit log of a pipeline is never changed: add a correction (maxpm pipeline correct <line> "<text>")');
+END;
+CREATE TRIGGER IF NOT EXISTS pipeline_changes_no_delete BEFORE DELETE ON pipeline_changes BEGIN
+  SELECT RAISE(ABORT, 'a line of the audit log of a pipeline is never deleted: add a correction (maxpm pipeline correct <line> "<text>")');
+END;
 
 -- A commit that moves through the stages. Readers: the view (the versions in each stage), the MaximizePM
 -- connection (the tasks of a version).
@@ -277,9 +296,13 @@ def migrate(conn):
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_changes)")}
-    for c in ("reason", "until_at"):  # #6139
+    for c, t in (("reason", "TEXT"), ("until_at", "TEXT"),  # #6139
+                 ("kind", "TEXT"), ("action", "TEXT"), ("place", "TEXT"), ("rev", "TEXT"), ("run_id", "INTEGER"),
+                 ("result", "TEXT"), ("corrects", "INTEGER")):  # #6144
         if c not in cols:
-            conn.execute(f"ALTER TABLE pipeline_changes ADD COLUMN {c} TEXT")
+            conn.execute(f"ALTER TABLE pipeline_changes ADD COLUMN {c} {t}")
+    conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_run ON pipeline_changes(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS pipeline_changes_at ON pipeline_changes(at)")
     _gates_to_transitions(conn, stage_cols)
 
 

@@ -14,7 +14,7 @@ import json
 import re
 
 from .. import core
-from . import store, transitions
+from . import audit, store, transitions
 
 _FIELDS = ("kind", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback", "wave_wait")
 
@@ -39,8 +39,11 @@ def _may(conn, actor):
 
 
 def _change(conn, pid, actor, text, detail=None):
-    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change, detail) VALUES (?,?,?,?,?)",
-                 (pid, store._now(), actor, text, json.dumps(detail, separators=(",", ":")) if detail else None))
+    """A change of the definition: a line of the audit log (#6144). It acts on the stage or the environment that
+    the text names first, else on the pipeline."""
+    m = re.match(r"(stage|environment) (\S+)", text)
+    place = f"{m.group(1)} {m.group(2)}" if m else "the pipeline"
+    audit.write(conn, pid, actor, "define", text, place=place, detail=detail)
 
 
 def pipeline_add(conn, name, project=None, notes=None, actor=None):

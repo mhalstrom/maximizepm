@@ -4257,6 +4257,14 @@ class PipelineRoutes(unittest.TestCase):
         self.assertEqual(lines[0]["actor"], "mark")
         self.assertIn("a freeze", lines[0]["change"])
         self.assertEqual({l["pipeline"] for l in self.get("/api/pipeline-audit?pipeline=gh")["body"]["lines"]}, {"gh"})
+        # #6144: the filters are the server's; a correction is a page action and a new line.
+        A = self.get("/api/pipeline-audit?who=person&since=today&q=freeze")["body"]
+        self.assertEqual([(l["kind"], l["action"], l["place"]) for l in A["lines"]], [("person", "hold", "every stage")])
+        self.assertEqual(A["pipelines"], ["app", "gh"])
+        self.assertEqual(self.get("/api/pipeline-audit?who=agent")["body"]["lines"], [])
+        out = server.OPS["pipeline_correct"](self.c, {"line": A["lines"][0]["id"], "text": "a freeze of the release"},
+                                             "mark")
+        self.assertEqual(self.get("/api/pipeline-audit?pipeline=app")["body"]["lines"][0]["id"], out["line"])
         # The page has an address for each part of Deploy and each pipeline's page.
         for path in ("/deploy", "/deploy/accounts", "/deploy/pipeline/app/emergency"):
             self.assertIn(b'id="tab-deploy"', server.page_html(path))

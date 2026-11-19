@@ -38,7 +38,8 @@ COMMANDS = {
                  "fix": ANY, "version": ANY, "item": ANY,  # #6113, #6114, #6116
                  "transition": LEAD, "block": LEAD, "unblock": LEAD, "delay": LEAD, "disable": LEAD,
                  "enable": LEAD, "pass": LEAD, "freeze": LEAD,  # #6139
-                 "plugins": ANY, "plugin": ANY},  # #6159
+                 "plugins": ANY, "plugin": ANY,  # #6159
+                 "audit": ANY, "correct": ANY},  # #6144: correct checks itself (the line's actor, a person, the manager)
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -70,7 +71,7 @@ READS = {"project show", "project list", "canvas list", "canvas show", "canvas c
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
-         "pipeline plugins"}
+         "pipeline plugins", "pipeline audit"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
@@ -86,7 +87,7 @@ OPS = {op: ANY for op in (
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
-    "pipeline_fix")}
+    "pipeline_fix", "pipeline_correct")}
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",

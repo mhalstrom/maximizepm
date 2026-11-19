@@ -9,7 +9,7 @@
 //   pipeline's own page).
 // The red number on the tab counts what waits on the person here: a version that waits for a person's yes, a release that waits
 // for the person's yes, and each token that is refused or not saved. Reads: GET api/deploy (each pipeline in one
-// read, river/routes/pipeline.py) and api/pipeline-audit. The address: /deploy, /deploy/<part>,
+// read, river/routes/pipeline.py) and api/pipeline-audit (views/audit.js). The address: /deploy, /deploy/<part>,
 // /deploy/pipeline/<name>[/<tab>] (app.js writes it from D).
 import { $, esc, getJson, ago, act, toast } from "../lib.js";
 import { button } from "../components/button.js";
@@ -18,6 +18,7 @@ import { empty } from "../components/empty.js";
 import { tab, nav } from "../page.js";
 import { showPipeline, hidePipeline, renderPipeline, askReason } from "./pipeline.js";
 import { showTargets } from "./targets.js";
+import { drawAudit } from "./audit.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -26,7 +27,7 @@ export const PAGE_TABS = [["stages", "Stages"], ["versions", "Versions"], ["trig
 
 // What Deploy shows: a part, or the page of one pipeline and its tab. The address sets it (fromUrl), and a click.
 export const D = { part: "pipelines", pipeline: null, tab: "stages" };
-let data = null, readAt = 0, sig = "", pageSig = "", auditLines = null, auditOf = undefined;
+let data = null, readAt = 0, sig = "", pageSig = "";
 const BADGE_EVERY = 30000;  // while Deploy is not on screen, the red number reads again at most this often
 
 const short = (rev) => rev && /^[0-9a-f]{12,}$/.test(rev) ? rev.slice(0, 7) : rev || "";
@@ -232,35 +233,6 @@ function agentsHtml() {
   return empty("No agent works on a release here yet. Each agent that works on a stage or a fault of a pipeline shows here, with its step.");
 }
 
-// The audit log of every pipeline (pipeline: null) or of one: who changed what, newest first. A search field filters it.
-async function drawAudit(name, box, force) {
-  if (!box.querySelector(".dp-audit") || box.dataset.of !== String(name)) {
-    box.dataset.of = String(name);
-    box.innerHTML = `<div class="dp-audit"><div class="pl-bar"><input type="search" class="dp-q" placeholder="Search the log"
-      aria-label="Search the log"><span class="muted t-s dp-an"></span></div><div class="dp-at"></div></div>`;
-    auditLines = null;
-  }
-  let A;
-  try { A = await getJson("api/pipeline-audit" + (name ? "?pipeline=" + encodeURIComponent(name) : "")); }
-  catch (e) { box.querySelector(".dp-at").innerHTML = empty(esc(e.message)); return; }
-  if (box.dataset.of !== String(name)) return;
-  const s = JSON.stringify(A.lines);
-  if (s === auditLines && auditOf === name && !force) return;
-  auditLines = s; auditOf = name;
-  box._lines = A.lines;
-  filterAudit(box);
-}
-function filterAudit(box) {
-  const q = (box.querySelector(".dp-q").value || "").trim().toLowerCase(), L = box._lines || [];
-  const shown = q ? L.filter(l => [l.actor, l.change, l.pipeline].join(" ").toLowerCase().includes(q)) : L;
-  const one = box.dataset.of !== "null";
-  box.querySelector(".dp-an").textContent = L.length ? `${shown.length} of ${plural(L.length, "line")}` : "";
-  box.querySelector(".dp-at").innerHTML = !L.length ? empty("Nothing changed yet: each change of a pipeline and each action on it (hold, approve, roll back, run again, stop) goes here with who did it.")
-    : `<div class="pl-table"><table><tr><th>When</th><th>Who</th>${one ? "" : "<th>Pipeline</th>"}<th>What</th></tr>
-      ${shown.map(l => `<tr><td class="mono" title="${esc(l.at)}">${esc(ago(l.at))}</td><td>${esc(l.actor || "")}</td>
-        ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline }, title: "Open the pipeline" })}</td>`}
-        <td class="t-m">${esc(l.change)}</td></tr>`).join("")}</table></div>`;
-}
 
 // ---- a pipeline's own page
 
@@ -343,10 +315,6 @@ async function pipeAct(op, args, done) {
   renderDeploy(true);
 }
 
-$("#tab-deploy").addEventListener("input", (e) => {
-  const box = e.target.closest(".dp-audit");
-  if (box && e.target.classList.contains("dp-q")) filterAudit(box.parentElement);
-});
 $("#tab-deploy").addEventListener("click", (e) => {
   const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-hold],[data-dp-unhold],[data-dp-stop],[data-dp-rollback]");
   if (!t) return;
