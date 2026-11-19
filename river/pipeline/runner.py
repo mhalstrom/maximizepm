@@ -144,7 +144,7 @@ def _mode(conn, r, t):
     the checks pass; the release with a cadence after that time since the last version entered; a person's yes
     opens when that person marks the approval item done. note 'declined': the person dropped the item."""
     mode, arg = t["mode"], t["mode_arg"]
-    if mode == "auto":
+    if mode == "auto" or (mode == "forge" and r["outside"]):  # #6164: the outside system starts it: it asked first
         return True, None
     if mode == "forge":  # #6119: a push or a tag starts it on the forge; its plugin links that run to this one
         return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
@@ -525,7 +525,10 @@ def _hand_on(conn, r):
                          else "\0")).fetchone():
             return  # it waits or ran there already (a forge made the run: GitLab's jobs of that stage, #6121; the
             # stage in the same Pulumi Delivery run, #6133; a plugin's system ran it, #6159)
-        _queue(conn, r["pipeline"], nxt["name"], r["rev"])
+        run = _queue(conn, r["pipeline"], nxt["name"], r["rev"])
+        if r["outside"]:  # #6164: the outside system runs the next stage too: it waits for its question, never runs here
+            with core.tx(conn):
+                conn.execute("UPDATE stage_runs SET outside=? WHERE id=?", (r["outside"], run))
 
 
 def hand_on(conn, run_id):
@@ -764,10 +767,22 @@ def serve_pass(conn):
     for row in rows:
         r = _row(conn, row["id"])
         forge = r["workflow"] and not r["cmd"]
-        if forge and (r["runner"] or not plugin.is_plugin(r["forge"])):
+        if forge and not r["outside"] and (r["runner"] or not plugin.is_plugin(r["forge"])):
             continue  # started in its system already (its plugin reads the run), or no plugin serves its source
-        busy = conn.execute("SELECT id FROM stage_runs WHERE stage_id=? AND state='running'", (r["stage_id"],)).fetchone()
-        if busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
+        busy = None if r["outside"] else conn.execute(
+            "SELECT id FROM stage_runs WHERE stage_id=? AND state='running' AND outside IS NULL",
+            (r["stage_id"],)).fetchone()
+        if r["outside"]:  # #6164: an outside system runs it; its next question (river/pipeline/gates.py) gets the yes
+            open_, note = gate(conn, r)  # the approval card or the manager's alert, once, as for our own runs
+            if note != "declined":
+                note = None if open_ else note
+                if note != r["gate_note"]:
+                    with core.tx(conn):
+                        conn.execute("UPDATE stage_runs SET gate_note=? WHERE id=?", (note, r["id"]))
+                if note:
+                    waiting[r["id"]] = note
+                continue
+        elif busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
             open_, note = False, f"waits for run #{busy['id'] if busy else started[-1]} of stage {r['stage']}"
         else:
             open_, note = gate(conn, r)

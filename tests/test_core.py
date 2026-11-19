@@ -1802,7 +1802,8 @@ class Plan(Base):
                      "## Holding and the release", "maxpm pipeline release",  # #6140
                      "## Emergency actions and operators", "maxpm pipeline operators <name>",  # #6145
                      "**Add a token.**", "Make the token for me",  # #6148
-                     "## Runners: agents with no person", "maxpm runner add", "--runs-on"):  # #6151
+                     "## Runners: agents with no person", "maxpm runner add", "--runs-on",  # #6151
+                     "## Outside flows ask the transitions", "maxpm pipeline may <pipeline>"):  # #6164
             self.assertIn(part, text)
         for skill in ("maxpm", "maxpm-manager"):
             self.assertIn("maxpm guide\npipelines", (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")

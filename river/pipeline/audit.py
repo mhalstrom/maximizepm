@@ -155,8 +155,9 @@ def _who(who):
 
 
 def _result(row):
-    """What came of a line: the state of the run it started or ended, now, else what the line itself says."""
-    if not row["run_state"]:
+    """What came of a line: the state of the run it started or ended, now, else what the line itself says. An outside
+    system's question (#6164) has its answer: yes or no."""
+    if not row["run_state"] or row["action"] == "ask":
         return row["result"]
     out = row["run_state"]
     if row["run_started"] and row["run_ended"]:

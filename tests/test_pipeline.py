@@ -2383,5 +2383,124 @@ class AuditLog(RunnerBase):
         self.assertIn(f"corrects line {line}", out.getvalue())
 
 
+class OutsideGates(Base):
+    """#6164: an outside flow (Jenkins, a cron job) asks 'may version 42 enter prod?' and the transition answers: its
+    mode and its controls, one audit line each time the answer changes; maxpm serve never starts its stage."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import audit, gates, runner, transitions
+        self.g, self.runner, self.tr, self.audit = gates, runner, transitions, audit
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "shop", project="shop", actor="mark")
+        define.env_set(self.c, "shop", "staging")
+        define.env_set(self.c, "shop", "prod")
+        define.stage_set(self.c, "shop", "build", "build")  # no --run: the outside system runs each stage
+        define.stage_set(self.c, "shop", "staging", "deploy", env="staging")
+        define.stage_set(self.c, "shop", "prod", "deploy", env="prod", gate="person mark")
+
+    def run_at(self, stage, rev):
+        return self.c.execute("SELECT r.* FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN "
+                              "pipeline_versions v ON v.id=r.version_id WHERE s.name=? AND v.rev=? ORDER BY r.id DESC",
+                              (stage, rev)).fetchone()
+
+    def lines(self):
+        return [(l["actor"], l["action"], l["result"]) for l in self.audit.lines(self.c, "shop")["lines"]
+                if l["action"] == "ask"]
+
+    def test_an_open_transition_says_yes_once_and_the_next_stage_ends_the_one_before(self):
+        a = self.g.ask(self.c, "shop", "build", "42", asker="jenkins")
+        self.assertEqual((a["may"], a["version"], a["asked_by"]), (True, "42", "jenkins"))
+        self.assertEqual(self.run_at("build", "42")["state"], "running")
+        self.assertTrue(self.g.ask(self.c, "shop", "build", "42", asker="jenkins")["may"])  # asked again: the same yes
+        self.assertEqual(self.lines(), [("jenkins", "ask", "yes")])
+        self.assertEqual(self.audit.lines(self.c, "shop", who="forge")["lines"][0]["actor"], "jenkins")
+        self.assertTrue(self.g.ask(self.c, "shop", "staging", "42", asker="jenkins")["may"])
+        self.assertEqual(self.run_at("build", "42")["state"], "passed")  # it asked at the next stage: it passed build
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], 2)
+        self.g.ask(self.c, "shop", "prod", "42", asker="jenkins")  # a no (mark's yes), but staging passed
+        envs = {e["name"]: e["rev"] for e in store.show(self.c, "shop")["envs"]}
+        self.assertEqual(envs["staging"], "42")
+        # An event of the outside system ends a run (maxpm pipeline event): the next stage waits for its question.
+        self.assertTrue(self.g.ask(self.c, "shop", "build", "50", asker="jenkins")["may"])
+        run = self.run_at("build", "50")["id"]
+        store.run_finish(self.c, run, "passed", source="jenkins")
+        self.runner.hand_on(self.c, run)
+        self.runner.serve_pass(self.c)
+        nxt = self.run_at("staging", "50")
+        self.assertEqual((nxt["state"], nxt["outside"]), ("queued", "jenkins"))
+
+    def test_a_persons_yes_and_maxpm_serve_never_starts_the_stage(self):
+        no = self.g.ask(self.c, "shop", "prod", "43", asker="cron")
+        self.assertFalse(no["may"])
+        r = self.run_at("prod", "43")
+        self.assertIn(f"waits for mark's yes on #{r['gate_item']}", no["why"])
+        self.assertFalse(self.g.ask(self.c, "shop", "prod", "43", asker="cron")["may"])
+        out = self.runner.serve_pass(self.c)
+        self.assertEqual(self.run_at("prod", "43")["state"], "queued")  # never started here
+        self.assertIn(r["id"], out["waiting"])
+        arrow = store.show(self.c, "shop")["stages"][2]["transition"]
+        self.assertEqual([(w["rev"], w["outside"]) for w in arrow["waiting"]], [("43", "cron")])
+        self.assertEqual(self.lines(), [("cron", "ask", "no")])  # the same no again writes nothing
+        core.done(self.c, r["gate_item"], actor="mark")
+        yes = self.g.ask(self.c, "shop", "prod", "43", asker="cron")
+        self.assertTrue(yes["may"])
+        self.assertEqual(self.run_at("prod", "43")["approved_by"], "mark")
+        self.assertEqual(self.lines(), [("cron", "ask", "yes"), ("cron", "ask", "no")])
+
+    def test_a_block_says_until_when_and_a_declined_yes_stays_no(self):
+        self.tr.block(self.c, "shop", "staging", "the database moves", until="2h", actor="mark")
+        no = self.g.ask(self.c, "shop", "staging", "44", asker="argo")
+        self.assertFalse(no["may"])
+        self.assertIn("blocked by mark: the database moves", no["why"])
+        self.assertTrue(no["until"])
+        self.tr.unblock(self.c, "shop", "staging", actor="mark")
+        self.assertTrue(self.g.ask(self.c, "shop", "staging", "44", asker="argo")["may"])
+        self.g.ask(self.c, "shop", "prod", "45", asker="argo")
+        core.drop(self.c, self.run_at("prod", "45")["gate_item"], actor="mark", note="not this one")
+        for _ in range(2):
+            self.assertIn("declined", self.g.ask(self.c, "shop", "prod", "45", asker="argo")["why"])
+
+    def test_the_refusals_the_wait_the_exit_code_and_the_http_answer(self):
+        define.stage_set(self.c, "shop", "smoke", "test", run="echo ok")
+        with self.assertRaises(RiverError) as e:
+            self.g.ask(self.c, "shop", "smoke", "46")
+        self.assertIn("runs here", str(e.exception))
+        with self.assertRaises(RiverError):
+            self.g.ask(self.c, "shop", "build", "")
+        with self.assertRaises(RiverError):
+            self.g.ask(self.c, "shop", "nowhere", "46")
+        self.tr.block(self.c, "shop", "staging", "a test", actor="mark")
+        slept = []
+
+        def sleep(s):
+            slept.append(s)
+            self.tr.unblock(self.c, "shop", "staging", actor="mark")
+        res = self.g.may(self.c, "shop", "staging", "47", wait="1m", asker="jenkins", sleep=sleep)
+        self.assertTrue(res["may"])
+        self.assertEqual(slept, [self.g.POLL])
+        self.tr.block(self.c, "shop", "staging", "a test", actor="mark")
+        from river import cli
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cli.run(["pipeline", "may", "shop", "staging", "--rev", "48", "--from", "cron"]), 1)
+        self.assertIn("no: version 48 may not enter stage staging of shop now", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.run(["pipeline", "may", "shop", "build", "--rev", "48"]), 0)
+        from river.routes import pipeline as routes
+        sent = []
+        h = mock.Mock(path="/api/pipeline-gate?pipeline=shop&stage=staging&rev=49&from=github", _send=lambda s, b: sent.append((s, b)))
+        routes._gate(h, "/api/pipeline-gate")
+        self.assertEqual((sent[0][0], sent[0][1]["may"], sent[0][1]["asked_by"]), (409, False, "github"))
+        self.tr.unblock(self.c, "shop", "staging", actor="mark")
+        routes._gate(h, "/api/pipeline-gate")
+        self.assertEqual((sent[1][0], sent[1][1]["may"]), (200, True))
+        h.path = "/api/pipeline-gate?pipeline=shop&stage=smoke&rev=49"
+        routes._gate(h, "/api/pipeline-gate")
+        self.assertEqual(sent[2][0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()

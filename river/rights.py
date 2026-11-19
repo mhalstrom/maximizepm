@@ -42,6 +42,7 @@ COMMANDS = {
                  "plugins": ANY, "plugin": ANY,  # #6159
                  "audit": ANY, "correct": ANY,  # #6144: correct checks itself (the line's actor, a person, the manager)
                  "holding": ANY, "release": LEAD,  # #6140
+                 "may": ANY,  # #6164: an outside flow asks; the answer acts only on its own run at that stage
                  "accounts": ANY,  # #6147: --check takes a person or the manager (accounts.check_now)
                  "runs": ANY, "move-back": LEAD,  # #6141
                  "triggers": ANY, "trigger": LEAD,  # #6150

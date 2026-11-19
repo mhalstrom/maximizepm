@@ -399,7 +399,26 @@ def audit(conn, path):
     return {**out, "max": AUDIT_MAX, "pipelines": names}
 
 
+def _gate(h, path):
+    """GET /api/pipeline-gate?pipeline=&stage=&rev=[&wait=30m][&from=<system>] (#6164): may this version enter the
+    stage now? 200 and {"may": true, ...} for yes; 409 and {"may": false, "why", "until"} for no, so curl --fail exits
+    with the answer; 404 and {"error"} for a question that names no stage. wait: at most gates.HTTP_WAIT_MAX."""
+    from urllib.parse import parse_qs, urlsplit
+    from ..pipeline import gates
+    q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
+    conn = core.connect()
+    try:
+        res = gates.may(conn, q.get("pipeline"), q.get("stage"), q.get("rev"), q.get("wait") or None,
+                        q.get("from") or None, None, limit=gates.HTTP_WAIT_MAX)
+        return h._send(200 if res["may"] else 409, res)
+    except (RiverError, ValueError) as e:
+        return h._send(404, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 GET += [
+    (lambda path: path == "/api/pipeline-gate", _gate),
     (lambda path: path == "/api/deploy", _with(deploy)),
     (lambda path: path.startswith("/api/runner-log/"), _with(runner_log)),
     (lambda path: path == "/api/pipeline-audit", _with(audit, query=True)),

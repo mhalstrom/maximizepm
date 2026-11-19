@@ -232,6 +232,10 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   sent_by      TEXT,                     -- who sent this version here on purpose (a run again, a move back, #6141)
   reason       TEXT,                     -- ... and why, as they said it
   fault_item   INTEGER,                  -- the fault item of MaximizePM that a failed run opened or joined (#6118)
+  outside      TEXT,                     -- an outside system asked at the transition (#6164): its name; it runs the stage
+                                         -- itself, so MaximizePM only answers whether the version may enter
+  outside_at   TEXT,                     -- ... when it asked last
+  outside_said TEXT,                     -- ... the last answer: yes, or no and the kind of control (one audit line each)
   UNIQUE (pipeline_id, key)
 );
 CREATE INDEX IF NOT EXISTS stage_runs_state ON stage_runs(state);
@@ -439,7 +443,8 @@ def migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
                  ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER"), ("passed_by", "TEXT"),
-                 ("passed_at", "TEXT"), ("sent_by", "TEXT"), ("reason", "TEXT")):  # #6114, #6117, #6118, #6139, #6141
+                 ("passed_at", "TEXT"), ("sent_by", "TEXT"), ("reason", "TEXT"),
+                 ("outside", "TEXT"), ("outside_at", "TEXT"), ("outside_said", "TEXT")):  # #6114, #6117, #6118, #6139, #6141, #6164
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_changes)")}

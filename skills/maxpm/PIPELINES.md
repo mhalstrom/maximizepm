@@ -554,6 +554,43 @@ The page shows the same on each arrow: the mode or the control that holds it,
 who set it, until when and the version that waits. A click on the arrow opens
 its controls and their buttons.
 
+## Outside flows ask the transitions
+
+A deploy that another system runs (Jenkins, Argo CD, Octopus, a cron job, a
+workflow on a runner of this computer) asks before each stage whether the
+version may enter it. The transition into that stage answers, with all its
+controls and its mode, as for a stage that MaximizePM runs. The stage is a
+stage of the pipeline with no `--run`: the outside system runs it.
+
+```
+maxpm pipeline may <pipeline> <stage> --rev <version> [--wait 30m] [--from jenkins]
+curl -fsS "http://127.0.0.1:<serve_port>/api/pipeline-gate?pipeline=<p>&stage=<s>&rev=<v>&wait=10m&from=jenkins"
+```
+
+- The command exits 0 for yes and 1 for no, and prints why. The HTTP answer
+  is 200 `{"may": true, ...}` or 409 `{"may": false, "why", "until"}`, so
+  `curl --fail` exits with the answer. `until` says when a block, a freeze, the
+  window or a delay ends.
+- `--wait` asks again every 5 seconds until a yes or the end of the wait (at
+  most 1h; the HTTP request at most 10m).
+- The first question queues the version at the stage, marked with the asker:
+  the arrow lists it ("asked by jenkins"), a person's yes makes the approval
+  card once, and the manager gets the alert of a release once. `maxpm serve`
+  never starts that stage.
+- A yes means the version entered the stage. The outside system reports its
+  end with an event of that run (`customData.maxpm.run`: the run id is in
+  the answer; section "Send events with no plugin"), or the version's
+  question at a later stage ends it as passed. The next stage then waits for
+  the system's question there; `maxpm serve` does not run it. A no that a
+  person declined stays no.
+- Each change of the answer is one line of the audit log, by the asker (the
+  filter `forge` shows the systems); a poll that gets the same no again adds
+  no line.
+- A stage that MaximizePM runs (one with `--run`) refuses the question.
+
+When you connect such a system, add the question as a step before each stage
+of its own flow, and name the system with `--from`.
+
 ## Trigger rules: what starts an agent
 
 Each pipeline has its own trigger rules. A rule says: when this happens in the

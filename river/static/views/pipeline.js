@@ -311,6 +311,7 @@ function arrowDetail(s) {
   if (t.delay) rows.push(row("Delay", esc(t.delay.reason), setBy(t.delay.by) + " · until " + esc(when(t.delay.until))));
   if (t.disabled) rows.push(row("Disabled", esc(t.disabled.reason), setBy(t.disabled.by, t.disabled.at) + " · until someone enables it"));
   const waits = (t.waiting || []).map(w => `<div class="t-m"><span class="pl-ver">${esc(short(w.rev))}</span> waits since ${esc(ago(w.since))}`
+    + (w.outside ? ` · asked by ${esc(w.outside)}${w.outside_at ? ", last " + esc(ago(w.outside_at)) : ""}` : "")  // #6164: an outside flow
     + (w.approved_by ? ` · yes from ${esc(w.approved_by)}` : "") + (w.passed_by ? ` · let pass by ${esc(w.passed_by)}` : "")
     + (w.note ? `<div class="muted t-s">${esc(w.note)}</div>` : "") + `</div>`).join("");
   return `<h3>The transition ${esc(from)} → ${esc(s.name)} ${chip(cls, `${esc(m)} ${esc(word)}`)}</h3>

@@ -2067,6 +2067,13 @@ def build_parser(only=None):
                        "reviewed (a pipeline: its first stage starts; a target: its release is cut, pinned there)")
     x.add_argument("name"); x.add_argument("--rev", help="release up to this commit")
     x.add_argument("--all", action="store_true", help="release every commit in holding (a review after it checks them)")
+    x = pls.add_parser("may", help="for an outside system (Jenkins, Argo CD, a cron job): may this version enter this "
+                       "stage now? The transition into it answers (its block, window, freeze, a person's yes); exit "
+                       "code 0 yes, 1 no")
+    x.add_argument("name"); x.add_argument("stage")
+    x.add_argument("--rev", required=True, help="the version: a commit, a tag or a build number")
+    x.add_argument("--wait", help="ask again until a yes, at most this long (30m, 2h; at most 1h)")
+    x.add_argument("--from", dest="asker", help="the outside system that asks (its name in the audit log)")
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
@@ -3392,6 +3399,8 @@ def _run(args, conn):
         h = _hint(args, res, actor)
         if h:
             print(h, file=sys.stderr)
+    if args.cmd == "pipeline" and args.plcmd == "may" and not res["may"]:
+        return 1  # #6164: a script reads the answer from the exit code
     return 0
 
 
@@ -7801,6 +7810,9 @@ def _pipeline_cmd(conn, a, actor):
         return targets.holding(conn, a.name, fresh=True)
     if sub == "release":
         return targets.release(conn, a.name, a.rev, a.all, actor)
+    if sub == "may":  # #6164: an outside flow asks the transition
+        from .pipeline import gates
+        return gates.may(conn, a.name, a.stage, a.rev, a.wait, a.asker, actor)
     if sub in ("audit", "correct"):  # #6144
         from .pipeline import audit
         if sub == "correct":
@@ -7952,6 +7964,11 @@ def render_pipeline(a, res):
         print(f"the release: {rel['text']}" + (f"; {rel['why']}" if rel.get("why") else "")
               + (f"; release the reviewed commits: maxpm pipeline release {res['pipeline']}" if res["upto"] else "")
               + (f"; or all: maxpm pipeline release {res['pipeline']} --all" if res["commits"] else ""))
+        return
+    if sub == "may":
+        print(f"{'yes' if res['may'] else 'no'}: version {res['version']} {'may' if res['may'] else 'may not'} enter "
+              f"stage {res['stage']} of {res['pipeline']} now (run #{res['run']}): {res['why']}"
+              + (f"; ask again after {res['until']}" if res.get("until") and not res["may"] else ""))
         return
     if sub == "release":
         print(f"released {res['released']} commit(s) of {res['pipeline']} up to {res['rev'][:12]}"

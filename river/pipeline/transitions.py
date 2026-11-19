@@ -269,7 +269,8 @@ def describe(conn, stage, pipeline, cache=None, at=None):
     freezes = [dict(f, now=core.parse_iso(f["from"]) <= at < core.parse_iso(f["to"])) for f in _freezes(t)
                if core.parse_iso(f["to"]) > at]
     waiting = [dict(r) for r in conn.execute(
-        "SELECT r.id run, v.rev, r.queued_at since, r.approved_by, r.passed_by, r.gate_note note, r.gate_item item "
+        "SELECT r.id run, v.rev, r.queued_at since, r.approved_by, r.passed_by, r.gate_note note, r.gate_item item, "
+        "r.outside, r.outside_at "
         "FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.stage_id=? AND r.state='queued' "
         "ORDER BY r.id DESC LIMIT ?", (stage["id"], WAITING_SHOWN))]
     block = None
