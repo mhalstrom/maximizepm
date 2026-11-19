@@ -2088,7 +2088,7 @@ class SnapshotLimits(Base):
         ref_of = lambda pat: "@" + __import__("re").search(r"@(e\d+) " + pat, lines).group(1)  # noqa: E731
         t0 = time.time()
         self.assertEqual(browser.resolve_target(b, "Invoice 1042"), rows[1].split()[1])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147: no page load, under 100 ms
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147: no page load, under 100 ms
         self.assertEqual(browser.resolve_target(b, 'link "Far link 24"'), ref_of('link "Far link 24"'))
         self.assertEqual(browser.resolve_target(b, "Remove", "card b"), ref_of(r'button "Remove" \(in "Card B"\)'))
         self.assertEqual(browser.resolve_target(b, "Edit", "Invoice 1043"), rows[2].split()[-2])
@@ -3054,7 +3054,7 @@ class ActionChanges(Base):
         self.assertIn('+ [menu "Account"] 3 elements:', cli._browser_result("click", out))
         t0 = time.time()
         self.assertEqual(act(action="click", selector="Nothing")["changes"], ["no change"])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147
         self.assertRegex(act(action="check", selector="Agree")["changes"][0], r'^~ @e\d+ checkbox "Agree" checked$')
         self.assertRegex(act(action="click", selector="Remove me")["changes"][0], r"^- 1 gone: @e\d+$")
         # #5759: a heading or a paragraph that changed is no 'no change'
@@ -3062,7 +3062,7 @@ class ActionChanges(Base):
         t0 = time.time()
         self.assertEqual(act(action="click", selector="Note")["changes"],
                          ["~ text changed (+10 characters): maxpm browser text"])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147
         out = act(action="click", selector="Two")
         self.assertEqual((out["navigated"], out.get("changes"), out["outline"]), (True, None, ["[main] 1 link"]))
 
@@ -3274,7 +3274,7 @@ class Fallbacks(Base):
         act(action="screenshot", selector="css:#go")
         t0 = time.time()
         act(action="click", selector="css:#go", changes=False)
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147, with the case logged
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147, with the case logged
         act(action="html")  # the failed name's case ended with the click
         r = rows()
         self.assertEqual([(x["kind"], x["action"], x["tried"], x["target"]) for x in r],
