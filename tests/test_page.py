@@ -465,6 +465,12 @@ try {
   q('#plAskDlg .wk').dispatchEvent(ev("pointermove", b));
   window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
   out.dragged = f.value;
+  // #6206: the zone field starts on the browser's zone; another zone from the list rewrites the window; 24-hour labels.
+  const z = q("#plAskDlg .wk-zone");
+  out.zoneStart = z.value; out.browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  out.hours = [...document.querySelectorAll("#plAskDlg .wk-hour")].map(e => e.textContent).filter(Boolean);
+  z.value = "Europe/Berlin"; z.dispatchEvent(new Event("change"));
+  out.berlin = f.value;
   out.over = [...q("#plAskDlg").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5).map(e => e.className).slice(0, 5);
   q('#plAskDlg [data-pl-askgo]').click();
   await until(() => q("#plAskDlg.hidden"), "saved");
@@ -478,11 +484,15 @@ try {
             self.assertEqual(r["presetOn"], 5 * 8, r)
             self.assertEqual(r["typedOn"], 4 * 8 + 2 + 2, r)  # sat 22-24 and sun 00-02
             self.assertIn("fri 09:00-12:00 UTC", r["dragged"], r)
+            self.assertEqual(r["zoneStart"], "UTC", r)  # the typed window named UTC
+            self.assertIn("21:00", r["hours"], r)  # a 24-hour clock
+            self.assertTrue(all("M" not in h for h in r["hours"]), r)
+            self.assertIn("fri 09:00-12:00 Europe/Berlin", r["berlin"], r)
             self.assertEqual(r["over"], [], r)
             s = self.c.execute("SELECT id FROM pipeline_stages WHERE name='prod'").fetchone()["id"]
             w = transitions.get(self.c, s)["time_window"]
             self.assertTrue(w and transitions.parse_window(w), w)
-            self.assertIn("fri 09:00-12:00 UTC", w)
+            self.assertIn("fri 09:00-12:00 Europe/Berlin", w)  # the picked zone is kept
 
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one

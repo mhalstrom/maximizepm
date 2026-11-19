@@ -555,3 +555,5 @@ button.tc-unfold { display: none; }
 .wk-cell.on { background: var(--accent); }
 .wk-foot { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .wk-foot .spacer { flex: 1; }
+.wk-zl { display: flex; align-items: center; gap: var(--sp-2); }
+.wk-zone { width: var(--w-l); max-width: 100%; }  /* the time zone field (#6206) */

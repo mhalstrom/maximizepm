@@ -93,7 +93,7 @@ function drawLines(box, A, name) {
         ${l.corrected_by ? `<div class="au-corr t-s">corrected by line ${l.corrected_by.map(esc).join(", ")}</div>` : ""}</td>
       ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline.split(", ")[0] }, title: "Open the pipeline" })}</td>`}
       ${has.place ? `<td class="t-s">${esc(l.place || "")}</td>` : ""}${has.rev ? `<td class="mono" title="${esc(l.rev || "")}">${esc(short(l.rev))}</td>` : ""}
-      ${has.why ? `<td class="t-s">${esc(l.reason || "")}${l.until ? `<div class="muted">until <span title="${esc(l.until)}">${esc(new Date(l.until).toLocaleString())}</span></div>` : ""}</td>` : ""}
+      ${has.why ? `<td class="t-s">${esc(l.reason || "")}${l.until ? `<div class="muted">until <span title="${esc(l.until)}">${esc(new Date(l.until).toLocaleString([], { hourCycle: "h23" }))}</span></div>` : ""}</td>` : ""}
       ${has.result ? `<td class="t-s">${esc(l.result || "")}</td>` : ""}
       <td>${typeof l.id === "number" ? button("Correct", { cls: "plain", data: { "au-correct": l.id }, title: "Add a correction" }) : ""}</td>
     </tr>`).join("")}</table></div>${A.more ? `<div class="muted t-s">The newest ${L.length} lines. Narrow the time or search to find older ones; Export saves up to ${EXPORT_MAX}.</div>` : ""}`;

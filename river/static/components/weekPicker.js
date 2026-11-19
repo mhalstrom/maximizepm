@@ -4,6 +4,7 @@
 // (pipeline/transitions.parse_window: 'mon-thu 09:00-17:00 America/Los_Angeles', ';' between windows) into a text
 // field, and a change of that text draws the calendar again. A text that whole hours cannot show (09:30) stays as it
 // is, with a note. The time zone comes from the text, else from this browser.
+import { esc } from "../lib.js";
 import { button } from "./button.js";
 
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -75,7 +76,9 @@ export function weekPickerHtml() {
   const rows = Array.from({ length: 24 }, (_, h) => `<span class="wk-hour">${h % 3 ? "" : hh(h)}</span>`
     + DAYS.map((_, d) => `<span class="wk-cell" data-wk="${d}:${h}" title="${DAYS[d]} ${hh(h)}"></span>`).join("")).join("");
   return `<div class="wk"><div class="wk-grid" role="grid" aria-label="Open hours">${head}${rows}</div>
-    <div class="wk-foot t-s"><span class="wk-note muted"></span><span class="spacer"></span>
+    <div class="wk-foot t-s"><label class="wk-zl">Time zone <input class="wk-zone" list="wkZones" aria-label="Time zone"
+      autocomplete="off" spellcheck="false"><datalist id="wkZones"></datalist></label>
+      <span class="wk-note muted"></span><span class="spacer"></span>
       ${button("Weekdays 9-17", { cls: "plain", data: { "wk-preset": "work" }, title: "Office hours" })}
       ${button("Any time", { cls: "plain", data: { "wk-preset": "none" }, title: "No window" })}</div></div>`;
 }
@@ -85,10 +88,18 @@ export function wireWeekPicker(root, field) {
   const box = root.querySelector(".wk");
   if (!box || !field) return;
   let cells = new Set(), zone = browserZone(), paint = null;
-  const note = box.querySelector(".wk-note");
+  const note = box.querySelector(".wk-note"), sel = box.querySelector(".wk-zone");
+  // The time zone selector (#6206, mark 2026-11-19: 'localize the timezone by default ... and have a selector'): a
+  // field that suggests every zone this browser knows as the person types, this browser's zone first; a known zone
+  // writes itself into the window text.
+  const zones = (() => { try { return Intl.supportedValuesOf("timeZone"); } catch (e) { return []; } })();
+  const known = new Set([browserZone(), "UTC", ...zones]);
+  box.querySelector("#wkZones").innerHTML = [...known].map(z => `<option value="${esc(z)}"></option>`).join("");
+  const fill = () => { sel.value = zone; };
   const draw = () => {
     box.querySelectorAll("[data-wk]").forEach(c => c.classList.toggle("on", cells.has(c.dataset.wk)));
-    note.textContent = `Times in ${zone}` + (cells.size ? "" : " · no hour marked: versions pass at any time");
+    if (sel.value !== zone) fill();
+    note.textContent = cells.size ? "" : "No hour marked: versions pass at any time.";
   };
   const fromText = () => {
     const g = gridFromWindow(field.value);
@@ -96,6 +107,10 @@ export function wireWeekPicker(root, field) {
     cells = g.cells; if (g.zone) zone = g.zone;
     draw();
   };
+  sel.addEventListener("change", () => {
+    if (!known.has(sel.value.trim())) { sel.value = zone; note.textContent = "Pick a zone from the list."; return; }
+    zone = sel.value.trim(); toText();
+  });
   const toText = () => { field.value = windowFromGrid(cells, zone); draw(); };
   const mark = (c) => { if (!c || !paint) return; paint === "on" ? cells.add(c.dataset.wk) : cells.delete(c.dataset.wk); toText(); };
   box.addEventListener("pointerdown", (e) => {
@@ -120,5 +135,6 @@ export function wireWeekPicker(root, field) {
     toText();
   });
   field.addEventListener("input", fromText);
+  fill();
   fromText();
 }

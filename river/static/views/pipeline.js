@@ -529,7 +529,8 @@ async function toggleCheck(k) {
 
 // ---- the detail of the chosen transition: each control with who set it and until when, and its buttons
 
-const when = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+// The browser's time zone and a 24-hour clock (#6206, mark 2026-11-19: 'localize the timezone by default and use a 24 hr clock').
+const when = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : "";
 const setBy = (who, at) => esc(who || "a person") + (at ? " · " + esc(ago(at)) : "");
 
 // A transition chip opens its dialog (#6189, mark 2026-11-19 through manager-526c: "the release control is ON THE
