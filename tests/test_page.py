@@ -195,6 +195,38 @@ try {
             self.assertIn("ran", r["runs"], r)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
+    def test_branches_draw_as_rows_that_fan_out_and_join(self):
+        """#6142: a pipeline that splits draws each branch as a row of its own, with the lines that fan out and in;
+        the join's arrow says what it waits for; no two stages overlap. At 1280 and at 390 px."""
+        from river.pipeline import define
+        define.pipeline_add(self.c, "api", project="site")
+        for s, kind, after in (("build", "build", None), ("prod-a", "test", None), ("prod-b", "test", "build"),
+                               ("smoke", "test", "prod-a,prod-b")):
+            define.stage_set(self.c, "api", s, kind, after=after)
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="api"]'), "Deploy: the pipeline api");
+  q('#dpList [data-dp-open="api"]').click();
+  await until(() => q('#plRow [data-pl-stage="smoke"]'), "the stages of api");
+  const box = n => q(`#plRow [data-pl-stage="${n}"]`).getBoundingClientRect();
+  const cells = [...document.querySelectorAll("#plRow .pl-cell")].map(c => c.getBoundingClientRect());
+  const over = cells.some((a, i) => cells.some((b, j) => i < j && a.left < b.right - 1 && b.left < a.right - 1
+    && a.top < b.bottom - 1 && b.top < a.bottom - 1));
+  post({ grid: q("#plRow").classList.contains("pl-grid"), fans: document.querySelectorAll("#plRow .pl-fan path").length,
+    below: box("prod-b").top >= box("prod-a").bottom - 1, sameCol: Math.abs(box("prod-b").left - box("prod-a").left) < 2,
+    joinRow: Math.abs(box("smoke").top - box("prod-a").top) < 2, join: q('#plRow [data-pl-arrow="smoke"]').textContent,
+    over, page: document.documentElement.scrollWidth <= innerWidth });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1280,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertTrue(r["grid"] and r["below"] and r["sameCol"] and r["joinRow"], r)
+            self.assertEqual(r["fans"], 4, r)  # two lines fan out to the branches, two fan in to the join
+            self.assertIn("⋈ every branch", r["join"], r)
+            self.assertFalse(r["over"], r)
+            self.assertTrue(r["page"], r)
+
     def test_a_stage_that_starts_manually_shows_run_under_its_card(self):
         """#6138: the card of a stage that starts manually says so; the version that waits in it has Run under the
         card, and Run starts it. At 1280 and at 390 px, nothing wider than the page."""

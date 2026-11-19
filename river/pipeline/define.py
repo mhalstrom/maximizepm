@@ -16,7 +16,7 @@ import re
 from .. import core
 from . import audit, store, transitions
 
-_FIELDS = ("kind", "tier", "start", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback",
+_FIELDS = ("kind", "tier", "start", "after", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback",
            "wave_wait")
 TIERS = ("alpha", "beta", "prod")  # the usual tiers; a pipeline may name others (#6137)
 _TIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -130,14 +130,15 @@ def _stage_detail(conn, s):
             "junit": s["junit"],
             "waves": "; ".join(", ".join(w) for w in json.loads(s["waves"])) if s["waves"] else None,
             "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"], "tier": s["tier"],
-            "start": s["start"] or "auto"}
+            "start": s["start"] or "auto", "after": s["after"]}
 
 
 STARTS = ("auto", "manual")  # how a stage starts when its transition lets a version in (#6138)
 
 
 def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None, gate=None, pos=None, remove=False,
-              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None, tier=None, start=None):
+              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None, tier=None, start=None,
+              after=None):
     """Add a stage (kind needed), or change the fields given ('' clears run, workflow or env), or move it (pos), or
     remove it (its runs stay; adding the name again brings it back). A stage runs a command (run) or a forge
     workflow (workflow), not both; a deploy stage names its environment."""
@@ -190,6 +191,19 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             if s not in STARTS:
                 raise core.RiverError(f"a stage starts {' or '.join(STARTS)}, not {start!r}")
             sets["start"] = None if s == "auto" else s
+        if after is not None:  # the stages it follows (#6142): two stages after one are branches, one after two a join
+            names = [a.strip() for a in after.split(",") if a.strip()]
+            mine = row["pos"] if row is not None else None
+            for a in names:
+                o = _stage_row(conn, pid, a)
+                if a == name or o is None or o["removed_at"]:
+                    raise core.RiverError(f"--after names stages of pipeline {p['name']} other than {name}: no stage {a}")
+                if mine is not None and o["pos"] >= mine:
+                    raise core.RiverError(f"stage {a} comes after {name} in the order; a stage follows earlier stages "
+                                          f"only (maxpm pipeline stage {p['name']} {name} --pos <n> moves it)")
+            if len(set(names)) != len(names):
+                raise core.RiverError("--after names each stage once")
+            sets["after"] = ",".join(names) or None
         if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
             sets["junit"] = junit.strip() or None
         if waves is not None:  # a stage over many servers (#6120)
@@ -213,7 +227,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             sid = row["id"]
             changed = "added again" if row["removed_at"] else "changed"
             if changed == "changed" and not sets and pos is None and rule is None:
-                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --tier, --start, --run, --workflow, --env, "
+                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --tier, --start, --after, --run, --workflow, --env, "
                                       "--gate or --pos")
             if row["removed_at"]:
                 sets["removed_at"] = None

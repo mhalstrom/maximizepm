@@ -63,6 +63,60 @@ def _pipeline(conn, name):
     return row
 
 
+# ---------------------------------------------------------------- branches and joins (#6142)
+
+def stage_graph(conn, pid):
+    """(the live stages in order, {stage: the stages it follows}, {stage: the stages that follow it}). A stage follows
+    the stages its 'after' names, or else the stage before it in order; only stages earlier in the order count, so the
+    flow never loops. Two stages after one are branches; a stage after two or more is a join (Decision 9)."""
+    rows = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
+                        (pid,)).fetchall()
+    names = [r["name"] for r in rows]
+    prev = {}
+    for i, r in enumerate(rows):
+        after = [a for a in (r["after"] or "").split(",") if a in names[:i]]
+        prev[r["name"]] = after or ([names[i - 1]] if i and not r["after"] else [])
+    nxt = {n: [m for m in names if n in prev[m]] for n in names}
+    return rows, prev, nxt
+
+
+def ancestors(prev, name):
+    """Every stage that a version passes before it reaches stage name."""
+    out, todo = set(), list(prev.get(name, []))
+    while todo:
+        n = todo.pop()
+        if n not in out:
+            out.add(n)
+            todo.extend(prev.get(n, []))
+    return out
+
+
+def depth(prev, name, _memo=None):
+    """How many stages lie before stage name on its longest path (the column of the page)."""
+    memo = {} if _memo is None else _memo
+    if name not in memo:
+        memo[name] = 1 + max((depth(prev, p, memo) for p in prev.get(name, [])), default=-1)
+    return memo[name]
+
+
+def branch_siblings(conn, pid, stage):
+    """The stages in the other branches at the place of stage (the same distance from the fork where its branch
+    starts): a move back of every branch acts on them too. None when stage is on no branch."""
+    rows, prev, nxt = stage_graph(conn, pid)
+    cur, fork = stage, None
+    while len(prev.get(cur, [])) == 1:
+        p = prev[cur][0]
+        if len(nxt[p]) > 1:
+            fork = p
+            break
+        cur = p
+    if fork is None:
+        return []
+    memo, d = {}, depth(prev, stage)
+    return [r["name"] for r in rows if r["name"] != stage and fork in ancestors(prev, r["name"])
+            and depth(prev, r["name"], memo) == d and len(prev[r["name"]]) == 1]
+
+
 # ---------------------------------------------------------------- records an event names (inside a tx)
 
 def _stage_id(conn, pid, name, kind=None):
@@ -449,6 +503,7 @@ def show(conn, name):
         d["last_run"] = _run_dict(conn, conn.execute(
             "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())
         d["start"] = s["start"] or "auto"  # #6138: manual: a version that enters waits for Run
+        d["prev"] = d["transition"].get("from") or []  # #6142: the stages it follows (branches, joins)
         w = conn.execute("SELECT r.id, v.rev, r.entered_at FROM stage_runs r LEFT JOIN pipeline_versions v ON "
                          "v.id=r.version_id WHERE r.stage_id=? AND r.state='queued' AND r.entered_at IS NOT NULL AND "
                          "r.run_at IS NULL ORDER BY r.id LIMIT 1", (s["id"],)).fetchone() if s["start"] else None
@@ -520,7 +575,8 @@ def stage_versions(conn, pipeline, stage, limit=STAGE_VERSIONS):
                     "by": who, "why": why, "state": r["state"], "queued_at": r["queued_at"],
                     "started_at": r["started_at"], "ended_at": r["ended_at"], "seconds": took, "errors": r["errors"],
                     "live": is_live})
-    return {"pipeline": p["name"], "stage": s["name"], "kind": s["kind"], "env_id": s["env_id"], "runs": out}
+    return {"pipeline": p["name"], "stage": s["name"], "kind": s["kind"], "env_id": s["env_id"], "runs": out,
+            "branches": branch_siblings(conn, p["id"], s["name"])}  # #6142: a move back of every branch acts on them
 
 
 def run_show(conn, run_id):

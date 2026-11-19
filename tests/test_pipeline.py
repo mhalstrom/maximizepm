@@ -105,7 +105,7 @@ class Commands(Base):
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
                                              "workflow": None, "env": "prod", "junit": None, "waves": None,
                                              "check": None, "rollback": None, "wave_wait": None, "tier": None,
-                                             "start": "auto",
+                                             "start": "auto", "after": None,
                                              "transition": {"mode": "delay 30m", "window": None, "freezes": [],
                                                             "fault_rule": False}})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
@@ -943,6 +943,87 @@ class Transitions(RunnerBase):
         self.c.execute("UPDATE pipeline_stages SET gate='forge'")
         schema.migrate(self.c)  # once only
         self.assertEqual(self.tr.get(self.c, ids["build"])["mode"], "yes")
+
+
+class Branches(RunnerBase):
+    """#6142 (Decision 9): after a stage the flow can split into branches, each with its own transitions, stages and
+    versions; a join starts when a version passed every branch; a move back acts on one branch or on every branch."""
+
+    def setUp(self):
+        super().setUp()
+        define.env_set(self.c, "app", "beta-b")
+        define.stage_set(self.c, "app", "beta-b", "deploy", env="beta-b", pos=4, after="test",
+                         run="test -f fail-b && exit 3 || echo region b")
+        define.stage_set(self.c, "app", "prod", gate="auto", after="beta,beta-b")
+
+    def rev_runs(self, stage):
+        return [(r["rev"], r["state"]) for r in self.c.execute(
+            "SELECT v.rev, r.state FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipeline_versions v "
+            "ON v.id=r.version_id WHERE s.name=? ORDER BY r.id", (stage,))]
+
+    def test_a_version_runs_in_every_branch_and_the_join_waits_for_all(self):
+        rows, prev, nxt = store.stage_graph(self.c, store._pipeline(self.c, "app")["id"])
+        self.assertEqual((prev["beta-b"], prev["prod"], nxt["test"]), (["test"], ["beta", "beta-b"], ["beta", "beta-b"]))
+        self.runner.start(self.c, "app", rev="brn0001")
+        self.passes(6)
+        self.assertEqual(self.rev_runs("beta"), [("brn0001", "passed")])
+        self.assertEqual(self.rev_runs("beta-b"), [("brn0001", "passed")])
+        self.assertEqual(self.rev_runs("prod"), [("brn0001", "passed")])  # once, after both branches
+        # Region b fails for the next version: the join lets it in only when it passed every branch.
+        open(os.path.join(self.folder, "fail-b"), "w").close()
+        self.runner.start(self.c, "app", rev="brn0002")
+        self.passes(6)
+        self.assertEqual(self.rev_runs("beta")[-1], ("brn0002", "passed"))
+        self.assertEqual(self.rev_runs("beta-b")[-1], ("brn0002", "failed"))
+        self.assertEqual(len(self.rev_runs("prod")), 1)
+        s = {x["name"]: x for x in store.show(self.c, "app")["stages"]}
+        self.assertEqual(s["prod"]["transition"]["join"], {"rev": "brn0002", "missing": ["beta-b"]})
+        self.assertEqual(s["prod"]["prev"], ["beta", "beta-b"])
+        self.assertEqual(s["beta-b"]["prev"], ["test"])
+        # Region b passes when it runs again: the version then enters the join.
+        os.remove(os.path.join(self.folder, "fail-b"))
+        self.runner.run_again(self.c, "app", "beta-b", "brn0002", "mark")
+        self.passes(4)
+        self.assertEqual(self.rev_runs("prod")[-1], ("brn0002", "passed"))
+        self.assertIsNone(store.show(self.c, "app")["stages"][4]["transition"]["join"])
+        from river.pipeline import transitions
+        self.assertEqual(transitions._arrow(self.c, store._pipeline(self.c, "app"), s["prod"]), "beta + beta-b -> prod")
+        from river import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "show", "app"])
+        self.assertIn("4. beta-b  [deploy, env beta-b, after test]", buf.getvalue())
+        self.assertIn("5. prod  [deploy, env prod, after beta + beta-b]", buf.getvalue())
+
+    def test_after_names_earlier_stages_only(self):
+        for bad in ("prod", "beta-b", "nope", "test,test"):
+            with self.assertRaises(RiverError):
+                define.stage_set(self.c, "app", "beta-b", after=bad, actor="mark")
+        define.stage_set(self.c, "app", "prod", after="", actor="mark")  # '' clears: the stage before it again
+        _, prev, _ = store.stage_graph(self.c, store._pipeline(self.c, "app")["id"])
+        self.assertEqual(prev["prod"], ["beta-b"])
+        self.assertIn("after beta,beta-b -> none", define.history(self.c, "app", 1)[0]["change"])
+
+    def test_a_move_back_acts_on_one_branch_or_on_every_branch(self):
+        for rev in ("brn0001", "brn0002"):
+            self.runner.start(self.c, "app", rev=rev)
+            self.passes(6)
+        p = store._pipeline(self.c, "app")
+        self.assertEqual(store.branch_siblings(self.c, p["id"], "beta"), ["beta-b"])
+        self.assertEqual(store.branch_siblings(self.c, p["id"], "test"), [])
+        self.assertEqual(store.stage_versions(self.c, "app", "beta-b")["branches"], ["beta"])
+        self.runner.move_back(self.c, "app", "beta-b", "brn0001", "region b only", "mark")
+        self.passes(2)
+        envs = {e["name"]: e["rev"] for e in store.show(self.c, "app")["envs"]}
+        self.assertEqual((envs["beta"], envs["beta-b"]), ("brn0002", "brn0001"))
+        r = self.runner.move_back_branches(self.c, "app", "beta", "brn0001", "a fault in every region", "mark")
+        self.assertEqual((r["moved"], r["left"]), (["beta", "beta-b"], []))
+        self.passes(2)
+        envs = {e["name"]: e["rev"] for e in store.show(self.c, "app")["envs"]}
+        self.assertEqual((envs["beta"], envs["beta-b"]), ("brn0001", "brn0001"))
+        with self.assertRaises(RiverError):
+            self.runner.move_back_branches(self.c, "app", "test", "brn0001", "x", "mark")  # on no branch
 
 
 class ManualStart(RunnerBase):

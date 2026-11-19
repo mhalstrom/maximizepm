@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
                                          -- (#6137). Readers: the stage card, trigger rules (any stage of a tier)
   start        TEXT,                     -- manual: a version that its transition lets in waits for Run (#6138);
                                          -- none: auto, the stage runs by itself
+  after        TEXT,                     -- the stages it follows, comma-separated (#6142): two stages after one stage
+                                         -- are branches; a stage after two is a join. None: the stage before it
   UNIQUE (pipeline_id, name)
 );
 
@@ -470,7 +472,7 @@ def migrate(conn):
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} INTEGER")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait",
-              "tier", "start"):  # #6113, #6114, #6120, #6137, #6138
+              "tier", "start", "after"):  # #6113, #6114, #6120, #6137, #6138, #6142
         if c not in stage_cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}

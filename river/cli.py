@@ -1919,6 +1919,8 @@ def build_parser(only=None):
                    "clears it)")
     x.add_argument("--start", choices=("auto", "manual"), help="auto: it runs when its transition lets a version in; "
                    "manual: the version waits in it until someone runs maxpm pipeline run-stage")
+    x.add_argument("--after", help="the stages it follows, comma-separated: two stages after one are branches, one "
+                   "after two a join (none: the stage before it; '' clears)")
     x.add_argument("--remove", action="store_true", help="remove it; its runs stay")
     x = pls.add_parser("run-stage", help="Run: start the version that waits in a stage that starts manually")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", help="that version, when several wait")
@@ -1965,6 +1967,8 @@ def build_parser(only=None):
                        "transition into it until you unblock it")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x.add_argument("--reason", required=True)
+    x.add_argument("--every-branch", action="store_true", help="also the stage at the same place of each other branch "
+                   "where that version passed")
     # #6145: who may press the emergency actions, and the actions
     x = pls.add_parser("operators", help="who may press the emergency actions of a pipeline; only a person changes "
                        "the list")
@@ -7709,7 +7713,7 @@ def _pipeline_cmd(conn, a, actor):
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
         return define.stage_set(conn, a.name, a.stage, a.kind, a.run, a.workflow, a.env, a.gate, a.pos, a.remove,
-                                actor, a.junit, a.waves, a.check, a.rollback, a.wave_wait, a.tier, a.start)
+                                actor, a.junit, a.waves, a.check, a.rollback, a.wave_wait, a.tier, a.start, a.after)
     if sub == "run-stage":
         from .pipeline import runner
         return runner.run_stage(conn, a.name, a.stage, a.rev, actor)
@@ -7757,6 +7761,8 @@ def _pipeline_cmd(conn, a, actor):
         return store.stage_versions(conn, a.name, a.stage, a.n)
     if sub == "move-back":
         from .pipeline import runner
+        if a.every_branch:  # #6142: the same place of every branch of the fork
+            return runner.move_back_branches(conn, a.name, a.stage, a.rev, a.reason, actor)
         return runner.move_back(conn, a.name, a.stage, a.rev, a.reason, actor)
     if sub in ("operators", "emergency"):
         from .pipeline import operators as ops
@@ -8164,6 +8170,11 @@ def render_pipeline(a, res):
         if not res["runs"]:
             print("  no version ran there yet")
         return
+    if sub == "move-back" and "moved" in res:  # every branch (#6142)
+        print(f"pipeline {res['pipeline']}: stages {', '.join(res['moved'])} go back to {res['version']} (runs "
+              + ", ".join(f"#{r}" for r in res["runs"]) + "); the transition into each is blocked until you unblock it"
+              + "".join(f"\n  not moved: {x}" for x in res["left"]))
+        return
     if sub in ("rollback", "rerun-failed", "move-back"):
         print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']})"
               + (f"; {res['held']}: the transition into it is blocked until maxpm pipeline unblock {res['pipeline']} "
@@ -8207,7 +8218,8 @@ def render_pipeline(a, res):
         t = s["transition"]
         print(f"  {s['pos']}. {s['name']}  [{s['kind']}{', env ' + s['env'] if s['env'] else ''}"
               f"{', tier ' + s['tier'] if s.get('tier') else ''}"
-              f"{', starts manually' if s.get('start') == 'manual' else ''}]  mode {t['words']}"
+              f"{', starts manually' if s.get('start') == 'manual' else ''}"
+              f"{', after ' + ' + '.join(s['prev']) if s.get('prev') and s.get('after') else ''}]  mode {t['words']}"
               + (f", window {t['window']['text']}" if t.get("window") else "")
               + (", fault rule" if t.get("fault_rule") else "") + f"  {does}")
         if t["state"] != "open":

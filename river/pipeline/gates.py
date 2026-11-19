@@ -70,9 +70,12 @@ def _declined(r):
 def _end_earlier(conn, p, s, vid, asker):
     """The version asks at this stage, so it passed the stages before it: their outside runs that still run end as
     passed, and hand the version on as an event of their end does (a deploy stage: its environment runs it now)."""
+    before = sorted(store.ancestors(store.stage_graph(conn, p["id"])[1], s["name"]))  # its branch only (#6142)
+    if not before:
+        return
     for x in conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages t ON t.id=r.stage_id WHERE r.pipeline_id=? "
-                          "AND r.version_id=? AND r.outside IS NOT NULL AND r.state='running' AND t.pos<?",
-                          (p["id"], vid, s["pos"])).fetchall():
+                          "AND r.version_id=? AND r.outside IS NOT NULL AND r.state='running' AND t.name IN ("
+                          + ",".join("?" * len(before)) + ")", [p["id"], vid] + before).fetchall():
         store.run_finish(conn, x["id"], "passed", source=asker)
         runner.hand_on(conn, x["id"])
 

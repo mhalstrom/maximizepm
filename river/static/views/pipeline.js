@@ -147,7 +147,10 @@ function arrowEl(s, i) {
   const w = (t.waiting || [])[0];
   const by = t.state !== "open" ? [t.set_by, t.until ? (t.until.startsWith("#") ? `until ${t.until} closes` : `${left(t.until)} left`) : ""]
     .filter(Boolean).join(" · ") : "";
+  // A join (#6142): it lets a version in when it passed every branch; it names the branches a version still waits for.
+  const join = (t.from || []).length > 1 ? (t.join ? `⋈ ${short(t.join.rev)} waits for ${t.join.missing.join(", ")}` : "⋈ every branch") : "";
   return `<div class="pl-gate">${button(`${chip(cls, `${esc(m)}<span class="pl-long"> ${esc(word)}</span>`)}
+    ${join ? `<span class="pl-anote pl-join">${esc(join)}</span>` : ""}
     ${by ? `<span class="pl-anote pl-long">${esc(by)}</span>` : ""}${w ? `<span class="pl-anote pl-ver pl-long">${esc(short(w.rev))} waits</span>` : ""}`,
     { kind: "card", cls: "pl-arrow", pressed: V.arrow === s.name, data: { "pl-arrow": s.name },
       title: `Transition into ${s.name}` })}</div>`;
@@ -155,11 +158,48 @@ function arrowEl(s, i) {
 
 function stagesView(D) {
   if (!D.stages.length) return empty(`Pipeline ${esc(D.name)} has no stages yet: maxpm pipeline stage ${esc(D.name)} &lt;stage&gt; --kind &lt;kind&gt;`);
-  const row = D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
-  return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row" id="plRow">${row}</div></div>
+  const L = layout(D.stages);
+  const row = L.branched ? branchedRow(D.stages, L) : D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
+  return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row${L.branched ? " pl-grid" : ""}" id="plRow">${row}</div></div>
     <div class="pl-card" id="plDetail">${detail()}</div>
     <div id="plStageRuns"></div>
     ${envTable(D)}${sourceCard(D)}`;
+}
+
+// Branches and joins (#6142, Decision 9): the place of each stage. Its column is the longest way from the first stage;
+// the first stage after a stage keeps that stage's row, each other branch gets a row of its own, and a join sits on
+// the row of its first branch. branched: the pipeline splits somewhere (else it is one row, as before).
+function layout(stages) {
+  const col = {}, row = {}, kept = {}, prevs = {};
+  let rows = 0, branched = false;
+  stages.forEach((s, i) => {  // in order, so the stages before s have their places
+    let p = (s.prev || []).filter(n => n in col);
+    if (!p.length && i) p = [stages[i - 1].name];  // after the Holding stage (#6140), which names none
+    col[s.name] = p.length ? 1 + Math.max(...p.map(n => col[n])) : 0;
+    if (p.length > 1) { row[s.name] = Math.min(...p.map(n => row[n])); branched = true; }
+    else if (p.length === 1 && !kept[p[0]]) { row[s.name] = row[p[0]]; kept[p[0]] = true; }
+    else { row[s.name] = rows; if (p.length) branched = true; }
+    rows = Math.max(rows, row[s.name] + 1);
+    prevs[s.name] = p;
+  });
+  return { col, row, rows, branched, prevs };
+}
+
+// The grid of a pipeline with branches: each stage (its arrow and card) in its row and column; before each column a
+// thin column with the lines that fan out to the branches and fan in to a join.
+function branchedRow(stages, L) {
+  const cells = stages.map((s, i) => `<div class="pl-cell" style="grid-row:${L.row[s.name] + 1};grid-column:${2 * L.col[s.name] + 2}">${arrowEl(s, i)}${stageCard(s)}</div>`);
+  const edgesOf = {};
+  for (const s of stages) for (const p of L.prevs[s.name]) {
+    (edgesOf[L.col[s.name]] = edgesOf[L.col[s.name]] || []).push([L.row[p], L.row[s.name]]);
+  }
+  for (const [c, edges] of Object.entries(edgesOf)) {
+    if (edges.every(([a, b]) => a === b)) continue;  // a plain step: the arrow's own line is enough
+    const top = Math.min(...edges.flat()), end = Math.max(...edges.flat()), n = end - top + 1;
+    const y = r => ((r - top + 0.5) / n * 100).toFixed(1);
+    cells.push(`<div class="pl-fan" style="grid-row:${top + 1} / ${end + 2};grid-column:${2 * c + 1}" aria-hidden="true"><svg viewBox="0 0 24 100" preserveAspectRatio="none">${edges.map(([a, b]) => `<path d="M0 ${y(a)} C 12 ${y(a)}, 12 ${y(b)}, 24 ${y(b)}"/>`).join("")}</svg></div>`);
+  }
+  return cells.join("");
 }
 
 // The forge's own words when it refuses the token, or that nobody saved it (#6147).
@@ -260,6 +300,8 @@ function stageRunsHtml(SR) {
     const b = [];
     if (r.state === "passed" && r.rev && r.rev !== liveRev)
       b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
+    if (r.state === "passed" && r.rev && r.rev !== liveRev && (SR.branches || []).length)  // #6142: the same place of every branch
+      b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
     if (["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
     else if (r.rev) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
     const when = r.started_at || r.queued_at;
@@ -308,7 +350,8 @@ const when = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short",
 const setBy = (who, at) => esc(who || "a person") + (at ? " · " + esc(ago(at)) : "");
 
 function arrowDetail(s) {
-  const D = V.data, t = s.transition, i = D.stages.indexOf(s), from = i > 0 ? D.stages[i - 1].name : "start";
+  const D = V.data, t = s.transition, i = D.stages.indexOf(s);
+  const from = (t.from || []).length ? t.from.join(" + ") : t.from ? "start" : i > 0 ? D.stages[i - 1].name : "start";  // #6142
   const [m, word, cls] = arrowMark(t);
   const row = (what, now, by) => `<tr><td><b>${esc(what)}</b></td><td>${now}</td><td class="t-s muted">${by}</td></tr>`;
   const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : t.fixed ? "the deploy target" : "the start: automatic")];
@@ -548,6 +591,9 @@ $("#dpStages").addEventListener("click", (e) => {
   const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback],[data-pl-moveback]");
   if (a) {
     const d = a.dataset;
+    if (d.plMoveback && d.branches) return askReason(`Move every branch back to ${short(d.rev)}?`,
+      `${d.plMoveback} and ${d.branches} run again with this version where it passed, and the transition into each is blocked until someone unblocks it. A branch where it never passed stays as it is.`,
+      "Move back every branch", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason, every_branch: true }));
     if (d.plMoveback) return askReason(`Move ${d.plMoveback} back to ${short(d.rev)}?`,
       `The stage runs again with this version, as one more run, and the transition into ${d.plMoveback} is blocked until someone unblocks it, so no newer version comes by itself.`,
       "Move back", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason }));

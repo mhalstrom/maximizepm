@@ -25,6 +25,19 @@ Deploy tab of the page.
   whether a version may enter; the start decides whether the stage then runs
   by itself. A run again or a move back starts at once: a person sent it.
   Run takes a person, the manager, or an operator of the pipeline.
+- **Branches and joins**: a stage follows the stage before it, or the stages
+  that `--after` names (`maxpm pipeline stage <name> prod-b --after staging`;
+  earlier stages only; `''` clears it). Two stages after one stage are
+  branches: each gets the version, with its own transitions, stages and
+  versions (one prod region with one server, another with three). A stage
+  after two or more stages is a join (`--after watch-a,watch-b`): its
+  transition lets a version in only when that version passed every branch,
+  and the arrow names the branch it still waits for. Keep the stages of a
+  branch together in the order, and put a branch's first stage `--after` the
+  stage where it splits. The page draws each branch as a row of its own. A
+  move back acts on one branch; `move-back --every-branch` also moves back
+  the stage at the same place of each other branch where that version
+  passed.
 - **Environment**: a place that runs the code (dev, beta, prod, one server).
   A deploy stage names the environment it deploys to. When the stage passes,
   that version runs there.
@@ -912,6 +925,7 @@ maxpm pipeline run-stage <name> <stage> [--rev <commit>]  # Run: a stage that st
 maxpm pipeline runs <name> <stage>                       # Versions in <stage>: each run there, who and why
 maxpm pipeline rerun <name> <stage> --rev <commit> [--reason "<why>"]   # run one stage again, an older version too
 maxpm pipeline move-back <name> <stage> --rev <commit> --reason "<why>" # back to a version that passed there
+maxpm pipeline move-back <name> <stage> --rev <commit> --reason "<why>" --every-branch  # and each other branch
 maxpm pipeline stop <run>                                # the command, the forge run, or the wait at the transition
 maxpm pipeline rollback <name> <env> --rev <older commit> --reason "<why>"
 ```
@@ -1045,7 +1059,7 @@ comes back to you as an answer to the question.
 
 ## Later
 
-Each Deploy tab task adds its part to this guide when it is built: branches,
-the override, an agent inside a forge's own CI job, keys granted per stage to
+Each Deploy tab task adds its part to this guide when it is built: the
+override, an agent inside a forge's own CI job, keys granted per stage to
 a runner's agent, and each pipeline's list of what its agents may do with no
 prompt.

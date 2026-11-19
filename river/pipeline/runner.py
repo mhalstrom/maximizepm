@@ -152,11 +152,16 @@ def start(conn, pipeline, rev=None, actor=None):
 # ---------------------------------------------------------------- gates
 
 def _previous(conn, r):
-    """The run of the stage before, for the same version, that passed (None for the first stage)."""
+    """The run of a stage before (the stages it follows, on its branch, #6142), for the same version, that passed
+    (None for the first stage)."""
+    rows, prev, _ = store.stage_graph(conn, r["pipeline_id"])
+    before = store.ancestors(prev, r["stage"])
+    if not before:
+        return None
     return conn.execute("SELECT x.*, s.env_id FROM stage_runs x JOIN pipeline_stages s ON s.id=x.stage_id WHERE "
-                        "x.pipeline_id=? AND x.version_id IS ? AND s.pos<? AND s.removed_at IS NULL AND "
-                        "x.state='passed' ORDER BY s.pos DESC, x.id DESC LIMIT 1",
-                        (r["pipeline_id"], r["version_id"], r["pos"])).fetchone()
+                        "x.pipeline_id=? AND x.version_id IS ? AND s.removed_at IS NULL AND x.state='passed' AND "
+                        "s.name IN (" + ",".join("?" * len(before)) + ") ORDER BY s.pos DESC, x.id DESC LIMIT 1",
+                        [r["pipeline_id"], r["version_id"]] + sorted(before)).fetchone()
 
 
 def _failed_check(conn, r, prev, since):
@@ -549,8 +554,19 @@ def _hand_on(conn, r):
                            run_id=r["id"], kind="rolledback" if r["purpose"] == "rollback" else "deployed")
     if r["purpose"] == "rollback" or (r["purpose"] or "").startswith("failed:"):
         return  # a roll back or a run of some tests hands nothing on: a person decides what comes next
-    nxt = conn.execute("SELECT id, name FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL AND pos>? "
-                       "ORDER BY pos, id LIMIT 1", (r["pipeline_id"], r["pos"])).fetchone()
+    rows, prev, nexts = store.stage_graph(conn, r["pipeline_id"])
+    ids = {s["name"]: s["id"] for s in rows}
+    for name in nexts.get(r["stage"], []):  # one stage, or one for each branch (#6142)
+        others = [p for p in prev[name] if p != r["stage"]]
+        if others and any(not conn.execute(
+                "SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND state='passed'",
+                (ids[p], r["version_id"])).fetchone() for p in others):
+            continue  # a join: the version enters only when it passed every branch (Decision 9)
+        _hand_to(conn, r, {"id": ids[name], "name": name})
+
+
+def _hand_to(conn, r, nxt):
+    """Queue the version of run r at the next stage nxt, once."""
     if nxt:
         # A newer version replaces an older one that still waits at that gate (#6119): the person approves the
         # newest, and a stage never runs a version that a newer one passed by.
@@ -707,6 +723,29 @@ def move_back(conn, pipeline, stage, rev, reason=None, actor=None, words=None, r
     transitions.block(conn, p["name"], stage, why, actor=actor)
     out = run_again(conn, p["name"], stage, rev, actor, purpose="rollback", note=why, reason=reason or why)
     return {**out, "held": why}
+
+
+def move_back_branches(conn, pipeline, stage, rev, reason=None, actor=None):
+    """maxpm pipeline move-back --every-branch (#6142, Decision 9: 'a move back acts on one branch, or on every branch
+    for one version'): move stage back to rev, and the stage at the same place of each other branch of the same fork
+    where rev passed too. A branch where rev never passed is left as it is, and the reply names it."""
+    _lead(conn, actor, "moves a stage back")
+    p = store._pipeline(conn, pipeline)
+    stages = [stage] + store.branch_siblings(conn, p["id"], stage)
+    if len(stages) == 1:
+        raise core.RiverError(f"stage {stage} of pipeline {p['name']} is on no branch; move it back alone: maxpm "
+                              f"pipeline move-back {p['name']} {stage} --rev {rev} --reason \"...\"")
+    moved, left = [], []
+    for s in stages:
+        try:
+            moved.append(move_back(conn, p["name"], s, rev, reason, actor,
+                                   words=f"moved every branch back to {rev}: stage {s}"))
+        except core.RiverError as e:
+            if s == stage:
+                raise
+            left.append(f"{s}: {e}")
+    return {"pipeline": p["name"], "stage": stage, "version": moved[0]["version"], "moved": [m["stage"] for m in moved],
+            "runs": [m["run"] for m in moved], "left": left, "held": moved[0]["held"]}
 
 
 def rerun_failed(conn, run_id, actor=None):

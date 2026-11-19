@@ -292,7 +292,40 @@ def describe(conn, stage, pipeline, cache=None, at=None):
         "state": c["kind"] if c else "open", "state_text": c["text"] if c else mode_text(t["mode"], t["mode_arg"]),
         "set_by": (c or {}).get("by") or t["mode_by"], "until": (c or {}).get("until"),
         "waiting": waiting,
+        **_join(conn, stage, pipeline, cache),
     }
+
+
+def _join(conn, stage, pipeline, cache=None):
+    """{"from": the stages before the arrow, "join": the newest version that passed some of them but not all, and
+    the stages it still waits for} (#6142: a join lets a version in only when it passed every branch)."""
+    key = ("graph", pipeline["id"])
+    if cache is None or key not in cache:
+        g = store.stage_graph(conn, pipeline["id"])
+        if cache is not None:
+            cache[key] = g
+    else:
+        g = cache[key]
+    rows, prev, _ = g
+    before = prev.get(stage["name"], [])
+    out = {"from": before, "join": None}
+    if len(before) < 2:
+        return out
+    ids = {r["name"]: r["id"] for r in rows}
+    got = conn.execute("SELECT v.rev, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id JOIN "
+                       "pipeline_versions v ON v.id=r.version_id WHERE r.state='passed' AND r.stage_id IN ("
+                       + ",".join("?" * len(before)) + ") ORDER BY r.id DESC", [ids[b] for b in before]).fetchall()
+    passed = {}
+    for x in got:
+        passed.setdefault(x["rev"], set()).add(x["stage"])
+    there = {x["rev"] for x in conn.execute("SELECT v.rev FROM stage_runs r JOIN pipeline_versions v ON "
+                                            "v.id=r.version_id WHERE r.stage_id=?", (stage["id"],))}
+    for x in got:  # newest first
+        missing = [b for b in before if b not in passed[x["rev"]]]
+        if missing and x["rev"] not in there:
+            out["join"] = {"rev": x["rev"], "missing": missing}
+            break
+    return out
 
 
 def plain(mode, arg=None):
@@ -300,7 +333,7 @@ def plain(mode, arg=None):
     return {"mode": mode, "arg": arg, "words": mode_words(mode, arg), "text": mode_text(mode, arg), "mode_by": None,
             "mode_at": None, "window": None, "freezes": [], "fault_rule": False, "rule_by": None, "fault": None,
             "block": None, "delay": None, "disabled": None, "state": "open", "state_text": mode_text(mode, arg),
-            "set_by": None, "until": None, "waiting": [], "fixed": True}
+            "set_by": None, "until": None, "waiting": [], "fixed": True, "from": None, "join": None}
 
 
 # ---------------------------------------------------------------- changes
@@ -349,9 +382,9 @@ def _target(conn, pipeline, stage):
 
 
 def _arrow(conn, p, s):
-    before = conn.execute("SELECT name FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL AND pos<? "
-                          "ORDER BY pos DESC LIMIT 1", (p["id"], s["pos"])).fetchone()
-    return f"{before['name']} -> {s['name']}" if before else f"start -> {s['name']}"
+    _, prev, _ = store.stage_graph(conn, p["id"])  # a join has more than one stage before it (#6142)
+    before = prev.get(s["name"], [])
+    return f"{' + '.join(before)} -> {s['name']}" if before else f"start -> {s['name']}"
 
 
 def set_mode(conn, pid, sid, mode, arg, actor):

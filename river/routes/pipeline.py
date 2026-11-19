@@ -120,8 +120,9 @@ OPS = {
     "pipeline_emergency": lambda c, a, who: _emergency(c, a, who),
     # #6138: Run on a stage that starts manually (the function checks: an operator, a person or the manager)
     "pipeline_run_stage": lambda c, a, who: _runner().run_stage(c, a["pipeline"], a["stage"], a.get("rev"), who),
-    "pipeline_move_back": lambda c, a, who: _runner().move_back(c, a["pipeline"], a["stage"], a["rev"],
-                                                                a.get("reason"), who),
+    "pipeline_move_back": lambda c, a, who: (_runner().move_back_branches if a.get("every_branch")  # #6142
+                                             else _runner().move_back)(c, a["pipeline"], a["stage"], a["rev"],
+                                                                       a.get("reason"), who),
     "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
     "pipeline_rollback": lambda c, a, who: _runner().rollback(c, a["pipeline"], a["env"], a["rev"], a.get("reason"), who),
     "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
@@ -321,6 +322,7 @@ def _strip(stages, no_news=False, work=None):
         t = s.get("transition") or {}
         out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "tier": s.get("tier"),
                     "start": s.get("start"), "waits_for_run": s.get("waits_for_run"),  # #6138
+                    "prev": s.get("prev"),  # #6142: the stages it follows
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),

@@ -33,6 +33,15 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
   max-width: var(--w-input-s); }
 .pl-ctl td:first-child, .pl-ctl th:first-child { white-space: nowrap; }
 .pl-compact .pl-stage { flex-basis: calc(var(--w-col) - var(--w-input-s) + var(--sp-7)); padding: var(--sp-3); }
+/* Branches and joins (#6142): a grid of rows, one for each branch; each cell is an arrow and a card; a thin column
+   before a column of stages holds the lines that fan out to the branches and fan in to a join. */
+.pl-row.pl-grid { display: grid; grid-auto-columns: max-content; row-gap: var(--sp-4); align-items: stretch; }
+.pl-cell { display: flex; align-items: stretch; }
+.pl-cell > .pl-stage, .pl-cell > .pl-stack { flex: 1 0 var(--w-card); }
+.pl-fan { width: var(--sp-7); align-self: stretch; }
+.pl-fan svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.pl-anote.pl-join { white-space: normal; max-width: var(--w-s); }
+.pl-fan path { fill: none; stroke: var(--line); stroke-width: var(--hair-2); vector-effect: non-scaling-stroke; }
 /* A stage that starts manually (#6138): its card, and under it Run for the version that waits in it. */
 .pl-stack { flex: 1 0 var(--w-card); max-width: calc(var(--w-card) + var(--w-input-s)); display: flex;
   flex-direction: column; gap: var(--sp-1); }
