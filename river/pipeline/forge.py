@@ -1,6 +1,6 @@
 """What the forge sources share (#6160): the value of a pipeline's secret, one HTTP call, and whether an event was
-kept already. The GitLab and Pulumi Delivery adapters (gitlab.py, pulumi.py), the account checks (accounts.py) and
-the plugins' secrets (plugin.py) read them here. GitHub, Gitea and Forgejo are a plugin now (plugins/github).
+kept already. The GitLab adapter (gitlab.py), the account checks (accounts.py) and the plugins' secrets (plugin.py)
+read them here. GitHub, Gitea, Forgejo and Pulumi Delivery are shipped plugins now (plugins/github, plugins/pulumi).
 
 A secret's value comes from the maxpm secret store (policy g6: never from the environment or a file of the home
 folder) and stays TOKEN_KEEP seconds in memory: each read from the store is a line of its log. Tests replace secret()."""

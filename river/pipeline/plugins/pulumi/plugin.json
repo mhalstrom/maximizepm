@@ -1,0 +1,19 @@
+{
+  "contract": 1,
+  "name": "pulumi",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "Pulumi Delivery (public preview): reads each Delivery run by number, one MaximizePM stage for each Delivery stage; the yes at a MaximizePM transition continues the Delivery gate; starts a run, retries it, cancels it. A roll back stays on Pulumi's page.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop", "rerun"],
+  "settings": {
+    "repo": {"required": true, "help": "the pipeline stack: org/project/stack"},
+    "url": {"help": "the Pulumi Cloud address, when not https://api.pulumi.com"},
+    "ref": {"help": "the number of the first Delivery run to read", "default": "1"}
+  },
+  "secrets": {
+    "token": {"help": "a Pulumi access token of the organization"}
+  },
+  "poll_every": 60,
+  "timeout": 120
+}

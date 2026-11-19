@@ -353,6 +353,12 @@ class GitHubPlugin(Base):
         self.assertEqual(plugin._config(p), {"settings": {"forge": "gitea", "repo": "o/app",
                                                           "url": "https://git.example.com"}, "secrets": {"token": "tok"}})
 
+    def test_the_pulumi_plugin_lists_no_roll_back(self):
+        out = plugin.describe("pulumi")  # #6161: a process, as maxpm serve runs it
+        self.assertEqual(out["actions"], ["start", "stop", "rerun"])
+        define.forge_set(self.c, "app", "pulumi", repo="acme/app-delivery/main", secret="pd", ref="7")
+        self.assertEqual(plugin._config(self.pipeline())["settings"]["ref"], "7")
+
     def test_a_poll_with_no_address_says_what_to_set(self):
         define.forge_set(self.c, "app", "gitea", repo="o/app", secret="tok", url="https://git.example.com")
         with core.tx(self.c):

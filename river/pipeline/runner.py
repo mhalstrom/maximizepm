@@ -36,8 +36,8 @@ from . import audit, cdevents, junit, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
           "pulumi": "Pulumi Delivery"}  # the forges that MaximizePM knows by name (Pulumi Delivery: #6133)
-# GitHub, Gitea and Forgejo run through the shipped plugin github (plugins/github, #6160); GitLab and Pulumi Delivery
-# are still Python modules (river/pipeline/<forge>.py) until their plugins replace them.
+# GitHub, Gitea and Forgejo run through the shipped plugin github (plugins/github, #6160), Pulumi Delivery through the
+# plugin pulumi (#6161); GitLab is still a Python module (river/pipeline/gitlab.py) until its plugin replaces it.
 
 
 def _adapter(forge):
@@ -727,7 +727,6 @@ def serve_pass(conn):
     _lost(conn)
     transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
     _adapter("gitlab").poll_due(conn)  # the GitLab pipelines, once a minute each (#6121)
-    _adapter("pulumi").poll_due(conn)  # and the Pulumi Delivery ones (#6133)
     from . import plugin
     plugin.poll_due(conn)  # and the pipelines whose source is a plugin: GitHub, Gitea, Forgejo too (#6159, #6160)
     started, waiting = [], {}

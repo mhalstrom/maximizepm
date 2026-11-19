@@ -128,7 +128,7 @@ Delivery a Delivery stage. The person saves the token first (`maxpm secret put
   jobs; the pipeline's test report and the environments' deployments are read
   too.
 - Pulumi Delivery: the yes of the transition continues the Delivery gate. A
-  roll back is done on Pulumi's page.
+  roll back is done on Pulumi's page (the plugin pulumi, below).
 - A stage that the forge starts by itself (a push, a tag) has the mode
   `forge`: MaximizePM only reads its run.
 
@@ -181,11 +181,14 @@ shows an action that the plugin does not do (run again, roll back, stop) as
 "not available for this source", and the command for it is refused: do that
 step in the system itself.
 
-MaximizePM ships two plugins. Read their code before you write a plugin:
+MaximizePM ships three plugins. Read their code before you write a plugin:
 
 - `github` (`river/pipeline/plugins/github/`): the GitHub, Gitea and
   Forgejo source above, the full example. `maxpm pipeline forge <name>
   github|gitea|forgejo` uses it.
+- `pulumi` (`river/pipeline/plugins/pulumi/`): Pulumi Delivery, the example
+  for a system with no list of runs and with gates of its own. `maxpm
+  pipeline forge <name> pulumi` uses it.
 - `jsonl` (`river/pipeline/plugins/jsonl/`): the short example. It follows a
   file of JSON lines that another program writes, one line for each change of
   a run, and it writes start and stop requests to a second file.
@@ -213,6 +216,31 @@ MaximizePM ships two plugins. Read their code before you write a plugin:
   so a test passes recorded API answers instead of the network
   (`tests/test_pipeline.py`, classes GitHub and GiteaForgejo). Test your own
   plugin the same way.
+
+### The pulumi plugin
+
+- **What it reads**, once a minute: Delivery runs by number, from the setting
+  `ref` (`--ref`, the first run) on, up to the first number that has no run;
+  its state keeps the oldest run that has not ended. Each Delivery stage that
+  a MaximizePM stage names (`--workflow`) is one stage run, with the key
+  `pd-<run>-<stage>`.
+- **What it does**: start begins a Delivery run (for a version that no run
+  carries yet), or, when the run is there, continues the stage's Delivery
+  gate: each pending manual condition, and an approval condition only after a
+  person's yes. When the gate is not open yet, the next poll continues it.
+  Run again retries the Delivery run (its failed members, the same commit);
+  stop cancels the whole Delivery run.
+- **What it cannot do, and why**: Pulumi documents no list of runs (so it
+  reads them by number), no commit or times of a run (so a run's version is
+  the one MaximizePM sent, else `release <n>`, else `run <n>`, and a stage
+  shows no steps), no roll back of a stage (do it in the stage's Actions menu
+  on Pulumi's page), and no way to run a commit named from outside (a start
+  runs the head of its source). Its routes are a public preview and can
+  change.
+- **Its token**: a Pulumi access token of the organization, saved as a maxpm
+  secret.
+- **Its test**: `tests/test_pipeline.py`, class PulumiDelivery, against
+  recorded answers.
 
 ## Write a plugin
 
@@ -275,7 +303,9 @@ stdout. Every request has `contract` and `call`. The calls:
   `counts`: numbers for the person, such as `{"runs": 10}`.
 - `start`, `rerun`, `rollback`: start the work of one stage run. `rerun` runs
   a stage again; `rollback` puts an older version on an environment. The
-  answer can have `key` (the system's id of the run), `url` and `note`.
+  answer can have `key` (the system's id of the run), `url` and `note`. When
+  another run of the pipeline has that key already (a retry of the same run in
+  the system), that run keeps its record under `<key>~<its id>`.
 - `stop`: stop the run. The run ends when a later poll reports its end.
 
 The request of `poll` and of each action also has:
@@ -289,10 +319,17 @@ The request of `poll` and of each action also has:
 - `state`: the `state` of the plugin's last answer (null at first). Keep a
   cursor here, such as the last build number read; the plugin keeps no file
   of its own.
-- `poll` only: `runs`, the stage runs that wait or run (`id`, `stage`,
-  `work`, `version`, `key`, `state`, `purpose`).
+- `runs`: the stage runs that wait or run, and the newest 100 others. Each
+  has `id`, `stage`, `work`, `version`, `key`, `state`, `purpose`, `url`,
+  `runner` (`forge:<source>` when the plugin was asked to start it),
+  `started_at`, `approved_at` and `approved_by_person` (a person, not the
+  manager or a rule, let it through its transition).
 - an action only: `run`, the stage run it acts on (the same fields). A
   `rerun` of failed tests also has `tests`: one `suite.name` for each test.
+
+Any answer can also have `notes`: `[{"run": <id>, "note": <text>}]`, a line
+that the page shows on a waiting run, such as what a gate in the system still
+waits for.
 
 The answer can always have `error` (a message). Exit 0 when the call worked.
 On an error, exit 1 or more and say why in `error` or on stderr. Do not print

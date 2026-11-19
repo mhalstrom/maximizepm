@@ -49,10 +49,13 @@ ALL_ACTIONS = list(ACTIONS)
 # The adapters that are still Python modules (runner.FORGES): what each one can do. Pulumi Delivery has no roll back
 # by its API (#6133). GitHub, Gitea and Forgejo are the shipped plugin github (#6160): PLUGIN_OF names the plugin of a
 # forge name, and the events of those pipelines keep the forge's name as their source.
-BUILTIN_ACTIONS = {"gitlab": ALL_ACTIONS, "pulumi": ["start", "stop", "rerun"]}
+BUILTIN_ACTIONS = {"gitlab": ALL_ACTIONS}
 PLUGIN_OF = {"gitea": "github", "forgejo": "github"}
 RESERVED = set(BUILTIN_ACTIONS) | set(PLUGIN_OF) | {"none", "maxpm", "here", "plugin"}
-SHIPPED_FORGES = ("github", "gitea", "forgejo")  # pipelines that keep repo, url, ref and secret in their own columns
+# Pipelines that keep repo, url, ref and secret in their own columns (maxpm pipeline forge <p> github|...|pulumi):
+# their shipped plugin gets them as its settings repo, url, ref and its secret token (#6160, #6161).
+SHIPPED_FORGES = ("github", "gitea", "forgejo", "pulumi")
+RUNS_SENT = 100  # the newest stage runs that a request lists besides the open ones
 
 
 def plugin_name(forge):
@@ -403,16 +406,23 @@ def _pipeline_info(conn, p):
     return {"name": p["name"], "project": p["project"], "stages": stages, "envs": envs}
 
 
-def _run_info(r):
+def _run_info(conn, r):
+    """A stage run as a plugin sees it. runner forge:<source>: the plugin was asked to start it; approved: someone
+    let it through its transition (approved_by_person: a person, not the manager or a rule)."""
     return {"id": r["id"], "stage": r["stage"], "work": r["workflow"], "version": r["rev"], "key": r["key"],
-            "state": r["state"], "purpose": r["purpose"], "url": r["url"]}
+            "state": r["state"], "purpose": r["purpose"], "url": r["url"], "runner": r["runner"],
+            "started_at": r["started_at"], "approved_at": r["approved_at"],
+            "approved_by_person": bool(r["approved_by"]) and core._is_person(conn, r["approved_by"])}
 
 
-def _open_runs(conn, p):
+def _known_runs(conn, p):
+    """The runs a request lists: each run that waits or runs, and the newest RUNS_SENT others."""
     from .runner import _row
-    return [_run_info(_row(conn, r["id"])) for r in conn.execute(
-        "SELECT id FROM stage_runs WHERE pipeline_id=? AND state IN ('queued','running') ORDER BY id DESC LIMIT 100",
-        (p["id"],))]
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM stage_runs WHERE pipeline_id=? AND state IN ('queued','running') UNION SELECT id FROM "
+        "(SELECT id FROM stage_runs WHERE pipeline_id=? ORDER BY id DESC LIMIT ?) ORDER BY id DESC",
+        (p["id"], p["id"], RUNS_SENT))]
+    return [_run_info(conn, _row(conn, i)) for i in ids]
 
 
 def _request(conn, p, m, what):
@@ -473,6 +483,13 @@ def _take(conn, p, m, answer):
                               "the next poll (its state)")
     res = store.ingest(conn, [_own(e, p["forge"], p["name"]) for e in events], pipeline=p["name"]) if events else []
     tests = _reports(conn, p, m, answer.get("reports") or [])
+    notes = answer.get("notes") or []
+    if not isinstance(notes, list) or not all(isinstance(x, dict) and isinstance(x.get("note"), str) for x in notes):
+        raise core.RiverError(f"plugin {m['name']}: \"notes\" is a list of {{\"run\": <id>, \"note\": <text>}}")
+    with core.tx(conn):  # a line that the page shows on a waiting run, such as what a gate still waits for
+        for x in notes:
+            conn.execute("UPDATE stage_runs SET gate_note=? WHERE id=? AND pipeline_id=?",
+                         (x["note"][:500], x.get("run"), p["id"]))
     if "state" in answer:
         state = json.dumps(answer["state"], separators=(",", ":"))
         if len(state) > STATE_MAX:
@@ -493,7 +510,7 @@ def poll(conn, p):
     and the numbers the plugin counts itself (its answer's "counts", such as runs read)."""
     m = find(plugin_name(p["forge"]))
     req = _request(conn, p, m, "poll")
-    req["runs"] = _open_runs(conn, p)
+    req["runs"] = _known_runs(conn, p)
     answer = call(m, req)
     events, tests = _take(conn, p, m, answer)
     counts = answer.get("counts") if isinstance(answer.get("counts"), dict) else {}
@@ -561,10 +578,11 @@ def need(conn, p, stage, action):
         return
     src = actions(conn, p)
     if action not in src["actions"]:
-        if src["kind"] == "adapter":
-            from .runner import FORGES
+        from .runner import FORGES
+        if src["kind"] == "adapter" or p["forge"] in FORGES:
+            name = FORGES.get(p["forge"]) or FORGES.get(src["name"], src["name"])
             raise core.RiverError(f"{action} is not available for this source: MaximizePM cannot do it through the "
-                                  f"{FORGES[src['name']]} API; do it on {FORGES[src['name']]}'s own page")
+                                  f"{name} API; do it on {name}'s own page")
         raise core.RiverError(f"{action} is not available for this source: " + (
             src.get("error") or f"plugin {src['name']} lists only {', '.join(src['actions']) or 'no actions'}")
             + f"; do it in that system, or use a plugin that lists {action}")
@@ -588,7 +606,8 @@ def act(conn, run_id, action):
         raise core.RiverError(f"{action} is not available for this source: plugin {m['name']} lists only "
                               f"{', '.join(m['actions']) or 'no actions'}")
     req = _request(conn, p, m, action)
-    req["run"] = _run_info(r)
+    req["run"] = _run_info(conn, r)
+    req["runs"] = _known_runs(conn, p)
     if (r["purpose"] or "").startswith("failed:"):
         req["tests"] = [f"{t['suite']}.{t['name']}" for t in store.tests(conn, int(r["purpose"][7:]))
                         if t["state"] in ("failed", "error")]
@@ -596,8 +615,11 @@ def act(conn, run_id, action):
     key, url, note = answer.get("key"), answer.get("url"), answer.get("note")
     with core.tx(conn):
         if action != "stop":
-            if key is not None and not conn.execute("SELECT 1 FROM stage_runs WHERE pipeline_id=? AND key=? AND id<>?",
-                                                    (r["pipeline_id"], str(key), run_id)).fetchone():
+            if key is not None and str(key) != r["key"]:
+                # The system's run belongs to this run from now on (a retry of the same run): an earlier run with that
+                # key keeps its record under <key>~<its id>.
+                conn.execute("UPDATE stage_runs SET key=key || '~' || id WHERE pipeline_id=? AND key=? AND id<>?",
+                             (r["pipeline_id"], str(key), run_id))
                 conn.execute("UPDATE stage_runs SET key=?, source=? WHERE id=?", (str(key), p["forge"], run_id))
             conn.execute("UPDATE stage_runs SET runner=?, url=COALESCE(?, url), gate_note=? WHERE id=?",
                          (f"forge:{p['forge']}", url, str(note or f"started by {m['name']}; its run shows at its "

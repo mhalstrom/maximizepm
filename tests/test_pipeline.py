@@ -1864,17 +1864,16 @@ def pd_run(n, status, stages, release=None):
 
 
 class PulumiDelivery(Base):
-    """The Pulumi Delivery adapter (#6133): a MaximizePM stage is a Delivery stage; runs are read by number; the yes
-    at a MaximizePM gate continues the Delivery gate; retry, cancel; a roll back is refused."""
+    """Pulumi Delivery, the shipped plugin pulumi (#6133, #6161): a MaximizePM stage is a Delivery stage; runs are
+    read by number; the yes at a MaximizePM gate continues the Delivery gate; retry, cancel; a roll back is refused.
+    The plugin runs in this process against the fake API."""
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import forge, pulumi, runner
-        self.pd, self.runner = pulumi, runner
+        from river.pipeline import plugin, runner
+        self.runner, self.plugin = runner, plugin
         self.api = FakePulumi()
-        old = (pulumi.FETCH, forge.token)
-        pulumi.FETCH, forge.token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(pulumi, "FETCH", old[0]) or setattr(forge, "token", old[1]))
+        self.pd = plugin_hooks(self, self.api)
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "shop")
@@ -1901,7 +1900,10 @@ class PulumiDelivery(Base):
             "pipeline_versions v ON v.id=r.version_id ORDER BY r.id")}
 
     def ref(self):
-        return self.c.execute("SELECT ref FROM pipelines WHERE name='shop'").fetchone()[0]
+        """The next Delivery run to read: the plugin's state (its 'next'), else the pipeline's --ref."""
+        p = self.c.execute("SELECT ref, plugin_state FROM pipelines WHERE name='shop'").fetchone()
+        state = json.loads(p["plugin_state"] or "null") or {}
+        return str(state["next"]) if "next" in state else p["ref"]
 
     def test_a_run_its_gate_continued_after_the_persons_yes_and_the_environment(self):
         gate = {"id": "g-7", "stageName": "prod", "status": "open", "conditions": [
@@ -1993,12 +1995,11 @@ class PulumiDelivery(Base):
             with self.assertRaises(RiverError):
                 define.forge_set(self.c, "shop", "pulumi", secret="x", **bad)
         define.forge_set(self.c, "shop", "pulumi", repo="acme/shop-delivery/main", secret="x", ref="120")
-        p = self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
-        self.assertEqual(self.pd._base(p), FakePulumi.BASE)
         self.assertIn("runs read from run 120 on", define.history(self.c, "shop", 1)[0]["change"])
         self.api.routes[("GET", "/runs/120")] = (500, {"message": "down"})
         self.c.execute("UPDATE pipelines SET polled_at=NULL")
-        self.assertIn("Pulumi answered 500", self.pd.poll_due(self.c)["shop"]["error"])
+        self.assertIn("Pulumi answered 500", self.plugin.poll_due(self.c)["shop"]["error"])
+        self.assertEqual(self.api.calls[-1][:2], ("GET", "/runs/120"))  # under the stack's .../delivery address
 
 
 class Speed(Base):
