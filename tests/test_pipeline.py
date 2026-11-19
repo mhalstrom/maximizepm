@@ -1369,6 +1369,162 @@ class GitLab(Base):
                 define.forge_set(self.c, "shop", "gitlab", secret="x", **{"repo": None, **bad})
 
 
+class FakePulumi(FakeGitHub):
+    """The Pulumi Delivery API: paths after the pipeline stack's .../delivery, or the whole /api/... path."""
+
+    BASE = "https://api.pulumi.com/api/preview/stacks/acme/shop-delivery/main/delivery"
+
+    def __call__(self, method, url, headers, body):
+        assert headers["Authorization"] == "token test-token"
+        url = url.replace(self.BASE, "https://api.github.com").replace("https://api.pulumi.com", "https://api.github.com")
+        return super().__call__(method, url, headers, body)
+
+
+def pd_run(n, status, stages, release=None):
+    """A Delivery run in the form that Pulumi's own gate hook reads: summary and stages."""
+    return {"summary": {"number": n, "status": {"status": status}, **({"release": release} if release else {})},
+            "stages": [{"name": name, "status": {"status": st}, **({"gate": gate} if gate else {})}
+                       for name, st, gate in stages]}
+
+
+class PulumiDelivery(Base):
+    """The Pulumi Delivery adapter (#6133): a MaximizePM stage is a Delivery stage; runs are read by number; the yes
+    at a MaximizePM gate continues the Delivery gate; retry, cancel; a roll back is refused."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import github, pulumi, runner
+        self.pd, self.runner = pulumi, runner
+        self.api = FakePulumi()
+        old = (pulumi.FETCH, github._token)
+        pulumi.FETCH, github._token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(pulumi, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "shop", project="shop")
+        define.env_set(self.c, "shop", "production")
+        define.stage_set(self.c, "shop", "test", "test", workflow="checks")
+        define.stage_set(self.c, "shop", "deploy", "deploy", env="production", workflow="prod", gate="person mark")
+        define.forge_set(self.c, "shop", "pulumi", repo="acme/shop-delivery/main", secret="pulumi-token")
+
+    def delivery(self, n, *args, **kw):
+        self.api.routes[("GET", f"/runs/{n}")] = (200, pd_run(n, *args, **kw))
+
+    def poll(self):
+        return self.pd.poll(self.c, self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone())
+
+    def pass_(self):
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))  # serve_pass reads no API
+        self.runner.serve_pass(self.c)
+
+    def runs(self):
+        return {r["stage"]: r for r in self.c.execute(
+            "SELECT r.*, s.name stage, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id LEFT JOIN "
+            "pipeline_versions v ON v.id=r.version_id ORDER BY r.id")}
+
+    def ref(self):
+        return self.c.execute("SELECT ref FROM pipelines WHERE name='shop'").fetchone()[0]
+
+    def test_a_run_its_gate_continued_after_the_persons_yes_and_the_environment(self):
+        gate = {"id": "g-7", "stageName": "prod", "status": "open", "conditions": [
+            {"name": "go", "kind": "manual", "state": "pending"},
+            {"name": "lead", "kind": "approval", "state": "pending", "changeRequestId": "cr-9"}]}
+        self.delivery(1, "in_progress", [("checks", "succeeded", None), ("prod", "pending", None)], release=7)
+        self.poll()
+        runs = self.runs()
+        self.assertEqual((runs["test"]["key"], runs["test"]["state"], runs["test"]["rev"]),
+                         ("pd-1-checks", "passed", "release 7"))
+        self.assertEqual(runs["deploy"]["state"], "queued")
+        self.assertFalse(runs["deploy"]["key"].startswith("pd-"))  # hand_on queued it; Delivery has not reached it
+        self.assertIn(self.ref(), (None, "1"))  # run 1 has not ended: it is read again
+        self.delivery(1, "waiting", [("checks", "succeeded", None), ("prod", "waiting", gate)], release=7)
+        self.poll()
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], 2)  # one deploy run
+        self.assertEqual(self.runs()["deploy"]["key"], "pd-1-prod")
+        # The person's yes in MaximizePM continues the manual condition and approves the change request.
+        self.pass_()
+        core.done(self.c, self.runs()["deploy"]["gate_item"], actor="mark")
+        self.api.routes[("POST", "/runs/1/gates/g-7/continue")] = (200, {})
+        self.api.routes[("POST", "/api/change-requests/acme/cr-9/approve")] = (200, {})
+        self.pass_()
+        self.assertEqual([c for c in self.api.calls if c[0] == "POST"],
+                         [("POST", "/runs/1/gates/g-7/continue", {"condition": "go"}),
+                          ("POST", "/api/change-requests/acme/cr-9/approve", {})])
+        self.assertEqual(self.runs()["deploy"]["runner"], "forge:pulumi")
+        self.delivery(1, "succeeded", [("checks", "succeeded", None), ("prod", "succeeded", {**gate, "status": "passed"})],
+                 release=7)
+        self.poll()
+        self.assertEqual(self.runs()["deploy"]["state"], "passed")
+        self.assertEqual(store.show(self.c, "shop")["envs"][0]["rev"], "release 7")
+        self.assertEqual(self.ref(), "2")  # run 1 ended: the next read starts at run 2
+
+    def test_an_auto_gate_continues_only_manual_conditions(self):
+        define.stage_set(self.c, "shop", "deploy", gate="auto")
+        self.api.routes[("POST", "/runs/1/gates/g-1/continue")] = (409, {"message": "the gate is not open"})
+        self.delivery(1, "waiting", [("checks", "succeeded", None), ("prod", "waiting", {"id": "g-1", "status": "open",
+            "conditions": [{"name": "go", "kind": "manual", "state": "pending"},
+                           {"name": "lead", "kind": "approval", "state": "pending", "changeRequestId": "cr-1"}]})])
+        self.poll()
+        self.pass_()
+        self.assertNotIn("/api/change-requests/acme/cr-1/approve", [c[1] for c in self.api.calls])
+        self.assertIn("a person decides: approval lead", self.runs()["deploy"]["gate_note"])
+
+    def test_start_retry_cancel_and_no_roll_back(self):
+        self.api.routes[("POST", "/dispatch")] = (200, {"runNumber": 40})
+        self.runner.start(self.c, "shop", rev="a" * 40, actor="mark")
+        self.pass_()
+        self.assertEqual(self.api.calls[-1][:2], ("POST", "/dispatch"))
+        self.assertEqual((self.runs()["test"]["key"], self.ref()), ("pd-40-checks", "40"))
+        self.delivery(40, "failed", [("checks", "failed", None), ("prod", "pending", None)])
+        self.poll()
+        failed = self.runs()["test"]
+        self.assertEqual((failed["state"], failed["rev"]), ("failed", "a" * 40))  # it keeps the version it was sent with
+        self.assertIn("checks failed", failed["errors"])
+        self.assertEqual(self.ref(), "41")
+        # Run again: Delivery retries the failed run; the old end that it still shows is not the retry's end.
+        self.api.routes[("POST", "/runs/40/retry")] = (200, {})
+        again = self.runner.run_again(self.c, "shop", "test", "a" * 40, actor="mark")
+        self.pass_()
+        self.assertEqual(self.api.calls[-1][:2], ("POST", "/runs/40/retry"))
+        keys = dict(self.c.execute("SELECT id, key FROM stage_runs WHERE stage_id=1").fetchall())
+        self.assertEqual(keys, {failed["id"]: f"pd-40-checks~{failed['id']}", again["run"]: "pd-40-checks"})
+        self.poll()
+        self.assertEqual(self.c.execute("SELECT state FROM stage_runs WHERE id=?", (again["run"],)).fetchone()[0],
+                         "queued")
+        self.delivery(40, "in_progress", [("checks", "running", None), ("prod", "pending", None)])
+        self.poll()  # run 40 is below the ref, and a stage run waits on it: it is read again
+        self.assertEqual(self.c.execute("SELECT state FROM stage_runs WHERE id=?", (again["run"],)).fetchone()[0],
+                         "running")
+        self.api.routes[("POST", "/runs/40/cancel")] = (200, {})
+        self.assertEqual(self.runner.stop(self.c, again["run"], actor="mark")["stopped"], "on Pulumi Delivery")
+        self.assertEqual(self.api.calls[-1][:2], ("POST", "/runs/40/cancel"))
+        self.delivery(40, "canceled", [("checks", "running", None), ("prod", "pending", None)])
+        self.poll()
+        r = self.c.execute("SELECT state, errors FROM stage_runs WHERE id=?", (again["run"],)).fetchone()
+        self.assertEqual(r["state"], "cancelled")
+        self.assertIn("the Delivery run ended (canceled)", r["errors"])
+        # A roll back is Pulumi's page's.
+        back = self.runner.rollback(self.c, "shop", "production", "a" * 40, reason="b breaks", actor="mark")
+        self.pass_()
+        r = self.c.execute("SELECT state, errors FROM stage_runs WHERE id=?", (back["run"],)).fetchone()
+        self.assertEqual(r["state"], "failed")
+        self.assertIn("Roll back in the stage's Actions menu", r["errors"])
+
+    def test_the_forge_command_for_pulumi(self):
+        for bad in ({"repo": "acme/shop"}, {"repo": "acme/shop-delivery/main", "ref": "main"}):
+            with self.assertRaises(RiverError):
+                define.forge_set(self.c, "shop", "pulumi", secret="x", **bad)
+        define.forge_set(self.c, "shop", "pulumi", repo="acme/shop-delivery/main", secret="x", ref="120")
+        p = self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
+        self.assertEqual(self.pd._base(p), FakePulumi.BASE)
+        self.assertIn("runs read from run 120 on", define.history(self.c, "shop", 1)[0]["change"])
+        self.api.routes[("GET", "/runs/120")] = (500, {"message": "down"})
+        self.c.execute("UPDATE pipelines SET polled_at=NULL")
+        self.assertIn("Pulumi answered 500", self.pd.poll_due(self.c)["shop"]["error"])
+
+
 class Speed(Base):
     def test_each_read_under_100_ms(self):
         """Policy p147: a pipeline with 400 runs, 2000 steps and 10800 test results reads fast."""

@@ -534,7 +534,10 @@ show its parts.
 The work can run on a forge instead: `maxpm pipeline forge <name>
 github|gitlab|gitea|forgejo --repo <owner/name> --secret <secret name> [--url
 <address>]` (Gitea and Forgejo need `--url`), and each stage names its workflow
-file, or on GitLab its GitLab stage (`--workflow`). The
+file, or on GitLab its GitLab stage (`--workflow`). Pulumi Delivery:
+`maxpm pipeline forge <name> pulumi --repo <org/project/stack> --secret <name>`
+(the pipeline stack); each stage names its Delivery stage, and the gate's yes
+continues the Delivery gate. A roll back is done on Pulumi's page. The
 person saves the token first (`maxpm secret put <name>`). A stage over many
 servers: `--waves "web-1; web-2, web-3" --check "<cmd>" --rollback "<cmd>"`.
 A failed stage opens a fault item; `maxpm pipeline fix <run> [--start]` adds

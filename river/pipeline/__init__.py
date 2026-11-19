@@ -1,6 +1,6 @@
 """Pipelines: the stages of a release, where each version runs, and what each stage run did (#6112).
 
-A layer over the forges (GitHub, GitLab, Gitea and Forgejo, or no forge), decided by mark 2026-11-18 (canvas
+A layer over the forges (GitHub, GitLab, Gitea and Forgejo, Pulumi Delivery, or no forge), decided by mark 2026-11-18 (canvas
 release-tracking of #6110). This package keeps its own tables (schema.py, which core.SCHEMA includes) and talks to
 the rest of MaximizePM only through events and a few calls (core.tx, core.now, core.RiverError), so it can move to a
 project of its own later.

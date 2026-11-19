@@ -239,20 +239,24 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 
 
-FORGES = ("github", "gitlab", "gitea", "forgejo", "none")
+FORGES = ("github", "gitlab", "gitea", "forgejo", "pulumi", "none")
+_SHAPES = {"gitlab": (r"^[\w.-]+(/[\w.-]+)+$", "group/project"),
+           "pulumi": (r"^[\w.-]+/[\w.-]+/[\w.-]+$", "org/project/stack (the pipeline stack)")}
 
 
 def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None, url=None):
-    """maxpm pipeline forge: where the pipeline's workflows run (#6119, #6121). github and gitlab need the repository
-    (owner/name; on GitLab group/subgroup/project) and the name of the maxpm secret that holds the API token; url: a
-    self-hosted GitLab's address; none: the stages run here (their --run commands)."""
+    """maxpm pipeline forge: where the pipeline's workflows run (#6119, #6121, #6133). A forge needs the repository
+    (owner/name; on GitLab group/subgroup/project; on Pulumi Delivery the pipeline stack org/project/stack) and the
+    name of the maxpm secret that holds the API token; url: a self-hosted forge's address; ref: the branch (Pulumi
+    Delivery: the number of the first run to read); none: the stages run here (their --run commands)."""
     if forge not in FORGES:
         raise core.RiverError(f"the forge {forge!r} is not one of {', '.join(FORGES)}")
     if forge != "none":
-        shape = r"^[\w.-]+(/[\w.-]+)+$" if forge == "gitlab" else r"^[\w.-]+/[\w.-]+$"
+        shape, words = _SHAPES.get(forge, (r"^[\w.-]+/[\w.-]+$", "owner/name"))
         if not repo or not re.match(shape, repo):
-            raise core.RiverError("name the repository: --repo " + ("group/project" if forge == "gitlab"
-                                                                     else "owner/name"))
+            raise core.RiverError("name the repository: --repo " + words)
+        if forge == "pulumi" and ref is not None and not re.match(r"^[1-9]\d*$", str(ref)):
+            raise core.RiverError("--ref names the first Delivery run to read: a whole number, such as 120")
         if forge in ("gitea", "forgejo") and not url:
             raise core.RiverError(f"name the address of the {forge}: --url https://<host> (Codeberg: "
                                   "https://codeberg.org)")
@@ -269,7 +273,8 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
                      "poll_error=NULL WHERE id=?", (*vals, p["id"]))
         text = "forge none: the stages run here" if forge == "none" else (
             f"forge {forge}: repository {repo}" + (f" at {url}" if url else "") + f", token from secret {secret}"
-            + (f", branch {ref or 'main'}" if forge != "gitlab" else ""))
+            + (f", branch {ref or 'main'}" if forge not in ("gitlab", "pulumi") else "")
+            + (f", runs read from run {ref or 1} on" if forge == "pulumi" else ""))
         _change(conn, p["id"], actor, text)
     return {"pipeline": p["name"], "forge": forge, "repo": repo, "secret": secret, "ref": ref, "url": url}
 

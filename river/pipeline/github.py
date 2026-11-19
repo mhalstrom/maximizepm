@@ -67,10 +67,12 @@ def _api(p):
 
 
 def _token(conn, p):
-    name = NAMES[_src(p)]
+    """The API token of pipeline p's forge (every adapter reads it here) from the maxpm secret that p names."""
+    from .runner import FORGES
+    name = FORGES.get(p["forge"], "GitHub")
     if not p["secret"]:
         raise core.RiverError(f"pipeline {p['name']} names no secret for its {name} token: maxpm pipeline forge "
-                              f"{p['name']} {_src(p)} --repo {p['repo'] or 'owner/name'} --secret <name>")
+                              f"{p['name']} {p['forge'] or 'github'} --repo {p['repo'] or 'owner/name'} --secret <name>")
     got = _TOKENS.get(p["secret"])
     if got and time.monotonic() - got[1] < TOKEN_KEEP:
         return got[0]

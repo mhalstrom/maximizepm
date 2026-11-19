@@ -32,7 +32,8 @@ import uuid
 from .. import core
 from . import cdevents, junit, steps, store
 
-FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo"}  # the forges with an adapter
+FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
+          "pulumi": "Pulumi Delivery"}  # the forges with an adapter (Pulumi Delivery: #6133)
 _ADAPTERS = {"gitea": "github", "forgejo": "github"}  # Gitea and Forgejo have GitHub's Actions API (#6122)
 
 
@@ -441,8 +442,10 @@ def _hand_on(conn, r):
             store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
             _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
         if conn.execute("SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND (state IN ('queued','running') "
-                        "OR key LIKE 'gl-%' OR key LIKE 'gh-run-%')", (nxt["id"], r["version_id"])).fetchone():
-            return  # it waits or ran there already (a forge made the run: GitLab's jobs of that stage, #6121)
+                        "OR key LIKE 'gl-%' OR key LIKE 'gh-run-%' OR key LIKE 'pd-%')",
+                        (nxt["id"], r["version_id"])).fetchone():
+            return  # it waits or ran there already (a forge made the run: GitLab's jobs of that stage, #6121; the
+            # stage in the same Pulumi Delivery run, #6133)
         _queue(conn, r["pipeline"], nxt["name"], r["rev"])
 
 
@@ -578,7 +581,7 @@ def stop(conn, run_id, actor=None):
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
     forge = (r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
-        r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-")) else None
+        r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-", "pd-")) else None
     if forge in FORGES:
         _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
         return {"run": run_id, "stopped": f"on {FORGES[forge]}"}
@@ -634,6 +637,7 @@ def serve_pass(conn):
     from . import github
     github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
     _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121); Gitea and Forgejo: github.poll_due (#6122)
+    _adapter("pulumi").poll_due(conn)  # and the Pulumi Delivery ones (#6133)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
