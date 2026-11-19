@@ -204,12 +204,14 @@ try {
     // The first stage (the Holding stage since #6140) has no arrow: one arrow fewer than the stages.
     first: document.querySelectorAll('#plRow [data-pl-arrow]').length !== document.querySelectorAll('#plRow [data-pl-stage]').length - 1,
     tier: q('#plRow [data-pl-stage="prod"] .pl-tier') && q('#plRow [data-pl-stage="prod"] .pl-tier').textContent };  // #6137
-  q('#plRow [data-pl-arrow="test"]').click();
-  await until(() => q("#plDetail").textContent.includes("The transition build → test"), "the controls of build → test");
-  out.detail = q("#plDetail").textContent.replace(/\s+/g, " ");
-  out.buttons = [...q("#plDetail").querySelectorAll("button")].map(b => b.textContent.trim());
-  out.over = [...q("#plDetail").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
+  q('#plRow [data-pl-arrow="test"]').click();  // #6189: the transition opens in a dialog
+  await until(() => q("#plArrowDlg:not(.hidden)") && q("#plArrowDlg").textContent.includes("The transition build → test"), "the controls of build → test");
+  out.detail = q("#plArrowDlg").textContent.replace(/\s+/g, " ");
+  out.buttons = [...q("#plArrowDlg").querySelectorAll("button")].map(b => b.textContent.trim());
+  out.over = [...q("#plArrowDlg").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
     && !e.closest(".pl-table")).map(e => e.tagName + "." + e.className).slice(0, 5);
+  q('#plArrowDlg [data-pl-arrowclose]').click();
+  await until(() => q("#plArrowDlg.hidden"), "the dialog closes");
   // #6141: a stage shows Versions in <stage>, each run with its buttons.
   q('#plRow [data-pl-stage="test"]').click();
   await until(() => q("#plStageRuns").textContent.includes("Versions in test"), "Versions in test");
@@ -332,7 +334,7 @@ try {
   const tops = [...document.querySelectorAll('#plRow .pl-stage .pl-name')].map(e => Math.round(e.getBoundingClientRect().top));
   const kind = q('#plRow [data-pl-stage="deploy"] .pl-kind');
   const out = { tops, kindLines: kind.getClientRects().length, kindH: kind.getBoundingClientRect().height,
-    kindTitle: kind.title, holdInText: !!q('#plNote .pl-bar > span button'), hold: !!q('#plNote .pl-bar > button'),
+    kindTitle: kind.title, holdInText: !!q('#plNote .pl-bar > span:first-child button'), hold: !!q('#plNote .pl-bar > button'),
     holdFont: getComputedStyle(q('#plRow [data-pl-stage="holding"] .pl-ver')).fontFamily };
   q('#plRow [data-pl-stage="deploy"]').click();
   await until(() => q("#plStageRuns .pl-runs"), "Versions in deploy");
@@ -350,6 +352,12 @@ try {
   await until(() => rows().length > 5, "Show all");
   out.all = rows().length;
   out.tasks = !!document.querySelector(".rel-tasks");
+  // #6189: the chip after holding opens the release's dialog: what it does now, then what it can do.
+  q('#plRow [data-pl-arrow]').click();
+  await until(() => q("#plArrowDlg:not(.hidden)"), "the release dialog");
+  out.dlg = q("#plArrowDlg").textContent.replace(/\s+/g, " ");
+  out.dlgOver = [...q("#plArrowDlg").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
+    && !scrolls(e)).map(e => e.tagName + "." + e.className).slice(0, 5);
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
@@ -370,6 +378,9 @@ try {
             self.assertEqual(r["all"], 8, r)
             self.assertFalse(r["tasks"], r)
             self.assertEqual(r["over"], [], r)
+            self.assertIn("What it does now", r["dlg"], r)
+            self.assertIn("What it can do", r["dlg"], r)
+            self.assertEqual(r["dlgOver"], [], r)
 
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one

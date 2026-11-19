@@ -636,9 +636,16 @@ def holding_stage(h):
     holding stage): its last_run is the summary."""
     n = len(h["commits"])
     c = h["counts"]
+    # #6189: the release from holding is a control at the top of the pipeline's page: whether it can release now, how
+    # many commits the reviewed ones are (up to the first one not reviewed), and the commits each button sends.
+    rel = h.get("release") or {}
+    k = next((i + 1 for i, x in enumerate(h["commits"]) if x["sha"] == h.get("upto")), 0) if h.get("upto") else 0
     return {"name": "holding", "pos": 0, "kind": "holding", "run": None, "workflow": None, "env": None,
             "transition": None, "holding": {"commits": n, **c, "added": h["added"], "removed": h["removed"],
                                             "base_label": h["base_label"], "folder": bool(h["folder"]),
-                                            "reading": bool(h.get("reading"))},
+                                            "reading": bool(h.get("reading")),
+                                            "release": {"can": bool(rel.get("can")), "reviewed": k,
+                                                        "upto": h.get("upto"),
+                                                        "last": h["commits"][-1]["sha"] if n else None}},
             "last_run": {"state": "queued" if n else "none", "version": None, "started_at": None, "ended_at": None,
                          "id": None, "steps": {}}}

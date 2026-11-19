@@ -4,7 +4,9 @@
 // each open release is one state line in plain words, the button Open report (the review report, #6003: the main
 // action here; its tasks are in the report, not repeated on the card, #6182). Release
 // now is a plain button that opens a small dialog for the reason; Deploy now, the hooks and the past deploys stay.
-import { $, esc, toast, act, ago, left, clip } from "../lib.js";
+import { $, esc, toast, act, ago, left, clip, actor } from "../lib.js";
+import { openTarget } from "./deploy.js";
+import { pickStage } from "./pipeline.js";
 import { ownerChip } from "../components/chip.js";
 import { button, iconButton } from "../components/button.js";
 import { makeDialog } from "../components/dialog.js";
@@ -71,14 +73,15 @@ function rulesLine(t) {
   return `<div class="muted t-s">${bits.map(([s, tip]) => tip ? `<span title="${esc(tip)}">${esc(s)}</span>` : esc(s)).join(" · ")}</div>`;
 }
 
-// The buttons under the releases: Deploy now when nothing holds the release back; Release now when the cadence or a
-// running release holds it (a person gives the reason in its dialog).
-function actionsHtml(t) {
-  if (t.release && t.release.waits && t.release.deploy) return `<div class="rel-acts">${button("Release now…", { data: { relnow: t.name }, title: "Release sooner" })}</div>`;
-  if (!t.pending.some(d => d.status === "open" && d.ships.length)) return "";
-  return `<div class="rel-acts">${agentStart(S.launch_agents, [
+// Deploy now when nothing holds the collected release back. Since #6189 it sits with every other release control at
+// the top of the pipeline's page (views/pipeline.js headControls), not on this card; Release now has its own button
+// there.
+export function deployButtons(name) {
+  const t = (S.targets || []).find(x => x.name === name);
+  if (!t || (t.release && t.release.waits) || !(t.pending || []).some(d => d.status === "open" && d.ships.length)) return "";
+  return `<span class="rel-acts">${agentStart(S.launch_agents, [
     { label: "Deploy now", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now" },
-    { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "Review first, then deploy" }])}</div>`;
+    { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "Review first, then deploy" }])}</span>`;
 }
 
 // The deploys that are done, folded: one short line each, with its report.
@@ -102,7 +105,6 @@ function cardHtml(t) {
       <div class="rel-h"><h3${t.description ? ` title="${esc(t.description)}"` : ""}>${esc(t.name)}</h3>${owner}${projects}</div>
       ${rulesLine(t)}
       ${rels}
-      ${actionsHtml(t)}
       <div class="rel-fold">${hooksHtml(t, S.hook_events)}${historyHtml(t)}</div></article>`;
 }
 
@@ -122,8 +124,8 @@ export function renderTargets() {
 }
 
 // Release now: a small dialog that asks why this release cannot wait (maxpm target release-now).
-let relDlg = null, relBox = null, relName = "";
-function openReleaseNow(name) {
+let relDlg = null, relBox = null, relName = "", relShow = false;
+function openReleaseNow(name, show) {
   if (!relDlg) {
     const d = document.createElement("div");
     d.id = "relNowDlg"; d.className = "hidden";
@@ -132,30 +134,35 @@ function openReleaseNow(name) {
     relBox = d.firstElementChild;
     relDlg = makeDialog(d);
   }
-  relName = name;
-  const t = (S.targets || []).find(x => x.name === name) || {}, r = t.release || {};
+  relName = name; relShow = show;
+  const t = (S.targets || []).find(x => x.name === name) || {}, r = t.release || {}, n = (r.ships || []).length;
+  // #6189: what goes out (its tasks, with the report) and a reason already written, so one click and Release now start it.
   relBox.innerHTML = `<div class="dlg-head"><h2>Release ${esc(name)} now?</h2>${iconButton("✕", "Close", { data: { relclose: "1" } })}</div>
-    <p class="t-m">${r.until ? `The next release can go out ${esc(when(r.until))} (in ${left(r.until)}).`
-      : r.running ? `Release #${r.running} runs now; the next one starts after it.` : "This release waits."}
-      A release sooner needs a reason; it goes in the release's history.</p>
-    <div class="form">${field("Why can it not wait?", textarea({ id: "relWhy", rows: 3, placeholder: "A fix for a defect in production" }, ""))}</div>
+    <p class="t-m">${n ? `${plural(n, "task")} go out` : "The collected tasks go out"}${r.deploy ? ` (release <span class="link" data-open="${r.deploy}">#${r.deploy}</span>,
+      <span class="link" data-report="${r.deploy}">the report</span>)` : ""}, at the newest commit when the release starts.
+      ${r.until ? `Without this, it goes out ${esc(when(r.until))} (in ${left(r.until)}).`
+      : r.running ? `Release #${r.running} runs now; without this, the next one starts after it.` : ""}</p>
+    <div class="form">${field("Why now (it goes in the release's history)", textarea({ id: "relWhy", rows: 2 },
+      `Released by ${actor() || "a person"} from the Deploy tab`))}</div>
     ${actions(button("Cancel", { data: { relclose: "1" } }) + button("Release now", { kind: "primary", data: { relgo: "1" } }))}`;
   relDlg.open();
-  relBox.querySelector("#relWhy").focus();
+  relBox.querySelector('[data-relgo]').focus();
 }
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
   const el = (k) => t.closest && t.closest(`[data-${k}]`);
   const now = el("relnow");
-  if (now) { openReleaseNow(now.dataset.relnow); return true; }
+  if (now) { openReleaseNow(now.dataset.relnow, !!now.dataset.relshow); return true; }
   if (el("relclose")) { relDlg.close(); return true; }
   if (el("relgo")) return run(async () => {
     const reason = ($("#relWhy").value || "").trim();
     if (!reason) return toast("Say why this release cannot wait", true);
     try { await act("release_now", { target: relName, reason }); } catch (e) { return; }
     relDlg.close();
-    toast(`The release of ${relName} can start now`);
+    toast(`The release of ${relName} starts now`);
+    // #6189: show the release as it runs: the target's pipeline with its deploy stage (the hook's steps).
+    if (relShow) { pickStage(relName, "deploy"); openTarget(relName); }
   });
   if (t.dataset.hook) return run(async () => {
     const name = t.dataset.target, event = t.dataset.hook;
@@ -169,6 +176,23 @@ export function onClick(t) {
     if (!command.trim()) return has ? toast(`The command is empty. To take the hook away, use remove`, true) : undefined;
     return act("target_hook", { target: name, event, command })
       .then(r => toast(`Hook ${event} of ${name} ${r.changed}: it runs in ${r.folder || "the folder of the command that causes the event"}, for at most ${r.timeout}`)).catch(() => {});
+  });
+  // Release via agent (#6189, mark 2026-11-19: 'one option should for sure be "Release Via Agent" which has an agent
+  // handle it'): the chosen agent and model in a new session take the release; a release that waits for the cadence
+  // starts now first (release_now, with the reason), as Release now does. A release that waits for the person's yes
+  // shows Approve instead of this button (pipeline.js arrowNow).
+  if (t.dataset.relagent) return run(async () => {
+    const name = t.dataset.relagent, tg = (S.targets || []).find(x => x.name === name) || {};
+    const ch = await chooseLaunch(S, { title: "Release via agent", go: "Start the agent",
+      what: `release ${name}: a new agent session reads the release report, starts the release, watches its steps, and on a failure fixes the cause and starts it again` });
+    if (!ch) return;
+    try {
+      if (tg.release && tg.release.waits) await act("release_now", { target: name, reason: `Released via agent by ${actor() || "a person"} from the Deploy tab` });
+      const r = await act("deploy_now", { target: name, review: false, ...launchArgs(ch) });
+      toast(!r.ready ? `#${r.start.id} waits on ${r.waits_on.map(w => "#" + w.id).join(", ")}; the agent starts when they are done`
+        : r.alerted ? `#${r.start.id} is ready; alerted the owner ${r.alerted}` : `Started ${r.agent} to release ${name}`);
+      pickStage(name, "deploy"); openTarget(name);
+    } catch (e) { /* toast shown */ }
   });
   if (t.dataset.deploy) return run(async () => {
     if (t.dataset.busy) return; t.dataset.busy = "1"; setTimeout(() => delete t.dataset.busy, 4000);

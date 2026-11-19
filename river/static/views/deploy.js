@@ -11,12 +11,12 @@
 // for the person's yes, and each token that is refused or not saved. Reads: GET api/deploy (each pipeline in one
 // read, river/routes/pipeline.py) and api/pipeline-audit (views/audit.js). The address: /deploy, /deploy/<part>,
 // /deploy/pipeline/<name>[/<tab>] (app.js writes it from D).
-import { $, esc, getJson, ago, act, toast } from "../lib.js";
+import { $, esc, getJson, ago, left, act, toast } from "../lib.js";
 import { button } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { tab, nav } from "../page.js";
-import { showPipeline, hidePipeline, renderPipeline } from "./pipeline.js";
+import { showPipeline, hidePipeline, renderPipeline, releaseButton } from "./pipeline.js";
 import { showTargets } from "./targets.js";
 import { drawAudit } from "./audit.js";
 import { accountsHtml as accountsView } from "./accounts.js";
@@ -174,6 +174,13 @@ function bannersHtml() {
       : button("Approve", { kind: "primary", data: { "dp-approve": p.name, stage: w.stage, rev: w.rev || "" }, title: "Let this version in" }))
       + button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" });
     out.push(`<div class="dp-banner dp-human"><span>✋ ${what}</span><span class="spacer"></span>${btns}</div>`);
+  }
+  // #6189: a deploy target whose collected tasks wait (for its cadence, or for the release that runs): Release now.
+  for (const p of data.pipelines) if (p.release) {
+    const r = p.release, n = `${r.tasks} task${r.tasks === 1 ? "" : "s"}`;
+    out.push(`<div class="dp-banner"><span>📦 ${esc(p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
+      : r.running ? ` after release #${r.running}` : ""}</span><span class="spacer"></span>${releaseButton(p)}
+      ${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
   }
   const seen = new Set();
   for (const p of data.pipelines) {

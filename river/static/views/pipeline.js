@@ -18,6 +18,7 @@ import { field, input, select, textarea, actions } from "../components/form.js";
 import { runsOut } from "./accounts.js";
 import { stageMarks } from "./agents.js";
 import { holdingCardHtml, holdingDetail } from "./holding.js";
+import { deployButtons } from "./targets.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
 let sig = "", runSig = "";
@@ -43,6 +44,11 @@ export function showPipeline(name, tab) {
   V.name = name; V.tab = tab; V.shown = !!name && ["stages", "versions"].includes(tab);
 }
 export function hidePipeline() { V.shown = false; }
+// Choose a stage of pipeline name before the Deploy tab shows it (#6189: after Release now, its deploy stage).
+export function pickStage(name, stage) {
+  if (name !== V.name) showPipeline(name, "stages");
+  V.stage = stage; V.arrow = null; V.run = null; sig = ""; runSig = "";
+}
 
 export async function renderPipeline(force) {
   if (!V.shown) return;
@@ -67,6 +73,61 @@ export async function renderPipeline(force) {
   refreshRun(true);
 }
 
+// The release of a deploy target in one click (#6189, mark 2026-11-19: 'I cannot figure out how to deploy
+// maximizepm-github'): Approve release when its release waits for the person's yes (never a way round it), else
+// Release now when collected tasks wait for the cadence or for the release that runs (its dialog: targets.js).
+export function releaseButton(D) {
+  if (!D.default || !D.controls) return "";
+  // D is the pipeline page's data (its approval stage's last run) or a row of the Deploy list (its waits).
+  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
+  const item = D.waits ? (D.waits[0] || {}).item : appr && appr.state === "queued" ? appr.item : null;
+  const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {}).item;
+  if (item) return button(`Approve release${dep ? " #" + dep : ""}`, { kind: "primary", data: { "dp-card": item }, title: "Approve or decline" });
+  const r = D.release;
+  return r ? button(`Release ${r.tasks} task${r.tasks === 1 ? "" : "s"} now`, { kind: "primary", data: { relnow: D.name, relshow: "1" },
+    title: "Start the release" }) : "";
+}
+
+// Every release control of the page sits here, above the stages (#6189; manager-526c relaying mark 2026-11-19): Approve
+// or Release now (releaseButton), the release from holding (the reviewed commits, or all), and for a target with
+// collected tasks and nothing that waits, Deploy now (targets.js). The holding detail and the target card keep none.
+function headControls(D) {
+  const first = releaseButton(D), h = (D.stages.find(s => s.holding) || {}).holding, r = h && h.release;
+  const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  const hold = r && r.can && h.commits ? [
+    r.reviewed ? button(`Release the ${plural(r.reviewed, "reviewed commit")}`, { kind: first ? "" : "primary",
+      data: { "hd-release": "reviewed", "hd-pipe": D.name, sha: r.upto, n: r.reviewed }, title: "Release the reviewed ones" }) : "",
+    button(`Release all ${h.commits}`, { data: { "hd-release": "all", "hd-pipe": D.name, sha: r.last, n: h.commits }, title: "Every commit in holding" })].join("") : "";
+  return first + hold + (D.default && !first && !hold ? deployButtons(D.name) : "");
+}
+
+// The next step of a deploy target, right under the graph (#6189, mark 2026-11-19: 'its still not obvious how to do
+// the release promotion'): one highlighted line that says what waits and for whom, with its button: Approve release
+// #N when the release waits for the person's yes, else Release N tasks now and Release via agent, else the release
+// from holding or Deploy now (headControls). Nothing when no step waits. The same buttons are in the chip's dialog.
+// Where the next step waits on the graph, for its highlight (pl-waits): the approval card while it waits for the
+// person's yes, else the chip after holding ("→<stage>") while collected tasks wait for the release; else null.
+function nextAt(D) {
+  if (!D || !D.default) return null;
+  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
+  if (appr && appr.state === "queued" && appr.item) return "approval";
+  const i = D.stages.findIndex(s => s.holding);
+  return D.release && i >= 0 && D.stages[i + 1] ? "→" + D.stages[i + 1].name : null;
+}
+
+function nextBar(D) {
+  const b = headControls(D);
+  if (!D.default || !b) return "";
+  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run || {}, R = D.release;
+  const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {});
+  const text = appr.state === "queued" && appr.item
+    ? `Next: your yes for release${dep.item ? " #" + dep.item : ""}${appr.version ? ` (<span class="pl-ver">${esc(short(appr.version))}</span>)` : ""}. It goes to production after it.`
+    : R ? `Next: ${R.tasks} task${R.tasks === 1 ? "" : "s"} wait for the release. Without a click: ${esc(R.text)}.`
+    : "Next: the collected tasks can go out.";
+  const agent = R ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
+  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}</div>`;
+}
+
 function draw() {
   const D = V.data;
   const envs = D.envs.length;
@@ -80,6 +141,7 @@ function draw() {
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
   if (V.tab === "stages") fit();
+  drawArrow();  // #6189: an open transition dialog shows the new state
 }
 
 // ---- the stages left to right
@@ -133,7 +195,8 @@ function stageCardOnly(s) {
     ${s.override ? `<span class="pl-meta c-warn" title="Skipped: ${esc(s.override.skipped.join(", "))}">⚠ not through the pipeline</span>` : ""}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
-    { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
+    { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : "") + (nextAt(V.data) === s.name ? " pl-waits" : ""),
+      pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
       title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name });
 }
 
@@ -182,7 +245,7 @@ function arrowEl(s, i) {
   return `<div class="pl-gate">${button(`${chip(cls, `${esc(m)}<span class="pl-long"> ${esc(word)}</span>`)}
     ${join ? `<span class="pl-anote pl-join">${esc(join)}</span>` : ""}
     ${by ? `<span class="pl-anote pl-long">${esc(by)}</span>` : ""}${w ? `<span class="pl-anote pl-ver pl-long">${esc(short(w.rev))} waits</span>` : ""}`,
-    { kind: "card", cls: "pl-arrow", pressed: V.arrow === s.name, data: { "pl-arrow": s.name },
+    { kind: "card", cls: "pl-arrow" + (nextAt(V.data) === "→" + s.name ? " pl-waits" : ""), pressed: V.arrow === s.name, data: { "pl-arrow": s.name },
       title: `Transition into ${s.name}` })}</div>`;
 }
 
@@ -191,6 +254,7 @@ function stagesView(D) {
   const L = layout(D.stages);
   const row = L.branched ? branchedRow(D.stages, L) : D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
   return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row${L.branched ? " pl-grid" : ""}" id="plRow">${row}</div></div>
+    ${nextBar(D)}
     <div class="pl-card" id="plDetail">${detail()}</div>
     <div id="plStageRuns"></div>
     ${envTable(D)}${sourceCard(D)}`;
@@ -448,6 +512,54 @@ async function toggleCheck(k) {
 const when = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 const setBy = (who, at) => esc(who || "a person") + (at ? " · " + esc(ago(at)) : "");
 
+// A transition chip opens its dialog (#6189, mark 2026-11-19 through manager-526c: "the release control is ON THE
+// GRAPH ... A click on a transition chip opens a modal"): what it does now (for the release after holding: the tasks
+// and commits that go out, up to which version, the deploy hook that runs, and the buttons Release now, Release the
+// reviewed commits, Release all, Approve, Deploy now), then what it can do (its controls, arrowDetail). It is drawn
+// again with each read of the pipeline while it is open. It lives in #dpStages, so this view's clicks reach it.
+let arrowDlg = null, arrowBox = null, arrowName = null;
+function openArrow(name) {
+  if (!arrowDlg) {
+    const d = document.createElement("div");
+    d.id = "plArrowDlg"; d.className = "hidden";
+    d.innerHTML = '<div class="box"></div>';
+    $("#dpStages").appendChild(d);
+    arrowBox = d.firstElementChild;
+    arrowDlg = makeDialog(d, { onClose: () => { arrowName = null; } });
+  }
+  arrowName = name;
+  drawArrow();
+  arrowDlg.open();
+}
+
+function drawArrow() {
+  if (!arrowName || !arrowBox || !V.data) return;
+  const D = V.data, s = D.stages.find(x => x.name === arrowName);
+  if (!s || !s.transition) return arrowDlg.close();
+  arrowBox.innerHTML = `<div class="dlg-head"><h2>Into ${esc(s.name)}</h2>${iconButton("✕", "Close", { data: { "pl-arrowclose": "1" } })}</div>`
+    + arrowNow(D, s) + arrowDetail(s);
+}
+
+// What the transition does now, with the buttons that act on it.
+function arrowNow(D, s) {
+  const i = D.stages.indexOf(s), afterHolding = i > 0 && D.stages[i - 1].holding;
+  if (!afterHolding) {
+    const yes = s.name === "approval" ? releaseButton(D) : "";
+    return yes ? `<div class="pl-bar">${yes}</div>` : "";
+  }
+  const h = D.stages[i - 1].holding || {}, r = h.release || {}, R = D.release, hook = (D.stages.find(x => x.name === "deploy") || {}).run;
+  const lines = [];
+  if (R) lines.push(`${R.tasks} task${R.tasks === 1 ? "" : "s"} wait for this release${R.deploy ? ` (<span class="link" data-open="${R.deploy}">#${R.deploy}</span>, <span class="link" data-report="${R.deploy}">its report</span>)` : ""}. Without a click: ${esc(R.text)}.`);
+  if (h.commits) lines.push(`${h.commits} commit${h.commits === 1 ? "" : "s"} in holding, ${h.reviewed || 0} reviewed${r.last ? `; Release all goes up to <span class="pl-ver">${esc(short(r.last))}</span>` : ""}.`);
+  if (hook) lines.push(`Then the deploy hook runs: <code>${esc(hook)}</code>`);
+  if (!lines.length) lines.push("Nothing waits for a release now.");
+  // Release via agent beside the manual release (mark 2026-11-19), when a release can go and no yes waits.
+  const waitsYes = releaseButton(D).includes("dp-card"), agent = D.default && !waitsYes && (R || h.commits)
+    ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
+  const b = headControls(D) + agent;
+  return `<h3>What it does now</h3>${lines.map(x => `<div class="t-m">${x}</div>`).join("")}${b ? `<div class="pl-bar">${b}</div>` : ""}<h3>What it can do</h3>`;
+}
+
 function arrowDetail(s) {
   const D = V.data, t = s.transition, i = D.stages.indexOf(s);
   const from = (t.from || []).length ? t.from.join(" + ") : t.from ? "start" : i > 0 ? D.stages[i - 1].name : "start";  // #6142
@@ -698,6 +810,8 @@ async function drawTasks(rev) {
 // ---- clicks
 
 $("#dpStages").addEventListener("click", (e) => {
+  // #6189: a button in the transition's dialog closes it first (its action may open a dialog of its own).
+  if (arrowDlg && e.target.closest("#plArrowDlg") && e.target.closest("button")) arrowDlg.close();
   const vb = e.target.closest("[data-pl-version]");
   if (vb) { V.version = V.version === vb.dataset.plVersion ? null : vb.dataset.plVersion; sig = ""; renderPipeline(true).then(() => drawTasks(V.version)); return; }
   const fx = e.target.closest("[data-pl-fix]");
@@ -737,7 +851,7 @@ $("#dpStages").addEventListener("click", (e) => {
   if (!t) return;
   if (t.dataset.plAllruns) { V.allRuns = V.allRuns === t.dataset.plAllruns ? null : t.dataset.plAllruns; return refreshStageRuns(true); }  // #6182
   if (t.dataset.plCheck) return toggleCheck(t.dataset.plCheck);  // #6181: every run of the check in the watch
-  if (t.dataset.plArrow) { V.arrow = t.dataset.plArrow; sig = ""; draw(); return; }
+  if (t.dataset.plArrow) return openArrow(t.dataset.plArrow);  // #6189: a dialog, not the panel under the graph
   if (t.dataset.plStage) { V.stage = t.dataset.plStage; V.arrow = null; V.run = null; runSig = ""; draw(); return refreshRun(true); }
   if (t.dataset.plFilter) { V.filter = t.dataset.plFilter; runSig = ""; return refreshRun(true); }
   if (t.dataset.plCopy && V.run && V.run.prompt) copyText(V.run.prompt).then(() => toast("Copied the prompt"));

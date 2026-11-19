@@ -55,6 +55,7 @@ def pipeline(conn, path):
         p = targets.default_pipeline(conn, name)
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
         p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
+        p["release"] = _release_now(conn, name)  # #6189: the head's Release now
     _with_holding(conn, name, p["stages"])
     from ..pipeline import keys  # #6153: the keys each stage may read, by name (a target's default pipeline: none)
     cards = keys.for_cards(conn, name) if not p.get("default") else {}
@@ -379,6 +380,18 @@ def _strip(stages, no_news=False, work=None):
     return out
 
 
+def _release_now(conn, name):
+    """What the button Release now acts on (#6189, mark 2026-11-19: 'I cannot figure out how to deploy
+    maximizepm-github'): the collected release of deploy target name when it has ship requests and waits (for the
+    cadence, or for the release that runs), as core.release_now needs; else None. The page offers the button only then:
+    a release that does not wait starts by itself."""
+    plan = core.release_plan(conn, name)
+    if not (plan["deploy"] and plan["ships"] and plan["waits"]):
+        return None
+    return {"deploy": plan["deploy"], "tasks": len(plan["ships"]), "until": plan["until"], "running": plan["running"],
+            "text": plan["text"]}
+
+
 def _person_waits(conn, pipeline_id):
     """The versions that wait at a transition for a person's yes: not approved, and the transition not disabled or
     blocked (#6139)."""
@@ -429,7 +442,8 @@ def deploy(conn, path):
                     "held_by": d.get("held_by"), "controls": True,  # #6176
                     "stages": _strip(_with_holding(conn, t["name"], d["stages"]), work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
-                    "targets": [t["name"]], "waits": waits})
+                    "targets": [t["name"]], "waits": waits,
+                    "release": None if waits else _release_now(conn, t["name"])})  # #6189: a yes first, not a way round
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}
     return {"pipelines": out, "accounts": account_list, "runners": _runners().listing(conn),  # #6151
             "count": sum(len(x["waits"]) for x in out) + len(bad)}

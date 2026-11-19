@@ -23,6 +23,15 @@ button.pl-stage { display: flex; flex-direction: column; justify-content: flex-s
   overflow: hidden; text-overflow: ellipsis; }
 .pl-ver.pl-words { font-family: inherit; }  /* words such as 'nothing waits', not a version */
 .pl-table .pl-nowrap { white-space: nowrap; }
+/* The next step of a deploy target under the graph (#6189): highlighted, with its primary button. */
+.pl-next { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-4) var(--sp-5);
+  margin: var(--sp-2) 0; border: var(--hair-2) solid var(--accent); border-radius: var(--r-l); background: var(--human-bg); }
+.pl-next .spacer { flex: 1; }
+/* The card or chip where that step waits: the same accent, so the eye goes from the graph to the button. */
+.pl-stage.pl-waits, button.pl-arrow.pl-waits { border: var(--hair-2) solid var(--accent); background: var(--human-bg); }
+#plArrowDlg { --dlg-w: var(--w-dlg-m); }  /* a transition's dialog (#6189) */
+#plArrowDlg .box { display: flex; flex-direction: column; gap: var(--sp-3); }
+#plArrowDlg h3 { margin: var(--sp-2) 0 0; font-size: var(--fs-base); }
 .pl-kind .pl-tier { font-size: var(--fs-xs); padding: 0 var(--sp-1); margin-left: var(--sp-1); }
 .pl-name { font-weight: 600; }
 .pl-ver { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); }

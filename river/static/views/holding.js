@@ -42,12 +42,10 @@ function html(H) {
   if (!H.folder) {
     return `<h3>Holding</h3><div class="muted t-s">The project of ${esc(H.pipeline)} has no git folder, so holding shows no commits. Link one: maxpm project path ${esc(H.project || "<project>")} &lt;folder&gt;</div>`;
   }
-  const upto = H.upto ? H.commits.findIndex(x => x.sha === H.upto) + 1 : 0;
+  // The release buttons are at the top of the pipeline's page with every release control (#6189).
   const acts = [
     n ? button(`View all changes (+${H.added} −${H.removed})`, { data: { "hd-all": 1 }, title: "Every commit in holding" }) : "",
     H.report ? `<span class="link t-m" data-report="${H.report}">Open the review report #${H.report}</span>` : "",
-    rel.can && upto ? button(`Release the ${plural(upto, "reviewed commit")}`, { kind: "primary", data: { "hd-release": "reviewed" }, title: "Release the reviewed ones" }) : "",
-    rel.can && n ? button(`Release all ${n}`, { data: { "hd-release": "all" }, title: "Every commit in holding" }) : "",
   ].filter(Boolean).join("");
   return `<h3>Holding · ${plural(n, "commit")} since ${esc(H.base_label || "the start")}</h3>
     ${n ? `<div class="pl-bar"><span class="pl-st passed">✓ ${c.reviewed} reviewed</span><span class="pl-st running">◐ ${c.in_review} in review</span>
@@ -80,15 +78,13 @@ async function refreshHolding(name) {
 document.addEventListener("click", async (e) => {
   const t = e.target.closest("[data-hd-diff],[data-hd-all],[data-hd-release]");
   if (!t) return;
-  const box = t.closest(".hd"), name = box && box.dataset.hd;
+  const box = t.closest(".hd"), name = (box && box.dataset.hd) || t.dataset.hdPipe;
   if (!name) return;
   if (t.dataset.hdDiff) return openHoldingChanges(name, t.dataset.hdDiff);
   if (t.dataset.hdAll) return openHoldingChanges(name, null);
-  const H = cache[name] && cache[name].data;
-  const all = t.dataset.hdRelease === "all";
-  const n = all ? H.commits.length : H.commits.findIndex(x => x.sha === H.upto) + 1;
-  const last = all ? H.commits[H.commits.length - 1] : H.commits[n - 1];
-  try { await act("pipeline_release", { pipeline: name, all, upto: last ? last.sha : null }); } catch (err) { return; }
-  toast(`Released ${plural(n, "commit")} of ${name}, up to ${short(last && last.sha)}`);
+  // A release button at the top of the pipeline's page (#6189) names the pipeline, the last commit and the count.
+  const all = t.dataset.hdRelease === "all", n = +t.dataset.n || 0, sha = t.dataset.sha || null;
+  try { await act("pipeline_release", { pipeline: name, all, upto: sha }); } catch (err) { return; }
+  toast(`Released ${plural(n, "commit")} of ${name}, up to ${short(sha)}`);
   refreshHolding(name);
 });
