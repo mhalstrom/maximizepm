@@ -27,7 +27,10 @@ function runnerRow(r, clis) {
     || `<span class="muted">none</span>`;
   const state = r.state === "bad" ? `<span class="c-warn">✕ ${esc(r.error || "does not answer")}</span>`
     : `<span class="dot active"></span> ${r.last_seen ? esc(ago(r.last_seen)) : "never"}`;
-  return `<tr><td><b>${esc(r.name)}</b></td><td class="t-s" data-label="What it is">${whatItIs(r)}</td>
+  // #6153: the sets that every run here gets (the model key), by name
+  const keys = (r.keys || []).map(k => `${k.set} (${k.secrets.join(", ") || "empty"})`).join("; ");
+  return `<tr><td><b>${esc(r.name)}</b></td><td class="t-s" data-label="What it is">${whatItIs(r)}
+    <br>${keys ? `🔒 ${esc(keys)}` : `<span class="muted">no keys of its own</span>`}</td>
     <td class="t-s" data-label="Agents">${agents}</td><td class="t-s" data-label="Last seen">${state}</td>
     <td class="t-s" data-label="Load">${r.busy} of ${r.slots}${r.waiting ? `, ${r.waiting} wait` : ""}<br><span class="muted">at most ${r.max_minutes}m, $${r.max_cost}</span></td>
     <td data-label="Used by">${used}</td><td>${button("Check", { data: { "rn-check": r.name }, title: "Ask the server again" })}</td></tr>`;
@@ -64,10 +67,11 @@ export function runnersHtml(data) {
     <h3 class="tg-h">Agents on runners</h3>
     ${runs.length ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Run</th><th>Task</th><th>Started by</th><th>Since</th><th>Cost</th><th>Result</th><th></th></tr>
       ${runs.map(runRow).join("")}</table></div>` : `<div class="muted t-m">No agent ran on a runner yet.</div>`}
-    <div class="muted t-s">A pipeline ticks the runners it may use on its Triggers tab; a rule there names one. The agent's model key is the runner's own:
+    <div class="muted t-s">A pipeline ticks the runners it may use on its Triggers tab; a rule there names one. The agent's model key: a credential set granted to the runner, else the runner's own:
       ${Object.values(R.clis).map(c => `${esc(c.label)}: ${esc(c.key)}`).join("; ")}.</div>
     <pre class="rn-cmds mono">maxpm runner add ci-1 --ssh ci@ci-1        # checks the server, installs maxpm there
-maxpm runner allow ci-1 &lt;pipeline&gt;          # the pipeline's trigger rules may run their agents there</pre>`;
+maxpm runner allow ci-1 &lt;pipeline&gt;          # the pipeline's trigger rules may run their agents there
+maxpm secret grant model-keys --runner ci-1  # every run there gets the set (never a person's sign-in)</pre>`;
 }
 
 // ---- the dialogs: Add a runner, Watch a run

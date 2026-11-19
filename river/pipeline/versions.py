@@ -132,8 +132,9 @@ def _order(fa, fb):
 
 def restore(conn, pipeline, n, reason, actor=None):
     """Make the definition what version n was, as one more version: environments, stages (their fields, order and
-    branches), the standing rules of each transition, the trigger rules and the runners. The source and the freezes
-    stay as they are now. A person or the manager."""
+    branches), the standing rules of each transition, the trigger rules and the runners. The source, the freezes and
+    the keys of its stages (#6153: a grant is a person's act, with its own check) stay as they are now. A person or
+    the manager."""
     if not (reason or "").strip():
         raise core.RiverError("say why: --reason \"<why this version>\" (the audit log keeps it)")
     why = core._lead_refusal(conn, actor, "puts a pipeline's definition back")

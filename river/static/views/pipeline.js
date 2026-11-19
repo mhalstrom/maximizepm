@@ -123,10 +123,32 @@ function stageCardOnly(s) {
     ${r ? st(r.state, live ? "live" : null) : st("none")}
     <span class="pl-meta pl-more-line">${esc(meta)}</span>
     ${s.start === "manual" ? `<span class="pl-meta">✋ ${s.waits_for_run ? "waits for Run" : "starts manually"}</span>` : ""}
+    ${keysLine(s)}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
       title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name });
+}
+
+// The keys a stage may read (#6153), by name only: the secrets of the credential sets granted to the stage or its
+// tier, and the names that the deployment system keeps for it (GitHub environment secrets, a Pulumi ESC environment).
+const keyNames = s => s.keys ? [...new Set([...s.keys.secrets, ...s.keys.kept.flatMap(x => x.names)])] : [];
+function keysLine(s) {
+  const names = keyNames(s);
+  return names.length ? `<span class="pl-meta pl-more-line">🔒 ${esc(names.join(", "))}</span>` : "";
+}
+function keysHtml(s) {
+  const k = s.keys;
+  if (!k) return "";
+  const row = (n, where, who) => `<tr><td data-label="Secret">🔒 ${esc(n)}</td><td data-label="Kept in">${where}</td>
+    <td data-label="Who uses it">${esc(who)}</td></tr>`;
+  const rows = k.detail.flatMap(x => (x.secrets.length ? x.secrets : ["(an empty set)"]).map(n => row(n,
+      `MaximizePM <span class="muted t-s">set ${esc(x.set)}</span>`, x.by === "tier" ? `every ${s.tier} stage` : `only the ${s.name} stage`)))
+    .concat(k.kept.flatMap(x => x.names.map(n => row(n, `${esc(x.kept_in)} <span class="muted t-s">${x.source === "person"
+      ? "named by a person" : "read by " + esc(x.source)}</span>`, `the ${s.name} stage's own job there`))));
+  return `<div class="t-m"><b>Secrets this stage may read</b></div>` + (rows.length
+    ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Secret</th><th>Kept in</th><th>Who uses it</th></tr>${rows.join("")}</table></div>`
+    : `<div class="muted t-s">None: this stage reads no secret. Grant a set: <code>maxpm secret grant &lt;set&gt; --stage ${esc(V.name)}/${esc(s.name)}</code></div>`);
 }
 
 // The mark and the words of a transition: [mark, short word, chip color].
@@ -401,7 +423,7 @@ function detail() {
   if (s.holding) return holdingDetail(V.name);
   const r = V.run && (V.run.id == null || (s.last_run && V.run.id === s.last_run.id)) ? V.run : s.last_run;
   const head = `<h3>${esc(s.name)}${r && r.version ? ` · <span class="pl-ver">${esc(short(r.version))}</span>` : ""}</h3>`;
-  if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>`;
+  if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>` + keysHtml(s);
   const when = r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
   const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
     + (r.fault_item ? ` · fault <span class="link" data-open="${r.fault_item}">#${r.fault_item}</span>` : "");
@@ -412,7 +434,8 @@ function detail() {
     + wavesHtml(s, r)
     + gantt(r.step_list || [])
     + (r.output ? `<pre class="pl-pre">${esc(r.output)}</pre>` : "")
-    + (r.test_list && r.test_list.length ? tests(r) : "");
+    + (r.test_list && r.test_list.length ? tests(r) : "")
+    + keysHtml(s);
 }
 
 // A stage over many servers (#6120): one card for each wave, each server with the state of its deploy, its check

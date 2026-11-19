@@ -520,6 +520,9 @@ def _take(conn, p, m, answer):
         for x in notes:
             conn.execute("UPDATE stage_runs SET gate_note=? WHERE id=? AND pipeline_id=?",
                          (x["note"][:500], x.get("run"), p["id"]))
+    if answer.get("secrets") is not None:  # #6153: the names of the keys the system keeps for a stage, never values
+        from . import keys
+        keys.take_plugin(conn, p, m["name"], answer["secrets"])
     if "state" in answer:
         state = json.dumps(answer["state"], separators=(",", ":"))
         if len(state) > STATE_MAX:

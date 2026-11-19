@@ -24,8 +24,10 @@ def credentials(h, path):
         rows = [{k: r.get(k) for k in SHOWN} for r in vault.listing(conn)["secrets"]]
         out = {"credentials": rows, "sets": vault.sets(conn)["sets"], "grants": vault.grants(conn)["grants"],
                "requests": vault.requests(conn)["requests"],  # #5834: the checklists that wait (#5833 draws them)
-               "levels": list(vault.LEVELS), "scopes": list(vault.GRANT_SCOPES), "kinds": list(vault.GRANT_KINDS),
-               "store": vault.backend().name, "browsers": session_browsers()}
+               "levels": list(vault.LEVELS), "scopes": list(vault.GRANT_SCOPES) + list(vault.KEY_SCOPES),
+               "kinds": list(vault.GRANT_KINDS), "store": vault.backend().name, "browsers": session_browsers()}
+        from ..pipeline import keys  # #6153: the stages, tiers and runners a set may go to
+        out["places"] = keys.places(conn)
         signin_accounts(conn, out["requests"])
     finally:
         conn.close()

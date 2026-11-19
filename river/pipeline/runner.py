@@ -32,7 +32,7 @@ import time
 import uuid
 
 from .. import core
-from . import audit, cdevents, junit, steps, store, transitions
+from . import audit, cdevents, junit, keys, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
           "pulumi": "Pulumi Delivery"}  # the forges that MaximizePM knows by name (Pulumi Delivery: #6133)
@@ -418,11 +418,24 @@ def _execute(conn, run_id):
         if (r["purpose"] or "").startswith("failed:"):  # only the failed tests of that run: one per line
             env["MAXPM_TESTS"] = "\n".join(f"{t['suite']}.{t['name']}" for t in store.tests(
                 conn, int(r["purpose"].split(":", 1)[1])) if t["state"] in ("failed", "error"))
+        # #6153: the keys of this stage and its tier, and no other secret; their values are masked in its output
+        values, forms, given, left = keys.stage_env(conn, r)
+        for k in ("MAXPM_PIPELINE", "MAXPM_STAGE", "MAXPM_REV", "MAXPM_RUN", "MAXPM_ENV"):
+            values.pop(k, None)
+        env.update(values)
+        if forms:
+            MASKS[run_id] = forms
+        if given or left:
+            steps.ingest_output(conn, run_id, [f"maxpm: the keys of stage {r['stage']}: " + (", ".join(
+                f"{g['secret']} as ${g['var']}" for g in given) or "none") + "".join(f"; left out: {x}" for x in left)])
         began = time.time()
-        if r["waves"]:
-            state, errors = _waves(conn, r, folder, limit, limit_text, env)
-        else:
-            state, errors = _single(conn, r, r["cmd"], folder, limit, limit_text, env)
+        try:
+            if r["waves"]:
+                state, errors = _waves(conn, r, folder, limit, limit_text, env)
+            else:
+                state, errors = _single(conn, r, r["cmd"], folder, limit, limit_text, env)
+        finally:
+            MASKS.pop(run_id, None)
         if r["junit"] and state != "cancelled":  # a stage that an operator's stop ended reads no report (#6145)
             path = os.path.join(folder or "", os.path.expanduser(r["junit"]))
             try:
@@ -445,6 +458,7 @@ def _execute(conn, run_id):
 
 
 STOPPED = {}  # run id -> why an operator's stop ended it after a step (#6145)
+MASKS = {}  # run id -> the forms of its stage's key values, masked in its output (#6153)
 
 
 def _stop_asked(conn, r):
@@ -460,6 +474,8 @@ def _single(conn, r, cmd, folder, limit, limit_text, env, on_lines=None):
     run_id = r["id"]
 
     def lines_in(lines):
+        if MASKS.get(run_id):  # #6153: a key of the stage never reaches the stored output
+            lines = [keys.mask(MASKS[run_id], x) for x in lines]
         steps.ingest_output(conn, run_id, lines)
         # An operator stopped the pipeline (#6145): the stage stops after its present step.
         if any(x.startswith("::step end") for x in lines) and run_id in PROCS:

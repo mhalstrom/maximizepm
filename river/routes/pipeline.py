@@ -56,8 +56,11 @@ def pipeline(conn, path):
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
         p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
     _with_holding(conn, name, p["stages"])
+    from ..pipeline import keys  # #6153: the keys each stage may read, by name (a target's default pipeline: none)
+    cards = keys.for_cards(conn, name) if not p.get("default") else {}
     for s in p["stages"]:  # the faults and agents under each stage card (#6149)
         s["work"] = work.get(s["name"]) or {"faults": [], "agents": []}
+        s["keys"] = cards.get(s["name"])
     return p
 
 

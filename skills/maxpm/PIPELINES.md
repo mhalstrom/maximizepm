@@ -253,7 +253,9 @@ the jsonl example only, with its test against recorded answers (#6165):
 - **What it reads**, once a minute: the newest 10 runs of each stage's
   workflow, their jobs (the stage's steps), the JUnit artifacts of a finished
   run (named `junit*`, or the stage's `--junit` name), and, on GitHub, each
-  environment's deployments with a success status.
+  environment's deployments with a success status. Once an hour, on GitHub,
+  the names of the secrets of each deploy stage's environment (`secrets` in
+  its answer: names only).
 - **What it does**: start, run again and roll back are `workflow_dispatch` of
   the stage's workflow on the branch (`--ref`, `main` when not set) with the
   inputs `maxpm_run` and `maxpm_rev` (the older commit of a roll back); stop
@@ -265,7 +267,8 @@ the jsonl example only, with its test against recorded answers (#6165):
   no jobs, artifacts or cancel call: the read goes on without them, and stop
   says to stop the run on the forge's page.
 - **Its token**: a fine-grained token with Actions read and write,
-  Deployments read and Contents read on the repository (on Gitea and Forgejo
+  Deployments read and Contents read on the repository, and Environments read
+  for the secret names (without it the stage cards show none) (on Gitea and Forgejo
   a token with the repository scope), saved as a maxpm secret.
 - **Its test**: the plugin's `handle(request, fetch)` takes the HTTP function,
   so a test passes recorded API answers instead of the network
@@ -313,7 +316,11 @@ the jsonl example only, with its test against recorded answers (#6165):
   shows no steps), no roll back of a stage (do it in the stage's Actions menu
   on Pulumi's page), and no way to run a commit named from outside (a start
   runs the head of its source). Its routes are a public preview and can
-  change.
+  change. Pulumi documents no link from a Delivery stage to the ESC
+  environment that holds its secrets, so the plugin sends no `secrets`: name
+  them by hand (`maxpm pipeline keys <name> <stage> --kept-in "Pulumi ESC
+  environment org/project/prod" --names a,b`, section "Keys for stages and
+  runners").
 - **Its token**: a Pulumi access token of the organization, saved as a maxpm
   secret.
 - **Its test**: `tests/test_pipeline.py`, class PulumiDelivery, against
@@ -488,6 +495,14 @@ The request of `poll` and of each action also has:
 Any answer can also have `notes`: `[{"run": <id>, "note": <text>}]`, a line
 that the page shows on a waiting run, such as what a gate in the system still
 waits for.
+
+A `poll` answer can also have `secrets`: `[{"stage": <name>, "kept_in":
+<where>, "names": [<name>, ...]}]`, the names of the keys that the system
+keeps for a stage itself (an environment's secrets, a vault). Never send a
+value: MaximizePM keeps only the names (at most 100 for one stage) and shows
+them on the stage card. Each one replaces what the plugin said before for
+that stage and place; send `"names": []` when the place is gone. Send them
+seldom (the github plugin: once an hour, its state keeps the time).
 
 The answer can always have `error` (a message). Exit 0 when the call worked.
 On an error, exit 1 or more and say why in `error` or on stderr. Do not print
@@ -793,7 +808,10 @@ Each rule also names the stages it watches (one stage, or any stage), what the
 agent does (the instructions of its task), where the agent runs (this
 computer: `maxpm serve` starts a new session; or a runner that the pipeline
 ticks: the next section), and the keys its task gets (credential sets,
-granted to that task alone until it closes).
+granted to that task alone until it closes). A set that is a key of some
+stages (section "Keys for stages and runners") goes only to a task of those
+stages: a rule of one stage cannot name a key of another stage, and a rule of
+any stage holds it back for the others (its result says "held back").
 
 ```
 maxpm pipeline triggers <name>                           # the rules, and what they did lately
@@ -881,8 +899,8 @@ What the server needs:
 
 | CLI | How it runs there | Its model key on the runner | The cost limit |
 |---|---|---|---|
-| Claude Code (`--cli claude`, the default) | `claude -p` with `--output-format stream-json`, `--permission-mode dontAsk` and `--allowedTools`: a tool outside the list is refused, never asked | `ANTHROPIC_API_KEY` in its environment, or a token of `claude setup-token` | `--max-budget-usd`, the runner's max cost (5 dollars when not set) |
-| Codex (`--cli codex`) | `codex exec --json` in its workspace-write sandbox, with network on, so maxpm reaches the queue | `codex login` there, or `CODEX_API_KEY` | none in the CLI: the time limit stops it |
+| Claude Code (`--cli claude`, the default) | `claude -p` with `--output-format stream-json`, `--permission-mode dontAsk` and `--allowedTools`: a tool outside the list is refused, never asked | a secret with the variable `ANTHROPIC_API_KEY` in a set granted to the runner (next section), else `ANTHROPIC_API_KEY` in its environment | `--max-budget-usd`, the runner's max cost (5 dollars when not set) |
+| Codex (`--cli codex`) | `codex exec --json` in its workspace-write sandbox, with network on, so maxpm reaches the queue | a secret with the variable `CODEX_API_KEY` in a set granted to the runner, else `codex login` there or `CODEX_API_KEY` | none in the CLI: the time limit stops it |
 
 `maxpm serve` stops each run after the runner's max minutes (60 when not set).
 The tools that a Claude Code agent may use there with no prompt are maxpm,
@@ -912,6 +930,61 @@ When you are the agent on a runner: nobody answers at a prompt. Ask in the
 queue (`maxpm ask`, or a person item that blocks your task), then release the
 task and stop. Push your branch to origin, because the queue's computer does
 not see your folder, and name the commit in `maxpm done <id> --commit <sha>`.
+
+## Keys for stages and runners
+
+An agent with no person has no browser sign-in, no Keychain prompt and no
+terminal. Its keys are maxpm secrets in credential sets, granted to the place
+where it works. Only a prod stage reads a prod key.
+
+```
+maxpm secret set prod-deploy --add prod-ssh-key --add prod-db-url   # a set of tokens and keys
+maxpm secret grant prod-deploy --stage shop/deploy            # this stage may read it
+maxpm secret grant prod-deploy --tier shop/prod               # or every prod stage of shop
+maxpm secret level anthropic-ci --var ANTHROPIC_API_KEY       # the variable a CLI reads
+maxpm secret set model-keys --add anthropic-ci
+maxpm secret grant model-keys --runner ci-1                   # every agent run on ci-1 gets it
+maxpm pipeline keys shop                                      # each stage's keys, by name
+maxpm secret grants                                           # every grant: g<n> for sessions, k<n> for places
+maxpm secret revoke k<n>                                      # end one
+```
+
+The rules:
+
+- **A stage's command** on this computer gets the secrets of the sets granted
+  to its stage and to its tier, as variables, and no other secret. A
+  secret's variable is its own (`maxpm secret level <name> --var X`), else
+  its name in capitals with `-` and `.` as `_` (`prod-ssh-key` is
+  `$PROD_SSH_KEY`). The stage's output keeps a line that names what it got
+  (`maxpm: the keys of stage deploy: prod-ssh-key as $PROD_SSH_KEY`), and
+  MaximizePM masks each value in the output (`***`). A locked secret goes
+  only to a command that its level names (`maxpm secret level <name>
+  --command scripts/deploy.sh`).
+- **A run on a runner** gets the runner's sets (the model key) and the sets
+  that its rule granted to its task, as variables in the script on the
+  connection's input: never on a command line. The transcript masks them.
+  The task's history names what the run got.
+- **A trigger rule's keys**: a set that is a key of some stages goes only to
+  a task of those stages (the section on trigger rules).
+- **Never a person's sign-in**: a set that holds a saved sign-in or browser
+  cookies is refused for a stage, a tier or a runner. Such a secret added to
+  the set later is left out, and the output says so.
+- **Keys that the system keeps itself** (GitHub environment secrets, a Pulumi
+  ESC environment) show by name only. The github plugin reads the names of
+  each deploy stage's environment secrets; for another place, name them:
+  `maxpm pipeline keys <name> <stage> --kept-in "<where>" --names a,b`
+  (`--names ""` forgets that place). MaximizePM never reads their values.
+
+The stage card shows its keys after a 🔒, and its detail has the table
+"Secrets this stage may read": each secret, where it is kept, and who uses
+it. A rule's card shows each key with the stages that may read it ("prod-deploy
+(deploy only)"), and the runner's own. Deploy > Runners shows each runner's
+keys.
+
+Only a person grants a set, or the manager a set whose credentials the person
+allows without asking. Each grant and revoke of a stage or tier key is a line
+of the pipeline's audit log. The Emergency tab's Revoke its keys also ends the
+pipeline's stage and tier keys of that set.
 
 ## Actions on a running pipeline
 
@@ -971,8 +1044,9 @@ maxpm pipeline versions <name> --back 7 --reason "<why>"
 `--back` makes one more version, the same as version 7 (version 7 itself never
 changes): its environments, stages with their order and branches, the
 standing rules of each transition, its trigger rules and its runners. The
-source (forge or plugin, its token) and the freezes stay as they are now. A
-person or the manager goes back.
+source (forge or plugin, its token), the freezes and the keys of its stages
+stay as they are now (a key grant or revoke makes a version too, but going
+back grants nothing). A person or the manager goes back.
 
 ## Emergency actions and operators
 
@@ -1084,6 +1158,5 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: the
-override, an agent inside a forge's own CI job, keys granted per stage to
-a runner's agent, and each pipeline's list of what its agents may do with no
-prompt.
+override, an agent inside a forge's own CI job, and each pipeline's list of
+what its agents may do with no prompt.

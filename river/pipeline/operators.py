@@ -185,13 +185,21 @@ def _keys(conn, p):
         for k in r["keys"].split(","):
             if k:
                 sets.setdefault(k, []).append(f"t{r['id']}")
-    for k, rules in sorted(sets.items()):
+    from . import keys as stage_keys
+    bound = stage_keys.bound(conn, p["id"])  # #6153: the sets its stages and tiers may read
+    for k in sorted(set(sets) | set(bound)):
+        rules = sets.get(k) or []
         held = len(_task_grants(conn, p, k))
         others = sorted({q["name"] for q in conn.execute(
             "SELECT DISTINCT pl.name FROM pipeline_triggers t JOIN pipelines pl ON pl.id=t.pipeline_id WHERE "
-            "t.pipeline_id<>? AND (','||t.keys||',') LIKE ?", (p["id"], f"%,{k},%"))})
-        out.append({"key": k, "kind": "set", "what": f"the credential set that trigger rule(s) {', '.join(rules)} give "
-                    f"their tasks" + (f"; {held} task(s) hold it now" if held else ""), "others": others})
+            "t.pipeline_id<>? AND (','||t.keys||',') LIKE ?", (p["id"], f"%,{k},%"))}
+                        | {q["name"] for q in conn.execute(
+                            "SELECT DISTINCT pl.name FROM pipeline_keys x JOIN pipelines pl ON pl.id=x.pipeline_id "
+                            "WHERE x.pipeline_id<>? AND x.set_name=? AND x.revoked_at IS NULL", (p["id"], k))})
+        what = ([f"the credential set that trigger rule(s) {', '.join(rules)} give their tasks"] if rules else []) + (
+            [f"a key that stage(s) {', '.join(bound[k]) or '(none live)'} may read"] if k in bound else [])
+        out.append({"key": k, "kind": "set", "what": "; ".join(what) + (f"; {held} task(s) hold it now" if held else ""),
+                    "others": others})
     return out
 
 
@@ -341,6 +349,10 @@ def revoke(conn, pipeline, key, reason, actor=None):
             with _acting(actor):
                 vault.revoke(conn, grant_id=g["id"], actor=actor)
             done.append(f"the grant to task #{g['value']} ended")
+        from . import keys as stage_keys  # #6153: its stages and tiers no longer read it
+        for g in stage_keys.revoke(conn, set_name=key, actor=actor, reason=reason, vouched=True,
+                                   pipeline_id=p["id"])["revoked"]:
+            done.append(f"{g['covers']} no longer reads it ({g['grant']})")
     with core.tx(conn):
         audit.write(conn, p["id"], actor, "revoke", f"revoked {key} from pipeline {p['name']}: {'; '.join(done)}"
                     + (f"; other pipelines still use it: {', '.join(k['others'])}" if k["others"] else ""),

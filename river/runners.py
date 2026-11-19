@@ -27,8 +27,10 @@ What a run is, step by step (serve_pass, each pass of maxpm serve):
 How it reaches the queue: only over this SSH connection, which this computer opens (Tailscale SSH or a key, policy
 p159). Nothing listens on the tailnet for it, and the runner needs no address of this computer. A CI runner of a forge
 is outside the tailnet: that is #6152. The model key of the CLI is the runner's own (a key in its environment, or the
-CLI's own sign-in there); keys granted per stage come with #6153, and the list of what an agent may do with no prompt
-per pipeline with #6154 (until then: ALLOW, or the runner's allow).
+CLI's own sign-in there), or a set granted to the runner (#6153: maxpm secret grant <set> --runner <name>; its secret
+carries the variable the CLI reads, maxpm secret level <name> --var ANTHROPIC_API_KEY). The run also gets the sets
+that its rule granted to its task (pipeline/keys.run_env), in the script on stdin; the transcript masks them. The list
+of what an agent may do with no prompt per pipeline comes with #6154 (until then: ALLOW, or the runner's allow).
 
 Standard library only."""
 
@@ -57,8 +59,10 @@ ALLOW = "Bash(maxpm:*) Bash(git:*) Read Edit Write Glob Grep"
 # codex-cli 0.159.1). key: what the CLI needs on the runner to call its model.
 CLIS = {
     "claude": {"label": "Claude Code", "type": "claude-code",
-               "key": "ANTHROPIC_API_KEY in the runner's environment, or a token of claude setup-token there"},
-    "codex": {"label": "Codex", "type": "codex", "key": "codex login on the runner, or CODEX_API_KEY there"},
+               "key": "a secret with --var ANTHROPIC_API_KEY in a set granted to the runner (#6153), else "
+                      "ANTHROPIC_API_KEY in the runner's environment"},
+    "codex": {"label": "Codex", "type": "codex", "key": "a secret with --var CODEX_API_KEY in a set granted to the "
+                                                        "runner, else codex login or CODEX_API_KEY there"},
 }
 LOG_KEEP = 400      # transcript lines that maxpm runner log and the page show at most
 SPAWN = None        # tests: fn(argv, script, transcript_path) -> an object with pid, poll() and terminate()
@@ -304,6 +308,9 @@ def listing(conn, runs=8):
                             (r["name"],)).fetchone()[0]
         d["last_seen"] = max(x for x in (last, r["checked_at"]) if x) if (last or r["checked_at"]) else None
         d.pop("key_hash", None)
+        from .pipeline import keys  # #6153: the sets every run here gets (the model key), by name
+        d["keys"] = [{"set": k["set"], "grant": k["grant"], "secrets": keys._members(conn, k["set"])}
+                     for k in keys.grants(conn, runner=r["name"])]
         out.append(d)
     this = {"name": THIS, "rules": [{"pipeline": x["name"], "rule": f"t{x['id']}", "on": bool(x["enabled"])}
                                     for x in rules if x["runner"] == THIS]}
@@ -402,8 +409,9 @@ def _cli_line(r, run, model):
             + f"--allowedTools {allow}")
 
 
-def script_for(r, run, origin, project, port, key, token, model=None):
-    """The shell script that a run sends on stdin (keys stay out of every command line)."""
+def script_for(r, run, origin, project, port, key, token, model=None, keys_env=None):
+    """The shell script that a run sends on stdin (keys stay out of every command line). keys_env: the variables of
+    the runner's and the task's credential sets (#6153, pipeline/keys.run_env)."""
     folder = r["folder"] or FOLDER
     base = ('"$HOME"/' + shlex.quote(folder[2:]) if folder.startswith("~/") else shlex.quote(folder)) \
         + "/" + shlex.quote(project)
@@ -411,7 +419,8 @@ def script_for(r, run, origin, project, port, key, token, model=None):
              f'|| {{ echo "maxpm: the version {run["rev"]} is not on origin: push it, then run the task again"; exit 3; }}; '
              f'start={shlex.quote(run["rev"])}' if run["rev"] else
              'git -C "$base" fetch -q origin HEAD && start=$(git -C "$base" rev-parse FETCH_HEAD)')
-    env = {"MAXPM_RUNNER_PORT": str(port), "MAXPM_RUNNER_KEY": key, core.TOKEN_ENV: token, "MAXPM_AGENT": run["agent"],
+    env = {**(keys_env or {}),
+           "MAXPM_RUNNER_PORT": str(port), "MAXPM_RUNNER_KEY": key, core.TOKEN_ENV: token, "MAXPM_AGENT": run["agent"],
            "MAXPM_FOCUS": f"item:{run['item']}", "MAXPM_RUNNER": r["name"],
            "MAXPM_AGENT_TYPE": CLIS[run["cli"] or r["cli"]]["type"]}
     prompt = prompt_for(run["id"], run["item"], r["name"])
@@ -457,27 +466,74 @@ def _start(conn, run):
         # checks the chain only on its own host), and request_for checks the run's key instead.
         conn.execute("UPDATE session_tokens SET host=? WHERE hash=?", (f"runner:{r['name']}", core._token_hash(token)))
     model = row["model"] if (run["cli"] or r["cli"]) == "claude" else None
-    script = script_for(r, dict(run), origin, row["project"], rport, key, token, model)
+    # #6153: the runner's keys (the model key) and the keys its rule granted to the task, never a person's sign-in
+    from .pipeline import keys
+    keys_env, forms, given, left = keys.run_env(conn, run, run["cli"] or r["cli"])
+    script = script_for(r, dict(run), origin, row["project"], rport, key, token, model, keys_env)
     path = Path(core.river_dir()) / "runners" / f"run{run['id']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=30", "-R", f"127.0.0.1:{rport}:127.0.0.1:{port}", r["ssh"], "sh -s"]
     try:
-        proc = SPAWN(argv, script, str(path)) if SPAWN else _spawn(argv, script, path)
+        proc = SPAWN(argv, script, str(path)) if SPAWN else _spawn(argv, script, path, forms)
     except OSError as e:
         return _end(conn, run, "failed", None, f"ssh did not start: {e}")
     PROCS[run["id"]] = proc
+    said = ("; keys " + ", ".join(f"{g['secret']} as ${g['var']}" for g in given) if given else "; no keys") + (
+        "; left out: " + "; ".join(left) if left else "")
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET state='running', started_at=?, pid=?, port=?, key_hash=?, transcript=? "
                      "WHERE id=?", (_now(), proc.pid, rport, _hash(key), str(path), run["id"]))
-        core._event(conn, run["item"], "maxpm", f"run #{run['id']} started on runner {r['name']} ({run['agent']})")
+        core._event(conn, run["item"], "maxpm", f"run #{run['id']} started on runner {r['name']} ({run['agent']})"
+                    + said)
     return {"started": run["id"]}
 
 
-def _spawn(argv, script, path):
-    with open(path, "ab") as out:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+# #6153: the process between ssh and the transcript when a run has keys. It reads the forms of the key values from a
+# file of mode 0600 and deletes it at once, starts ssh (its stdin is this process's: the script), and writes each line
+# of ssh's output with the values masked. It is a process of its own, not a thread of maxpm serve, so the run lives
+# through a restart of serve as before (serve finds it again by its pid). It exits with ssh's exit code; a SIGTERM
+# (stop) ends ssh.
+MASK_CODE = r"""
+import base64, json, os, signal, subprocess, sys
+forms_file, log, argv = sys.argv[1], sys.argv[2], sys.argv[4:]
+with open(forms_file) as f:
+    forms = [base64.b64decode(x) for x in json.load(f)]
+os.unlink(forms_file)
+p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+signal.signal(signal.SIGTERM, lambda *a: p.terminate())
+with open(log, "ab") as out:
+    for line in p.stdout:
+        for x in forms:
+            line = line.replace(x, b"***")
+        out.write(line)
+        out.flush()
+sys.exit(p.wait())
+"""
+
+
+def _spawn(argv, script, path, forms=None):
+    """Start ssh with the script on stdin; its output goes to the transcript file. With forms (#6153: the forms of
+    the run's key values), MASK_CODE stands between them, so no key value is kept in the file."""
+    if forms:
+        import base64
+        import sys
+        ff = Path(str(path) + ".forms")
+        fd = os.open(ff, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump([base64.b64encode(x).decode() for x in forms], f)
+        argv = [sys.executable, "-c", MASK_CODE, str(ff), str(path), "--", *argv]
+        try:
+            with open(path, "ab") as out:  # what the masking process itself says, if it fails
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=out,
+                                        start_new_session=True)
+        except OSError:
+            ff.unlink(missing_ok=True)
+            raise
+    else:
+        with open(path, "ab") as out:
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
     try:
         proc.stdin.write(script.encode())
         proc.stdin.close()

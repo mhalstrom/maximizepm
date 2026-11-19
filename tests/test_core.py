@@ -1807,7 +1807,8 @@ class Plan(Base):
                      "- **Start**:", "maxpm pipeline run-stage <name> <stage>",  # #6138
                      "### Install, versions and a person's yes", "maxpm plugin trust <name>",  # #6166
                      "- **Branches and joins**:", "--every-branch",  # #6142
-                     "## Versions of the definition", "maxpm pipeline versions <name> --back 7"):  # #6143
+                     "## Versions of the definition", "maxpm pipeline versions <name> --back 7",  # #6143
+                     "## Keys for stages and runners", "--stage shop/deploy", "--runner ci-1"):  # #6153
             self.assertIn(part, text)
         for skill in ("maxpm", "maxpm-manager"):
             self.assertIn("maxpm guide\npipelines", (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")

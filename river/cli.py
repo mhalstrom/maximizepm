@@ -1473,14 +1473,19 @@ def build_parser(only=None):
         g.add_argument("--kind", help="work, operational, review, fixes, deploy or monitor")
         g.add_argument("--item", help="one task")
         g.add_argument("--agent", help="one session")
-    x = ses.add_parser("grant", help="grant a set to a project, a goal, a kind of task, one task or one agent "
-                       "(a person only)")
+        # #6153: keys for agents with no person (river/pipeline/keys.py)
+        g.add_argument("--stage", help="<pipeline>/<stage>: that stage's command and its tasks' agents may read it")
+        g.add_argument("--tier", help="<pipeline>/<tier>: every stage of that tier (prod) may read it")
+        g.add_argument("--runner", help="every agent run on that runner gets it (the model key)")
+    x = ses.add_parser("grant", help="grant a set to a project, a goal, a kind of task, one task or one agent, or to "
+                       "a pipeline's stage or tier or a runner (a person only)")
     x.add_argument("name", help="the set")
     scope_args(x)
     x.add_argument("--until", help="when it ends: 7d, 2026-12-01, 'fri 18:00' (default: until a revoke)")
     x.add_argument("--note", help="why")
-    x = ses.add_parser("revoke", help="end a grant (g12), or a set's grants to one scope, or all its grants")
-    x.add_argument("name", help="a grant id (g12) or a set")
+    x = ses.add_parser("revoke", help="end a grant (g12, or a key k3), or a set's grants to one scope, or all its "
+                       "grants")
+    x.add_argument("name", help="a grant id (g12, k3) or a set")
     scope_args(x)
     x = ses.add_parser("grants", help="the grants that give a set now")
     x.add_argument("name", nargs="?", help="only this set's")
@@ -2074,6 +2079,12 @@ def build_parser(only=None):
     x.add_argument("--runs-on", dest="runner", help="where the agent runs (this computer)")
     x.add_argument("--keys", help="credential sets its task gets, comma-separated ('' for none)")
     x.add_argument("--reason", help="off: why")
+    x = pls.add_parser("keys", help="the keys each stage may read (credential sets granted to it or its tier), the "
+                       "names that the deployment system keeps, and the keys of its rules and runners; --kept-in "
+                       "names a stage's outside keys")
+    x.add_argument("name"); x.add_argument("stage", nargs="?", help="with --kept-in: the stage")
+    x.add_argument("--kept-in", dest="kept_in", help="where the system keeps them: 'Pulumi ESC environment org/p/prod'")
+    x.add_argument("--names", help="their names, comma-separated ('' forgets that place); never a value")
     x = pls.add_parser("holding", help="the first stage: the commits that wait for the next release, each with its "
                        "tasks, the session that wrote it, its changes and its review")
     x.add_argument("name")
@@ -6515,15 +6526,17 @@ def _secret_cmd(conn, a, actor):
             args.update(add=a.add, remove=a.remove, note=a.note, delete=a.delete,
                         manager_may_grant=None if a.manager_may_grant is None else a.manager_may_grant == "on")
         elif cmd in ("grant", "revoke"):
-            scope = next((s for s in vault.GRANT_SCOPES if getattr(a, s, None)), None)
+            scope = next((s for s in vault.GRANT_SCOPES + vault.KEY_SCOPES if getattr(a, s, None)), None)
             args.update(scope=scope, value=getattr(a, scope) if scope else None)
             if cmd == "grant":
                 if not scope:
-                    raise RiverError("name what the set goes to: --project, --goal, --kind, --item or --agent")
+                    raise RiverError("name what the set goes to: --project, --goal, --kind, --item, --agent, "
+                                     "--stage <pipeline>/<stage>, --tier <pipeline>/<tier> or --runner")
                 args.update(until=a.until, note=a.note)
-            elif re.match(r"^[gG]\d+$", a.name):
+            elif re.match(r"^[gGkK]\d+$", a.name):
                 if scope:
-                    raise RiverError("a grant id names one grant: leave out --project, --goal, --kind, --item, --agent")
+                    raise RiverError("a grant id names one grant: leave out --project, --goal, --kind, --item, "
+                                     "--agent, --stage, --tier, --runner")
                 args.update(grant=a.name, name=None)
         elif cmd == "grants":
             args.update(ended=a.ended, for_agent=a.for_agent)
@@ -6656,6 +6669,15 @@ def _request_line(r):
             + (f" ({r['reason']})" if r.get("reason") else "") + (f"; checklist {marks}" if marks else "")
             + (f"; allowed {', '.join(r['chosen'])}" if r["chosen"] else "")
             + (f"; by {r['decided_by'] or 'a person'}" if r["state"] in ("granted", "refused") else ""))
+
+
+def _key_word(k):
+    """A key as a rule shows it (#6153): the set, the stages that may read it, or the runner that gives it."""
+    if k.get("runner"):
+        return f"{k['set']} (runner {k['runner']})"
+    if k.get("stages") is not None:
+        return f"{k['set']} ({', '.join(k['stages']) or 'no live stage'} only)"
+    return k["set"]
 
 
 def _grant_line(g):
@@ -7841,6 +7863,14 @@ def _pipeline_cmd(conn, a, actor):
         if sub == "pass":
             return tr.let_pass(conn, a.name, a.stage, a.rev, a.reason, actor)
         return tr.freeze(conn, a.name, a.stage, a.start, a.end, a.reason, a.clear, actor)
+    if sub == "keys":  # #6153
+        from .pipeline import keys
+        if a.kept_in is not None or a.names is not None:
+            if not a.stage or a.kept_in is None or a.names is None:
+                raise RiverError(f"name the stage, the place and the names: maxpm pipeline keys {a.name} <stage> "
+                                 "--kept-in \"<where>\" --names a,b")
+            return keys.kept(conn, a.name, a.stage, a.kept_in, a.names, actor)
+        return keys.view(conn, a.name)
     if sub in ("triggers", "trigger"):  # #6150
         from .pipeline import triggers
         if sub == "triggers":
@@ -8103,12 +8133,33 @@ def render_pipeline(a, res):
         print(f"pipeline {res['pipeline']}: its runs come from plugin {res['forge']} {res['version']} "
               f"({res['level']}; actions: {', '.join(res['actions']) or 'none'}); maxpm serve polls it")
         return
+    if sub == "keys" and "kept_in" in res:
+        print(f"pipeline {res['pipeline']}, stage {res['stage']}: {res['kept_in']} keeps "
+              + (", ".join(res["names"]) if res["names"] else "nothing that MaximizePM shows"))
+        return
+    if sub == "keys":
+        print(f"pipeline {res['pipeline']}: the keys each stage may read (names only)")
+        for name, s in res["stages"].items():
+            sets = "; ".join(f"{x['set']} ({', '.join(x['secrets']) or 'empty'}; {x['grant']}, by its "
+                             f"{'tier ' + s['tier'] if x['by'] == 'tier' else 'stage'})" for x in s["sets"])
+            print(f"  {name}" + (f" [{s['tier']}]" if s["tier"] else "") + ": " + (sets or "no maxpm secret"))
+            for k in s["kept"]:
+                print(f"      {k['kept_in']} keeps {', '.join(k['names'])} ({'a person' if k['source'] == 'person' else 'plugin ' + k['source']} said so)")
+        for name, sets in res["runners"].items():
+            print(f"  runner {name}: every run gets {', '.join(sets) or 'no set'}")
+        for r in res["rules"]:
+            if r["keys"]:
+                print(f"  rule {r['rule']} (runs on {r['runner']}): " + ", ".join(_key_word(k) for k in r["keys"]))
+        print(f"Grant one: maxpm secret grant <set> --stage {res['pipeline']}/<stage> (or --tier "
+              f"{res['pipeline']}/<tier>, --runner <runner>)")
+        return
     if sub == "triggers":
         print(f"pipeline {res['pipeline']}: what starts an agent")
         for r in res["rules"]:
             print(f"  {r['name']}  {r['when']}" + ("" if r["enabled"] else f"  [off: {r['off_reason']}]"))
             print(f"      the agent: {r['does']}")
-            print(f"      runs on {r['runner']}" + (f"; keys {', '.join(r['keys'])}" if r["keys"] else "; no keys"))
+            kl = r.get("key_list") or [{"set": k, "stages": None} for k in r["keys"]]
+            print(f"      runs on {r['runner']}" + ("; keys " + ", ".join(_key_word(k) for k in kl) if kl else "; no keys"))
         if not res["rules"]:
             print(f"  no rules: nothing starts an agent. Add one: maxpm pipeline trigger {res['pipeline']} add --when "
                   "stage-failed")
@@ -8372,6 +8423,9 @@ def render_runner(a, res):
                   + f"; at most {r['max_minutes']}m and ${r['max_cost']:g} a run"
                   + f"; used by {', '.join(r['used_by']) or 'no pipeline'}"
                   + (f"; rules {', '.join(x['pipeline'] + ' ' + x['rule'] for x in r['rules'])}" if r["rules"] else ""))
+            print("  keys of every run: " + ("; ".join(f"{k['set']} ({', '.join(k['secrets']) or 'empty'})"
+                                                       for k in r.get("keys") or []) or
+                                             f"none (the model key: maxpm secret grant <set> --runner {r['name']})"))
             for x in r["runs"][:3]:
                 print("  " + _runner_line(x))
         rules = res["this"]["rules"]

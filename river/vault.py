@@ -600,6 +600,10 @@ def cookie_sites(conn):
 # ---- sets and grants (#5822)
 
 GRANT_SCOPES = ("project", "goal", "kind", "item", "agent")
+# #6153: the places of a pipeline that a set may go to, for agents with no person: a stage or a tier of a pipeline
+# ('<pipeline>/<stage>'), or a runner. They are not sessions, so their grants are rows of pipeline_keys
+# (river/pipeline/keys.py): grant, revoke and grants below pass them on, with ids k<n>.
+KEY_SCOPES = ("stage", "tier", "runner")
 # The kinds of task that a kind grant names: the task kinds of maxpm add, and the kinds that MaximizePM makes.
 GRANT_KINDS = ("work", "operational", "review", "fixes", "deploy", "monitor")
 
@@ -1015,6 +1019,11 @@ def grant(conn, set_name, scope, value, until=None, note=None, actor=None, check
     manager for a set marked 'the manager may grant' (#5828). checked_by: a pipeline's trigger rule grants the set
     to the task it adds (#6150); _may_grant checked the person or the manager who named the set on the rule then,
     and actor names the rule."""
+    if scope in KEY_SCOPES:  # #6153: a stage, a tier or a runner
+        if until:
+            raise RiverError(f"a key of a {scope} lasts until a revoke: leave out --until")
+        from .pipeline import keys
+        return keys.grant(conn, set_name, scope, value, note, actor)
     s = _set(conn, set_name)
     if checked_by is None:
         actor = _may_grant(conn, actor, s, "grant")["name"] or actor
@@ -1307,7 +1316,18 @@ def check(conn, agent, limit=30):
 
 def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=None):
     """End grants: one by its id (g12), or the set's grants to one scope, or all grants of the set. The next use is
-    refused. A person, or the manager for a set marked 'the manager may grant' (#5828)."""
+    refused. A person, or the manager for a set marked 'the manager may grant' (#5828). A key grant (k3) or a key
+    scope (--stage, --tier, --runner) ends a key of a pipeline place (#6153); all grants of a set end its keys too."""
+    from .pipeline import keys
+    if grant_id is not None and str(grant_id).lstrip("#")[:1] in ("k", "K"):
+        return keys.revoke(conn, grant_id, actor=actor)
+    if scope in KEY_SCOPES:
+        return keys.revoke(conn, None, set_name, scope, value, actor)
+    if grant_id is None and not scope:
+        _set(conn, set_name)
+        more = keys.revoke(conn, None, set_name, actor=actor)["revoked"]
+    else:
+        more = []
     if grant_id is not None:
         gid = str(grant_id).lstrip("gG#")
         if not gid.isdigit():
@@ -1333,7 +1353,7 @@ def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=Non
         for g in live:
             conn.execute("UPDATE secret_grants SET revoked_at=?, revoked_by=? WHERE id=?", (at, actor, g["id"]))
     return {"revoked": [_grant_info(conn, conn.execute("SELECT * FROM secret_grants WHERE id=?", (g["id"],)).fetchone())
-                        for g in live]}
+                        for g in live] + more}
 
 
 SUMMARY_EVERY = 86400  # seconds: the person's summary of the manager's grants comes once a day
@@ -1384,4 +1404,7 @@ def grants(conn, set_name=None, ended=False, for_agent=None):
         rows = [g for g in rows if _covers(g, scopes)]
     if not ended:
         rows = [g for g in rows if g["active"]]
+    if not for_agent:  # #6153: the keys of stages, tiers and runners (k<n>); they cover no session
+        from .pipeline import keys
+        rows += keys.grants(conn, set_name, ended)
     return {"grants": rows}

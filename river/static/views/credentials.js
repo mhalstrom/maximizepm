@@ -188,11 +188,12 @@ function setRow(s) {
     <div class="cred-grants">${grants.map(g => `<span class="cred-grant">${chip("c-ready", esc(g.covers || `${g.scope} ${g.value}`))}`
       + `${g.until ? `<span class="muted t-s"> until ${esc(g.until.slice(0, 10))}</span>` : ""}`
       // A data key is kebab-case: HTML lowers an attribute's name, so data-credRevoke would read as dataset.credrevoke.
-      + iconButton("✕", `Revoke ${g.grant}`, { data: { "cred-revoke": g.id } }) + `</span>`).join("")
+      // g.grant, not g.id: a key of a stage, a tier or a runner is k<n> (#6153), a grant of a session g<n>
+      + iconButton("✕", `Revoke ${g.grant}`, { data: { "cred-revoke": g.grant } }) + `</span>`).join("")
       || `<span class="muted t-s">No grant: no session can use it.</span>`}</div>
     <div class="cred-grantform" data-set="${esc(s.name)}">
       <select class="cred-scope" title="Grant to what">${scopes}</select>
-      <input class="cred-value" placeholder="project, goal, kind, #task or agent" list="credChoices-${esc(s.name)}">
+      <input class="cred-value" placeholder="project, goal, kind, #task, agent, pipeline/stage or runner" list="credChoices-${esc(s.name)}">
       <datalist id="credChoices-${esc(s.name)}">${choices(C.scopes ? C.scopes[0] : "project")}</datalist>
       <input class="cred-until" placeholder="until (optional: 7d, 2026-12-01)">
       ${button("Grant", { data: { "cred-grant": s.name } })}
@@ -206,7 +207,7 @@ function choices(scope) {
     : scope === "goal" ? (S.goals || []).filter(g => g.status === "open").map(g => g.name)
     : scope === "kind" ? (C.kinds || [])
     : scope === "agent" ? (S.agents || []).filter(a => a.kind !== "human").map(a => a.name)
-    : [];
+    : (C.places || {})[scope] || [];  // #6153: <pipeline>/<stage>, <pipeline>/<tier>, a runner
   return names.map(n => `<option value="${esc(n)}">`).join("");
 }
 
@@ -314,7 +315,7 @@ panel.addEventListener("click", async (e) => {
   }
   if (t.dataset.credRevoke) {
     if (!confirm("Revoke this grant? Sessions that it covers lose the set at their next use.")) return;
-    try { await act("secret", { action: "revoke", grant: +t.dataset.credRevoke }); toast("Revoked"); } catch (err) { /* shown */ }
+    try { await act("secret", { action: "revoke", grant: t.dataset.credRevoke }); toast("Revoked"); } catch (err) { /* shown */ }
     return renderCredentials(true);
   }
   if (t.dataset.credGrant) {

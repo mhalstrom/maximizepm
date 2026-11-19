@@ -464,6 +464,38 @@ CREATE TABLE IF NOT EXISTS plugin_trust (
   trusted_at   TEXT,
   UNIQUE (name, digest)
 );
+
+-- Keys for agents with no person (#6153, river/pipeline/keys.py): a credential set (its name in secret_sets) that a
+-- person grants to a stage or a tier of a pipeline, or to a runner (the model key). Only those stages read a stage
+-- key. Readers: the stage runner (a command's variables), runners.py (a run's variables), triggers (a stage key goes
+-- only to a task of its stages), the stage cards, maxpm pipeline keys, maxpm secret grants, the Emergency tab.
+CREATE TABLE IF NOT EXISTS pipeline_keys (
+  id            INTEGER PRIMARY KEY,
+  set_name      TEXT NOT NULL,
+  scope         TEXT NOT NULL,           -- stage, tier or runner
+  pipeline_id   INTEGER,                 -- the pipeline of a stage or tier; NULL for a runner
+  value         TEXT NOT NULL,           -- the stage's name, the tier, or the runner's name
+  note          TEXT,
+  granted_by    TEXT,
+  granted_at    TEXT NOT NULL,
+  revoked_by    TEXT,
+  revoked_at    TEXT,
+  revoke_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS pipeline_keys_place ON pipeline_keys(pipeline_id, scope, value);
+-- The names of the keys that the deployment system keeps for a stage itself (GitHub environment secrets, a Pulumi
+-- ESC environment), never a value: from a plugin's answer ("secrets") or a person (maxpm pipeline keys --kept-in).
+-- Readers: the stage cards and maxpm pipeline keys.
+CREATE TABLE IF NOT EXISTS pipeline_kept_keys (
+  pipeline_id  INTEGER NOT NULL,
+  stage        TEXT NOT NULL,
+  kept_in      TEXT NOT NULL,            -- where: 'GitHub environment production'
+  names        TEXT NOT NULL,            -- JSON list of the names
+  source       TEXT NOT NULL,            -- the plugin's name, or person
+  at           TEXT NOT NULL,
+  by           TEXT,
+  PRIMARY KEY (pipeline_id, stage, kept_in)
+);
 """
 
 # The rule each pipeline starts with (#6150): what MaximizePM did for every pipeline before rules (#6118). The

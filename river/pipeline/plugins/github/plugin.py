@@ -7,7 +7,8 @@ MaximizePM runs this program once for each call, with one JSON request on stdin;
 - poll: for each stage that names a workflow (maxpm pipeline stage ... --workflow tests.yml): the newest runs of that
   workflow become pipelinerun events, their jobs taskrun events, and a finished run's JUnit artifacts (named junit*,
   or the stage's --junit name) go back as reports, which MaximizePM reads. On GitHub, each environment's deployments
-  with a success status become service.deployed events.
+  with a success status become service.deployed events, and once an hour the names of the secrets of each deploy
+  stage's environment go back as "secrets" (names only; the stage card shows them as keys that GitHub keeps).
 - start, rerun, rollback: workflow_dispatch of the stage's workflow on the branch (setting ref), with the inputs
   maxpm_run (MaximizePM's run id) and maxpm_rev (the commit). The workflow names its run 'maxpm run <id>' (run-name)
   and checks out maxpm_rev; the next poll links the two runs by that name.
@@ -17,7 +18,8 @@ Not possible here, and why: a run that a push or a tag starts carries no Maximiz
 that waits at that stage (same commit). Gitea and Forgejo list no deployments, and some of their versions have no
 jobs, artifacts or cancel calls: the read goes on without them, and stop says to stop the run on its page.
 
-The token: a fine-grained token with Actions read and write, Deployments read and Contents read, saved as a maxpm
+The token: a fine-grained token with Actions read and write, Deployments read and Contents read (and Environments
+read for the secret names; without it the stage cards show none), saved as a maxpm
 secret and mapped to this plugin's secret 'token'. It comes in the request; this program keeps no copy.
 
 Only the standard library, so it runs with the Python that runs MaximizePM ({python} in plugin.json).
@@ -256,6 +258,32 @@ def deploy_events(api, envs, seen):
     return out
 
 
+SECRETS_EVERY = 3600  # seconds between two reads of the environments' secret names
+
+
+def secret_names(api, stages, state):
+    """The names of the secrets that each GitHub environment of a deploy stage keeps (never their values: the API
+    gives none), once an hour (the state's 'secrets_at'). MaximizePM shows them on the stage card as keys that GitHub
+    keeps. A token that may not list them (fine-grained: Environments read) gives nothing, and the read goes on."""
+    if api.forge != "github":
+        return None
+    at = state.get("secrets_at") or 0
+    if datetime.now(timezone.utc).timestamp() - at < SECRETS_EVERY:
+        return None
+    out = []
+    for stage in stages:
+        if not stage.get("env"):
+            continue
+        try:
+            got = api.call("GET", f"/repos/{api.repo}/environments/{stage['env']}/secrets?per_page=100")
+        except Failed:
+            continue
+        out.append({"stage": stage["name"], "kept_in": f"GitHub environment {stage['env']}",
+                    "names": [s["name"] for s in got.get("secrets") or [] if s.get("name")]})
+    state["secrets_at"] = int(datetime.now(timezone.utc).timestamp())
+    return out
+
+
 # ---------------------------------------------------------------- the calls
 
 def poll(req, api):
@@ -279,8 +307,13 @@ def poll(req, api):
                 reports += junit_reports(api, stage, run)
                 done.append(mark)
     events += deploy_events(api, (req.get("pipeline") or {}).get("envs") or [], deps)
-    return {"events": events, "reports": reports, "counts": {"runs": runs},
-            "state": {"done": done[-DONE_KEEP:], "deployments": sorted(deps)[-DONE_KEEP:]}}
+    out_state = {"done": done[-DONE_KEEP:], "deployments": sorted(deps)[-DONE_KEEP:],
+                 "secrets_at": state.get("secrets_at") or 0}
+    names = secret_names(api, (req.get("pipeline") or {}).get("stages") or [], out_state)
+    answer = {"events": events, "reports": reports, "counts": {"runs": runs}, "state": out_state}
+    if names is not None:
+        answer["secrets"] = names
+    return answer
 
 
 def act(req, api):

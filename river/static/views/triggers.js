@@ -31,8 +31,14 @@ export async function drawTriggers(name, host, force) {
   host.querySelector(".tg-view").innerHTML = viewHtml(d);
 }
 
+// A key as the rule gives it (#6153): a stage key goes only to a task of the stages that may read it; a runner's set
+// (the model key) goes to every run there.
+const keyWord = k => k.runner ? `${k.set} (runner ${k.runner})`
+  : k.stages ? `${k.set} (${k.stages.join(", ") || "no live stage"} only)` : k.set;
+
 function ruleHtml(r) {
-  const keys = r.keys.length ? `🔒 keys ${esc(r.keys.join(", "))}` : "no keys";
+  const list = r.key_list || r.keys.map(set => ({ set }));
+  const keys = list.length ? `🔒 keys ${esc(list.map(keyWord).join(", "))}` : "no keys";
   return `<div class="dp-rule${r.enabled ? "" : " tg-off"}">
     <div class="tg-head"><b>${esc(r.when)}</b><span class="muted t-s">${esc(r.name)}</span>${r.enabled ? "" : chip("c-waiting", "off")}</div>
     <div class="t-m"><b>The agent</b> ${esc(r.does)}</div>

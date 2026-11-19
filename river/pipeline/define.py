@@ -331,7 +331,11 @@ def export(conn, name):
                       "url": p["forge_url"], **({"plugin": json.loads(p["plugin_settings"])}
                                                 if p["plugin_settings"] else {})} if p["forge"] else None,
             "environments": envs, "stages": stages, "triggers": triggers.export(conn, p["id"]),
-            "runners": json.loads(p["runners"] or "[]")}  # the runners its rules may use (#6151)
+            "runners": json.loads(p["runners"] or "[]"),  # the runners its rules may use (#6151)
+            # #6153: the credential sets its stages and tiers may read (names only)
+            "keys": [{"set": k["set_name"], k["scope"]: k["value"]} for k in conn.execute(
+                "SELECT set_name, scope, value FROM pipeline_keys WHERE pipeline_id=? AND revoked_at IS NULL "
+                "ORDER BY set_name, scope, value", (p["id"],))]}
 
 
 def history(conn, name, limit=50):

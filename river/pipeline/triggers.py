@@ -113,6 +113,8 @@ def _check_fields(conn, p, event, stage, tier, runner, keys, actor):
     from .. import vault
     for k in keys:
         vault._may_grant(conn, actor, vault._set(conn, k), "grant")  # the rule grants the set to each task later
+    from . import keys as stage_keys
+    stage_keys.rule_check(conn, p, keys, stage, tier, runner)  # #6153: a stage key only where its stages are
 
 
 def _keys(text):
@@ -172,6 +174,8 @@ def rule_edit(conn, pipeline, ref, event=None, does=None, stage=None, tier=None,
                               "--tier, --does, --runs-on or --keys")
     added = [k for k in _keys(new["keys"] or "") if k not in _keys(r["keys"] or "")]
     _check_fields(conn, p, new["event"], new["stage"], new["tier"], new["runner"], added, actor)
+    from . import keys as stage_keys  # #6153: a new stage or runner must fit the keys the rule had too
+    stage_keys.rule_check(conn, p, _keys(new["keys"] or ""), new["stage"], new["tier"], new["runner"])
     sets = dict(changed, keys_by=(actor or "a person") if new["keys"] else None) if "keys" in changed else changed
     with core.tx(conn):
         conn.execute("UPDATE pipeline_triggers SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE id=?",
@@ -231,9 +235,12 @@ def rules(conn, pipeline, fired=20):
     ticks = runners.ticked(p)
     every = [{"name": r["name"], "ssh": r["ssh"], "state": r["state"], "cli": r["cli"], "ticked": r["name"] in ticks}
              for r in conn.execute("SELECT name, ssh, state, cli FROM runners ORDER BY name")]
+    from . import keys as stage_keys
     return {"pipeline": p["name"], "project": p["project"],
-            "rules": [_info(r) for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id",
-                                                      (p["id"],))],
+            # key_list (#6153): each set with the stages that may read it (None: any), then the runner's sets
+            "rules": [dict(_info(r), key_list=stage_keys.rule_keys(conn, p["id"], _keys(r["keys"] or ""), r["runner"]))
+                      for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id",
+                                            (p["id"],))],
             "fired": [dict(f, rule=f"t{f['trigger_id']}") for f in conn.execute(
                 "SELECT * FROM pipeline_trigger_fires WHERE pipeline_id=? ORDER BY id DESC LIMIT ?", (p["id"], fired))],
             "events": EVENTS, "runners": runners.choices(conn, p), "all_runners": every,
@@ -381,7 +388,7 @@ def _fire(conn, p, r, ev):
     except core.RiverError as e:
         item, result = None, f"did nothing: {e}"
     if item and r["keys"]:
-        result += _grant(conn, r, item)
+        result += _grant(conn, r, item, ev["stage"])
     if item and r["runner"] and r["runner"] != THIS:  # #6151: the task goes to a runner, not to a session here
         from .. import runners
         try:
@@ -436,13 +443,19 @@ def _context(p, r, ev):
             f"What to do: {r['does']}\n\nThe run: {run}. The pipeline: maxpm pipeline show {p['name']}.")
 
 
-def _grant(conn, r, item):
+def _grant(conn, r, item, stage=None):
     """The rule's keys for its task: each set granted to the task alone (it ends when the task closes). The person
-    or the manager who named a set on the rule was checked then (vault._may_grant)."""
+    or the manager who named a set on the rule was checked then (vault._may_grant). A stage key of other stages of
+    the pipeline only is held back (#6153): an agent on a stage gets only that stage's keys."""
     from .. import vault
-    got, missing = [], []
+    from . import keys as stage_keys
+    got, missing, held = [], [], []
     for k in (r["keys"] or "").split(","):
         if not k:
+            continue
+        why = stage_keys.held_back(conn, r["pipeline_id"], k, stage)
+        if why:
+            held.append(why)
             continue
         try:
             vault.grant(conn, k, "item", str(item), note=f"trigger rule t{r['id']}", actor=f"trigger t{r['id']}",
@@ -450,4 +463,5 @@ def _grant(conn, r, item):
             got.append(k)
         except core.RiverError:
             missing.append(k)
-    return ("; keys " + ", ".join(got) if got else "") + ("; no set " + ", ".join(missing) if missing else "")
+    return (("; keys " + ", ".join(got) if got else "") + ("; no set " + ", ".join(missing) if missing else "")
+            + ("; held back: " + "; ".join(held) if held else ""))
