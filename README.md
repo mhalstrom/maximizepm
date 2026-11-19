@@ -513,6 +513,8 @@ An agent that cannot run shell commands can use MaximizePM through MCP:
 words). Each tool returns the same text as the command, and the server keeps
 the agent name that `go`, `plan`, or `manage` gives.
 For Claude Code: `claude mcp add maxpm -- maxpm mcp`.
+To plan from a chat app without the rest of the tools, use `maxpm mcp --plan`
+(see Plan from a chat app, below).
 
 ### Claude desktop app
 
@@ -557,6 +559,63 @@ MaximizePM; plain Chat mode reaches only remote servers, so it does not. In a
 chat, MaximizePM works as it does for the Claude desktop app (above). Codex CLI
 sessions see the MaximizePM server too, and in a project folder they work as
 usual. `--remove` takes MaximizePM out again.
+
+### Plan from a chat app
+
+You can plan with a chat app while the manager runs the work. The planner
+connection gives the chat app planning tools only: it reads and changes
+projects, goals, tasks and the order between them. It can't take a task,
+finish one, deploy, or start a session. What it adds shows up in the history
+as you, with the app's name after it (`mark@claude-ai`), and the manager
+starts agents for the new tasks as it does for any task.
+
+The tools: `list_projects`, `show_project`, `add_project`,
+`describe_project`, `list_goals`, `show_goal`, `add_goal`, `list_tasks`,
+`search_tasks`, `show_task`, `add_task`, `edit_task`, `link_tasks`,
+`unlink_tasks`, `backlog_task`, `activate_task`, `drop_task`, and
+`planning_guide`.
+
+An app on this computer runs the planner with `maxpm mcp --plan` (stdin and
+stdout), or reaches it at `http://127.0.0.1:<port>/mcp/plan` in `maxpm serve`
+(Streamable HTTP; like `/mcp`, it answers only on this computer).
+
+Claude desktop app: add this to `claude_desktop_config.json` under
+`mcpServers`, then quit and reopen the app:
+
+```json
+"maxpm-plan": {"command": "maxpm", "args": ["mcp", "--plan"]}
+```
+
+ChatGPT desktop app and the Codex CLI: add this to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.maxpm-plan]
+command = "maxpm"
+args = ["mcp", "--plan"]
+```
+
+Gemini CLI: add this to `~/.gemini/settings.json` under `mcpServers`:
+
+```json
+"maxpm-plan": {"command": "maxpm", "args": ["mcp", "--plan"]}
+```
+
+Claude on the web, ChatGPT on the web and the Gemini web app connect from
+their own servers, so they need a public address. The MaximizePM relay gives
+you one (it needs a relay plan or its trial): add a custom connector with the
+address `https://<your relay address>/mcp/plan`. Your relay account page shows
+it under Chat apps. The first time, the chat app opens the relay: sign in and
+press Allow. The account page lists the apps you allowed, each with
+Disconnect. That sign-in opens only the planner, never the rest of MaximizePM.
+
+- Claude: Settings, Connectors, Add custom connector. Every plan has custom
+  connectors; the Free plan allows one.
+- ChatGPT: turn on developer mode, then add a custom MCP server.
+- Gemini: Settings, Connected apps, custom app (for now, personal Google
+  accounts in the US).
+
+The planner refuses to run inside a session that MaximizePM started: a session
+changes tasks with its own `maxpm` commands.
 
 ## Tests
 
