@@ -540,6 +540,23 @@ class Runner(Base):
         self.runner.serve_pass(self.c)
         self.assertEqual(self.runs()["build"]["errors"], "maxpm serve stopped while it ran")
 
+    def test_stop_a_running_command_and_a_wait_at_the_gate(self):
+        self.runner.SYNC["on"] = False
+        define.stage_set(self.c, "app", "build", run="sleep 30")
+        self.runner.start(self.c, "app", rev="stop001")
+        self.runner.serve_pass(self.c)
+        rid = self.runs()["build"]["id"]
+        timing.wait_for(lambda: rid in self.runner.PROCS, what="the command started")
+        self.assertEqual(self.runner.stop(self.c, rid, actor="mark")["stopped"], "its command")
+        timing.wait_for(lambda: self.runs()["build"]["state"] == "failed", what="the run ended")
+        self.assertNotIn(rid, self.runner.PROCS)
+        define.stage_set(self.c, "app", "build", gate="manager")
+        self.runner.start(self.c, "app", rev="stop002")
+        rid = max(r["id"] for r in self.c.execute("SELECT id FROM stage_runs"))
+        self.assertEqual(self.runner.stop(self.c, rid, actor="mark")["stopped"], "the wait at its gate")
+        with self.assertRaises(RiverError):
+            self.runner.stop(self.c, rid, actor="mark")  # cancelled already
+
     def test_restart_waits_for_a_running_stage(self):
         self.runner.RUNNING[99] = True
         self.addCleanup(self.runner.RUNNING.pop, 99, None)
@@ -701,6 +718,201 @@ class Prompt(Base):
         text = self.prompt.failure_prompt(self.c, run)["text"]
         self.assertIn(f"git log {revs[0]}..{revs[2]}, 2 commit(s):", text)
         self.assertIn("change 2", text)
+
+
+class FakeGitHub:
+    """The GitHub REST API as the adapter calls it: answers by (method, path) and keeps each call."""
+
+    def __init__(self):
+        self.calls, self.routes = [], {}
+
+    def __call__(self, method, url, headers, body):
+        path = url.replace("https://api.github.com", "")
+        self.calls.append((method, path, json.loads(body) if body else None))
+        for (m, prefix), answer in sorted(self.routes.items(), key=lambda kv: -len(kv[0][1])):  # the longest path first
+            if m == method and path.startswith(prefix):
+                status, out = answer(path, body) if callable(answer) else answer
+                return status, out if isinstance(out, bytes) else json.dumps(out).encode()
+        return 404, b'{"message": "Not Found"}'
+
+
+def gh_run(n, sha, status="completed", conclusion="success", title="Fix it", at="2026-11-18T10:00:00Z"):
+    return {"id": n, "head_sha": sha, "head_branch": "main", "status": status, "conclusion": conclusion,
+            "display_title": title, "html_url": f"https://github.com/o/r/actions/runs/{n}", "run_attempt": 1,
+            "created_at": at, "run_started_at": at, "updated_at": at}
+
+
+def junit_zip(xml):
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("report.xml", xml)
+    return buf.getvalue()
+
+
+class GitHub(Base):
+    """The GitHub adapter (#6119): runs, jobs, JUnit artifacts and deployments read into events; a gated workflow
+    starts after its gate; cancel."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import github, runner
+        self.gh, self.runner = github, runner
+        self.api = FakeGitHub()
+        old = (github.FETCH, github._token)
+        github.FETCH, github._token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(github, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        core.project_add(self.c, "maximizepm")
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "mpm", project="maximizepm")
+        define.env_set(self.c, "mpm", "beta")
+        define.stage_set(self.c, "mpm", "tests", "test", workflow="tests.yml")
+        define.stage_set(self.c, "mpm", "beta", "deploy", env="beta", workflow="desktop-release.yml", gate="person mark")
+        define.forge_set(self.c, "mpm", "github", repo="o/r", secret="gh-token")
+        self.p = lambda: self.c.execute("SELECT * FROM pipelines WHERE name='mpm'").fetchone()
+        self.runs = {"tests.yml": [], "desktop-release.yml": []}
+        wf = lambda name: lambda path, body: (200, {"workflow_runs": self.runs[name]})
+        self.api.routes[("GET", "/repos/o/r/actions/workflows/tests.yml/runs")] = wf("tests.yml")
+        self.api.routes[("GET", "/repos/o/r/actions/workflows/desktop-release.yml/runs")] = wf("desktop-release.yml")
+        self.api.routes[("GET", "/repos/o/r/deployments")] = (200, [])
+
+    def jobs(self, n, *jobs):
+        self.api.routes[("GET", f"/repos/o/r/actions/runs/{n}/jobs")] = (200, {"jobs": [
+            {"id": n * 10 + i, "name": name, "status": "completed", "conclusion": c, "started_at": "2026-11-18T10:01:00Z",
+             "completed_at": "2026-11-18T10:04:00Z", "html_url": "u"} for i, (name, c) in enumerate(jobs)]})
+
+    def stage_runs(self):
+        return {r["stage"]: r for r in self.c.execute(
+            "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+    def test_a_push_run_its_jobs_and_tests_then_the_gate_then_github_runs_the_next_stage(self):
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101, ("test (3.10)", "success"), ("standalone", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": [
+            {"name": "junit-3.13", "expired": False, "archive_download_url": "https://api.github.com/download/1"}]})
+        self.api.routes[("GET", "/download/1")] = (200, junit_zip(
+            '<testsuite name="t"><testcase classname="c" name="a"/><testcase classname="c" name="b"/></testsuite>'))
+        out = self.gh.poll(self.c, self.p())
+        self.assertEqual((out["runs"], out["tests"]), (1, 1))
+        runs = self.stage_runs()
+        t = store.run_show(self.c, runs["tests"]["id"])
+        self.assertEqual((t["state"], t["version"], t["url"]), ("passed", "a" * 40, "https://github.com/o/r/actions/runs/101"))
+        self.assertEqual([s["name"] for s in t["step_list"]], ["test (3.10)", "standalone"])
+        self.assertEqual(t["tests"], {"passed": 2})
+        self.assertEqual(runs["beta"]["state"], "queued")  # handed on: it waits at its gate
+        n = len(self.c.execute("SELECT * FROM pipeline_events").fetchall())
+        self.gh.poll(self.c, self.p())  # read again: nothing new
+        self.assertEqual(len(self.c.execute("SELECT * FROM pipeline_events").fetchall()), n)
+        # The person's yes opens the gate; MaximizePM starts the workflow with the run's id and commit.
+        self.runner.serve_pass(self.c)
+        card = self.stage_runs()["beta"]["gate_item"]
+        core.done(self.c, card, actor="mark")
+        self.c.execute("UPDATE pipelines SET polled_at=? WHERE name='mpm'", (core.iso(core.now()),))  # no read now
+        self.api.routes[("POST", "/repos/o/r/actions/workflows/desktop-release.yml/dispatches")] = (204, b"")
+        self.runner.serve_pass(self.c)
+        beta = self.stage_runs()["beta"]
+        sent = [c for c in self.api.calls if c[0] == "POST"][-1]
+        self.assertEqual(sent[2], {"ref": "main", "inputs": {"maxpm_run": str(beta["id"]), "maxpm_rev": "a" * 40}})
+        self.assertEqual(beta["runner"], "forge:github")
+        self.runner.serve_pass(self.c)  # it is started: not again
+        self.assertEqual(len([c for c in self.api.calls if c[0] == "POST"]), 1)
+        # Its run on GitHub names our run: the two are one; when it passes, beta runs that version.
+        self.runs["desktop-release.yml"] = [gh_run(202, "a" * 40, title=f"maxpm run {beta['id']}")]
+        self.jobs(202, ("mac", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/202/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        beta = self.stage_runs()["beta"]
+        self.assertEqual((beta["key"], beta["state"], beta["approved_by"]), ("gh-run-202", "passed", "mark"))
+        self.assertEqual(store.show(self.c, "mpm")["envs"][0]["rev"], "a" * 40)
+
+    def test_a_forge_gate_waits_for_the_tag_run_and_takes_it(self):
+        define.stage_set(self.c, "mpm", "beta", gate="forge")
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101)
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
+        out = self.runner.serve_pass(self.c)
+        beta = self.stage_runs()["beta"]
+        self.assertIn("the forge starts it by itself", out["waiting"][beta["id"]])
+        self.assertFalse([c for c in self.api.calls if c[0] == "POST"])  # MaximizePM starts nothing
+        self.runs["desktop-release.yml"] = [gh_run(404, "a" * 40, title="v0.9.0")]  # the manager's tag
+        self.jobs(404)
+        self.api.routes[("GET", "/repos/o/r/actions/runs/404/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        runs = self.c.execute("SELECT id, key, state FROM stage_runs WHERE stage_id=(SELECT id FROM pipeline_stages "
+                              "WHERE name='beta')").fetchall()
+        self.assertEqual([(r["id"], r["key"], r["state"]) for r in runs], [(beta["id"], "gh-run-404", "passed")])
+
+    def test_a_newer_version_replaces_an_older_one_at_the_gate(self):
+        self.runs["tests.yml"] = [gh_run(102, "b" * 40, at="2026-11-18T11:00:00Z"), gh_run(101, "a" * 40)]
+        for n in (101, 102):
+            self.jobs(n)
+            self.api.routes[("GET", f"/repos/o/r/actions/runs/{n}/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        beta = self.c.execute("SELECT r.state, v.rev, r.errors FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+                              "JOIN pipeline_versions v ON v.id=r.version_id WHERE s.name='beta' ORDER BY r.id").fetchall()
+        self.assertEqual([(b["state"], b["rev"][0]) for b in beta], [("cancelled", "a"), ("queued", "b")])
+        self.assertIn("a newer version came", beta[0]["errors"])
+
+    def test_a_refused_start_fails_the_run_and_a_read_error_stays_on_the_pipeline(self):
+        define.stage_set(self.c, "mpm", "tests", gate="auto")
+        self.api.routes[("POST", "/repos/o/r/actions/workflows/tests.yml/dispatches")] = (
+            422, {"message": "Unexpected inputs provided: [\"maxpm_run\"]"})
+        self.runner.start(self.c, "mpm", rev="c" * 40)
+        self.api.routes[("GET", "/repos/o/r/actions/workflows/tests.yml/runs")] = (500, {"message": "boom"})
+        self.runner.serve_pass(self.c)
+        t = self.stage_runs()["tests"]
+        self.assertEqual(t["state"], "failed")
+        self.assertIn("Unexpected inputs provided", t["errors"])
+        self.assertIn("GitHub answered 500", self.p()["poll_error"])
+
+    def test_deployments_and_cancel(self):
+        self.api.routes[("GET", "/repos/o/r/deployments")] = (200, [{"id": 7, "sha": "d" * 40}])
+        self.api.routes[("GET", "/repos/o/r/deployments/7/statuses")] = (200, [{"id": 70, "state": "success",
+                                                                                 "created_at": "2026-11-18T12:00:00Z"}])
+        self.gh.poll(self.c, self.p())
+        self.assertEqual(store.show(self.c, "mpm")["envs"][0]["rev"], "d" * 40)
+        self.runs["tests.yml"] = [gh_run(303, "e" * 40, status="in_progress", conclusion=None)]
+        self.jobs(303, ("test", None))
+        self.c.execute("UPDATE pipelines SET polled_at=NULL")
+        self.gh.poll(self.c, self.p())
+        run = self.stage_runs()["tests"]
+        self.assertEqual(run["state"], "running")
+        self.api.routes[("POST", "/repos/o/r/actions/runs/303/cancel")] = (202, {})
+        with self.assertRaises(RiverError):  # an agent may not
+            core.register(self.c, "w1")
+            self.runner.stop(self.c, run["id"], actor="w1")
+        self.assertEqual(self.runner.stop(self.c, run["id"], actor="mark")["stopped"], "on GitHub")
+        self.assertEqual(self.api.calls[-1][:2], ("POST", "/repos/o/r/actions/runs/303/cancel"))
+
+    def test_run_again_an_older_commit_and_the_forge_command(self):
+        r = self.runner.run_again(self.c, "mpm", "beta", "f" * 40, actor="mark")
+        row = self.c.execute("SELECT approved_by FROM stage_runs WHERE id=?", (r["run"],)).fetchone()
+        self.assertEqual(row["approved_by"], "mark")
+        with self.assertRaises(RiverError):
+            define.forge_set(self.c, "mpm", "github", repo="not a repo", secret="x")
+        define.forge_set(self.c, "mpm", "none")
+        self.assertIsNone(self.p()["forge"])
+        self.assertIn("forge none", define.history(self.c, "mpm")[0]["change"])
+
+
+class JUnitRunner(unittest.TestCase):
+    def test_the_report_of_tests_junit_run_reads_back(self):
+        """tests/junit_run.py writes the report that tests.yml uploads and the GitHub adapter reads (#6119)."""
+        from tests import junit_run
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.xml")
+            junit_run.write([("tests.test_x.A.test_ok", "passed", 0.5, None),
+                             ("tests.test_x.A.test_bad", "failure", 1.0, "Traceback\nAssertionError: 2 != 3"),
+                             ("tests.test_y.B.test_skip", "skipped", 0.0, "no Chrome")], path, "py3.13")
+            suites = junit.parse(open(path, "rb").read())
+        tests = {t["name"]: t for s in suites for t in s["tests"]}
+        self.assertEqual((tests["test_bad"]["state"], tests["test_bad"]["message"], tests["test_bad"]["suite"]),
+                         ("failed", "AssertionError: 2 != 3", "py3.13 tests.test_x.A"))
+        self.assertEqual((tests["test_ok"]["state"], tests["test_skip"]["state"]), ("passed", "skipped"))
 
 
 class Speed(Base):

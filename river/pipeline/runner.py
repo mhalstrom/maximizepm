@@ -41,7 +41,7 @@ FLUSH_LINES = 200
 def _row(conn, run_id):
     return conn.execute(
         "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.gate, s.gate_rule, s.pos, s.env_id, "
-        "p.name pipeline, p.project, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+        "p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
         "JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?",
         (run_id,)).fetchone()
 
@@ -146,6 +146,8 @@ def gate(conn, r):
         if core.now() < opens:
             return False, f"opens at {core.iso(opens)} (auto after {rule}) while the checks pass"
         return True, None
+    if g == "forge":  # #6119: a push or a tag starts it on the forge; the adapter links its run to this one
+        return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
     if g == "manager":
         return False, f"waits for the manager: {_approve_cmd(r)}"
     # person
@@ -229,11 +231,13 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
 
 # ---------------------------------------------------------------- running a stage
 
-def _command(cmd, folder, limit, env, on_lines):
+def _command(cmd, folder, limit, env, on_lines, run_id=None):
     """Run cmd in its own process group; give its output lines to on_lines as they come (every FLUSH_EVERY seconds).
     Returns (exit code, timed out)."""
     p = subprocess.Popen(cmd, shell=True, cwd=folder, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, errors="replace", start_new_session=True)
+    if run_id is not None:
+        PROCS[run_id] = p  # maxpm pipeline stop finds it
     lines = queue.Queue()
 
     def read():
@@ -301,8 +305,11 @@ def _execute(conn, run_id):
         try:
             if folder and not os.path.isdir(folder):
                 raise OSError(f"the folder {folder} does not exist")
-            code, timed_out = _command(r["cmd"], folder, limit, env,
-                                       lambda lines: steps.ingest_output(conn, run_id, lines))
+            try:
+                code, timed_out = _command(r["cmd"], folder, limit, env,
+                                           lambda lines: steps.ingest_output(conn, run_id, lines), run_id)
+            finally:
+                PROCS.pop(run_id, None)
         except OSError as e:
             code, timed_out = None, False
             errors = f"the command did not start: {e}"
@@ -337,10 +344,75 @@ def _hand_on(conn, r):
         e = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (r["env_id"],)).fetchone()
         if e:
             store.deployed(conn, r["pipeline"], e["name"], r["rev"], run_id=r["id"])
-    nxt = conn.execute("SELECT name FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL AND pos>? "
+    nxt = conn.execute("SELECT id, name FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL AND pos>? "
                        "ORDER BY pos, id LIMIT 1", (r["pipeline_id"], r["pos"])).fetchone()
     if nxt:
+        # A newer version replaces an older one that still waits at that gate (#6119): the person approves the
+        # newest, and a stage never runs a version that a newer one passed by.
+        for old in conn.execute("SELECT id, gate_item FROM stage_runs WHERE stage_id=? AND state='queued' AND "
+                                "approved_at IS NULL AND runner IS NULL AND version_id IS NOT ?",
+                                (nxt["id"], r["version_id"])).fetchall():
+            store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
+            _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
         _queue(conn, r["pipeline"], nxt["name"], r["rev"])
+
+
+def hand_on(conn, run_id):
+    """A stage run passed (here, or on a forge): its version goes on (_hand_on)."""
+    _hand_on(conn, _row(conn, run_id))
+
+
+def _drop_card(conn, item_id, note):
+    if item_id:
+        it = conn.execute("SELECT status FROM items WHERE id=?", (item_id,)).fetchone()
+        if it and it["status"] not in core.CLOSED_STATES:
+            core.drop(conn, item_id, "maxpm", note=note)
+
+
+def run_again(conn, pipeline, stage, rev, actor=None):
+    """maxpm pipeline rerun: run one stage again for a version, an older one too (a deploy of an older commit is a
+    roll back). The person or the manager asks for it, so its gate counts as passed."""
+    why = core._lead_refusal(conn, actor, "runs a stage again")
+    if why:
+        raise core.RiverError(why)
+    p = store._pipeline(conn, pipeline)
+    s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
+                     (p["id"], stage)).fetchone()
+    if not s:
+        raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
+    run = _queue(conn, p["name"], stage, rev)
+    with core.tx(conn):
+        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?", (actor or "a person",
+                                                                                    store._now(), run))
+        core._event(conn, None, actor or "maxpm", f"pipeline {p['name']}: run stage {stage} again for {rev} "
+                                                  f"(run #{run})")
+    return {"pipeline": p["name"], "stage": stage, "version": rev, "run": run}
+
+
+PROCS = {}  # run id -> the Popen of its command, in this process (stop)
+
+
+def stop(conn, run_id, actor=None):
+    """maxpm pipeline stop: stop a stage run: its command here, its run on the forge, or the wait at its gate."""
+    why = core._lead_refusal(conn, actor, "stops a stage run")
+    if why:
+        raise core.RiverError(why)
+    r = _row(conn, run_id)
+    if r is None:
+        raise core.RiverError(f"no stage run {run_id}")
+    if r["state"] in store.FINAL:
+        raise core.RiverError(f"run #{run_id} is {r['state']} already")
+    if (r["runner"] or "") == "forge:github" or (r["key"] or "").startswith("gh-run-"):
+        from . import github
+        github.cancel(conn, run_id)  # the next read of GitHub records its end
+        return {"run": run_id, "stopped": "on GitHub"}
+    p = PROCS.get(run_id)
+    if p is not None:
+        core._stop_group(p)  # the run's thread records the end
+        return {"run": run_id, "stopped": "its command"}
+    store.run_finish(conn, run_id, "cancelled", errors=f"stopped by {actor or 'a person'}")
+    _drop_card(conn, r["gate_item"], f"run #{run_id} was stopped")
+    return {"run": run_id, "stopped": "the wait at its gate" if r["state"] == "queued" else "its record"}
 
 
 def _launch(run_id):
@@ -373,7 +445,8 @@ def _lost(conn):
     """A run that maxpm serve started and no thread of this process runs any more ended with serve: it failed."""
     with LOCK:
         mine = set(RUNNING)
-    for r in conn.execute("SELECT id FROM stage_runs WHERE state='running' AND runner IS NOT NULL").fetchall():
+    for r in conn.execute("SELECT id FROM stage_runs WHERE state='running' AND runner IS NOT NULL AND runner NOT LIKE "
+                          "'forge:%'").fetchall():
         if r["id"] not in mine:
             store.run_finish(conn, r["id"], "failed", errors="maxpm serve stopped while it ran")
 
@@ -382,13 +455,16 @@ def serve_pass(conn):
     """One pass of the loop of maxpm serve: end lost runs, open the gates that may open, start what may start.
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
+    from . import github
+    github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
     for row in rows:
         r = _row(conn, row["id"])
-        if r["workflow"] and not r["cmd"]:
-            continue  # a forge runs it: its adapter reports the run
+        forge = r["workflow"] and not r["cmd"]
+        if forge and (r["runner"] or r["forge"] != "github"):
+            continue  # started on the forge already (its adapter reads the run), or a forge with no adapter here
         busy = conn.execute("SELECT id FROM stage_runs WHERE stage_id=? AND state='running'", (r["stage_id"],)).fetchone()
         if busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
             open_, note = False, f"waits for run #{busy['id'] if busy else started[-1]} of stage {r['stage']}"
@@ -409,7 +485,13 @@ def serve_pass(conn):
                 conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
                              (core._done_by(conn, r["gate_item"]), store._now(), r["id"]))
         started.append(r["id"])
-        if SYNC["on"]:
+        if forge:  # the gate opened: GitHub runs it (#6119)
+            from . import github
+            try:
+                github.dispatch(conn, r["id"])
+            except core.RiverError as e:
+                store.run_finish(conn, r["id"], "failed", errors=f"GitHub did not start it: {e}")
+        elif SYNC["on"]:
             _execute(conn, r["id"])
         else:
             _launch(r["id"])

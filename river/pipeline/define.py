@@ -10,9 +10,11 @@ Gate rules, in the words of maxpm pipeline gate:
     auto after <time>    ... and the checks of the stage before it passed for that long (30m)
     manager              the manager lets each version in
     person [<name>]      a person lets each version in (that person, when named)
+    forge                the forge starts the stage's workflow by itself (a push, a tag); MaximizePM only reads it
 """
 
 import json
+import re
 
 from .. import core
 from . import store
@@ -46,10 +48,12 @@ def parse_gate(text):
             return "auto", words[2]
     if words == ["manager"]:
         return "manager", None
+    if words == ["forge"]:  # #6119: the forge starts it by itself (a push, a tag); MaximizePM reads its runs
+        return "forge", None
     if words[:1] == ["person"] and len(words) <= 2:
         return "person", words[1] if len(words) == 2 else None
     raise core.RiverError(f"the gate rule {text!r} is not one of: auto; auto after <time> (30m); manager; "
-                          "person; person <name>")
+                          "person; person <name>; forge")
 
 
 def pipeline_add(conn, name, project=None, notes=None, actor=None):
@@ -210,6 +214,32 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 
 
+FORGES = ("github", "none")
+
+
+def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None):
+    """maxpm pipeline forge: where the pipeline's workflows run (#6119). github needs the repository (owner/name)
+    and the name of the maxpm secret that holds the API token; none: the stages run here (their --run commands)."""
+    if forge not in FORGES:
+        raise core.RiverError(f"the forge {forge!r} is not one of {', '.join(FORGES)}")
+    if forge == "github":
+        if not repo or not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+            raise core.RiverError("name the repository: --repo owner/name")
+        if not secret:
+            raise core.RiverError("name the maxpm secret that holds the GitHub token: --secret <name> (a person saves "
+                                  "it: maxpm secret put <name>)")
+    with core.tx(conn):
+        _may(conn, actor)
+        p = store._pipeline(conn, pipeline)
+        vals = (None, None, None, None) if forge == "none" else (forge, repo, secret, ref)
+        conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, polled_at=NULL, poll_error=NULL "
+                     "WHERE id=?", (*vals, p["id"]))
+        text = "forge none: the stages run here" if forge == "none" else (
+            f"forge github: repository {repo}, token from secret {secret}, branch {ref or 'main'}")
+        _change(conn, p["id"], actor, text)
+    return {"pipeline": p["name"], "forge": forge, "repo": repo, "secret": secret, "ref": ref}
+
+
 def gate_set(conn, pipeline, stage, rule, actor=None):
     """maxpm pipeline gate: the rule that lets a version into a stage."""
     return stage_set(conn, pipeline, stage, gate=rule, actor=actor)
@@ -226,8 +256,9 @@ def export(conn, name):
         d = _stage_detail(conn, s)
         d.pop("pos")
         stages.append(d)
-    return {"pipeline": p["name"], "project": p["project"], "notes": p["notes"], "environments": envs,
-            "stages": stages}
+    return {"pipeline": p["name"], "project": p["project"], "notes": p["notes"],
+            "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"]} if p["forge"] else None,
+            "environments": envs, "stages": stages}
 
 
 def history(conn, name, limit=50):

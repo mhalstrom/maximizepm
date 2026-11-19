@@ -2,11 +2,25 @@
 # promises that break without a sign: Python 3.10 to 3.13 (the standard library differs between them), on Linux
 # and macOS. Windows runs maxpm only inside WSL 2, which is Linux (mark 2026-11-12): no Windows job. The wheel
 # build and the desktop smoke tests run on a release tag, in desktop-release.yml, before the release builds.
+#
+# The pipeline of MaximizePM (#6119) reads each run of this workflow and the JUnit reports of its test jobs (artifacts
+# junit-*). When the person or the manager runs the tests again for a version (maxpm pipeline rerun), MaximizePM starts
+# it with workflow_dispatch: maxpm_run names its stage run (the run's name then says 'maxpm run <id>', which links the
+# two) and maxpm_rev the commit to test.
 name: tests
+run-name: ${{ inputs.maxpm_run && format('maxpm run {0}', inputs.maxpm_run) || github.event.head_commit.message || github.event.pull_request.title || 'tests' }}
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      maxpm_run:
+        description: "The MaximizePM stage run that started it"
+        required: false
+      maxpm_rev:
+        description: "The commit to test"
+        required: false
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -20,11 +34,20 @@ jobs:
             python: "3.13"
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxpm_rev || '' }}
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Tests (standard library only)
-        run: python -m unittest discover -s tests -t . -v
+        run: python tests/junit_run.py report.xml "${{ matrix.os }} py${{ matrix.python }}"
+      - name: The JUnit report, for the pipeline of MaximizePM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-${{ matrix.python }}
+          path: report.xml
+          if-no-files-found: ignore
   # install-standalone.sh on a Linux host with no Python of its own (#5873): the Python of river/python-builds.txt,
   # checked by sha256, and the code of this commit; then the maxpm command runs on a new queue, and a second run
   # keeps the Python it has.

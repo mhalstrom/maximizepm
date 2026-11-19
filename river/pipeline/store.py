@@ -18,7 +18,7 @@ from .. import core
 from . import cdevents
 
 STAGE_KINDS = ("build", "test", "review", "approve", "deploy", "check", "other")
-GATES = ("auto", "manager", "person")
+GATES = ("auto", "manager", "person", "forge")
 RUN_STATES = ("queued", "running", "passed", "failed", "cancelled", "skipped")
 FINAL = ("passed", "failed", "cancelled", "skipped")
 OUTPUT_LINES = 60  # a run keeps its last lines
@@ -160,6 +160,9 @@ def _apply_pipelinerun(conn, pid, ev):
     run = conn.execute("SELECT * FROM stage_runs WHERE pipeline_id=? AND key=?", (pid, key)).fetchone() if key else None
     if run is None and m.get("run") is not None:
         run = conn.execute("SELECT * FROM stage_runs WHERE id=? AND pipeline_id=?", (m["run"], pid)).fetchone()
+        if run is not None and key and run["key"] != key:  # a forge run that we started: it keeps the forge's id
+            conn.execute("UPDATE stage_runs SET key=?, source=? WHERE id=?", (key, ev["source"], run["id"]))
+            run = conn.execute("SELECT * FROM stage_runs WHERE id=?", (run["id"],)).fetchone()
     vid = _version_id(conn, pid, m.get("version"), m.get("ref"), m.get("title"))
     if run is None:
         stage = m.get("stage") or c.get("pipelineName")

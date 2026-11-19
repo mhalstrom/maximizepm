@@ -1900,7 +1900,8 @@ def build_parser(only=None):
     x.add_argument("--run", help="the project's command that does the work ('' clears it)")
     x.add_argument("--workflow", help="or the forge workflow or job that does it ('' clears it)")
     x.add_argument("--env", help="the environment a deploy stage deploys to")
-    x.add_argument("--gate", help="auto; auto after <time>; manager; person; person <name>")
+    x.add_argument("--gate", help="auto; auto after <time>; manager; person; person <name>; forge (a push or a tag "
+                   "starts it on the forge)")
     x.add_argument("--pos", type=int, help="its place, 1 is the first")
     x.add_argument("--junit", help="a test stage: the JUnit XML file its command writes, in the project folder "
                    "('' clears it)")
@@ -1908,6 +1909,15 @@ def build_parser(only=None):
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
+    x = pls.add_parser("forge", help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
+                       "minute and starts a gated workflow after the gate), or none (the stages run here)")
+    x.add_argument("name"); x.add_argument("forge", choices=("github", "none"))
+    x.add_argument("--repo", help="owner/name"); x.add_argument("--secret", help="the maxpm secret with the API token")
+    x.add_argument("--ref", help="the branch a started workflow runs on (main)")
+    x = pls.add_parser("rerun", help="run one stage again for a version, an older one too (a roll back)")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
+    x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
+    x.add_argument("id", type=int)
     x = pls.add_parser("run", help="one stage run: its steps, failed tests and last lines; --prompt: the prompt that "
                        "analyzes its failed tests")
     x.add_argument("id", type=int); x.add_argument("--prompt", action="store_true")
@@ -7490,6 +7500,14 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "approve":
         from .pipeline import runner
         return runner.approve(conn, a.name, a.stage, a.rev, actor)
+    if sub == "forge":
+        return define.forge_set(conn, a.name, a.forge, a.repo, a.secret, a.ref, actor)
+    if sub == "rerun":
+        from .pipeline import runner
+        return runner.run_again(conn, a.name, a.stage, a.rev, actor)
+    if sub == "stop":
+        from .pipeline import runner
+        return runner.stop(conn, a.id, actor)
     if sub == "run":
         from .pipeline import prompt
         return {"text": prompt.failure_prompt(conn, a.id)["text"] if a.prompt else prompt.run_text(conn, a.id)}
@@ -7528,6 +7546,17 @@ def render_pipeline(a, res):
         return
     if sub == "run":
         print(res["text"])
+        return
+    if sub == "forge":
+        print(f"pipeline {res['pipeline']}: " + ("its stages run here" if res["forge"] == "none" else
+              f"its workflows run on GitHub ({res['repo']}); maxpm serve reads them every minute"))
+        return
+    if sub == "rerun":
+        print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']}) "
+              f"at the next pass of maxpm serve")
+        return
+    if sub == "stop":
+        print(f"run #{res['run']}: stopped {res['stopped']}")
         return
     if sub == "start":
         print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"

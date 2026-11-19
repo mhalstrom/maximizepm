@@ -14,7 +14,13 @@ CREATE TABLE IF NOT EXISTS pipelines (
   project     TEXT,                      -- the MaximizePM project it releases (a name)
   notes       TEXT,
   created_by  TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  forge       TEXT,                      -- where its workflows run: github, or none (#6119)
+  repo        TEXT,                      -- owner/name on the forge
+  secret      TEXT,                      -- the name of the maxpm secret that holds the forge's API token
+  ref         TEXT,                      -- the branch that a started workflow runs on (main when none)
+  polled_at   TEXT,                      -- the last read of the forge (the adapter reads it every minute)
+  poll_error  TEXT                       -- what the last read said when it failed
 );
 
 -- A place that runs the code: dev, beta, prod, or one server. version_id and since say what runs there now.
@@ -189,6 +195,10 @@ CREATE INDEX IF NOT EXISTS pipeline_events_run ON pipeline_events(run_id, id);
 def migrate(conn):
     """Add the columns that a queue made by an older version of these tables lacks. core._migrate calls it, inside
     its tx; core.schema_print counts this function, so a change here runs again."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
+    for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error"):  # #6119
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit"):  # #6113, #6114
         if c not in cols:
