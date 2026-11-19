@@ -331,6 +331,9 @@ def _reap_loop():
 NO_DOWNLOADS = ("--disable-component-update",
                 "--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,"
                 "OptimizationTargetPrediction,OptimizationHints")
+# The most bytes of Chrome's HTTP cache in a profile (#6135): a project's browser may run for days, and the space
+# cleanup empties its cache only while it does not run (231 MB in the maximizepm profile, 2026-11-19).
+DISK_CACHE = 64 * 1024 * 1024
 
 
 def session_dir(project, owner):
@@ -1001,7 +1004,7 @@ class Browser:
         w, h = VIEW
         args = [chrome, f"--user-data-dir={profile}", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
                 "--no-first-run", "--no-default-browser-check", "--disable-default-apps", "--disable-sync",
-                "--disable-blink-features=AutomationControlled", *NO_DOWNLOADS,
+                "--disable-blink-features=AutomationControlled", *NO_DOWNLOADS, f"--disk-cache-size={DISK_CACHE}",
                 f"--proxy-server=http://127.0.0.1:{self.proxy.port}", "--proxy-bypass-list=<-loopback>",
                 f"--window-size={w},{h}", "about:blank"]
         place = self.passkey_place() if self.state.get("window") and self.passkey_at else None

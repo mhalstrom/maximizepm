@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -261,9 +262,17 @@ class Folder(SpaceBase):
             if download:
                 self.file(f"browsers/p/sessions/{name}/downloads/report.pdf", 1_000, age_days=age_days)
             return self.root / "browsers" / "p" / "sessions" / name
+        def expert(name, age_days):
+            # An expert is never gone by time (core._live_state), so the browser tidy (#6135) keeps its folder: only
+            # this rule removes it.
+            core.register(self.c, name)
+            seen = core.iso(core.now() - timedelta(days=age_days))
+            self.c.execute("UPDATE agents SET role='expert', last_seen=? WHERE name=?", (seen, name))
         gone = session("gone-1", 40)
         with_dl = session("gone-2", 40, download=True)
-        recent = session("gone-3", 2)  # ended 2 days ago: younger than space_sessions_after (30d)
+        recent = session("gone-3", 2)  # seen 2 days ago: younger than space_sessions_after (30d)
+        for name, age in (("gone-1", 40), ("gone-2", 40), ("gone-3", 2)):
+            expert(name, age)
         quiet = session("quiet-1", 40)  # its agent was seen yesterday
         core.register(self.c, "quiet-1")
         project = self.file("browsers/p/profile/Default/Cookies", 100_000, age_days=40)
@@ -283,6 +292,83 @@ class Folder(SpaceBase):
         core.config_set(self.c, "folder_max_size", "1KB")
         space.run(self.c)
         self.assertFalse((self.root / "browsers" / "p" / "profile" / "Default" / "Cache").exists())
+
+
+class BrowserTidy(SpaceBase):
+    """#6135: at any size, the browser folders of ended sessions go, and the project's own profile loses the caches
+    that Chrome fills as pages load; sign-ins, downloads, live sessions and running browsers stay."""
+    file = Folder.file
+
+    def session(self, name, age_hours, download=False):
+        self.file(f"browsers/p/sessions/{name}/profile/Default/Cookies", 100_000)
+        self.file(f"browsers/p/sessions/{name}/state.json", 10)
+        if download:
+            self.file(f"browsers/p/sessions/{name}/downloads/report.pdf", 1_000)
+        d = self.root / "browsers" / "p" / "sessions" / name
+        t = time.time() - age_hours * 3600
+        for p in (d / "profile" / "Default" / "Cookies", d / "state.json", d / "profile" / "Default", d / "profile"):
+            os.utime(p, (t, t))
+        return d
+
+    def setUp(self):
+        super().setUp()
+        core.config_set(self.c, "folder_max_size", "2GB")  # far over what the test writes: the tidy runs anyway
+        self.ended = self.session("ended-1", 3)  # no agents row: it unregistered
+        self.with_dl = self.session("ended-2", 3, download=True)
+        self.gone = self.session("gone-1", 3)
+        core.register(self.c, "gone-1")
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='gone-1'", (OLD,))  # gone after gone_after
+        self.live = self.session("live-1", 3)
+        core.register(self.c, "live-1")
+        self.fresh = self.session("ended-3", 0)  # used in SESSION_GRACE
+        self.running = self.session("ended-4", 3)
+        os.symlink(f"host-{os.getpid()}", self.running / "profile" / "SingletonLock")
+        base = "browsers/p/profile"
+        self.caches = [self.file(f"{base}/Default/{n}/data_1", 50_000) for n in
+                       ("Cache", "Code Cache", "GPUCache", "Service Worker/CacheStorage/a", "Service Worker/ScriptCache")]
+        self.cookies = self.file(f"{base}/Default/Cookies", 50_000)
+        self.lists = self.file(f"{base}/Safe Browsing/UrlMalware.store", 50_000)
+        self.registrations = self.file(f"{base}/Default/Service Worker/Database/CURRENT", 100)
+
+    def check_tidied(self):
+        self.assertFalse(self.ended.exists())
+        self.assertFalse(self.gone.exists())
+        self.assertEqual([p.name for p in self.with_dl.iterdir()], ["downloads"])  # a download stays
+        for d in (self.live, self.fresh, self.running):
+            self.assertTrue((d / "profile" / "Default" / "Cookies").exists(), d.name)
+        for c in self.caches:
+            self.assertFalse(c.exists(), c)
+        for p in (self.cookies, self.lists, self.registrations):
+            self.assertTrue(p.exists(), p)  # sign-ins stay; the downloaded lists wait for the limit
+
+    def test_serve_pass_tidies_under_the_limit_once_an_hour(self):
+        space.serve_pass(self.c)
+        self.check_tidied()
+        ev = self.c.execute("SELECT change FROM events WHERE change LIKE 'browser tidy:%'").fetchall()
+        self.assertEqual(len(ev), 1)
+        self.assertIn("3 folders of browsers of ended sessions", ev[0][0])
+        self.assertIn("5 folders of caches of project browsers", ev[0][0])
+        # Within the hour the tidy does not run again.
+        cache = self.file("browsers/p/profile/Default/Cache/data_2", 50_000)
+        space.serve_pass(self.c)
+        self.assertTrue(cache.exists())
+
+    def test_run_says_it_and_a_dry_run_removes_nothing(self):
+        dry = space.run(self.c, dry_run=True)
+        self.assertEqual([r["what"] for r in dry["browsers"]["removed"]],
+                         ["browsers of ended sessions", "caches of project browsers"])
+        self.assertTrue(self.ended.exists())
+        self.assertIn("would remove 3 folders of browsers of ended sessions", dry["summary"])
+        res = space.run(self.c)
+        self.check_tidied()
+        self.assertIn("removed 3 folders of browsers of ended sessions", res["summary"])
+
+    def test_folder_limit_off_keeps_everything(self):
+        core.config_set(self.c, "folder_max_size", "off")
+        core.config_set(self.c, "db_max_size", "1KB")
+        space.serve_pass(self.c)
+        self.assertTrue(self.ended.exists())
+        self.assertTrue(self.caches[0].exists())
 
 
 class Serve(SpaceBase):

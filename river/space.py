@@ -28,6 +28,10 @@ before space_sessions_after (#6062 answer A: a new session copies the project's 
 uploads older than space_files_after, and backups older than it except the newest. The project's own profile and a
 live session's profile stay: the report counts them.
 
+The browser tidy (#6135) runs at any size of the folder (while folder_max_size is not off): once an hour in serve and
+in each run, it removes the browser folder of each session that ended (its downloads stay) and empties the caches
+that Chrome fills as pages load (SHARED_CACHES) in each project's own profile while its Chrome does not run.
+
 A real run writes one event (no item) and sends the active manager one note. --dry-run removes nothing: it runs the
 database part inside a transaction that it rolls back, so its counts are exact."""
 
@@ -58,7 +62,14 @@ META = "space"
 BROWSER_CACHES = ("Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache", "GrShaderCache",
                   "GraphiteDawnCache", "ShaderCache", "component_crx_cache", "optimization_guide_model_store",
                   "WasmTtsEngine", "OnDeviceHeadSuggestModel", "Safe Browsing", "CertificateRevocation",
-                  "GPUPersistentCache", "ActorSafetyLists")
+                  "GPUPersistentCache", "ActorSafetyLists", "Service Worker/CacheStorage", "Service Worker/ScriptCache")
+# The caches that the hourly browser tidy empties in a project's own profile while its Chrome does not run (#6135):
+# the ones Chrome fills as pages load (231 MB of Cache and 107 MB of Code Cache in the maximizepm profile,
+# 2026-11-19). The lists and components in the rest of BROWSER_CACHES wait for the folder limit, so that each start of
+# the browser does not download them again.
+SHARED_CACHES = ("Cache", "Code Cache", "GPUCache", "Service Worker/CacheStorage", "Service Worker/ScriptCache")
+# A session's browser folder goes this long after its last use at the earliest, even when the session ended.
+SESSION_GRACE = timedelta(hours=1)
 
 
 def parse_size(value):
@@ -125,9 +136,15 @@ def _profiles(root):
                   if p.is_dir())
 
 
-def _caches(profile):
-    return [p for base in (profile, profile / "Default") for p in (base / n for n in BROWSER_CACHES)
+def _caches(profile, names=BROWSER_CACHES):
+    return [p for base in (profile, profile / "Default") for p in (base / n for n in names)
             if p.is_dir() and not p.is_symlink()]
+
+
+def _used(prof):
+    """The time of the last use of a profile: Chrome writes these files while it runs."""
+    return max((os.lstat(p).st_mtime for p in (prof, prof / "Default", prof / "Local State", prof.parent / "state.json")
+                if os.path.lexists(p)), default=0)
 
 
 def _running(profile):
@@ -372,11 +389,65 @@ def _ended_profiles(conn, root, cutoff):
     for prof in root.glob("browsers/*/sessions/*/profile"):
         if prof.parent.name in live or not prof.is_dir() or prof.is_symlink() or _running(prof):
             continue
-        used = max((os.lstat(p).st_mtime for p in (prof, prof / "Default", prof / "Local State",
-                                                    prof.parent / "state.json") if os.path.lexists(p)), default=0)
+        used = _used(prof)
         if used < cutoff.timestamp():
             out.append((used, prof))
     return [p for _, p in sorted(out)]
+
+
+def _session_ended(conn, name):
+    """The session of a browser folder ended: it has no agents row (it unregistered), or it is stopped or gone and
+    holds and owns nothing (core.ended)."""
+    if not conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        return True
+    return core.ended(core.agent_status(conn, name))
+
+
+def _tidy_browsers(conn, dry_run, t):
+    """The browser tidy (#6135), at any size of the folder, once in FOLDER_EVERY by serve and in each run: the
+    folder browsers/<project>/sessions/<session>/ of each session that ended (a later session gets its own profile
+    with the project's sign-ins, so this one is of no more use; a downloads folder that holds a file stays), and
+    SHARED_CACHES in each project's own profile. Nothing of a profile that Chrome runs on, and no session folder
+    used in SESSION_GRACE. The sign-ins of the project's profile stay. Returns {"removed": [groups]}."""
+    root = db_file(conn).parent
+    groups = {}
+
+    def took(what, b):
+        g = groups.setdefault(what, {"what": what, "folders": 0, "bytes": 0})
+        g["folders"] += 1
+        g["bytes"] += b
+
+    grace = (t - SESSION_GRACE).timestamp()
+    for d in sorted(root.glob("browsers/*/sessions/*")):
+        if not d.is_dir() or d.is_symlink():
+            continue
+        prof = d / "profile"
+        if prof.exists() and (prof.is_symlink() or _running(prof) or _used(prof) >= grace):
+            continue
+        if not _session_ended(conn, d.name):
+            continue
+        dl = d / "downloads"
+        keep = dl.is_dir() and any(dl.iterdir())
+        parts = [p for p in d.iterdir() if not (keep and p.name == "downloads")]
+        if not parts:
+            continue  # only a download is left
+        took("browsers of ended sessions", sum(tree_bytes(p) if p.is_dir() and not p.is_symlink() else _file_bytes(p)
+                                              for p in parts))
+        if dry_run:
+            continue
+        if keep:
+            for p in parts:
+                _remove(p)
+        else:
+            shutil.rmtree(d, ignore_errors=True)
+    for prof in sorted(root.glob("browsers/*/profile")):
+        if not prof.is_dir() or prof.is_symlink() or _running(prof):
+            continue
+        for c in _caches(prof, SHARED_CACHES):
+            took("caches of project browsers", tree_bytes(c))
+            if not dry_run:
+                _remove(c)
+    return {"removed": list(groups.values())}
 
 
 def _candidates(conn, root, cutoff, t):
@@ -728,15 +799,18 @@ def archived_rows(conn, where="1", params=()):
 
 # ---------------------------------------------------------------- the run
 
+def _parts(side, key):
+    return [f"{r[key]} {key} of {r['what']} ({show_size(r['bytes'])})" for r in (side or {}).get("removed", [])]
+
+
 def summary(res):
     """One line for the event and the note."""
     parts = []
     a = res.get("archive") or {}
     moved = (f"{'would archive' if res.get('dry_run') else 'archived'} {a['items']} items closed more than "
              f"{a['after']} ago, with {a['rows']} rows of their history; ") if a.get("items") else ""
-    for side, key in (("db", "rows"), ("archive_db", "rows"), ("folder", "files")):
-        for r in (res.get(side) or {}).get("removed", []):
-            parts.append(f"{r[key]} {key} of {r['what']} ({show_size(r['bytes'])})")
+    for side, key in (("db", "rows"), ("archive_db", "rows"), ("browsers", "folders"), ("folder", "files")):
+        parts += _parts(res.get(side), key)
     d, f = res["db"], res["folder"]
     verb = "would remove " if res.get("dry_run") else "removed "
     line = ("space cleanup: " + moved + (verb + ", ".join(parts) if parts else "nothing to remove")
@@ -765,14 +839,16 @@ def run(conn, dry_run=False, actor=None):
             ad["vacuum_error"] = _vacuum(conn, ARCHIVE)
             ad["used_after"] = db_used(conn, ARCHIVE)
             ad["over"] = bool(ad["limit"] and ad["used_after"] > ad["limit"])
+    if parse_size(setting(conn, "folder_max_size")):  # the folder limit off: nothing of the folder goes
+        res["browsers"] = _tidy_browsers(conn, dry_run, t)
     res["folder"] = _folder_part(conn, dry_run, t)
     res["summary"] = summary(res)
     if dry_run:
         return res
     m = _meta(conn)
-    m.update(last_run=iso(t), folder=res["folder"]["size_after"], folder_at=iso(t),
+    m.update(last_run=iso(t), folder=res["folder"]["size_after"], folder_at=iso(t), tidy_at=iso(t),
              removed=bool(res["archive"]["items"] or res["db"]["removed"] or res["folder"]["removed"]
-                          or (res.get("archive_db") or {}).get("removed")))
+                          or (res.get("archive_db") or {}).get("removed") or (res.get("browsers") or {}).get("removed")))
     over = res["db"].get("over") or res["folder"].get("over") or (res.get("archive_db") or {}).get("over")
     tell = m["removed"] or (over and (not m.get("told_over") or t - parse_iso(m["told_over"]) >= TELL_OVER_EVERY))
     if over and tell:
@@ -801,6 +877,16 @@ def serve_pass(conn):
     dbl, fl = parse_size(setting(conn, "db_max_size")), parse_size(setting(conn, "folder_max_size"))
     if not dbl and not fl:
         return None
+    if fl:  # the browser tidy, at any size (#6135): one event when it removed something, no note
+        at = parse_iso(m["tidy_at"]) if m.get("tidy_at") else None
+        if not at or t - at >= FOLDER_EVERY:
+            tidy = _tidy_browsers(conn, False, t)
+            m["tidy_at"] = iso(t)
+            if tidy["removed"]:
+                m.pop("folder_at", None)  # measure the folder again below
+                with tx(conn):
+                    core._event(conn, None, "maxpm", "browser tidy: removed " + ", ".join(_parts(tidy, "folders")))
+            _save_meta(conn, m)
     over = bool(dbl and db_used(conn) > dbl)
     if not over and fl:
         at = parse_iso(m["folder_at"]) if m.get("folder_at") else None
