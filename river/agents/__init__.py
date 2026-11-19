@@ -315,7 +315,10 @@ DETECT_LAYOUT = {
     "other": "",
     "item": "{mark}",
     "frame": "│┃╭╮╰╯┌┐└┘",
-    "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$",
+    # A rule can hold one short name between its dashes: Claude Code writes the session's name into the top edge of
+    # its input box ("──────── maxpm manager ─"). The plain rule alone let the person's typed "2. comments ..." in
+    # that box read as a numbered menu, and the person got an alert to answer their own text (#6155).
+    "rule": r"^\s*(?=.*[─━╌╍┄┅═-]{8})[─━╌╍┄┅═-]+(?:\s+[^─━╌╍┄┅═\s][^─━╌╍┄┅═]{0,78}?\s+[─━╌╍┄┅═-]+)?\s*$",
     # Also Codex's key lines ("enter select · esc back", "enter default · s session · esc back") and the key line over
     # Claude Code's /model menu ("◐ Medium effort (default) ←/→ to adjust", #5220).
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"

@@ -3002,9 +3002,15 @@ class LaunchInTmux(unittest.TestCase):
             "  ⎿  $ cd ~/Projects/shop && grep -n wait cli.py\n"
             "     Running…\n\n"
             "✢ Finding the wait command… (12s · ↓ 1.2k tokens · esc to interrupt)\n\n"
-            f"{rule}\n❯ {{typed}}\n{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle)")
-        for typed, status in (("", True), ("1. Do you want to keep it?", True), ("1. Do you want to keep it?", False)):
-            pane["screen"] = working.format(typed=typed)
+            "{top}\n❯ {typed}\n" f"{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle)")
+        # #6155: Claude Code writes the session's name into the input box's top edge; the person's unsent "2. ..."
+        # under that edge read as a numbered menu, and the person got an alert to answer their own text.
+        named = "─" * 70 + " maxpm manager ─"
+        for typed, status, top in (("", True, rule), ("1. Do you want to keep it?", True, rule),
+                                   ("1. Do you want to keep it?", False, rule),
+                                   ("2. comments should be resolvable from the inline view", True, named),
+                                   ("2. comments should be resolvable from the inline view", False, named)):
+            pane["screen"] = working.format(top=top, typed=typed)
             if not status:  # no status line under the input box: its rule ends the screen
                 pane["screen"] = pane["screen"].rsplit("\n", 1)[0]
             self.assertEqual(server.pane_prompts(self.c, {name: pane["id"]}), {}, (typed, status))
