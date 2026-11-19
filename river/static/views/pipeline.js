@@ -294,12 +294,14 @@ function missLine(D, miss) {
 function envTable(D) {
   if (!D.envs.length) return "";
   const deployer = e => D.stages.find(s => s.kind === "deploy" && s.env === e.name);
-  const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td>${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
-    <td class="mono">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td><td>${e.since ? esc(ago(e.since)) : ""}</td>
-    <td class="t-s muted">${(e.history || []).slice(1, 4).filter(h => h.rev && h.rev !== e.rev).map(h => esc(short(h.rev))
+  // #6187: on a phone each environment is a block with each cell under its name (pl-blocks), not four columns that
+  // broke 'Environment' and 'Since' inside the word at 390 px; the versions before are a list with separators.
+  const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td data-label="Environment">${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
+    <td data-label="Version">${e.rev ? `<span class="mono">${esc(short(e.rev))}</span>` : `<span class="muted">none yet</span>`}</td><td class="pl-nowrap" data-label="Since">${e.since ? esc(ago(e.since)) : ""}</td>
+    <td class="t-s muted" data-label="Before">${(e.history || []).slice(1, 4).filter(h => h.rev && h.rev !== e.rev).map(h => esc(short(h.rev))
       + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + srcButton(D, deployer(e), "rollback", "Put back", { data: { "pl-rollback": e.name, rev: h.rev },
-        title: `Roll back to ${short(h.rev)}` }))).join(" ")}</td></tr>`).join("");
-  return `<div class="pl-card"><h3>Where each version runs</h3><div class="pl-table"><table>
+        title: `Roll back to ${short(h.rev)}` }))).join(" · ")}</td></tr>`).join("");
+  return `<div class="pl-card"><h3>Where each version runs</h3><div class="pl-table"><table class="pl-blocks">
     <tr><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows}</table></div></div>`;
 }
 
@@ -353,7 +355,7 @@ function stageRunsHtml(SR) {
       ver: tg && !r.pinned ? `<span class="muted">not pinned</span>` : esc(short(r.rev)) };
   });
   const hasWhy = cells.some(c => c.why), hasTask = cells.some(c => c.task), hasActs = cells.some(c => c.b.length);
-  const rows = cells.map(({ r, b, why, when, task, ver }) => `<tr class="${r.live ? "live" : ""}"><td class="t-s">${when ? esc(ago(when)) : ""}</td>
+  const rows = cells.map(({ r, b, why, when, task, ver }) => `<tr class="${r.live ? "live" : ""}"><td class="t-s pl-nowrap">${when ? esc(ago(when)) : ""}</td>
       <td class="mono">${ver}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
       <td class="pl-nowrap">${st(r.state)}${plain(r.what) ? "" : ` <span class="muted t-s">${esc(r.what)}</span>`}</td>
       <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : ""}</td>
