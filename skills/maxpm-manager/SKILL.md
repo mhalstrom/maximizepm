@@ -110,8 +110,12 @@ ends the session, and tell the user.
   the target: `review` (a release goes out when its review passes; this turns
   review on for that project) or `person` (maxpm serve adds one item for a person
   to each ready release, "Approve release <target>: ...", and the deploy waits on
-  that yes; after a failed deploy it asks again). `maxpm config set
-  release_approval review|person --project <name>`; there is no global value, and
+  that yes; after a failed deploy it asks again) or `draft` (the deploy hook
+  prepares the release, for example a draft GitHub release, and exits 76;
+  MaximizePM adds the person's "Approve release" item with the hook's last
+  lines; after the yes the hook runs again with `MAXPM_APPROVED` and publishes
+  it). `maxpm config set
+  release_approval review|person|draft --project <name>`; there is no global value, and
   `maxpm target show` says when a target has none. Ask the person which one fits
   when you set up a target, with the project's needs: a service with users can
   ship on review, and a release that only the person may approve takes `person`.

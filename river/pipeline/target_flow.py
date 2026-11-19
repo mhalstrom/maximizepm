@@ -188,6 +188,9 @@ def _items_at(conn, target, stage, first):
     if stage == "deploy":
         return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open'",
                                               (target,))]
+    if stage == "publish":  # #6213: the release that the person approved waits; the deploy hook does not publish it
+        return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' "
+                                              "AND cut_at IS NOT NULL", (target,)) if core._person_yes(conn, d["id"])]
     return []
 
 
@@ -279,8 +282,7 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     reached the stage, newest first; a version sent on purpose names who sent it and why."""
     from . import targets
     releases = targets.release_runs(conn, p["target"], targets._deploys(conn, p["target"], limit))
-    # A branch after deploy (#6186, downloads) has no stored row: its runs come from the deploy hook's steps.
-    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"] + targets.branch_names(releases):
+    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"]:
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
     sends = {}
     for r in conn.execute("SELECT * FROM target_sends WHERE pipeline_id=? ORDER BY id", (p["id"],)):

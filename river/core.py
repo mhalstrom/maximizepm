@@ -659,8 +659,10 @@ DEFAULT_SETTINGS = {
     "max_sessions": "0",
     # The release gate of a deploy project (#5003, mark: 'This should be a project setting'): review (a release
     # goes out when its review passes; review is on for that project) or person (maxpm serve adds one item for a
-    # person to each ready release, and the deploy waits on that yes). Set it on the deploy project (deploy-<target>)
-    # or on a project of the target, from the project's needs: maxpm config set release_approval review|person
+    # person to each ready release, and the deploy waits on that yes) or draft (#6213: the deploy hook prepares the
+    # release, a draft, and exits HOOK_YES; maxpm adds the person's item with the draft; after the yes the hook runs
+    # again and publishes it). Set it on the deploy project (deploy-<target>)
+    # or on a project of the target, from the project's needs: maxpm config set release_approval review|person|draft
     # --project <name>. There is no global value: a target where none is set says so in maxpm target show.
     "release_approval": "",
     # Models, weakest to strongest, one list per family ("family: a, b, c", families separated by ";").
@@ -3220,8 +3222,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "model_min_version" and value and not re.match(r"^\d+(\.\d+)?$", value.strip()):
         raise RiverError("model_min_version is a version such as 5.5 (empty: no floor)")
     elif key == "release_approval" and value not in RELEASE_APPROVALS:
-        raise RiverError("release_approval is review (a release goes out when its review passes) or person (a "
-                         "person's yes for each release)")
+        raise RiverError("release_approval is review (a release goes out when its review passes), person (a "
+                         "person's yes for each release, before the deploy) or draft (the deploy hook makes a draft "
+                         "of the release, a person approves it, then the hook publishes it)")
     elif key in ("review", "auto_review") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "setup_done" and value not in ("on", "off"):
@@ -3275,7 +3278,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
                          "--agent or --kind)")
     if key == "release_approval" and not sc.startswith("project:"):
         raise RiverError("release_approval is set for each project from its needs, never for all of them: "
-                         "maxpm config set release_approval review|person --project <name> (the deploy project "
+                         "maxpm config set release_approval review|person|draft --project <name> (the deploy project "
                          "deploy-<target>, or a project of the target)")
     also = None
     with tx(conn):
@@ -4612,6 +4615,11 @@ HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook wh
 # maxpm queues it again, maxpm serve runs it after HOOK_ORPHAN_AFTER, and so on until hook_timeout from its first run.
 # build-sweep.sh mark refused at 5 of 37 cuts because a check ran in the tree, and nothing ran it again.
 HOOK_BUSY = 75
+# A deploy hook that exits HOOK_YES says 'the release is prepared; the rest waits for a person's yes' (#6213, mark
+# 2026-11-19: 'the tag to be a final step with a manual approval'): maximizepm-github pushes main and builds the
+# downloads as a draft, then the person approves the draft, then the hook runs again (MAXPM_APPROVED) and tags and
+# publishes it. MaximizePM adds the person's approval item with the hook's last lines (the draft's link, its files).
+HOOK_YES = 76
 HOOK_AGAIN = "again:"  # queued_by of a run that a busy run queued: again:<the id of the first run>
 HOOK_TAIL = 15  # the lines of a hook's output that the command prints and the run keeps
 HOOK_RUNNER = None  # a test hook: (command, folder, limit, renew, env) -> a result like _run_command's
@@ -8645,7 +8653,9 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     where = os.path.expanduser(folder) if folder else cwd
     env = {**os.environ, "MAXPM_EVENT": event, "MAXPM_TARGET": target, "MAXPM_REV": run["rev"] or "",
            "MAXPM_ITEM": str(run["item_id"] or ""), "MAXPM_DEPLOY": str(run["deploy_id"] or ""),
-           "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", "")}
+           "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", ""),
+           # #6213: the person's yes on the prepared release (a draft): the deploy hook now finishes it
+           "MAXPM_APPROVED": str(run["item_id"]) if _run_approved(run) else ""}
 
     def renew():  # a long hook keeps the leases of the agent whose command runs it
         if actor:
@@ -8688,6 +8698,8 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     took = f"{secs:.0f}s" if secs < 90 else _short(timedelta(seconds=secs))
     ok = code == 0 and not timed_out
     result = (f"stopped at {limit_key} ({limit_text}) after {took}" if timed_out
+              else f"prepared, waits for a person's yes (exit {code}), {took}"
+              if event == "deploy" and code == HOOK_YES and not _run_approved(run)
               else f"exit {code}, {took}" if code is not None else "not started")
     again = None
     if code == HOOK_BUSY and not timed_out and event != "deploy":
@@ -8728,7 +8740,7 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
                 out["alerted"] = to
         conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     if event == "deploy" and run["deploy_id"]:
-        out.update(_deploy_hook_end(conn, run, ok, result, tail, where))
+        out.update(_deploy_hook_end(conn, run, ok, result, tail, where, None if timed_out else code))
         with tx(conn):
             conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     return out
@@ -8749,7 +8761,22 @@ def deploy_hook(conn, target):
     return r["command"] if r else None
 
 
-RELEASE_APPROVALS = ("review", "person")
+def _run_approved(run):
+    """True when this run of a deploy hook comes after the person's yes on the prepared release (#6213): deploy_hook_start
+    queues it with the yes item as its item (MAXPM_APPROVED)."""
+    return (run.get("event") == "deploy" and bool(run.get("item_id")) and bool(run.get("deploy_id"))
+            and run["item_id"] != run["deploy_id"])
+
+
+def _person_yes(conn, dep_id):
+    """The id of a person's done approval item of this release (only a person's done is a yes, #6039), or None."""
+    for a in _approvals(conn, dep_id):
+        if a["status"] == "done" and _is_person(conn, _done_by(conn, a["id"])):
+            return a["id"]
+    return None
+
+
+RELEASE_APPROVALS =("review", "person", "draft")
 APPROVE_TITLE = "Approve release"
 # The start of the Read card of a release report (report.summary_set): a low alert to each person about the deploy item.
 REPORT_CARD = "Read the report of the release of"
@@ -8816,7 +8843,7 @@ def approval_refusal(conn, item):
     if item["kind"] != "deploy" or release_approval(conn, item["target"])["approval"] != "person":
         return None
     # Only a person's done is a yes (#6039, mark 2026-11-16): a session or the manager that closed it gives none.
-    if any(a["status"] == "done" and _is_person(conn, _done_by(conn, a["id"])) for a in _approvals(conn, item["id"])):
+    if _person_yes(conn, item["id"]):
         return None
     return (f"target {item['target']} takes a person's yes for each release (release_approval person): maxpm serve "
             f"asks for it when deploy #{item['id']} is ready, and the deploy waits on it")
@@ -8892,32 +8919,65 @@ def release_yes(conn, dep_id, actor="maxpm"):
             return None
         if any(a["status"] != "dropped" for a in _approvals(conn, dep_id)):
             return None  # asked already: an open item waits for the person
-        rows = conn.execute("SELECT i.id, i.title, i.kind, i.status FROM deps d JOIN items i ON i.id=d.blocked_by "
-                            "WHERE d.item_id=? AND i.kind<>'deploy' ORDER BY i.id", (dep_id,)).fetchall()
-        ships = [r for r in rows if r["kind"] != "review" and r["status"] != "dropped"]
-        reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
         gate = release_approval(conn, dep["target"])
-        lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
-        rv = conn.execute("SELECT id, output FROM items WHERE id=?", (reviews[-1]["id"],)).fetchone() if reviews else None
-        context = (f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your sign-off: the "
-                   f"project {gate['project']} says release_approval person.\n"
-                   + (f"Its review #{rv['id']} passed ({_done_by(conn, rv['id']) or 'a reviewer'}): "
-                      f"{(rv['output'] or 'no output')[:400]}\n" if rv else "")
-                   + f"Read its review report: maxpm target report {dep_id}.\nIt ships:\n{lines}\n"
-                   + f"Approve: maxpm done <this id> (only a person); the release then goes out (maxpm serve runs its "
-                   f"deploy hook, or the deployer takes deploy #{dep_id}). Request changes: on its card, or maxpm "
-                   f"release-changes <this id> \"<what must change>\": the review runs again after the fix.")
-        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
-        cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
-                           "VALUES (?,?,?,?,'human',?,'work',?,?)",
-                           (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
-                            dep["priority"], top + 1, context, dep["target"], iso(now())))
-        yes = cur.lastrowid
-        # An approval (#5957): only a person's done closes it, so neither the manager nor a session signs off (#6039).
-        conn.execute("INSERT OR IGNORE INTO approvals(item_id) VALUES (?)", (yes,))
-        _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} (release_approval person)")
-        _dep_add(conn, dep_id, yes, actor, alert=False)
-        _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release (release_approval person)")
+        yes = _add_release_yes(
+            conn, dep, f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your sign-off: "
+                       f"the project {gate['project']} says release_approval person.\n",
+            f"the release then goes out (maxpm serve runs its deploy hook, or the deployer takes deploy #{dep_id})",
+            "release_approval person", actor)
+    sync_needs_you(conn)
+    return yes
+
+
+def _add_release_yes(conn, dep, head, then, why, actor):
+    """Inside a tx: one item for a person, the yes on the release of deploy item dep, which dep waits on. head opens
+    its context; then says what the yes starts. Returns its id."""
+    dep_id = dep["id"]
+    rows = conn.execute("SELECT i.id, i.title, i.kind, i.status FROM deps d JOIN items i ON i.id=d.blocked_by "
+                        "WHERE d.item_id=? AND i.kind<>'deploy' ORDER BY i.id", (dep_id,)).fetchall()
+    ships = [r for r in rows if r["kind"] != "review" and r["status"] != "dropped"]
+    reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
+    lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
+    rv = conn.execute("SELECT id, output FROM items WHERE id=?", (reviews[-1]["id"],)).fetchone() if reviews else None
+    context = (head
+               + (f"Its review #{rv['id']} passed ({_done_by(conn, rv['id']) or 'a reviewer'}): "
+                  f"{(rv['output'] or 'no output')[:400]}\n" if rv else "")
+               + f"Read its review report: maxpm target report {dep_id}.\nIt ships:\n{lines}\n"
+               + f"Approve: maxpm done <this id> (only a person); {then}. Request changes: on its card, or maxpm "
+               f"release-changes <this id> \"<what must change>\": the review runs again after the fix.")
+    top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
+    cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
+                       "VALUES (?,?,?,?,'human',?,'work',?,?)",
+                       (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
+                        dep["priority"], top + 1, context, dep["target"], iso(now())))
+    yes = cur.lastrowid
+    # An approval (#5957): only a person's done closes it, so neither the manager nor a session signs off (#6039).
+    conn.execute("INSERT OR IGNORE INTO approvals(item_id) VALUES (?)", (yes,))
+    _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} ({why})")
+    _dep_add(conn, dep_id, yes, actor, alert=False)
+    _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release ({why})")
+    return yes
+
+
+def _draft_yes(conn, dep_id, tail, actor="maxpm"):
+    """The deploy hook prepared the release and exited HOOK_YES (#6213): one item for a person with what it prepared
+    (the hook's last lines: the draft's link, its files, its notes), which the deploy item waits on. An open yes of
+    this release is kept (no second item). Returns the item's id."""
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        open_yes = [a["id"] for a in _approvals(conn, dep_id) if a["status"] not in CLOSED_STATES]
+        if open_yes:
+            return open_yes[0]
+        said = [x for x in (tail or "").splitlines() if x.strip() and not x.startswith("::step")]
+        yes = _add_release_yes(
+            conn, dep, f"The deploy hook of target {dep['target']} prepared the release of deploy #{dep_id} and waits "
+                       f"for your sign-off before it publishes it (release_approval draft). What it prepared:\n"
+                       + "\n".join(f"  {x}" for x in said[-12:]) + "\n",
+            f"maxpm serve then runs the deploy hook again, which publishes the release ({deploy_hook(conn, dep['target'])})",
+            "the deploy hook prepared it", actor)
+        _event(conn, dep_id, actor, f"deploy hook: the release is prepared; it waits on the person's yes #{yes}")
+        _wake_manager(conn, actor, f"the deploy hook of target {dep['target']} prepared the release of deploy "
+                                   f"#{dep_id}; it waits on the person's yes #{yes}", dep_id, level="low")
     sync_needs_you(conn)
     return yes
 
@@ -8975,11 +9035,14 @@ def deploy_hook_start(conn, dep_id, token=None):
         if token:  # the release-cut hook of that cut runs first, in the same thread as the deploy
             conn.execute("UPDATE hook_runs SET queued_by=? WHERE queued_by=? AND started_at IS NULL AND deploy_id=?",
                          (token, hook_token(), dep["id"]))
-        _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}")
+        # #6213: after the person's yes on the prepared release, the run's item is that yes (MAXPM_APPROVED)
+        yes = _person_yes(conn, dep["id"]) if release_approval(conn, dep["target"])["approval"] == "draft" else None
+        _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}"
+               + (f" (after the person's yes #{yes})" if yes else ""))
         # The manager's watch prints the start with its next wake, at the latest with the end of the deploy (#5382).
         _wake_manager(conn, "maxpm", f"the deploy hook of target {dep['target']} started for deploy #{dep['id']}: {cmd}",
                       dep["id"], level="low")
-        _hook(conn, "deploy", dep["target"], dep["id"], None, token=token)
+        _hook(conn, "deploy", dep["target"], yes or dep["id"], None, deploy_id=dep["id"], token=token)
         run = conn.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=? AND event='deploy'", (dep["id"],)).fetchone()[0]
     return run
 
@@ -9153,9 +9216,11 @@ def hook_runs_cut(conn, serve=None, boot=None):
     return out
 
 
-def _deploy_hook_end(conn, run, ok, result, tail, folder):
+def _deploy_hook_end(conn, run, ok, result, tail, folder, code=None):
     """The deploy hook ended. Exit 0: the deploy item is done (the deployed hook runs).
-    Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
+    Exit HOOK_YES before the person's yes (#6213): the release is prepared; the deploy item stays open and cut, and
+    waits on one item for a person with the hook's last lines (_draft_yes); after the yes maxpm serve runs the hook
+    again with MAXPM_APPROVED. Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
     that it waits on holds the failure, a new review covers the fix (with review on), and when that review passes
     maxpm serve runs the hook again. Nobody runs the command again by hand or repairs production by hand."""
     dep_id, target, cmd = run["deploy_id"], run["target"], run["command"]
@@ -9165,6 +9230,10 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
                      "WHERE id=? AND blocked_set_by=?", (dep_id, DEPLOY_HOOK_BY))
         if dep["status"] != "open":
             return {"deploy_end": f"#{dep_id} is {dep['status']}: nothing to do"}
+    if code == HOOK_YES and not ok:
+        if not _run_approved(run):
+            return {"deploy_end": "waits for a person's yes", "yes": _draft_yes(conn, dep_id, tail)}
+        result = f"asked for a person's yes again after the yes #{run['item_id']} (exit {code})"
     last = (tail or "").strip().splitlines()[-1:] if tail else []
     if ok:
         done(conn, dep_id, f"deploy hook: {result}: {cmd}" + (f" ({last[0][:200]})" if last else ""), "maxpm")

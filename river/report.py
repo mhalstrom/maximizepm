@@ -211,7 +211,7 @@ def summary_set(conn, item_id, text, actor=None):
     sent = []
     # A target that takes a person's yes for each release (release_approval person) shows the report on its approval
     # card: a Read card as well asked the person twice (#6108). A Read card closes with its release (core._close).
-    on_approval = bool(dep["target"]) and core.release_approval(conn, dep["target"])["approval"] == "person"
+    on_approval = bool(dep["target"]) and core.release_approval(conn, dep["target"])["approval"] in ("person", "draft")
     if first and not on_approval and dep["status"] not in core.CLOSED_STATES:
         for p in [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' AND last_seen IS NOT NULL "
                                                     "ORDER BY name")]:

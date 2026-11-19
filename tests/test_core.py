@@ -8802,7 +8802,7 @@ class ReleaseGate(DeployHook):
         for bad in ({}, {"item": self.deploy}, {"agent": "ops"}):
             with self.assertRaisesRegex(RiverError, "set for each project from its needs"):
                 core.config_set(self.c, "release_approval", "person", **bad)
-        with self.assertRaisesRegex(RiverError, "review .* or person"):
+        with self.assertRaisesRegex(RiverError, "review .*, person .* or draft"):
             core.config_set(self.c, "release_approval", "always", project="site")
         self.assertEqual(core.release_approval(self.c, "web"), {"approval": "", "project": None})
         core.config_set(self.c, "release_approval", "person", project="site")
@@ -8946,6 +8946,96 @@ class ReleaseGate(DeployHook):
         self.assertIn("release gate: ships when its review passes (set on site); cadence: 2h (a service with users", text)
         self.assertIn("release cadence: off (why: each push is a release)", text)
         self.assertEqual(core.release_plan(self.c, "web")["cadence_reason"], "each push is a release")
+
+class DraftRelease(DeployHook):
+    """#6213 (mark 2026-11-19: 'the tag to be a final step with a manual approval'): with release_approval draft the
+    deploy hook prepares the release and exits HOOK_YES; MaximizePM adds the person's yes with the hook's last lines;
+    after the yes the hook runs again with MAXPM_APPROVED and finishes. The stages are one line."""
+
+    def draft(self):
+        """The draft hook and release_approval draft (not in setUp: the inherited tests of DeployHook run as before)."""
+        self.seen = os.path.join(self.dir.name, "approved.txt")
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("import os, sys\n"
+                    f"open({self.seen!r}, 'a').write(os.environ.get('MAXPM_APPROVED', '') + '\\n')\n"
+                    "if not os.environ.get('MAXPM_APPROVED'):\n"
+                    "    print('::step start push kind=deploy'); print('::step end push passed')\n"
+                    "    print('github-release: v1.5.0 is prepared and waits for your yes.')\n"
+                    "    print('  the draft: https://github.example/releases/v1.5.0'); sys.exit(76)\n"
+                    "print('::step start tag kind=deploy'); print('::step end tag passed')\n"
+                    "print('released v1.5.0')\n")
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" "{path}"', actor="mark")
+        core.config_set(self.c, "release_approval", "draft", project="site")
+
+    def stages(self):
+        from river.pipeline import targets
+        return {s["name"]: s["last_run"] for s in targets.default_pipeline(self.c, "web")["stages"]}
+
+    def test_the_hook_prepares_the_person_approves_then_the_hook_publishes(self):
+        from river.pipeline import targets
+        self.draft()
+        self.assertEqual(targets.shape(self.c, "web"), ["holding", "review", "deploy", "approval", "publish", "watch"])
+        self.pass_review("rev")
+        self.assertEqual(core.release_yes_pass(self.c), {}, "no yes before the hook prepared the release")
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(False, "waits for a person's yes")])
+        self.assertIn("prepared, waits for a person's yes (exit 76)", r[0]["result"])
+        yes = r[0]["yes"]
+        it = core.item_show(self.c, yes)
+        self.assertTrue(it["title"].startswith("Approve release web: "), it["title"])
+        self.assertIn("  the draft: https://github.example/releases/v1.5.0", it["context"])
+        self.assertNotIn("::step", it["context"])
+        dep = core.item_show(self.c, self.deploy)
+        self.assertEqual(dep["status"], "open")
+        self.assertIsNotNone(core._item(self.c, self.deploy)["cut_at"])
+        self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
+        self.assertEqual([i for i in dep["waits_on"] if core.item_show(self.c, i)["status"] != "done"], [yes])
+        self.assertEqual(core._draft_yes(self.c, self.deploy, ""), yes, "one yes for each preparation")
+        s = self.stages()
+        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["approval"]["item"], s["publish"]),
+                         ("passed", "queued", yes, None))
+        self.assertEqual([x["name"] for x in s["deploy"]["step_list"]], ["push"])
+        with self.assertRaisesRegex(RiverError, "only the person approves it"):
+            core.done(self.c, yes, "yes", "ops")
+        core.done(self.c, yes, "yes", "mark")
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+        with open(self.seen, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines(), ["", str(yes)])
+        s = self.stages()
+        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["publish"]["state"]),
+                         ("passed", "passed", "passed"))
+        self.assertEqual([x["name"] for x in s["publish"]["step_list"]], ["tag"])
+
+    def test_a_failure_after_the_yes_starts_the_release_again_without_it(self):
+        self.draft()
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        with open(self.flag, "w"):
+            pass
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"sys.exit(3 if os.path.exists({self.flag!r}) else 0)\n")
+        r = self.run_deploy()
+        self.assertEqual(r[0]["deploy_end"], "failed")
+        self.assertEqual(core._approvals(self.c, self.deploy), [], "the release takes a new yes")
+        self.assertEqual(self.stages()["publish"]["state"], "failed")
+
+    def test_exit_76_after_the_yes_is_a_failure(self):
+        self.draft()
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("import sys\nsys.exit(76)\n")
+        r = self.run_deploy()
+        self.assertEqual(r[0]["deploy_end"], "failed")
+        self.assertIn("asked for a person's yes again", core.item_show(self.c, r[0]["fix"])["title"])
+
 
 class Hooks(Base):
     """A hook is a command that MaximizePM runs when a release event of a target occurs (maxpm target hook)."""

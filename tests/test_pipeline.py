@@ -1774,10 +1774,10 @@ class DefaultPipelines(Base):
             cli.run(["--as", "mark", "pipeline", "show", "web-prod"])
         self.assertIn("step activate on cell-1: failed, 210s, ended 2026-11-18T10:14:00Z", out.getvalue())
 
-    def test_steps_named_branch_slash_step_are_a_branch_after_deploy(self):
-        """#6186: maximizepm-github's deploy hook pushes main (the deploy), then the tag, the build of the apps and the
-        published files as downloads/<step>: the default pipeline draws 'downloads' on a row of its own after deploy,
-        beside the watch, with each job's link and its state."""
+    def test_a_target_s_stages_never_branch(self):
+        """#6213 (mark 2026-11-19: 'this should not be a branching deploy workflow'): the steps that #6186 named
+        downloads/<step> stay steps of the deploy stage, with their full names; no stage after deploy has a row of its
+        own."""
         dep = self.release("aaaaaaa", "A change")
         link = "https://github.example/actions/runs/7/job/9"
         lines = ["::step start push kind=deploy at=2026-11-19T10:00:00Z",
@@ -1792,25 +1792,16 @@ class DefaultPipelines(Base):
         core._run_hook(self.c, self.hook_run("deploy", cmd, dep), cwd=self.dir.name)
         p = self.targets.default_pipeline(self.c, "web-prod")
         self.assertEqual([(s["name"], s.get("prev")) for s in p["stages"]],
-                         [("holding", None), ("deploy", None), ("watch", None), ("downloads", ["deploy"])])
-        deploy = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
-        self.assertEqual([s["name"] for s in deploy["step_list"]], ["push"])
-        down = next(s for s in p["stages"] if s["name"] == "downloads")
-        self.assertEqual(down["transition"]["from"], ["deploy"])
-        run = down["last_run"]
+                         [("holding", None), ("deploy", None), ("watch", None)])
+        run = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
         self.assertEqual([(s["name"], s["state"]) for s in run["step_list"]],
-                         [("tag", "passed"), ("build-checks", "passed"), ("build-mac", "failed")])
+                         [("push", "passed"), ("downloads/tag", "passed"), ("downloads/build-checks", "passed"),
+                          ("downloads/build-mac", "failed")])
         self.assertEqual(run["state"], "failed")
-        self.assertEqual(run["errors"], f"step build-mac failed: {link}")
-        self.assertEqual(p["releases"][0]["stages"]["downloads"]["state"], "failed")
-        # Versions in downloads: the release that reached it, as for any stage of the target.
+        self.assertEqual(set(p["releases"][0]["stages"]), {"holding", "deploy"})
         from river.pipeline import store
-        versions = store.stage_versions(self.c, "web-prod", "downloads")
-        self.assertEqual([(r["deploy"], r["state"]) for r in versions["runs"]], [(dep, "failed")])
-        # A deploy hook with no such steps has no branch.
-        core.target_add(self.c, "plain-prod", "deploys", None)
-        self.assertEqual([s["name"] for s in self.targets.default_pipeline(self.c, "plain-prod")["stages"]],
-                         ["holding", "deploy", "watch"])
+        with self.assertRaisesRegex(core.RiverError, "has no stage downloads"):
+            store.stage_versions(self.c, "web-prod", "downloads")
 
     def test_the_steps_show_while_the_hook_runs(self):
         import threading

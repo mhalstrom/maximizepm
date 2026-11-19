@@ -234,6 +234,9 @@ def _release_lines(p):
     gate = p.get("approval") or {}
     if gate.get("approval") == "person":
         out = [f"release gate: a person's yes for each release (release_approval person, project {gate['project']})"]
+    elif gate.get("approval") == "draft":
+        out = [f"release gate: the deploy hook prepares each release as a draft, a person approves the draft, then the "
+               f"hook publishes it (release_approval draft, project {gate['project']})"]
     elif gate.get("approval") == "review":
         out = [f"release gate: a release goes out when its review passes (release_approval review, project "
                f"{gate['project']})"]

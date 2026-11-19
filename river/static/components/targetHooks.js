@@ -7,8 +7,11 @@ import { esc, ago, clip } from "../lib.js";
 export function hookRun(last) {
   if (!last) return { text: "never ran", item: null, bad: false };
   if (!last.ended_at) return { text: last.started_at ? "runs now" : "waits to run", item: last.item_id, bad: false };
-  const result = last.timed_out ? "stopped at hook_timeout" : last.exit_code == null ? "not started" : "exit " + last.exit_code;
-  return { text: `${result}, ${ago(last.ended_at)}`, item: last.item_id, bad: !!last.timed_out || last.exit_code !== 0 };
+  // #6213: a deploy hook that exits 76 (core.HOOK_YES) prepared the release and waits for the person's yes.
+  const prepared = !last.timed_out && last.exit_code === 76 && last.deploy_id != null && last.item_id === last.deploy_id;
+  const result = last.timed_out ? "stopped at hook_timeout" : last.exit_code == null ? "not started"
+    : prepared ? "prepared, waits for a yes" : "exit " + last.exit_code;
+  return { text: `${result}, ${ago(last.ended_at)}`, item: last.item_id, bad: !prepared && (!!last.timed_out || last.exit_code !== 0) };
 }
 
 // t: a target of the state (name, hooks). events: {event: when it occurs} (state.hook_events), in their order.
