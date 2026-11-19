@@ -1080,11 +1080,14 @@ What the job does, in order:
    dollars) and the tools of `--allow` (default: read and change files, `git`
    status, diff, log, show, add and commit, and the first word of `--test`);
    or `codex exec --json` in its workspace-write sandbox. The agent commits
-   its fix. It cannot push: its step has no token.
-3. When the agent committed: runs `--test`, pushes the commit to the branch
-   `maxpm/fix-<failed run id>`, and opens a pull request into the branch that
-   failed.
-4. Uploads the artifact `maxpm-agent`: `proof.json` (`commit`, `branch`, `pr`,
+   its fix. It cannot push: its job's token only reads.
+3. When the agent committed: runs `--test` with no token, and keeps the
+   commits as a git bundle.
+4. The job `maxpm-push`, on a new runner with a clean checkout, pushes the
+   bundle's commits to the branch `maxpm/fix-<failed run id>` and opens a pull
+   request into the branch that failed. Only this job's token can write, and
+   no code of the agent runs in it.
+5. Uploads the artifact `maxpm-agent`: `proof.json` (`commit`, `branch`, `pr`,
    `test` with its command, exit code and last line, `agent_exit`, `error`),
    the transcript and the logs. GitHub stops the job after `--max-minutes`
    (30).

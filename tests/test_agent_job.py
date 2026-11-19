@@ -82,6 +82,22 @@ class AgentJob(Base):
                      "'Bash(git commit:*)' 'Bash(python3:*)'", "name: maxpm-agent", "--permission-mode dontAsk"):
             self.assertIn(part, text)
         self.assertNotIn("git push", text.split("- name: Push the fix")[0])  # the agent's steps hold no push
+        # #6177: the agent's job only reads (a step can read the job's token from the runner's memory); the test
+        # runs there with no token; the push is in a job of its own, on a new runner, with no hook.
+        agent_part, push_part = text.split("  maxpm-push:")
+        self.assertIn("permissions: {}", agent_part)
+        self.assertIn("    permissions:\n      contents: read\n      actions: read\n", agent_part)
+        self.assertNotIn("write", agent_part.split("jobs:")[1])
+        test_step = agent_part.split("- name: Test the fix")[1].split("- name:")[0]
+        self.assertIn('bash -c "$MAXPM_TEST"', test_step)
+        self.assertNotIn("TOKEN", test_step)
+        self.assertIn('git bundle create "$MAXPM_OUT/fix.bundle" HEAD "^$FAILED"', agent_part)
+        self.assertNotIn('bash -c "$MAXPM_TEST"', push_part)  # the push job runs no code of the agent
+        for part in ("needs: maxpm-agent", "contents: write", "pull-requests: write", "name: maxpm-agent-work",
+                     'git fetch -q "$MAXPM_OUT/fix.bundle" HEAD', "git -c core.hooksPath=/dev/null push",
+                     "python3 -I -c", "python3 -I - <<"):
+            self.assertIn(part, push_part)
+        self.assertNotIn("python3 -c", text)
         rule = triggers.rules(self.c, "mpm")["rules"][0]
         self.assertEqual(rule["runner"], "github")
         self.assertIn("now runs its agent in GitHub Actions", res["rules"][0])

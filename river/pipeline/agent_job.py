@@ -16,8 +16,10 @@ github plugin, once a minute), the same path that brings the stage runs:
    agent record github-r<run>, so maxpm serve starts no session here for it.
 3. The job reads the failed log, runs the agent CLI with no terminal and no prompt (the model key is a repository
    secret that a person sets: policy g6, nobody searches for keys), and the agent commits its fix. The job then runs
-   the proof command, pushes the commit to the branch maxpm/fix-<failed run id>, opens a pull request, and uploads
-   the artifact maxpm-agent: proof.json and the transcript.
+   the proof command with no token, and keeps the fix as a git bundle. Its token only reads: a step can read a job's
+   token from the runner's memory (#6177). The job maxpm-push, on a new runner with a clean checkout, pushes the
+   bundle's commits to the branch maxpm/fix-<failed run id> with no hook, opens a pull request, and uploads the
+   artifact maxpm-agent: proof.json and the transcript.
 4. Each poll asks the plugin about the open runs (open_runs): the plugin answers "agents" with the job's state, and
    at its end the proof and the transcript; take() keeps them. The run ends as a runner run ends (runners._end): the
    task, still open, goes back to the queue with the proof in a note, and the manager hears of it. The session that
@@ -88,6 +90,8 @@ CHANGE = {"github": "pull request", "gitlab": "merge request", "pulumi": "pull r
 IMAGE = "node:20"  # GitLab: the job's image (it has npm, git and python3); maxpm runner gitlab --image changes it
 TOKEN_VAR = "MAXPM_GITLAB_TOKEN"  # GitLab: the CI/CD variable with a project access token (the logs and the push)
 JOB = "maxpm-agent"     # the job's name, and the name of its artifact
+PUSH_JOB = "maxpm-push"  # GitHub: the job after the agent's, on a new runner, that pushes the fix (#6177)
+WORK = "maxpm-agent-work"  # GitHub: the agent job's artifact for the push job (the fix as a git bundle, the logs)
 OUT = "/tmp/maxpm-agent"  # the job's own files on the runner (the log, the transcript, the proof): the artifact
 QUEUE_MAX = 30 * 60     # seconds: a run whose job the forge did not show by then fails
 RUN_MAX = 6 * 3600      # seconds: GitHub ends a job after 6 hours
@@ -466,10 +470,11 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         "  workflow_run:",
         f"    workflows: [{', '.join(_yaml_str(n) for n in names)}]",
         "    types: [completed]",
-        "permissions:",
-        "  contents: write",
-        "  pull-requests: write",
-        "  actions: read",
+        "permissions: {}",
+        "env:",
+        f"  MAXPM_OUT: {OUT}",
+        f"  MAXPM_TEST: {_yaml_str(test or '')}",
+        "  FAILED: ${{ github.event.workflow_run.head_sha }}",
         "concurrency:",
         f"  group: {JOB}-{run}",
         "jobs:",
@@ -482,9 +487,11 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         "      github.event.workflow_run.head_repository.full_name == github.repository",
         "    runs-on: ubuntu-latest",
         f"    timeout-minutes: {int(max_minutes)}",
-        "    env:",
-        f"      MAXPM_OUT: {OUT}",
-        f"      MAXPM_TEST: {_yaml_str(test or '')}",
+        "    # The agent's code runs in this job, and any step of a job can read the job's token from the runner's",
+        "    # memory (sudo): this token only reads. The job after it pushes, on a new runner (#6177).",
+        "    permissions:",
+        "      contents: read",
+        "      actions: read",
         "    steps:",
         "      - uses: actions/checkout@v4",
         "        with:",
@@ -507,35 +514,81 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         '          git config user.name "maxpm-agent"',
         '          git config user.email "maxpm-agent@users.noreply.github.com"',
         f"          {agent}",
+        "      - name: Test the fix",
+        "        # The test runs the agent's code: no token in its environment.",
+        "        if: always()",
+        "        run: |",
+        '          mkdir -p "$MAXPM_OUT"',
+        '          if [ "$(git rev-parse HEAD)" != "$FAILED" ] && [ -n "$MAXPM_TEST" ]; then',
+        '            bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; echo $? > "$MAXPM_OUT/test-exit"',
+        "          fi",
+        "      - name: Keep the fix for the push",
+        "        # Only the commits go to the push job, as a git bundle: no hook and no setting of this checkout.",
+        "        if: always()",
+        "        run: |",
+        '          mkdir -p "$MAXPM_OUT"; rm -f "$MAXPM_OUT/fix.bundle"',
+        '          if [ "$(git rev-parse HEAD)" != "$FAILED" ]; then',
+        '            git bundle create "$MAXPM_OUT/fix.bundle" HEAD "^$FAILED" 2> "$MAXPM_OUT/bundle.err" || true',
+        "          fi",
+        "      - uses: actions/upload-artifact@v4",
+        "        if: always()",
+        "        with:",
+        f"          name: {WORK}",
+        f"          path: {OUT}",
+        "          retention-days: 1",
+        f"  {PUSH_JOB}:",
+        "    # A new runner: nothing of the agent's job runs here. Only this job's token can write.",
+        f"    needs: {JOB}",
+        f"    if: ${{{{ !cancelled() && needs.{JOB}.result != 'skipped' }}}}",
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 10",
+        "    permissions:",
+        "      contents: write",
+        "      pull-requests: write",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "        with:",
+        "          ref: ${{ github.event.workflow_run.head_sha }}",
+        "          persist-credentials: false",
+        "      - uses: actions/download-artifact@v4",
+        "        continue-on-error: true",
+        "        with:",
+        f"          name: {WORK}",
+        f"          path: {OUT}",
         "      - name: Push the fix and open a pull request",
         "        if: always()",
         "        env:",
         "          GH_TOKEN: ${{ github.token }}",
         "          BASE: ${{ github.event.workflow_run.head_branch }}",
-        "          FAILED: ${{ github.event.workflow_run.head_sha }}",
         "          WORKFLOW: ${{ github.event.workflow_run.name }}",
         "        run: |",
         "          set +e",
         '          mkdir -p "$MAXPM_OUT"',
-        '          head=$(git rev-parse HEAD)',
-        '          branch=""; pr=""; error=""; test_exit=""',
-        '          if [ "$head" != "$FAILED" ]; then',
-        '            if [ -n "$MAXPM_TEST" ]; then',
-        '              bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; test_exit=$?',
-        "            fi",
-        f'            branch="maxpm/fix-{run}"',
-        '            if git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"; then',
-        '              python3 -c \'import json,sys; t=[json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]; '
+        '          head="$FAILED"; branch=""; pr=""; error=""',
+        '          test_exit=$(cat "$MAXPM_OUT/test-exit" 2>/dev/null)',
+        '          case "$test_exit" in ""|*[!0-9]*) test_exit="";; esac',
+        '          if [ -f "$MAXPM_OUT/fix.bundle" ]; then',
+        '            if git fetch -q "$MAXPM_OUT/fix.bundle" HEAD 2> "$MAXPM_OUT/fetch.err"; then',
+        "              head=$(git rev-parse FETCH_HEAD)",
+        f'              branch="maxpm/fix-{run}"',
+        '              if git -c core.hooksPath=/dev/null push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$head:refs/heads/$branch"; then',
+        '                python3 -I -c \'import json,sys; t=[json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]; '
         'r=[x.get("result") for x in t if x.get("type")=="result"]; print((r[-1] if r else "") or "The agent of MaximizePM made this fix.")\' '
         '"$MAXPM_OUT/transcript.jsonl" > "$MAXPM_OUT/summary.md" 2>/dev/null || echo "The agent of MaximizePM made this fix." > "$MAXPM_OUT/summary.md"',
-        '              pr=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" '
+        '                pr=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" '
         '--title "maxpm agent: fix $WORKFLOW for ${FAILED:0:7}" --body-file "$MAXPM_OUT/summary.md" 2>"$MAXPM_OUT/pr.err") '
         '|| error="no pull request: $(tail -1 "$MAXPM_OUT/pr.err")"',
+        "              else",
+        '                error="the push of $branch failed"',
+        "              fi",
         "            else",
-        '              error="the push of $branch failed"',
+        '              error="the fix did not come from the agent job: $(tail -1 "$MAXPM_OUT/fetch.err")"',
         "            fi",
+        '          elif [ -s "$MAXPM_OUT/bundle.err" ]; then',
+        '            error="no bundle of the fix: $(tail -1 "$MAXPM_OUT/bundle.err")"',
         "          fi",
-        '          HEAD_SHA="$head" BRANCH="$branch" PR="$pr" ERROR="$error" TEST_EXIT="$test_exit" python3 - <<\'EOF\'',
+        '          rm -f "$MAXPM_OUT/fix.bundle"',
+        '          HEAD_SHA="$head" BRANCH="$branch" PR="$pr" ERROR="$error" TEST_EXIT="$test_exit" python3 -I - <<\'EOF\'',
         "          import json, os",
         '          out = os.environ["MAXPM_OUT"]',
         "          def tail(name):",
