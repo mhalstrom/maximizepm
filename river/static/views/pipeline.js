@@ -158,8 +158,9 @@ function running(D) {
 // - while a stage runs, the page reads the pipeline each second (pace), not every 3 s: a new step or state shows
 //   at once. Nothing runs: no timer.
 const clock = (n) => {
-  const s = Math.max(0, Math.floor(n)), two = (v) => String(v).padStart(2, "0");
-  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${two(s % 60)}s` : `${Math.floor(s / 3600)}h ${two(Math.floor(s / 60) % 60)}m`;
+  // pad2, not two: the page's guard reads a call of two() as form.js's helper (#6219)
+  const s = Math.max(0, Math.floor(n)), pad2 = (v) => String(v).padStart(2, "0");
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${pad2(s % 60)}s` : `${Math.floor(s / 3600)}h ${pad2(Math.floor(s / 60) % 60)}m`;
 };
 const sinceIso = (iso) => (Date.now() - Date.parse(iso)) / 1000;
 const runFor = (iso) => `<span data-pl-tick="${esc(iso)}">${clock(sinceIso(iso))}</span>`;
