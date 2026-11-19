@@ -226,15 +226,19 @@ def release_marks(conn, agent, days=14, limit=20):
     """The report blocks of a session's chat (#6031, mark 2026-11-16: 'this is not a rule this should be built into the
     platform'): each release that this session cut (core._release_cut) or started (it claimed the deploy item), and for
     the manager every cut. [{id, at, kind: cut|start, by, target, tasks}], oldest first; the page puts each one into
-    the chat at its time and reads its numbers from GET /api/report/<id>."""
+    the chat at its time and reads its numbers from GET /api/report/<id>. Only releases that are not out yet (the
+    deploy item open): a release that went out has no block, so a new manager's chat starts with no report of the
+    releases before it (#6180, mark 2026-11-19)."""
     me = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
     manager = bool(me and me["role"] == "manager")
     since = core.iso(core.now() - core.timedelta(days=days))
+    states = core.OPEN_STATES
     rows = conn.execute(
         "SELECT e.item_id, e.at, e.actor, e.change, i.target FROM events e JOIN items i ON i.id=e.item_id "
-        "WHERE i.kind='deploy' AND e.at>=? AND (e.change LIKE 'release cut%' OR e.change LIKE 'claimed (%') "
+        f"WHERE i.kind='deploy' AND i.status IN ({','.join('?' * len(states))}) AND e.at>=? "
+        "AND (e.change LIKE 'release cut%' OR e.change LIKE 'claimed (%') "
         "AND (e.actor=? OR (? AND e.change LIKE 'release cut%')) ORDER BY e.id DESC LIMIT ?",
-        (since, agent, 1 if manager else 0, limit)).fetchall()
+        (*states, since, agent, 1 if manager else 0, limit)).fetchall()
     out, seen = [], set()
     for r in rows:
         kind = "cut" if r["change"].startswith("release cut") else "start"

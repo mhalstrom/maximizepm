@@ -14687,10 +14687,28 @@ class ReleaseReport(Base):
                          [(self.deploy, "cut", "ops", 3)])
         self.assertEqual([m["kind"] for m in report.release_marks(self.c, "boss")], ["cut"])
         self.assertEqual(report.release_marks(self.c, "dev"), [])
+        core.register(self.c, "dep")
         with core.tx(self.c):  # the deployer claims the deploy item: the deploy starts
             core._event(self.c, self.deploy, "dep", "claimed (lease 30m)")
         self.assertEqual([m["kind"] for m in report.release_marks(self.c, "dep")], ["start"])
         self.assertEqual(sessions._report_marks(self.c, "ops")[0]["id"], self.deploy)
+
+    def test_a_release_that_went_out_has_no_block(self):
+        # #6180 (mark 2026-11-19): a new manager's chat showed a block for every cut of the last 14 days. A block shows
+        # only while the release is not out yet (its deploy item open); after it went out (done or dropped), none,
+        # for the manager and for the session that cut it.
+        from river import report
+        core.register(self.c, "ops")
+        core.target_own(self.c, "web", "ops")
+        core.target_cut(self.c, "web", actor="ops")
+        core.register(self.c, "manager-new")
+        core._set_role_note(self.c, "manager-new", "manager", None)
+        self.assertEqual([m["id"] for m in report.release_marks(self.c, "manager-new")], [self.deploy])
+        for status in ("done", "dropped"):
+            with core.tx(self.c):
+                self.c.execute("UPDATE items SET status=? WHERE id=?", (status, self.deploy))
+            self.assertEqual(report.release_marks(self.c, "manager-new"), [], status)
+            self.assertEqual(report.release_marks(self.c, "ops"), [], status)
 
     def test_the_cli_report_and_who_may_write_the_summary(self):
         from river import cli
