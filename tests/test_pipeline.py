@@ -1697,6 +1697,52 @@ class DefaultPipelines(Base):
         self.assertEqual([s["state"] for s in runs["deploy"]["step_list"]], ["failed", "passed"])
         self.assertEqual(runs["watch"]["step_list"][0]["name"], "web-prod/up")
 
+    def test_the_watch_has_one_row_for_each_check(self):
+        """#6181: toolscaled-prod's watch listed every run of every check (hundreds of rows). It has one step for each
+        check: its last result, its runs and failed runs, the newest failed runs; every run of one check on request."""
+        start = core.now() - core.timedelta(hours=2)
+        dep = self.release("aaaaaaa", "A change")
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(start), dep))
+        ids = {}
+        for name in ("up", "errors", "shell"):
+            ids[name] = self.c.execute(
+                "INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
+                "severity, created_at) VALUES ('target','web-prod',?,'http','{}','1m',1,1,'10s','item',?)",
+                (name, core.iso(start))).lastrowid
+        for n in range(100):
+            at = core.iso(start + core.timedelta(minutes=n + 1))
+            for name, cid in ids.items():
+                bad = name == "errors" and n in (40, 41)
+                self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status, summary) VALUES "
+                               "(?, 'k', ?, ?, ?, ?)", (cid, at, at, "critical" if bad else "ok",
+                                                         f"5xx at {n}" if bad else "fine"))
+        w = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
+                 if s["name"] == "watch")["last_run"]
+        self.assertEqual(w["state"], "failed")
+        rows = w["step_list"]
+        self.assertEqual([(s["name"], s["state"], s["runs"], s["failed"]) for s in rows],
+                         [("web-prod/errors", "passed", 100, 2), ("web-prod/shell", "passed", 100, 0),
+                          ("web-prod/up", "passed", 100, 0)])  # the checks that failed first
+        self.assertEqual([f["summary"] for f in rows[0]["fails"]], ["5xx at 41", "5xx at 40"])  # newest first
+        self.assertEqual(w["errors"], "2 failed check run(s): web-prod/errors (passes now)")
+        runs = self.targets.watch_runs(self.c, ids["errors"], w["started_at"], w["watch_end"])
+        self.assertEqual((runs["check"], len(runs["runs"])), ("web-prod/errors", 100))
+        self.assertEqual(runs["runs"][58]["state"], "failed")  # newest first: run 41 is the 59th
+        # The route: GET /api/pipeline-check-runs.
+        from river.routes import pipeline as routes
+        from urllib.parse import quote
+        got = routes.check_runs(self.c, f"/api/pipeline-check-runs?check={ids['up']}&from={quote(w['started_at'])}"
+                                        f"&to={quote(w['watch_end'])}")
+        self.assertEqual(len(got["runs"]), 100)
+        with self.assertRaises(core.RiverError):
+            routes.check_runs(self.c, "/api/pipeline-check-runs?check=1")
+        # A check that still fails after the watch says so.
+        self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status) VALUES (?, 'k', ?, ?, "
+                       "'critical')", (ids["errors"], core.iso(core.now()), core.iso(core.now())))
+        w = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
+                 if s["name"] == "watch")["last_run"]
+        self.assertIn("web-prod/errors (fails now)", w["errors"])
+
     def hook_run(self, event, command, dep):
         hid = self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, rev, queued_at, started_at) "
                              "VALUES ('web-prod',?,?,?, 'aaaaaaa', ?, ?)",

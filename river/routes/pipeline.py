@@ -287,6 +287,16 @@ def item(conn, path):
     return _links().item_versions(conn, int(path.rsplit("/", 1)[1]))
 
 
+def check_runs(conn, path):
+    """GET /api/pipeline-check-runs?check=<id>&from=<iso>&to=<iso>: every run of one check in a release's watch
+    (#6181), for the row of the check that a click opens."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    if not q.get("check") or not q.get("from") or not q.get("to"):
+        raise RiverError("name the check and the watch: ?check=<id>&from=<time>&to=<time>")
+    return targets.watch_runs(conn, int(q["check"][0]), q["from"][0], q["to"][0])
+
+
 def stage_runs(conn, path):
     """GET /api/pipeline-stage?pipeline=<name>&stage=<stage>: Versions in <stage> (#6141)."""
     from urllib.parse import parse_qs, urlsplit
@@ -298,6 +308,7 @@ def stage_runs(conn, path):
 
 GET += [
     (lambda path: path == "/api/pipeline-stage", _with(stage_runs, query=True)),
+    (lambda path: path == "/api/pipeline-check-runs", _with(check_runs, query=True)),  # #6181
     (lambda path: path == "/api/pipeline-emergency", _with(emergency_plan, query=True)),
     (lambda path: path == "/api/pipeline-versions", _with(definition_versions, query=True)),  # #6143
     (lambda path: path.startswith("/api/pipeline-triggers/"), _with(trigger_rules)),

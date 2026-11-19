@@ -11,6 +11,7 @@
 import { $, esc, getJson, ago, left, copyText, toast, act } from "../lib.js";
 import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
+import { OPEN_MARK } from "../components/rowOpen.js";
 import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
@@ -31,6 +32,8 @@ const STATE_MARK = { disabled: ["⏸", "disabled", "c-waiting"], blocked: ["⛔"
 const NEEDS_YES = ["yes", "release", "delay"];
 
 const st = (s, word) => `<span class="pl-st ${esc(s || "none")}">● ${esc(word || WORD[s] || s || "no run yet")}</span>`;
+// The end of a run: a watch that failed before its window closed has its end ahead (#6181: "ended -68398s ago").
+const endText = (iso) => Date.parse(iso) > Date.now() ? `ends in ${left(iso)}` : ago(iso);
 const short = (rev) => rev && /^[0-9a-f]{12,}$/.test(rev) ? rev.slice(0, 7) : rev || "";
 const secs = (n) => n == null ? "" : n < 90 ? `${Math.round(n)}s` : n < 5400 ? `${Math.round(n / 60)}m` : `${Math.round(n / 3600)}h`;
 
@@ -117,7 +120,7 @@ function stageCardOnly(s) {
   const r = s.last_run, live = r && s.env && r.state === "passed";
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
   const meta = !r ? "" : r.state === "queued" && r.gate_note ? r.gate_note
-    : r.ended_at ? `${WORD[r.state] || r.state} ${ago(r.ended_at)}` : r.started_at ? `since ${ago(r.started_at)}` : "";
+    : r.ended_at ? `${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}` : r.started_at ? `since ${ago(r.started_at)}` : "";
   return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
@@ -378,6 +381,49 @@ function gantt(steps) {
   }).join("")}</div>`;
 }
 
+// The watch of a release (#6181): one row for each check of the target, its name on one line, its last result in the
+// watch, its runs and failed runs, and the newest failed runs with their summary. A click on the row opens every run
+// of the check in the watch (GET api/pipeline-check-runs); a second click closes it. Before, each run was a row of the
+// time line: a check every few minutes for 24 hours made a page over 30000 px tall.
+const WV = { key: null, runs: null };
+const watchKey = (r, x) => `${x.check}|${r.started_at}|${r.watch_end}`;
+
+function watchHtml(r) {
+  const rows = (r.step_list || []).map(x => {
+    const k = watchKey(r, x), open = WV.key === k, fails = x.fails || [];
+    const failText = fails.map(f => `<div><span class="mono">${esc(when(f.at))}</span> ${esc(f.summary || "")}</div>`).join("")
+      + (x.failed > fails.length ? `<div class="muted">and ${x.failed - fails.length} more</div>` : "");
+    const now = x.now && x.now !== x.state ? ` <span class="muted">now ${esc(WORD[x.now] || x.now)}</span>` : "";
+    return `<tr class="clickrow" data-pl-check="${esc(k)}" aria-expanded="${open}"><td class="pl-cname"><span class="title">${esc(x.name)}</span></td>
+      <td>${st(x.state)}${now}</td><td class="pl-n">${x.runs} run${x.runs === 1 ? "" : "s"}</td>
+      <td class="pl-n">${x.failed ? `<span class="c-warn">${x.failed} failed</span>` : "none failed"}</td>
+      <td class="t-s pl-wide">${failText}</td><td class="pl-open">${OPEN_MARK}</td></tr>`
+      + (open ? `<tr class="pl-allruns"><td colspan="6">${allRuns()}</td></tr>` : "");
+  }).join("");
+  return `<div class="pl-table"><table class="pl-checks"><tr class="pl-th"><th>Check</th><th>Last result</th><th>Runs</th>
+    <th>Failed</th><th>Failed runs, newest first</th><th></th></tr>${rows}</table></div>`;
+}
+
+function allRuns() {
+  if (!WV.runs) return `<div class="muted t-s">Reading the runs…</div>`;
+  if (WV.runs.error) return `<div class="c-warn t-s">${esc(WV.runs.error)}</div>`;
+  if (!WV.runs.runs.length) return `<div class="muted t-s">No run in the watch.</div>`;
+  return `<div class="pl-runlist t-s">${WV.runs.runs.map(x => `<div><span class="mono">${esc(when(x.at))}</span> ${st(x.state)}
+    ${x.summary ? `<span class="muted">${esc(x.summary)}</span>` : ""}</div>`).join("")}</div>`;
+}
+
+async function toggleCheck(k) {
+  if (WV.key === k) { WV.key = null; WV.runs = null; }
+  else {
+    WV.key = k; WV.runs = null;
+    const [check, from, to] = k.split("|");
+    getJson(`api/pipeline-check-runs?check=${encodeURIComponent(check)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
+      .then(R => { if (WV.key === k) WV.runs = R; }, e => { if (WV.key === k) WV.runs = { error: String(e.message || e) }; })
+      .then(() => { if ($("#plDetail")) $("#plDetail").innerHTML = detail(); });
+  }
+  if ($("#plDetail")) $("#plDetail").innerHTML = detail();
+}
+
 // ---- the detail of the chosen transition: each control with who set it and until when, and its buttons
 
 const when = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
@@ -443,12 +489,12 @@ function detail() {
   const when = r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
   const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
     + (r.fault_item ? ` · fault <span class="link" data-open="${r.fault_item}">#${r.fault_item}</span>` : "");
-  return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ended ${esc(ago(r.ended_at))}` : ""}${item}</span></div>`
+  return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ${Date.parse(r.ended_at) > Date.now() ? "" : "ended "}${esc(endText(r.ended_at))}` : ""}${item}</span></div>`
     + (r.gate_note && r.state === "queued" ? `<div class="t-s">At the transition: ${esc(r.gate_note)}</div>` : "")
     + stageActions(s, r)
     + (r.errors ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
     + wavesHtml(s, r)
-    + gantt(r.step_list || [])
+    + (r.watch_end ? watchHtml(r) : gantt(r.step_list || []))
     + (r.output ? `<pre class="pl-pre">${esc(r.output)}</pre>` : "")
     + (r.test_list && r.test_list.length ? tests(r) : "")
     + keysHtml(s);
@@ -668,8 +714,9 @@ $("#dpStages").addEventListener("click", (e) => {
   }
   const run = e.target.closest("[data-pl-run-stage]");  // Run: a stage that starts manually (#6138)
   if (run) return doAct("pipeline_run_stage", { stage: run.dataset.plRunStage, rev: run.dataset.rev || null });
-  const t = e.target.closest("[data-pl-stage],[data-pl-arrow],[data-pl-filter],[data-pl-copy]");
+  const t = e.target.closest("[data-pl-stage],[data-pl-arrow],[data-pl-filter],[data-pl-copy],[data-pl-check]");
   if (!t) return;
+  if (t.dataset.plCheck) return toggleCheck(t.dataset.plCheck);  // #6181: every run of the check in the watch
   if (t.dataset.plArrow) { V.arrow = t.dataset.plArrow; sig = ""; draw(); return; }
   if (t.dataset.plStage) { V.stage = t.dataset.plStage; V.arrow = null; V.run = null; runSig = ""; draw(); return refreshRun(true); }
   if (t.dataset.plFilter) { V.filter = t.dataset.plFilter; runSig = ""; return refreshRun(true); }

@@ -235,6 +235,76 @@ try {
             self.assertIn("ran", r["runs"], r)
             self.assertTrue(r["stop"], r)  # the waiting run can be stopped
 
+    def test_the_watch_of_a_release_has_one_row_for_each_check(self):
+        """#6181: the watch of toolscaled-prod's release listed every check run in a narrow column, a page over
+        30000 px tall. Now one row for each check, its name on one line; a click opens its runs. At 1500 and 390 px."""
+        core.target_add(self.c, "web-prod", "deploys web", None)
+        core.project_add(self.c, "web", target="web-prod")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MAX(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "web-prod", rev="abc1234", actor=None)
+        start = core.now() - core.timedelta(hours=5)
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(start), dep))
+        for name in ("host-check-edge-cell-long-name", "backend-errors", "mcp-endpoint"):
+            cid = self.c.execute(
+                "INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
+                "severity, created_at) VALUES ('target','web-prod',?,'http','{}','1m',1,1,'10s','item',?)",
+                (name, core.iso(start))).lastrowid
+            for n in range(240):
+                at = core.iso(start + core.timedelta(minutes=n + 1))
+                bad = name == "backend-errors" and n in (100, 101)
+                self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status, summary) VALUES "
+                               "(?, 'k', ?, ?, ?, ?)", (cid, at, at, "critical" if bad else "ok",
+                                                         "3 errors in the backend log" if bad else "fine"))
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="web-prod"]'), "Deploy: the target web-prod");
+  q('#dpList [data-dp-open="web-prod"]').click();
+  await until(() => q('#plRow [data-pl-stage="watch"]'), "the stages of web-prod");
+  q('#plRow [data-pl-stage="watch"]').click();
+  await until(() => q("#plDetail .pl-checks"), "the checks of the watch");
+  const rows = [...q("#plDetail").querySelectorAll("tr[data-pl-check]")];
+  const name = r => r.querySelector(".pl-cname .title");
+  const out = { rows: rows.length, names: rows.map(r => name(r).textContent.trim()),
+    oneLine: rows.every(r => name(r).getClientRects().length === 1),
+    card: q('#plRow [data-pl-stage="watch"]').textContent.replace(/\s+/g, " "),
+    height: q("#plDetail").getBoundingClientRect().height, text: q("#plDetail").textContent.replace(/\s+/g, " "),
+    dots: q('#plRow [data-pl-stage="watch"]').querySelectorAll(".pl-dot").length,
+    over: [...q("#plDetail").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5)
+      .map(e => e.tagName + "." + e.className).slice(0, 5) };
+  rows[0].click();
+  await until(() => q("#plDetail .pl-runlist"), "the runs of the first check");
+  out.runs = q("#plDetail .pl-runlist").children.length;
+  out.overOpen = [...q("#plDetail").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5)
+    .map(e => e.tagName + "." + e.className).slice(0, 5);
+  out.openHeight = q("#plDetail").getBoundingClientRect().height;
+  q("#plDetail tr[data-pl-check]").click();
+  await until(() => !q("#plDetail .pl-runlist"), "the runs close");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertEqual(r["rows"], 3, r)
+            self.assertEqual(r["names"][0], "web-prod/backend-errors", r)  # the check that failed first
+            self.assertIn("2 failed check run(s): web-prod/backend-errors (passes now)", r["text"], r)
+            self.assertIn("3 errors in the backend log", r["text"], r)
+            self.assertIn("240 runs", r["text"], r)
+            self.assertIn("ends in 19h", r["text"], r)  # the watch failed before its 24 hours ended
+            self.assertIn("failed, ends in 19h", r["card"], r)
+            self.assertNotIn("s ago", r["text"].split("2 failed")[0], r)
+            self.assertEqual(r["dots"], 3, r)  # one dot for each check on the stage card
+            self.assertLess(r["height"], 1200, r)
+            self.assertEqual(r["over"], [], r)
+            self.assertEqual(r["overOpen"], [], r)
+            self.assertEqual(r["runs"], 240, r)
+            self.assertLess(r["openHeight"], 1600, r)  # the runs scroll in their own box
+            if size.startswith("1500"):
+                self.assertTrue(r["oneLine"], r)
+
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one
         changed, and Go back makes one more version. At 1280 and at 390 px, nothing wider than the page."""

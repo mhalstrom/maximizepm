@@ -83,6 +83,12 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
 .pl-table th { color: var(--muted); font-weight: 500; font-size: var(--fs-s); }
 .pl-table .mono { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); white-space: nowrap; }
 .pl-table tr.live td { background: var(--human-bg); }
+/* The watch of a release (#6181): one row for each check; the name on one line, the failed runs in the wide column. */
+.pl-checks .pl-cname, .pl-checks .pl-n { white-space: nowrap; }
+.pl-checks .pl-wide { width: 100%; }
+.pl-checks .pl-open { text-align: right; }
+.pl-checks tr.pl-allruns td { background: var(--bg); }
+.pl-runlist { display: flex; flex-direction: column; gap: var(--sp-1); max-height: var(--h-pre); overflow-y: auto; }
 .pl-suite { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .pl-suite .pl-sname { min-width: var(--w-xs); font-size: var(--fs-s); color: var(--muted); }
 .pl-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
@@ -109,6 +115,17 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
   .pl-table .pl-blocks td { border-bottom: 0; padding: var(--sp-0) 0; }
   .pl-blocks td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: var(--fs-s); }
   /* Versions in <stage> (#6141): when, version, what and how on a line; who and why, then the buttons, below. */
+  /* The checks of a watch (#6181): the name and the open mark on a line, then result, runs and failed, then the
+     failed runs. */
+  .pl-checks .pl-th { display: none; }
+  .pl-checks tr { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--sp-1) var(--sp-3);
+    align-items: center; padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }
+  .pl-checks td { border: 0; padding: 0; }
+  .pl-checks td.pl-cname { grid-column: 1 / 4; white-space: normal; word-break: break-word; }
+  .pl-checks td.pl-open { grid-column: 4; grid-row: 1; }
+  .pl-checks td.pl-wide:empty { display: none; }
+  .pl-checks td.pl-wide, .pl-checks tr.pl-allruns td { grid-column: 1 / -1; }
+  .pl-checks tr.pl-allruns { display: block; }
   .pl-runs .pl-th { display: none; }
   .pl-runs tr { display: grid; grid-template-columns: auto auto 1fr auto; gap: var(--sp-1) var(--sp-3); align-items: center;
     padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); }

@@ -100,9 +100,18 @@ def _checks(conn, target):
                         (target, target)).fetchall()
 
 
+WATCH_FAILS = 5  # the newest failed runs that a check's row of the watch names; the rest open on request (watch_runs)
+
+
+def _check_state(status):
+    return "failed" if status in ("warning", "critical") else "passed" if status == "ok" else "skipped"
+
+
 def _watch(conn, t, dep, next_at, checks):
     """The watch of one release: the runs of the target's checks from its deploy until its last watch time (or
-    the next release, when sooner)."""
+    the next release, when sooner), as one step for each check (#6181: a check that runs every few minutes gave
+    hundreds of steps, one row each). A check's step has its last result in the watch, how many runs and how many
+    failed, and the newest failed runs with their summary; watch_runs lists every run of one check on request."""
     if dep["status"] != "done" or not dep["closed_at"]:
         return None
     if not checks:
@@ -117,19 +126,59 @@ def _watch(conn, t, dep, next_at, checks):
     rows = conn.execute(f"SELECT o.check_id, o.started_at, o.ended_at, o.status, o.summary FROM ops_runs o WHERE "
                         f"o.check_id IN ({marks}) AND o.started_at>=? AND o.started_at<=? ORDER BY o.id",
                         (*ids, dep["closed_at"], core.iso(end))).fetchall()
-    names = {c["id"]: f"{c['scope']}/{c['name']}" for c in checks}
-    steps = [{"name": names[r["check_id"]], "state": "failed" if r["status"] in ("warning", "critical") else
-              "passed" if r["status"] == "ok" else "skipped", "started_at": r["started_at"],
-              "ended_at": r["ended_at"], "seconds": None, "output": None, "note": r["summary"]} for r in rows]
-    bad = [s for s in steps if s["state"] == "failed"]
+    by = {c["id"]: [] for c in checks}
+    for r in rows:
+        by[r["check_id"]].append(r)
+    steps = []
+    for c in checks:
+        runs = by[c["id"]]
+        fails = [r for r in runs if _check_state(r["status"]) == "failed"]
+        last = runs[-1] if runs else None
+        steps.append({"name": f"{c['scope']}/{c['name']}", "check": c["id"],
+                      "state": _check_state(last["status"]) if last else "skipped",
+                      "started_at": runs[0]["started_at"] if runs else None,
+                      "ended_at": (last["ended_at"] or last["started_at"]) if last else None, "seconds": None,
+                      "output": None, "note": (last["summary"] if last else "no run in the watch"),
+                      "runs": len(runs), "failed": len(fails),
+                      "fails": [{"at": r["started_at"], "summary": r["summary"]} for r in fails[-WATCH_FAILS:][::-1]]})
+    steps.sort(key=lambda s: (not s["failed"], s["name"]))  # the checks that failed first
+    bad = [s for s in steps if s["failed"]]
     if bad:
         state = "failed"
     elif core.now() < end:
         state = "running"
     else:
-        state = "passed" if steps else "skipped"
-    return _run("watch", state, dep["closed_at"], core.iso(end) if state != "running" else None, steps=steps,
-                errors=f"{len(bad)} failed check run(s): {bad[0]['name']}" if bad else None)
+        state = "passed" if rows else "skipped"
+    errors = None
+    if bad:  # each check that failed in the watch, and whether its newest run (also after the watch) passes now
+        now = {r["check_id"]: r["status"] for r in conn.execute(
+            f"SELECT o.check_id, o.status FROM ops_runs o WHERE o.id IN (SELECT MAX(id) FROM ops_runs WHERE check_id "
+            f"IN ({','.join('?' * len(bad))}) AND ended_at IS NOT NULL GROUP BY check_id)", [s["check"] for s in bad])}
+        for s in bad:
+            s["now"] = _check_state(now.get(s["check"]))
+        errors = f"{sum(s['failed'] for s in bad)} failed check run(s): " + ", ".join(
+            s["name"] + (" (passes now)" if s["now"] == "passed" else " (fails now)" if s["now"] == "failed" else "")
+            for s in bad)
+    out = _run("watch", state, dep["closed_at"], core.iso(end) if state != "running" else None, steps=steps,
+               errors=errors)
+    out["watch_end"] = core.iso(end)  # the end of the window that watch_runs reads
+    return out
+
+
+WATCH_RUNS_MAX = 2000  # the runs of one check that watch_runs returns (a check every minute for 24h: 1440)
+
+
+def watch_runs(conn, check_id, start, end):
+    """Every run of one check in a release's watch, newest first (#6181): the list that a click on the check's row
+    opens. start and end are the watch's started_at and watch_end."""
+    c = conn.execute("SELECT id, scope, name FROM checks WHERE id=?", (check_id,)).fetchone()
+    if not c:
+        raise core.RiverError(f"no check with id {check_id}; the list: maxpm ops list")
+    rows = conn.execute("SELECT started_at, ended_at, status, summary FROM ops_runs WHERE check_id=? AND started_at>=? "
+                        "AND started_at<=? ORDER BY id DESC LIMIT ?", (check_id, start, end, WATCH_RUNS_MAX)).fetchall()
+    return {"check": f"{c['scope']}/{c['name']}", "runs": [{"at": r["started_at"], "ended_at": r["ended_at"],
+                                                             "state": _check_state(r["status"]),
+                                                             "summary": r["summary"]} for r in rows]}
 
 
 def _release(conn, t, dep, next_at, reviews, approval, checks):
