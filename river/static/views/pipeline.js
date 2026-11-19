@@ -134,12 +134,35 @@ function fade() {
   sc.classList.toggle("pl-more", sc.scrollLeft + sc.clientWidth < sc.scrollWidth - 1);
 }
 
+// Whether the pipeline's source can do an action on a stage (#6159): a stage whose work the source does (a workflow
+// and no command) has only the actions its plugin or adapter lists; a stage with a command has every action.
+function sourceCan(D, s, action) {
+  if (!s || !s.workflow || s.run) return true;
+  return ((D.source && D.source.actions) || []).includes(action);
+}
+
+// An action button, or the same button greyed out when the source does not do that action (its text goes in miss,
+// for the line under the bar).
+function srcButton(D, s, action, html, opts, miss) {
+  if (sourceCan(D, s, action)) return button(html, opts);
+  if (miss) miss.push(html);
+  return button(html, { ...opts, data: {}, disabled: true, title: "Source cannot do this" });
+}
+
+// The line under a bar of actions that names the greyed ones and the source.
+function missLine(D, miss) {
+  if (!miss.length) return "";
+  const src = D.source || {};
+  return `<div class="muted t-s">${miss.join(", ")}: not available for this source${src.name ? ` (${src.kind === "plugin" || src.kind === "missing" ? "plugin " : ""}${esc(src.name)})` : ""}</div>`;
+}
+
 function envTable(D) {
   if (!D.envs.length) return "";
+  const deployer = e => D.stages.find(s => s.kind === "deploy" && s.env === e.name);
   const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td>${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
     <td class="mono">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td><td>${e.since ? esc(ago(e.since)) : ""}</td>
     <td class="t-s muted">${(e.history || []).slice(1, 4).filter(h => h.rev && h.rev !== e.rev).map(h => esc(short(h.rev))
-      + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + button("Put back", { data: { "pl-rollback": e.name, rev: h.rev },
+      + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + srcButton(D, deployer(e), "rollback", "Put back", { data: { "pl-rollback": e.name, rev: h.rev },
         title: `Roll back to ${short(h.rev)}` }))).join(" ")}</td></tr>`).join("");
   return `<div class="pl-card"><h3>Where each version runs</h3><div class="pl-table"><table>
     <tr><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows}</table></div></div>`;
@@ -265,12 +288,14 @@ function stageActions(s, r) {
   if (V.data.default) return "";
   const rev = r && r.version, b = [];
   if (s.transition) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
-  if (r && ["running", "queued"].includes(r.state) && r.id != null) b.push(button("Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }));
-  if (r && rev && !["running", "queued"].includes(r.state)) b.push(button("Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }));
+  const D = V.data, miss = [], ours = r && r.state === "queued" && !r.runner && (!r.source || r.source === "maxpm");
+  if (r && ["running", "queued"].includes(r.state) && r.id != null)
+    b.push(srcButton(D, ours ? null : s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }, miss));
+  if (r && rev && !["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }, miss));
   const bad = r && r.tests ? (r.tests.failed || 0) + (r.tests.error || 0) : 0;
   if (bad && r.id != null && !["running", "queued"].includes(r.state))
-    b.push(button(`Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }));
-  return `<div class="pl-bar">${b.join("")}</div>`;
+    b.push(srcButton(D, s, "rerun", `Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }, miss));
+  return `<div class="pl-bar">${b.join("")}</div>${missLine(D, miss)}`;
 }
 
 // The reason of a hold or a roll back: a small dialog (components/dialog.js). The Emergency tab asks with it too.

@@ -107,8 +107,10 @@ function sourceChip(p) {
   if (p.default) return "";  // the head says "deploy target" already
   if (s.state === "local") return `<span class="dp-src muted t-s">${esc(s.label)}</span>`;
   const icon = { ok: "●", new: "○", bad: "✕", missing: "○" }[s.state];
-  const word = s.state === "bad" ? " · token refused" : s.state === "missing" ? " · token not saved" : "";
-  return `<span class="dp-src t-s ${s.state === "bad" || s.state === "missing" ? "dp-bad" : ""}" title="${esc(s.secret ? "Token " + s.secret : "No token named")}">${icon}
+  // A plugin (#6159) may need no token, and its failed read may have another cause than a token.
+  const word = s.state === "bad" ? (s.plugin ? " · read failed" : " · token refused") : s.state === "missing" ? " · token not saved" : "";
+  const tip = s.secret ? "Token " + s.secret : s.plugin ? "No token needed" : "No token named";
+  return `<span class="dp-src t-s ${s.state === "bad" || s.state === "missing" ? "dp-bad" : ""}" title="${esc(tip)}">${icon}
     ${esc(s.label)}${s.repo ? " · " + esc(s.repo) : ""}${word}</span>`;
 }
 
@@ -313,17 +315,21 @@ function emergencyHtml(p) {
     ? `<div class="pl-banner">⛔ Every stage is held${p.held_by ? " by " + esc(p.held_by) : ""}: ${esc(p.held)}</div>${button("End the hold", { kind: "primary", data: { "dp-unhold": p.name }, title: "Stages start again" })}`
     : button("Hold every stage", { kind: "warn", data: { "dp-hold": p.name }, title: "Nothing new starts" });
   const runs = p.stages.filter(s => ["running", "queued"].includes(s.state) && s.run != null);
+  // A stage whose work the source does has only the actions its plugin or adapter lists (#6159).
+  const can = (s, a) => !s || !s.by_source || ((p.source && p.source.actions) || []).includes(a);
+  const em = (ok, html, opts) => ok ? button(html, opts) : button(html, { ...opts, data: {}, disabled: true, title: "Source cannot do this" });
   const envs = p.envs.map(e => {
     const before = (e.history || []).filter(h => h.rev && h.rev !== e.rev).slice(0, 3);
+    const dep = p.stages.find(s => s.kind === "deploy" && s.env === e.name);
     return `<div class="dp-envrow"><span><b>${esc(e.name)}</b> <span class="pl-ver">${esc(short(e.rev)) || "none yet"}</span></span>
-      ${before.map(h => button(`Put back ${esc(short(h.rev))}`, { kind: "warn", data: { "dp-rollback": e.name, rev: h.rev }, title: `Roll back to ${short(h.rev)}` })).join("")
+      ${before.map(h => em(can(dep, "rollback"), `Put back ${esc(short(h.rev))}`, { kind: "warn", data: { "dp-rollback": e.name, rev: h.rev }, title: `Roll back to ${short(h.rev)}` })).join("")
         || `<span class="muted t-s">no earlier version</span>`}</div>`;
   }).join("");
   return `<div class="dp-cards">
     <div class="pl-card dp-em-card"><h3>Stop this pipeline</h3><div class="t-m">Nothing new starts in any stage until you end the hold. Work that runs goes on to its end.</div><div class="pl-bar">${stop}</div></div>
     <div class="pl-card dp-em-card"><h3>Stop what runs now</h3>${runs.length ? runs.map(s => `<div class="dp-envrow"><span><b>${esc(s.name)}</b>
       <span class="pl-ver">${esc(short(s.version))}</span> <span class="muted t-s">${esc(s.state === "queued" ? "waits" : "runs")}</span></span>
-      ${button("Stop", { kind: "warn", data: { "dp-stop": s.run }, title: "Stop this run" })}</div>`).join("") : `<div class="muted t-m">Nothing runs now.</div>`}</div>
+      ${em(s.state === "queued" || can(s, "stop"), "Stop", { kind: "warn", data: { "dp-stop": s.run }, title: "Stop this run" })}</div>`).join("") : `<div class="muted t-m">Nothing runs now.</div>`}</div>
     <div class="pl-card dp-em-card"><h3>Put an environment back</h3>${envs || `<div class="muted t-m">This pipeline has no environment.</div>`}
       <div class="muted t-s">The deploy stage runs with that version, and the transition into it is blocked after it, so no newer version comes by itself.</div></div>
   </div><div class="muted t-s">A person or the manager may press these. A hold and a put back ask why; the audit log names who pressed each one.</div>`;

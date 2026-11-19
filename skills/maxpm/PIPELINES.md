@@ -130,6 +130,163 @@ Delivery a Delivery stage. The person saves the token first (`maxpm secret put
 When the forge refuses the token, the pipeline shows the error, and the
 Deploy tab counts it in its red number.
 
+## Connect another system with a plugin
+
+Any other release system (Jenkins, Argo CD, a cron job, a deploy script)
+connects through a plugin. `maxpm pipeline plugins` lists the installed
+ones, with the actions each one does. Connect a pipeline to one:
+
+```
+maxpm pipeline forge <name> <plugin> --set <key>=<value> --secret <its secret>=<maxpm secret>
+maxpm pipeline plugin <plugin>        # its settings, its secrets, and a check that it answers
+```
+
+Each stage then names the work in that system with `--workflow`. When a
+stage's gate opens, MaximizePM asks the plugin to start that work. The page
+shows an action that the plugin does not do (run again, roll back, stop) as
+"not available for this source", and the command for it is refused: do that
+step in the system itself.
+
+MaximizePM ships one plugin: `jsonl`. It follows a file of JSON lines that
+another program writes, one line for each change of a run, and it writes
+start and stop requests to a second file. Read its code before you write a
+plugin: `river/pipeline/plugins/jsonl/`.
+
+## Write a plugin
+
+A plugin is a folder with two parts: a manifest, `plugin.json`, and a program
+in any language. It imports nothing of MaximizePM's. Put the folder in
+`plugins/<name>/` beside the queue's database (`maxpm db` shows that folder;
+usually `~/.maximizepm/plugins/<name>/`). The folder's name is the plugin's
+name.
+
+### The manifest
+
+```json
+{
+  "contract": 1,
+  "name": "jenkins",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "Reads the builds of a Jenkins job; starts and stops them.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop"],
+  "settings": {"url": {"required": true, "help": "https://jenkins.example.com"},
+               "job": {"required": true, "help": "the job's name"}},
+  "secrets": {"token": {"help": "a Jenkins API token"}},
+  "poll_every": 60,
+  "timeout": 30
+}
+```
+
+- `contract`: 1, the version of this contract.
+- `name`: lower case letters, digits and `-`; the same as the folder. The
+  names of the built-in forges (`github`, `gitlab`, `gitea`, `forgejo`,
+  `pulumi`) and `none`, `maxpm`, `here`, `plugin` are taken.
+- `level`: `report` (it reads only; no actions), `act` (it reads, and it does
+  the actions it lists), or `gate` (as `act`; the outside flow will also ask
+  MaximizePM's gates before it moves on; that call is not ready yet, so a gate
+  plugin works as `act` now).
+- `run`: the command as a list of words, run in the plugin's folder.
+  `{python}` is the Python that runs MaximizePM.
+- `actions`: some of `start`, `stop`, `rerun`, `rollback`.
+- `settings` and `secrets`: each name with its `help`. A setting can be
+  `required` and have a `default`. A secret is required unless it says
+  `"required": false`.
+- `poll_every`: seconds between two polls (60 when not given; at least 10).
+- `timeout`: seconds for one call (30 when not given; at most 300).
+
+### The calls
+
+For each call, `maxpm serve` starts the program, writes one JSON object (the
+request) on its stdin, and reads one JSON object (the answer) from its
+stdout. Every request has `contract` and `call`. The calls:
+
+- `describe`: answer with `name`, `version`, `level` and `actions`. They must
+  match the manifest. `maxpm pipeline forge` and `maxpm pipeline plugin` call
+  it.
+- `poll`: read what changed in the system since the last poll, and answer with
+  `events` (a list of CDEvents objects, below) and `state`.
+- `start`, `rerun`, `rollback`: start the work of one stage run. `rerun` runs
+  a stage again; `rollback` puts an older version on an environment. The
+  answer can have `key` (the system's id of the run), `url` and `note`.
+- `stop`: stop the run. The run ends when a later poll reports its end.
+
+The request of `poll` and of each action also has:
+
+- `pipeline`: its `name`, `project`, `stages` (each with `name`, `kind`,
+  `pos`, `work` (the stage's `--workflow`), `env`, `transition` (the mode of
+  the arrow into it)) and `envs` (each
+  with `name`, `target`, and the `version` that runs there).
+- `settings`: the pipeline's settings for the plugin.
+- `secrets`: the value of each secret the manifest names.
+- `state`: the `state` of the plugin's last answer (null at first). Keep a
+  cursor here, such as the last build number read; the plugin keeps no file
+  of its own.
+- `poll` only: `runs`, the stage runs that wait or run (`id`, `stage`,
+  `work`, `version`, `key`, `state`, `purpose`).
+- an action only: `run`, the stage run it acts on (the same fields). A
+  `rerun` of failed tests also has `tests`: one `suite.name` for each test.
+
+The answer can always have `error` (a message). Exit 0 when the call worked.
+On an error, exit 1 or more and say why in `error` or on stderr. Do not print
+anything else on stdout.
+
+### The events
+
+A `poll` (and an action) answers with events in the CDEvents form, the same
+form that MaximizePM keeps for every source:
+
+```json
+{"context": {"version": "0.4.1", "id": "build-482-finished", "source": "jenkins",
+             "type": "dev.cdevents.pipelinerun.finished.0.2.0", "timestamp": "2026-11-18T10:04:00Z"},
+ "subject": {"id": "build-482", "type": "pipelineRun",
+             "content": {"pipelineName": "build", "outcome": "success", "url": "https://..."}},
+ "customData": {"maxpm": {"stage": "build", "version": "3f2a9c1", "run": 17}}}
+```
+
+- A stage run: `pipelinerun.queued`, `.started`, `.finished` (`outcome`
+  success, failure, cancel; `errors` for the reason). The subject id is the
+  system's id of the run. A step: `taskrun.started` and `.finished`, with
+  `content.taskName`, and `customData.maxpm.run_key` set to the run's subject
+  id. A test: `testcaserun.finished` with `content.testCase.name` and
+  `content.outcome` (success, failure, error, skip), and
+  `customData.maxpm.run_key` and `suite`. A version that now runs in an
+  environment: `service.deployed` with `content.environment.id` (the
+  environment's name).
+- `customData.maxpm.stage` names the stage; `version` names the commit.
+- `customData.maxpm.run`: the id of a MaximizePM stage run (from `runs` of
+  the request, or the `run` of a start). It links the system's run to the run
+  that waits at MaximizePM's gate. A system that starts its runs itself
+  (a push, a timer) links them this way.
+- Give each event an id that is the same each time you read the same change:
+  MaximizePM keeps each event once for each pipeline, so a change read twice
+  changes nothing. MaximizePM sets the event's source to the plugin's name.
+- A run that ends passed hands its version to the next stage, as a run of a
+  forge does.
+
+### What MaximizePM does for you
+
+- The program gets no variable of `maxpm serve`'s environment but `PATH`,
+  `HOME`, the language, `TMPDIR`, `TZ` and `MAXPM_PLUGIN_CONTRACT`. It gets
+  only the secrets its manifest names, and only the ones the pipeline mapped.
+- A call that runs past its `timeout` is stopped with every process it
+  started. A crash, a hang or an answer that is not JSON goes on the
+  pipeline as its last error (`maxpm pipeline show`, and the Accounts list of
+  the Deploy tab); the other pipelines go on.
+- A failed `start` fails that stage run with the plugin's message.
+
+### Test a plugin
+
+1. Run each call by hand: `echo '{"contract": 1, "call": "describe"}' |
+   python3 plugin.py`, then a `poll` request with your settings.
+2. Keep the system's answers in files and test the plugin against them, not
+   against the live system.
+3. `maxpm pipeline plugin <name>` checks the manifest and `describe`.
+4. Connect a test pipeline (`maxpm pipeline forge <test pipeline> <name>
+   ...`), and follow it with `maxpm pipeline show <test pipeline>` and on the
+   Deploy tab.
+
 ## What happens when a stage fails
 
 - A failed run opens a fault task in the pipeline's project, titled
@@ -249,7 +406,5 @@ they find it there.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: tiers,
-manual starts, the holding stage, branches,
-operators and the override, trigger rules, runners that start agents with no
-person's computer, and a plugin contract that connects any other release
-system.
+manual starts, the holding stage, branches, operators and the override,
+trigger rules, and runners that start agents with no person's computer.

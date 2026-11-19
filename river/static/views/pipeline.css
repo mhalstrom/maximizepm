@@ -71,6 +71,8 @@ button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
 .pl-suite { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .pl-suite .pl-sname { min-width: var(--w-xs); font-size: var(--fs-s); color: var(--muted); }
 .pl-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+/* An action that the pipeline's source does not do (#6159): greyed, with its reason in the title and under the bar. */
+.pl-bar button:disabled, .pl-table button:disabled, .dp-envrow button:disabled { opacity: .45; cursor: default; }
 .pl-waves { display: flex; gap: var(--sp-4); overflow-x: auto; padding-bottom: var(--sp-1); }
 .pl-wave { flex: 1 0 var(--w-l); max-width: calc(var(--w-l) + var(--w-xs)); border: var(--hair) solid var(--line);
   border-radius: var(--r-l); padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }

@@ -446,6 +446,9 @@ def show(conn, name):
         stages.append(d)
     p["stages"] = stages
     p["envs"] = list(envs.values())
+    from . import plugin
+    p["source"] = plugin.actions(conn, p)  # what its source can do: the page greys out the rest (#6159)
+    p.pop("plugin_state", None)
     return p
 
 

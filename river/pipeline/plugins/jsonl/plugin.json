@@ -1,0 +1,16 @@
+{
+  "contract": 1,
+  "name": "jsonl",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "Follows a JSON lines file that another system writes (a cron job, a deploy script): one line for each change of a run. Start and stop write a request line that the other system reads. The example of the plugin contract.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop"],
+  "settings": {
+    "file": {"required": true, "help": "the path of the file of run lines"},
+    "requests": {"help": "the path of the file that start and stop append to", "default": ""}
+  },
+  "secrets": {},
+  "poll_every": 30,
+  "timeout": 10
+}

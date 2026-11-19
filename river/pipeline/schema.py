@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS pipelines (
   poll_error  TEXT,                      -- what the last read said when it failed
   held_reason TEXT,                      -- a hold of every stage: no stage run starts (#6117)
   held_by     TEXT,
-  held_at     TEXT
+  held_at     TEXT,
+  plugin_settings TEXT,                  -- a plugin source (#6159): JSON {settings, secrets: {its name: maxpm secret}}
+  plugin_state    TEXT                   -- the JSON state the plugin's last answer kept (a cursor), sent back to it
 );
 
 -- A place that runs the code: dev, beta, prod, or one server. version_id and since say what runs there now.
@@ -261,8 +263,8 @@ def migrate(conn):
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
     for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
-              "forge_url"):
-        if c not in cols:  # #6119, #6117, #6121
+              "forge_url", "plugin_settings", "plugin_state"):
+        if c not in cols:  # #6119, #6117, #6121, #6159
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait"):  # #6113, #6114, #6120

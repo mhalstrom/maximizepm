@@ -6,6 +6,7 @@ GET /api/pipeline/<name>      one pipeline: its stages with their last run, its 
 GET /api/pipeline-run/<id>    one stage run: its steps, its tests (failed first), its last lines, and the prompt that
                               analyzes its failed tests"""
 
+import json
 from urllib.parse import unquote
 
 from .. import core
@@ -147,6 +148,14 @@ def _source(p, saved):
     if not p.get("forge"):
         return {"forge": None, "label": "this computer", "state": "local"}
     secret = p.get("secret")
+    if p.get("plugin_settings"):  # a plugin (#6159): the secrets its manifest needs, mapped to maxpm secrets; none is ok
+        names = list((json.loads(p["plugin_settings"]).get("secrets") or {}).values())
+        lacking = [n for n in names if n not in saved]
+        state = ("missing" if lacking else "bad" if p.get("poll_error") else "ok" if p.get("polled_at") else "new")
+        return {"forge": p["forge"], "plugin": True, "label": f"plugin {p['forge']}", "repo": p.get("repo"),
+                "url": p.get("forge_url"),
+                "secret": lacking[0] if lacking else secret, "state": state, "error": p.get("poll_error"),
+                "read_at": p.get("polled_at")}
     state = ("missing" if not secret or secret not in saved else "bad" if p.get("poll_error")
              else "ok" if p.get("polled_at") else "new")
     return {"forge": p["forge"], "label": SOURCES.get(p["forge"], p["forge"]), "repo": p.get("repo"),
@@ -164,7 +173,7 @@ def _strip(stages):
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
-                    "run": r.get("id")})
+                    "run": r.get("id"), "by_source": bool(s.get("workflow") and not s.get("run"))})
     return out
 
 
@@ -189,7 +198,7 @@ def deploy(conn, path):
     for p in store.pipelines(conn):
         d = store.show(conn, p["name"])
         waits = [] if p.get("held_reason") else _person_waits(conn, p["id"])
-        out.append({"name": p["name"], "project": p["project"], "default": False, "source": _source(p, saved),
+        out.append({"name": p["name"], "project": p["project"], "default": False, "source": {**_source(p, saved), "actions": d["source"]["actions"]},
                     "held": p.get("held_reason"), "held_by": p.get("held_by"), "stages": _strip(d["stages"]),
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],

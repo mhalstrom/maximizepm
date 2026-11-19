@@ -222,13 +222,22 @@ _SHAPES = {"gitlab": (r"^[\w.-]+(/[\w.-]+)+$", "group/project"),
            "pulumi": (r"^[\w.-]+/[\w.-]+/[\w.-]+$", "org/project/stack (the pipeline stack)")}
 
 
-def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None, url=None):
+def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None, url=None, settings=None,
+              secrets=None):
     """maxpm pipeline forge: where the pipeline's workflows run (#6119, #6121, #6133). A forge needs the repository
     (owner/name; on GitLab group/subgroup/project; on Pulumi Delivery the pipeline stack org/project/stack) and the
     name of the maxpm secret that holds the API token; url: a self-hosted forge's address; ref: the branch (Pulumi
-    Delivery: the number of the first run to read); none: the stages run here (their --run commands)."""
+    Delivery: the number of the first run to read); none: the stages run here (their --run commands). Any other name
+    is an installed plugin (#6159): plugin.use takes its settings and secrets."""
     if forge not in FORGES:
-        raise core.RiverError(f"the forge {forge!r} is not one of {', '.join(FORGES)}")
+        from . import plugin
+        return plugin.use(conn, pipeline, forge, settings, secrets if secrets is not None else
+                          ([secret] if secret else None), repo, url, ref, actor)
+    if secrets and len(secrets) > 1:
+        raise core.RiverError(f"the {forge} adapter takes one secret: --secret <name>")
+    secret = secret or (secrets[0] if secrets else None)
+    if settings:
+        raise core.RiverError(f"the {forge} adapter has no --set settings; a plugin has them")
     if forge != "none":
         shape, words = _SHAPES.get(forge, (r"^[\w.-]+/[\w.-]+$", "owner/name"))
         if not repo or not re.match(shape, repo):
@@ -248,7 +257,7 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
         p = store._pipeline(conn, pipeline)
         vals = (None,) * 5 if forge == "none" else (forge, repo, secret, ref, url)
         conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, forge_url=?, polled_at=NULL, "
-                     "poll_error=NULL WHERE id=?", (*vals, p["id"]))
+                     "poll_error=NULL, plugin_settings=NULL, plugin_state=NULL WHERE id=?", (*vals, p["id"]))
         text = "forge none: the stages run here" if forge == "none" else (
             f"forge {forge}: repository {repo}" + (f" at {url}" if url else "") + f", token from secret {secret}"
             + (f", branch {ref or 'main'}" if forge not in ("gitlab", "pulumi") else "")
@@ -277,7 +286,8 @@ def export(conn, name):
         stages.append(d)
     return {"pipeline": p["name"], "project": p["project"], "notes": p["notes"],
             "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"],
-                      "url": p["forge_url"]} if p["forge"] else None,
+                      "url": p["forge_url"], **({"plugin": json.loads(p["plugin_settings"])}
+                                                if p["plugin_settings"] else {})} if p["forge"] else None,
             "environments": envs, "stages": stages}
 
 

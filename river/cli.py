@@ -1916,14 +1916,20 @@ def build_parser(only=None):
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
     x = pls.add_parser("forge", help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
-                       "minute and starts a gated workflow after the gate), or none (the stages run here)")
+                       "minute and starts a gated workflow after the gate), an installed plugin (maxpm pipeline "
+                       "plugins), or none (the stages run here)")
     x.add_argument("name")
-    x.add_argument("forge", choices=("github", "gitlab", "gitea", "forgejo", "pulumi", "none"))
+    x.add_argument("forge", help="github, gitlab, gitea, forgejo, pulumi, none, or a plugin's name")
     x.add_argument("--repo", help="owner/name (GitLab: group/project; pulumi: the pipeline stack org/project/stack)")
-    x.add_argument("--secret", help="the maxpm secret with the API token")
+    x.add_argument("--secret", action="append", help="the maxpm secret with the API token; a plugin: "
+                   "<its secret>=<maxpm secret>, once for each secret it needs")
+    x.add_argument("--set", action="append", metavar="KEY=VALUE", help="a plugin's setting (its manifest names them)")
     x.add_argument("--ref", help="the branch a started workflow runs on (main); pulumi: the first run to read (1)")
     x.add_argument("--url", help="the forge's address: Gitea and Forgejo need it (https://codeberg.org); a "
                    "self-hosted GitLab")
+    x = pls.add_parser("plugins", help="the installed plugins: name, version, level and the actions each one does")
+    x = pls.add_parser("plugin", help="one plugin: its manifest, and its own describe, which must match it")
+    x.add_argument("plugin")
     x = pls.add_parser("rerun", help="run one stage again for a version, an older one too (a roll back)")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
@@ -7559,7 +7565,16 @@ def _pipeline_cmd(conn, a, actor):
         from .pipeline import runner
         return runner.approve(conn, a.name, a.stage, a.rev, actor)
     if sub == "forge":
-        return define.forge_set(conn, a.name, a.forge, a.repo, a.secret, a.ref, actor, a.url)
+        settings = {}
+        for kv in a.set or []:
+            k, eq, v = kv.partition("=")
+            if not eq or not k:
+                raise RiverError(f"--set takes KEY=VALUE, not {kv!r}")
+            settings[k] = v
+        return define.forge_set(conn, a.name, a.forge, a.repo, None, a.ref, actor, a.url, settings or None, a.secret)
+    if sub in ("plugins", "plugin"):  # #6159
+        from .pipeline import plugin
+        return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin)
     if sub == "rerun":
         from .pipeline import runner
         return runner.run_again(conn, a.name, a.stage, a.rev, actor)
@@ -7696,6 +7711,37 @@ def render_pipeline(a, res):
     if sub == "run":
         print(res["text"])
         return
+    if sub == "plugins":
+        if not res:
+            print("no plugins; the guide says how to write one: maxpm guide pipelines")
+        for p in res:
+            if p.get("error"):
+                print(f"{p['name']}  NOT USABLE: {p['error']}")
+                continue
+            print(f"{p['name']} {p['version']}  level {p['level']}"
+                  + (f"  actions: {', '.join(p['actions'])}" if p["actions"] else "  (reads only)")
+                  + ("  (shipped)" if p["shipped"] else f"  ({p['folder']})"))
+            if p["description"]:
+                print(f"    {p['description']}")
+            if p["settings"] or p["secrets"]:
+                print(f"    settings: {', '.join(p['settings']) or 'none'}; secrets: {', '.join(p['secrets']) or 'none'}")
+        return
+    if sub == "plugin":
+        print(f"plugin {res['name']} {res['version']}: level {res['level']}, actions "
+              f"{', '.join(res['actions']) or 'none'}; its describe matches its manifest ({res['seconds']}s)")
+        if res["description"]:
+            print(f"  {res['description']}")
+        for k, d in sorted(res["settings"].items()):
+            print(f"  setting {k}{' (required)' if d.get('required') else ''}: {d.get('help', '')}"
+                  + (f" [default {d['default']}]" if "default" in d else ""))
+        for k, d in sorted(res["secrets"].items()):
+            print(f"  secret {k}{'' if d.get('required', True) else ' (optional)'}: {d.get('help', '')}")
+        print(f"  polls every {res['poll_every']}s; each call has {res['timeout']}s; folder {res['folder']}")
+        return
+    if sub == "forge" and res.get("plugin"):
+        print(f"pipeline {res['pipeline']}: its runs come from plugin {res['forge']} {res['version']} "
+              f"({res['level']}; actions: {', '.join(res['actions']) or 'none'}); maxpm serve polls it")
+        return
     if sub == "forge":
         print(f"pipeline {res['pipeline']}: " + ("its stages run here" if res["forge"] == "none" else
               f"its workflows run on {_FORGE_NAMES.get(res['forge'], res['forge'])} ({res['repo']}); maxpm serve "
@@ -7762,6 +7808,13 @@ def render_pipeline(a, res):
     print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else "")
           + ("  (the default pipeline of deploy target " + res["name"] + ", from its releases)" if res.get("default")
              else ""))
+    src = res.get("source") or {}
+    if src.get("kind") in ("plugin", "missing"):
+        print(f"  source: plugin {src['name']}" + (f" {src['version']} ({src['level']}; actions: "
+                                                   f"{', '.join(src['actions']) or 'none'})" if src.get("version")
+                                                   else f": {src.get('error')}"))
+    if res.get("poll_error"):
+        print(f"  the last read failed: {res['poll_error']}")
     if not res["stages"]:
         print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
     for s in res["stages"]:

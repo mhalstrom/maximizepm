@@ -496,10 +496,11 @@ def _hand_on(conn, r):
             store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
             _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
         if conn.execute("SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND (state IN ('queued','running') "
-                        "OR key LIKE 'gl-%' OR key LIKE 'gh-run-%' OR key LIKE 'pd-%')",
-                        (nxt["id"], r["version_id"])).fetchone():
+                        "OR key LIKE 'gl-%' OR key LIKE 'gh-run-%' OR key LIKE 'pd-%' OR source=?)",
+                        (nxt["id"], r["version_id"], r["forge"] if r["forge"] and r["forge"] not in FORGES
+                         else "\0")).fetchone():
             return  # it waits or ran there already (a forge made the run: GitLab's jobs of that stage, #6121; the
-            # stage in the same Pulumi Delivery run, #6133)
+            # stage in the same Pulumi Delivery run, #6133; a plugin's system ran it, #6159)
         _queue(conn, r["pipeline"], nxt["name"], r["rev"])
 
 
@@ -541,7 +542,8 @@ def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None
     pipeline still stops it."""
     _lead(conn, actor, "runs a stage again")
     p = store._pipeline(conn, pipeline)
-    _stage_row(conn, p, stage)
+    from . import plugin
+    plugin.need(conn, p, _stage_row(conn, p, stage), plugin.action_for(purpose))  # a plugin may not list it (#6159)
     run = _queue(conn, p["name"], stage, rev)
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, passed_by=?, passed_at=?, purpose=? "
@@ -594,6 +596,8 @@ def rollback(conn, pipeline, env, rev, reason=None, actor=None):
                      (p["id"], env)).fetchone()
     if not s:
         raise core.RiverError(f"no stage of pipeline {p['name']} deploys to {env}")
+    from . import plugin
+    plugin.need(conn, p, _stage_row(conn, p, s["name"]), "rollback")  # before the block (#6159)
     why = f"rolled back {env} to {rev}" + (f": {reason}" if reason else "")
     transitions.block(conn, p["name"], s["name"], why, actor=actor)
     out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why)
@@ -627,9 +631,17 @@ def stop(conn, run_id, actor=None):
         raise core.RiverError(f"no stage run {run_id}")
     if r["state"] in store.FINAL:
         raise core.RiverError(f"run #{run_id} is {r['state']} already")
+    from . import plugin
+    if plugin.plugin_run(conn, r):  # a plugin's run: the plugin stops it, when it lists stop (#6159)
+        p = conn.execute("SELECT * FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
+        plugin.need(conn, p, {"workflow": r["workflow"], "run": r["cmd"]}, "stop")
+        with core.tx(conn):
+            _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
+        plugin.act(conn, run_id, "stop")  # the next poll records its end
+        return {"run": run_id, "stopped": f"by plugin {r['forge']}"}
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
-    forge = (r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
+    forge =(r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
         r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-", "pd-")) else None
     if forge in FORGES:
         _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
@@ -688,13 +700,15 @@ def serve_pass(conn):
     github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
     _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121); Gitea and Forgejo: github.poll_due (#6122)
     _adapter("pulumi").poll_due(conn)  # and the Pulumi Delivery ones (#6133)
+    from . import plugin
+    plugin.poll_due(conn)  # and the pipelines whose source is a plugin (#6159)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
     for row in rows:
         r = _row(conn, row["id"])
         forge = r["workflow"] and not r["cmd"]
-        if forge and (r["runner"] or r["forge"] not in FORGES):
+        if forge and (r["runner"] or not (r["forge"] in FORGES or plugin.is_plugin(r["forge"]))):
             continue  # started on the forge already (its adapter reads the run), or a forge with no adapter here
         busy = conn.execute("SELECT id FROM stage_runs WHERE stage_id=? AND state='running'", (r["stage_id"],)).fetchone()
         if busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
@@ -715,7 +729,12 @@ def serve_pass(conn):
                 conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
                              (core._done_by(conn, r["gate_item"]), store._now(), r["id"]))
         started.append(r["id"])
-        if forge:  # the gate opened: the forge runs it (#6119, #6121)
+        if forge and r["forge"] not in FORGES:  # the gate opened: the plugin starts it in its system (#6159)
+            try:
+                plugin.act(conn, r["id"], plugin.action_for(r["purpose"]))
+            except core.RiverError as e:
+                store.run_finish(conn, r["id"], "failed", errors=f"plugin {r['forge']} did not start it: {e}")
+        elif forge:  # the gate opened: the forge runs it (#6119, #6121)
             try:
                 _adapter(r["forge"]).dispatch(conn, r["id"])
             except core.RiverError as e:

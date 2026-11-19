@@ -1724,12 +1724,12 @@ class PulumiDelivery(Base):
         r = self.c.execute("SELECT state, errors FROM stage_runs WHERE id=?", (again["run"],)).fetchone()
         self.assertEqual(r["state"], "cancelled")
         self.assertIn("the Delivery run ended (canceled)", r["errors"])
-        # A roll back is Pulumi's page's.
-        back = self.runner.rollback(self.c, "shop", "production", "a" * 40, reason="b breaks", actor="mark")
-        self.pass_()
-        r = self.c.execute("SELECT state, errors FROM stage_runs WHERE id=?", (back["run"],)).fetchone()
-        self.assertEqual(r["state"], "failed")
-        self.assertIn("Roll back in the stage's Actions menu", r["errors"])
+        # A roll back is Pulumi's page's: refused before the stage's gate holds (#6159).
+        with self.assertRaises(RiverError) as e:
+            self.runner.rollback(self.c, "shop", "production", "a" * 40, reason="b breaks", actor="mark")
+        self.assertIn("rollback is not available for this source: MaximizePM cannot do it through the Pulumi "
+                      "Delivery API", str(e.exception))
+        self.assertFalse(self.c.execute("SELECT 1 FROM pipeline_transitions WHERE block_reason IS NOT NULL").fetchone())
 
     def test_the_forge_command_for_pulumi(self):
         for bad in ({"repo": "acme/shop"}, {"repo": "acme/shop-delivery/main", "ref": "main"}):
