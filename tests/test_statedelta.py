@@ -35,6 +35,19 @@ def apply(old, ans):
     return new
 
 
+def as_js(value):
+    """value as the page's JSON gives it back: a whole float such as an item's rank (a REAL column, 4.0) is 4 in
+    JavaScript. Equal either way for assertEqual, but its diff showed every rank as a difference and hid the real
+    one (#6174)."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: as_js(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [as_js(v) for v in value]
+    return value
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -438,9 +451,17 @@ console.log(JSON.stringify(s));
         core.drop(self.c, self.two, actor="ag")
         a1 = self.get(f"/api/state?since={first['v']}&closed=1")
         core.register(self.c, "other")
-        a2 = self.get(f"/api/state?since={a1['v']}&closed=1")
-        page = self.node(None, [first, a1, a2])
-        whole = self.get("/api/state?since=&closed=1")["state"]
+        answers = [first, a1, self.get(f"/api/state?since={a1['v']}&closed=1")]
+        # #6174: the page's copy is compared with the whole state of the same version. A part can change between
+        # two requests with no write of this test: in a full run, review.counts() replaces the 'changes' of an
+        # earlier test from its thread. Then the page asks again, as it does every 3 s, until both name one version.
+        for _ in range(5):
+            whole = self.get("/api/state?since=&closed=1")
+            if whole["v"] == answers[-1]["v"]:
+                break
+            answers.append(self.get(f"/api/state?since={answers[-1]['v']}&closed=1"))
+        self.assertEqual(whole["v"], answers[-1]["v"])
+        page, whole = self.node(None, answers), as_js(whole["state"])
         for part in ("now", "loop"):
             page.pop(part), whole.pop(part)
         self.assertEqual(page, whole)
