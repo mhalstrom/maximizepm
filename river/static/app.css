@@ -543,3 +543,15 @@ button.tc-unfold { display: none; }
 .sf-save, .sf-acct { display: flex; gap: var(--sp-2); align-items: center; color: var(--muted); }
 .sf-save input { margin: 0; }
 .sf-acct input { flex: 1 1 auto; min-width: 0; max-width: var(--w-l); }
+
+/* The week calendar of a time window (components/weekPicker.js, #6205): seven day columns, 24 hour rows; a marked hour
+   is the accent. touch-action none: a drag marks hours on a phone instead of scrolling the dialog. */
+.wk { display: flex; flex-direction: column; gap: var(--sp-2); }
+.wk-grid { display: grid; grid-template-columns: calc(var(--sp-7) + var(--sp-6)) repeat(7, minmax(0, 1fr));
+  gap: var(--hair); touch-action: none; user-select: none; font-size: var(--fs-xs); }
+.wk-day { text-align: center; color: var(--muted); text-transform: capitalize; }
+.wk-hour { color: var(--muted); line-height: 1; }
+.wk-cell { height: var(--sp-5); background: var(--bg); border-radius: var(--hair-2); cursor: pointer; }
+.wk-cell.on { background: var(--accent); }
+.wk-foot { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.wk-foot .spacer { flex: 1; }

@@ -12,6 +12,7 @@ import { $, esc, getJson, ago, left, copyText, toast, act, actor } from "../lib.
 import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
+import { weekPickerHtml, wireWeekPicker } from "../components/weekPicker.js";
 import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
@@ -752,8 +753,9 @@ export function askForm(title, text, go, fields, then, needWhy = true) {
     : input({ id: "plF-" + f.id, value: f.value || "", placeholder: f.hint || null });
   askBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-askclose": "1" } })}</div>
     <p class="t-m">${esc(text)}</p>
-    <div class="form">${fields.map(f => field(esc(f.label), ctl(f))).join("")}${field(needWhy ? "Why?" : "Why? (optional)", textarea({ id: "plWhy", rows: 3 }, ""))}</div>
+    <div class="form">${fields.map(f => field(esc(f.label), (f.before || "") + ctl(f))).join("")}${field(needWhy ? "Why?" : "Why? (optional)", textarea({ id: "plWhy", rows: 3 }, ""))}</div>
     ${actions(button("Cancel", { data: { "pl-askclose": "1" } }) + button(go, { kind: "primary", data: { "pl-askgo": "1" } }))}`;
+  for (const f of fields) if (f.wire) f.wire(askBox, askBox.querySelector("#plF-" + f.id));  // #6205: a part on a field
   askDlg.open();
   askBox.querySelector(fields.length ? "#plF-" + fields[0].id : "#plWhy").focus();
   askBox.onclick = async (e) => {
@@ -791,9 +793,11 @@ function arrowAct(d) {
     (v) => v.to ? doAct("pipeline_freeze", { stage: n, from: v.from || null, to: v.to, reason: v.why }) : toast("Say until when", true));
   if (d.plUnfreeze) return doAct("pipeline_freeze", { stage: n, clear: true });
   const target = V.data.default;  // #6176: a deploy target's mode comes from the target
-  return askForm(`Change ${into}`, (target ? "" : "The mode is how a version passes when nothing holds it. ") + "The window says when versions may pass (for example mon-thu 09:00-17:00 America/Los_Angeles); empty: at any time.",
+  // #6205: the window is marked on a week calendar (components/weekPicker.js); its text stays under it.
+  return askForm(`Change ${into}`, (target ? "" : "The mode is how a version passes when nothing holds it. ") + "Mark the hours when versions may pass; none marked: at any time.",
     "Save", [...(target ? [] : [{ id: "mode", label: "Mode", value: t.words, hint: "auto, yes mark, delay 10m, release" }]),
-      { id: "window", label: "Time window", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00" },
+      { id: "window", label: "When versions may pass", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00",
+        before: weekPickerHtml(), wire: wireWeekPicker },
       { id: "fault", label: "Fault rule", options: [["on", "Block it"], ["off", "Let versions pass"]], value: t.fault_rule ? "on" : "off" }],
     (v) => {
       const args = { stage: n, reason: v.why || null };

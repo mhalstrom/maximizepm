@@ -429,6 +429,61 @@ try {
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
 
+    def test_the_window_of_a_transition_is_marked_on_a_week_calendar(self):
+        """#6205 (mark 2026-11-19: 'probably a better way to do this is with a calander'): the Window of a transition
+        is a week of hour cells; a preset or a drag marks hours and writes the window text, a typed text marks the
+        hours, and Save stores a window that the server reads. At 1280 and 390 px."""
+        from river.pipeline import define, transitions
+        define.pipeline_add(self.c, "app", project="site")
+        define.env_set(self.c, "app", "prod")
+        define.stage_set(self.c, "app", "build", "build")
+        define.stage_set(self.c, "app", "prod", "deploy", env="prod")
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="app"]'), "Deploy: app");
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('#plRow [data-pl-arrow="prod"]'), "the arrows");
+  q('#plRow [data-pl-arrow="prod"]').click();
+  await until(() => q('#plArrowDlg [data-pl-change]'), "the Window option");
+  q('#plArrowDlg [data-pl-change]').click();
+  await until(() => q('#plAskDlg:not(.hidden) .wk-grid'), "the calendar");
+  const f = q("#plF-window"), on = () => document.querySelectorAll("#plAskDlg .wk-cell.on").length;
+  const out = { cells: document.querySelectorAll("#plAskDlg .wk-cell").length };
+  q('#plAskDlg [data-wk-preset="work"]').click();
+  out.preset = f.value; out.presetOn = on();
+  f.value = "mon-thu 09:00-17:00 UTC; sat 22:00-02:00 UTC"; f.dispatchEvent(new Event("input"));
+  out.typedOn = on();
+  const cell = (k) => q(`#plAskDlg [data-wk="${k}"]`).getBoundingClientRect();
+  const a = cell("4:9"), b = cell("4:11");  // a drag down friday 09:00-12:00
+  const ev = (type, r) => new PointerEvent(type, { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerId: 1 });
+  q('#plAskDlg [data-wk="4:9"]').dispatchEvent(ev("pointerdown", a));
+  q('#plAskDlg .wk').dispatchEvent(ev("pointermove", cell("4:10")));
+  q('#plAskDlg .wk').dispatchEvent(ev("pointermove", b));
+  window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+  out.dragged = f.value;
+  out.over = [...q("#plAskDlg").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5).map(e => e.className).slice(0, 5);
+  q('#plAskDlg [data-pl-askgo]').click();
+  await until(() => q("#plAskDlg.hidden"), "saved");
+  await sleep(500);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1280,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertEqual(r["cells"], 7 * 24, r)
+            self.assertRegex(r["preset"], r"^mon-fri 09:00-17:00 \S+$", r)
+            self.assertEqual(r["presetOn"], 5 * 8, r)
+            self.assertEqual(r["typedOn"], 4 * 8 + 2 + 2, r)  # sat 22-24 and sun 00-02
+            self.assertIn("fri 09:00-12:00 UTC", r["dragged"], r)
+            self.assertEqual(r["over"], [], r)
+            s = self.c.execute("SELECT id FROM pipeline_stages WHERE name='prod'").fetchone()["id"]
+            w = transitions.get(self.c, s)["time_window"]
+            self.assertTrue(w and transitions.parse_window(w), w)
+            self.assertIn("fri 09:00-12:00 UTC", w)
+
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one
         changed, and Go back makes one more version. At 1280 and at 390 px, nothing wider than the page."""
