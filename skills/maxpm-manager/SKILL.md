@@ -531,9 +531,10 @@ A test stage names its JUnit file (`--junit report.xml`); a stage's command
 prints `::step start <name>` and `::step end <name> passed|failed` lines to
 show its parts.
 
-The work can run on a forge instead: `maxpm pipeline forge <name> github|gitlab
---repo <owner/name> --secret <secret name> [--url <self-hosted GitLab>]`, and
-each stage names its workflow (GitHub) or its GitLab stage (`--workflow`). The
+The work can run on a forge instead: `maxpm pipeline forge <name>
+github|gitlab|gitea|forgejo --repo <owner/name> --secret <secret name> [--url
+<address>]` (Gitea and Forgejo need `--url`), and each stage names its workflow
+file, or on GitLab its GitLab stage (`--workflow`). The
 person saves the token first (`maxpm secret put <name>`). A stage over many
 servers: `--waves "web-1; web-2, web-3" --check "<cmd>" --rollback "<cmd>"`.
 A failed stage opens a fault item; `maxpm pipeline fix <run> [--start]` adds

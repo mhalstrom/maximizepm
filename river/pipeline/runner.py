@@ -32,12 +32,14 @@ import uuid
 from .. import core
 from . import cdevents, junit, steps, store
 
-FORGES = {"github": "GitHub", "gitlab": "GitLab"}  # the forges with an adapter: river/pipeline/<forge>.py
+FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo"}  # the forges with an adapter
+_ADAPTERS = {"gitea": "github", "forgejo": "github"}  # Gitea and Forgejo have GitHub's Actions API (#6122)
 
 
 def _adapter(forge):
+    """The module of a forge's adapter: river/pipeline/<forge>.py."""
     import importlib
-    return importlib.import_module(f"{__package__}.{forge}")
+    return importlib.import_module(f"{__package__}.{_ADAPTERS.get(forge, forge)}")
 
 
 RUNNING = {}  # run id -> the thread of this process that runs it; server.restart_blocked waits for them
@@ -575,9 +577,9 @@ def stop(conn, run_id, actor=None):
         raise core.RiverError(f"run #{run_id} is {r['state']} already")
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
-    forge = "github" if (r["runner"] or "") == "forge:github" or (r["key"] or "").startswith("gh-run-") else \
-        "gitlab" if (r["runner"] or "") == "forge:gitlab" or (r["key"] or "").startswith("gl-") else None
-    if forge:
+    forge = (r["runner"] or "")[6:] if (r["runner"] or "").startswith("forge:") else \
+        r["forge"] if (r["key"] or "").startswith(("gh-run-", "gl-")) else None
+    if forge in FORGES:
         _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
         return {"run": run_id, "stopped": f"on {FORGES[forge]}"}
     p = PROCS.get(run_id)
@@ -631,7 +633,7 @@ def serve_pass(conn):
     _lost(conn)
     from . import github
     github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
-    _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121)
+    _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121); Gitea and Forgejo: github.poll_due (#6122)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()

@@ -239,7 +239,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 
 
-FORGES = ("github", "gitlab", "none")
+FORGES = ("github", "gitlab", "gitea", "forgejo", "none")
 
 
 def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None, url=None):
@@ -249,10 +249,13 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
     if forge not in FORGES:
         raise core.RiverError(f"the forge {forge!r} is not one of {', '.join(FORGES)}")
     if forge != "none":
-        shape = r"^[\w.-]+/[\w.-]+$" if forge == "github" else r"^[\w.-]+(/[\w.-]+)+$"
+        shape = r"^[\w.-]+(/[\w.-]+)+$" if forge == "gitlab" else r"^[\w.-]+/[\w.-]+$"
         if not repo or not re.match(shape, repo):
-            raise core.RiverError("name the repository: --repo " + ("owner/name" if forge == "github"
-                                                                     else "group/project"))
+            raise core.RiverError("name the repository: --repo " + ("group/project" if forge == "gitlab"
+                                                                     else "owner/name"))
+        if forge in ("gitea", "forgejo") and not url:
+            raise core.RiverError(f"name the address of the {forge}: --url https://<host> (Codeberg: "
+                                  "https://codeberg.org)")
         if not secret:
             raise core.RiverError(f"name the maxpm secret that holds the {forge} token: --secret <name> (a person "
                                   "saves it: maxpm secret put <name>)")
@@ -266,7 +269,7 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
                      "poll_error=NULL WHERE id=?", (*vals, p["id"]))
         text = "forge none: the stages run here" if forge == "none" else (
             f"forge {forge}: repository {repo}" + (f" at {url}" if url else "") + f", token from secret {secret}"
-            + (f", branch {ref or 'main'}" if forge == "github" else ""))
+            + (f", branch {ref or 'main'}" if forge != "gitlab" else ""))
         _change(conn, p["id"], actor, text)
     return {"pipeline": p["name"], "forge": forge, "repo": repo, "secret": secret, "ref": ref, "url": url}
 

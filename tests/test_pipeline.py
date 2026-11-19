@@ -1153,6 +1153,104 @@ class JUnitRunner(unittest.TestCase):
         self.assertEqual((tests["test_ok"]["state"], tests["test_skip"]["state"]), ("passed", "skipped"))
 
 
+class FakeForge(FakeGitHub):
+    """Gitea or Forgejo at https://git.example.com: the API under /api/v1, the token as 'token <value>'."""
+
+    def __call__(self, method, url, headers, body):
+        assert headers["Authorization"] == "token test-token"
+        return super().__call__(method, url.replace("https://git.example.com/api/v1", "https://api.github.com"),
+                                headers, body)
+
+
+class GiteaForgejo(Base):
+    """The Gitea and Forgejo adapter (#6122): github.py with their address, token and run forms. Gitea lists runs in
+    GitHub's form; Forgejo in its own (title, commit_sha, one status word) and has no jobs, artifacts or cancel."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import github, runner
+        self.gh, self.runner = github, runner
+        self.api = FakeForge()
+        old = (github.FETCH, github._token)
+        github.FETCH, github._token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(github, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "shop", project="shop")
+        define.env_set(self.c, "shop", "prod")
+        define.stage_set(self.c, "shop", "test", "test", workflow="test.yml")
+        define.stage_set(self.c, "shop", "prod", "deploy", env="prod", workflow="deploy.yml", gate="person mark")
+        self.runs = []
+        self.api.routes[("GET", "/repos/o/shop/actions/runs?limit")] = lambda path, body: (
+            200, {"workflow_runs": self.runs, "total_count": len(self.runs)})
+
+    def forge(self, name):
+        define.forge_set(self.c, "shop", name, repo="o/shop", secret="tok", url="https://git.example.com")
+
+    def poll(self):
+        self.gh.poll(self.c, self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone())
+
+    def stage_runs(self):
+        return {r["stage"]: r for r in self.c.execute(
+            "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+    def test_gitea_runs_and_jobs_then_the_gate_starts_the_deploy_workflow(self):
+        self.forge("gitea")
+        self.runs = [dict(gh_run(7, "a" * 40), path=".gitea/workflows/test.yml@refs/heads/main", started_at=None),
+                     dict(gh_run(8, "f" * 40), path=".gitea/workflows/other.yml@refs/heads/main")]
+        self.api.routes[("GET", "/repos/o/shop/actions/runs/7/jobs")] = (200, {"jobs": [
+            {"id": 70, "name": "unit", "status": "completed", "conclusion": "success",
+             "started_at": "2026-11-18T10:01:00Z", "completed_at": "2026-11-18T10:03:00Z"}]})
+        self.poll()
+        runs = self.stage_runs()
+        self.assertEqual((runs["test"]["key"], runs["test"]["state"]), ("gh-run-7", "passed"))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], 2)  # other.yml is no stage
+        self.assertEqual(self.c.execute("SELECT DISTINCT source FROM pipeline_events").fetchall()[0][0], "gitea")
+        self.assertEqual([s["name"] for s in store.run_show(self.c, runs["test"]["id"])["step_list"]], ["unit"])
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
+        self.runner.serve_pass(self.c)  # the gate asks the person
+        core.done(self.c, self.stage_runs()["prod"]["gate_item"], actor="mark")
+        self.api.routes[("POST", "/repos/o/shop/actions/workflows/deploy.yml/dispatches")] = (204, b"")
+        self.runner.serve_pass(self.c)
+        self.assertEqual(self.api.calls[-1], ("POST", "/repos/o/shop/actions/workflows/deploy.yml/dispatches",
+                                              {"ref": "main", "inputs": {"maxpm_run": str(runs["prod"]["id"]),
+                                                                         "maxpm_rev": "a" * 40}}))
+        self.assertEqual(self.stage_runs()["prod"]["runner"], "forge:gitea")
+
+    def test_forgejo_runs_and_a_run_again_with_an_older_commit(self):
+        self.forge("forgejo")
+        fj = lambda n, sha, status: {"id": n, "title": f"maxpm run x {sha[:3]}", "commit_sha": sha, "status": status,
+                                     "workflow_id": "test.yml", "prettyref": "main", "html_url": f"u/{n}",
+                                     "created": "2026-11-18T10:00:00Z", "started": "2026-11-18T10:00:10Z",
+                                     "stopped": "2026-11-18T10:02:00Z" if status != "running" else None}
+        self.runs = [fj(3, "b" * 40, "running"), fj(2, "a" * 40, "failure")]
+        self.poll()  # no jobs and no artifacts on this Forgejo: 404, and the read goes on
+        states = dict(self.c.execute("SELECT key, state FROM stage_runs").fetchall())
+        self.assertEqual(states, {"gh-run-2": "failed", "gh-run-3": "running"})
+        # This Forgejo cannot stop a run by its API: the refusal says where to stop it.
+        running = self.c.execute("SELECT id FROM stage_runs WHERE key='gh-run-3'").fetchone()[0]
+        with self.assertRaisesRegex(RiverError, "cannot stop a run by its API; stop run 3 on its Actions page"):
+            self.runner.stop(self.c, running, actor="mark")
+        self.runs[0] = fj(3, "b" * 40, "success")
+        self.poll()
+        # Run the test stage again for the older commit: the forge's workflow_dispatch with that commit.
+        r = self.runner.run_again(self.c, "shop", "test", "a" * 40, actor="mark")
+        self.api.routes[("POST", "/repos/o/shop/actions/workflows/test.yml/dispatches")] = (204, b"")
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
+        self.runner.serve_pass(self.c)
+        self.assertEqual(self.api.calls[-1][2]["inputs"], {"maxpm_run": str(r["run"]), "maxpm_rev": "a" * 40})
+        self.assertEqual(self.c.execute("SELECT runner FROM stage_runs WHERE id=?", (r["run"],)).fetchone()[0],
+                         "forge:forgejo")
+
+    def test_the_forge_command_needs_the_address(self):
+        with self.assertRaisesRegex(RiverError, "--url https://<host>"):
+            define.forge_set(self.c, "shop", "forgejo", repo="o/shop", secret="tok")
+        self.forge("forgejo")
+        self.assertEqual(define.export(self.c, "shop")["forge"]["url"], "https://git.example.com")
+
+
 class FakeGitLab(FakeGitHub):
     def __call__(self, method, url, headers, body):
         assert headers["PRIVATE-TOKEN"] == "test-token"
