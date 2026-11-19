@@ -429,6 +429,53 @@ try {
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
 
+    def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
+        """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'): the Next bar names
+        the running release, its step and its time with a log link, and offers nothing that starts another release;
+        no count of stages, no paragraph under Versions in deploy, the stage's links are plain, and the holding card's
+        line is short. At 1500 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        for n in range(2):
+            i = core.item_add(self.c, "web", f"Change {n}", actor="mark")["id"]
+            core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MIN(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        t0 = core.iso(core.now() - core.timedelta(minutes=2))
+        h = self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, item_id, rev, queued_at, started_at) "
+                           "VALUES ('toolscaled-prod','deploy','make it',?,?,'9783eb1abcdef',?,?)", (dep, dep, t0, t0)).lastrowid
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at, ended_at, seconds) "
+                       "VALUES (?,'check','passed',?,?,1)", (h, t0, t0))
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'test','running',?)", (h, t0))
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q(".pl-next"), "the Next bar");
+  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " ").trim(), buttons: q(".pl-next").querySelectorAll("button").length,
+    note: q("#plNote").textContent.replace(/\s+/g, " ").trim() };
+  q('.pl-next [data-pl-stage="deploy"]').click();
+  await until(() => q("#plStageRuns .pl-runs"), "Versions in deploy");
+  out.runs = q("#plStageRuns").textContent.replace(/\s+/g, " ");
+  out.links = [...q("#plDetail").querySelectorAll(".pl-opts button")].map(b => [b.textContent.trim(), b.className]);
+  out.page = q("#deploy-pipeline").textContent.replace(/\s+/g, " ");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertIn("Releasing 9783eb1 · step test · 2m · log · report", r["next"], r)
+            self.assertEqual(r["buttons"], 0, r)  # nothing that starts another release
+            self.assertNotIn("stage", r["note"].replace("Hold all stages", ""), r)
+            self.assertNotIn("Each row is a release", r["runs"], r)
+            self.assertEqual([x[0] for x in r["links"]], ["The transition before it", "Send a version here…"], r)
+            self.assertTrue(all("plain" in x[1] and "warn" not in x[1] for x in r["links"]), r)
+            for words in ("starts an agent session", "as a pipeline", "Deploy now"):
+                self.assertNotIn(words, r["page"], r)
+
     def test_the_window_of_a_transition_is_marked_on_a_week_calendar(self):
         """#6205 (mark 2026-11-19: 'probably a better way to do this is with a calander'): the Window of a transition
         is a week of hour cells; a preset or a drag marks hours and writes the window text, a typed text marks the

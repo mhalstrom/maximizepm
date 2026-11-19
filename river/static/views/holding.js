@@ -16,13 +16,18 @@ const cache = {};  // pipeline name -> {sig, html}: the detail draws at once, th
 const short = (sha) => (sha || "").slice(0, 8);
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
+// A count of lines in a card: 33912 is 34k (#6209).
+const lines = (n) => n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+// The base in short: the release's #id ('the pin of release #6023' is #6023), else the label (#6209).
+const since = (label) => (String(label).match(/#\d+/) || [label])[0];
+
 // The inside of the holding stage card (views/pipeline.js stageCard).
 export function holdingCardHtml(h) {
   const n = h.commits || 0;
   return `<span class="pl-kind">holding</span><span class="pl-name">holding</span>
     <span class="pl-ver pl-words">${h.reading ? "reading…" : n ? plural(n, "commit") : h.folder ? "nothing waits" : "no git folder"}</span>
     ${n ? `<span class="pl-st queued">● ${h.reviewed} of ${n} reviewed</span>` : `<span class="pl-st none">● empty</span>`}
-    <span class="pl-meta pl-more-line">${n ? `+${h.added} −${h.removed}` : ""}${h.base_label ? ` · since ${esc(h.base_label)}` : ""}</span>`;
+    <span class="pl-meta pl-more-line">${n ? `+${lines(h.added)} −${lines(h.removed)}` : ""}${h.base_label ? ` · since ${esc(since(h.base_label))}` : ""}</span>`;
 }
 
 function table(H) {

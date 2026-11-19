@@ -27,7 +27,6 @@ button.pl-stage { display: flex; flex-direction: column; justify-content: flex-s
 .pl-next { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-4) var(--sp-5);
   margin: var(--sp-2) 0; border: var(--hair-2) solid var(--accent); border-radius: var(--r-l); background: var(--human-bg); }
 .pl-next .spacer { flex: 1; }
-.pl-next .pl-next-help { flex-basis: 100%; }  /* what Deploy now and Review and deploy do (#6193) */
 /* The card or chip where that step waits: the same accent, so the eye goes from the graph to the button. */
 .pl-stage.pl-waits, button.pl-arrow.pl-waits { border: var(--hair-2) solid var(--accent); background: var(--human-bg); }
 #plArrowDlg { --dlg-w: var(--w-dlg-m); }  /* a transition's dialog (#6189) */

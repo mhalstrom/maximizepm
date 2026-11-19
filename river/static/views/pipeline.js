@@ -68,7 +68,7 @@ export async function renderPipeline(force) {
     || V.data.stages.find(s => s.last_run && !s.holding) || V.data.stages[0] || {}).name || null;
   if (!V.data.stages.some(s => s.name === V.arrow)) V.arrow = null;
   const s = JSON.stringify([V.name, V.data, V.stage, V.arrow, V.tab, V.filter]);
-  if (s === sig && !force) return refreshRun(force);
+  if (s === sig && !force) { tickRunning(); return refreshRun(force); }
   sig = s;
   draw();
   refreshRun(true);
@@ -101,7 +101,8 @@ function headControls(D) {
     r.reviewed ? button(`Release the ${plural(r.reviewed, "reviewed commit")}`, { kind: first ? "" : "primary",
       data: { "hd-release": "reviewed", "hd-pipe": D.name, sha: r.upto, n: r.reviewed }, title: "Release the reviewed ones" }) : "",
     button(`Release all ${h.commits}`, { data: { "hd-release": "all", "hd-pipe": D.name, sha: r.last, n: h.commits }, title: "Every commit in holding" })].join("") : "";
-  return first + hold + (D.default && !first && !hold ? deployButtons(D.name) : "");
+  // #6209: no Deploy now while a release runs: it would start another one.
+  return first + hold + (D.default && !first && !hold && !running(D) ? deployButtons(D.name) : "");
 }
 
 // The next step of a deploy target, right under the graph (#6189, mark 2026-11-19: 'its still not obvious how to do
@@ -126,10 +127,31 @@ function yesWaits(D) {
     return w && NEEDS_YES.includes(t.mode) && !w.approved_by && t.state !== "blocked" && t.state !== "disabled"; }) || null;
 }
 
-// Deploy now and Review and deploy in words (#6193: 'unclear: say what each does'); a tooltip stays 1-4 words (p146).
-const DEPLOY_WORDS = "Deploy now starts an agent session that takes the release and deploys it. Review and deploy starts a review session first; the deploy follows when the review passes.";
+// A stage that runs now (#6209, mark 2026-11-19 on a running release: 'fix the wordy text'): the first stage of the
+// pipeline whose last run is running, with the step that runs and how long; the Next bar names it and offers nothing
+// that starts another release. The log is the stage's detail (its steps and output): a click selects the stage.
+function running(D) {
+  const s = D.stages.find(x => !x.holding && x.last_run && x.last_run.state === "running");
+  if (!s) return "";
+  const r = s.last_run, step = (r.step_list || []).find(x => x.state === "running");
+  const what = r.version ? `<span class="pl-ver">${esc(short(r.version))}</span>` : r.item ? `#${r.item}` : esc(s.name);
+  const bits = [`${D.default ? "Releasing" : "Running " + esc(s.name)} ${what}`];
+  if (step) bits.push(`step ${esc(step.name)}`);
+  if (r.started_at) bits.push(esc(secs((Date.now() - Date.parse(r.started_at)) / 1000)));
+  const log = `<span class="link" data-pl-stage="${esc(s.name)}">log</span>`;
+  const report = D.default && r.item ? ` · <span class="link" data-report="${r.item}">report</span>` : "";
+  return `<div class="pl-next"><span class="t-m">${bits.join(" · ")} · ${log}${report}</span></div>`;
+}
+
+// The time of a running stage goes on with each read of the pipeline, also when nothing else changed.
+function tickRunning() {
+  const bar = V.tab === "stages" && $("#plBody .pl-next"), run = bar && V.data && running(V.data);
+  if (run && bar.outerHTML !== run) bar.outerHTML = run;
+}
 
 function nextBar(D) {
+  const run = running(D);
+  if (run) return run;
   if (!D.default) {  // #6193: every pipeline names its next step
     const s = yesWaits(D), w = s && s.transition.waiting[0];
     return s ? `<div class="pl-next"><span class="t-m">Next: <span class="pl-ver">${esc(short(w.rev))}</span> waits for your yes before ${esc(s.name)}.</span>
@@ -140,24 +162,21 @@ function nextBar(D) {
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run || {}, R = D.release;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {});
   const text = appr.state === "queued" && appr.item
-    ? `Next: your yes for release${dep.item ? " #" + dep.item : ""}${appr.version ? ` (<span class="pl-ver">${esc(short(appr.version))}</span>)` : ""}. It goes to production after it.`
+    ? `Next: your yes for release${dep.item ? " #" + dep.item : ""}${appr.version ? ` (<span class="pl-ver">${esc(short(appr.version))}</span>)` : ""}.`
     : R ? `Next: release ${releaseLine(D, (D.stages.find(s => s.holding) || {}).holding)}`  // #6198: the dialog's words
     : "Next: the collected tasks can go out.";
   const agent = R ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
-  const help = b.includes("data-deploy=") ? `<div class="muted t-s pl-next-help">${DEPLOY_WORDS}</div>` : "";
-  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}${help}</div>`;
+  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}</div>`;
 }
 
 function draw() {
   const D = V.data;
-  const envs = D.envs.length;
-  // #6183: Hold all stages stands at the end of the bar, not inside the line of text.
-  const words = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
-    + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : "")  // the page's head names the project
-    + (D.followed ? ` · followed: its own system runs the flow; its trigger rules and hooks act on its events` : "");  // #6167
+  // #6183: Hold all stages stands at the end of the bar, not inside the line of text. #6209: no count of stages or
+  // environments (the graph shows them) and no words on what a target's pipeline is (the page's head names it).
+  const words = D.followed ? "Followed: its own system runs it" : "";  // #6167
   const hold = (D.default && !D.controls) || D.followed ? "" : D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
     : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" });
-  $("#plNote").innerHTML = `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>`
+  $("#plNote").innerHTML = (words || hold ? `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>` : "")
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
   if (V.tab === "stages") fit();
@@ -432,7 +451,8 @@ function stageRunsHtml(SR) {
     if (back(r) && (SR.branches || []).length)  // #6142: the same place of every branch
       b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
     if (ours && r.run != null && busy(r)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
-    else if (again(r)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev }, title: "Run this stage again" }, miss));
+    else if (again(r)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev },
+      title: tg && SR.stage === "deploy" ? "A new release, pinned" : "Run this stage again" }, miss));
     const when = r.started_at || r.queued_at;
     const why = (r.by ? esc(r.by) + (r.why ? ": " : "") : "") + esc(r.why || "") + (r.errors ? `${r.by || r.why ? " · " : ""}<span class="c-warn">${esc(r.errors)}</span>` : "");
     return { r, b, why, when, task: tg && r.item ? `<span class="link" data-open="${r.item}">#${r.item}</span>` : "",
@@ -451,10 +471,7 @@ function stageRunsHtml(SR) {
     <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>State</th><th>Took</th>
       ${hasWhy ? "<th>Why, or who</th>" : ""}${hasTask ? "<th>Task</th>" : ""}${hasActs ? "<th>Actions</th>" : ""}</tr>${rows}</table></div>
     ${more}
-    ${missLine(D, [...new Set(miss)])}
-    <div class="muted t-s">${tg ? `Each row is a release of ${esc(SR.target)}. A move back or a run again of deploy adds a deploy item pinned at that version: it waits for the person's yes and goes out through the deploy hook, like every release. A move back also blocks the transition into deploy until someone unblocks it.`
-      : ours ? `A move back is one more run here, and it blocks the transition into ${esc(SR.stage)} until someone unblocks it.`
-      : "Followed: these runs come from its own system; a move back or a run again happens there."}</div></div>`;
+    ${missLine(D, [...new Set(miss)])}</div>`;  // #6209: no paragraph on what a move back does (the guide holds it)
 }
 
 async function refreshRun(force) {
@@ -592,7 +609,6 @@ function arrowNow(D, s, release) {
     ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
   const b = headControls(D) + agent;
   return `<div class="t-m">${line}</div>${b ? `<div class="pl-bar">${b}</div>` : ""}`
-    + (b.includes("data-deploy=") ? `<div class="muted t-s">${DEPLOY_WORDS}</div>` : "")
     + (hook ? `<details class="t-s"><summary>What runs</summary><code>${esc(hook)}</code></details>` : "");
 }
 
@@ -638,8 +654,7 @@ function arrowDetail(s) {
     <div class="t-m">${t.state === "open" ? "Open: " + esc(t.text) : esc(t.state_text)}</div>
     ${waits || (D.default ? "" : `<div class="muted t-s">No version waits here now.</div>`)}
     <div class="pl-table"><table class="pl-ctl"><tr><th>Control</th><th>Now</th><th>Set by, until</th></tr>${rows.join("")}</table></div>
-    ${arrowActions(s, t)}
-    <div class="muted t-s">The tests and checks run inside the stages; a transition only lets versions in. Each change is a line in the audit log with who made it, why and until when.</div>`;
+    ${arrowActions(s, t)}`;  // #6209: no paragraph of explanation (the guide holds it)
 }
 
 function arrowActions(s, t) {
@@ -660,8 +675,7 @@ function arrowActions(s, t) {
   b.push(button(V.data.default ? "Change the window…" : "Change the mode or the window…", { data: { "pl-change": n }, title: "The standing rules" }));
   // #6176: a deploy target's arrow holds its release items, not versions: it names them.
   const holds = (t.holds || []).map(h => `<span class="link" data-open="${h.id}">#${h.id}</span> ${esc(h.kind)}`).join(", ");
-  return `<div class="pl-bar">${b.join("")}</div>${holds ? `<div class="t-s">It holds ${holds} now.</div>` : ""}`
-    + (V.data.default ? `<div class="muted t-s">The mode comes from the deploy target (its release cadence, the person's yes). A closed transition holds the release item after it; the person's approval item and the deploy hook still release it.</div>` : "");
+  return `<div class="pl-bar">${b.join("")}</div>${holds ? `<div class="t-s">It holds ${holds} now.</div>` : ""}`;
 }
 
 function detail() {
@@ -707,30 +721,36 @@ function wavesHtml(s, r) {
 function stageActions(s, r) {
   if (V.data.default) return targetActions(s, r);
   if (V.data.followed) return `<div class="muted t-s">Followed: its own system runs this stage. A trigger rule acts on its events (Triggers).</div>`;  // #6167
-  const rev = r && r.version, b = [];
-  if (s.transition) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
+  const rev = r && r.version, b = [], links = [];
+  if (s.transition) links.push(stageLink("The transition before it", { "pl-arrow": s.name }, "Its controls"));
   const D = V.data, miss = [], ours = r && r.state === "queued" && !r.runner && (!r.source || r.source === "maxpm");
   if (r && ["running", "queued"].includes(r.state) && r.id != null)
     b.push(srcButton(D, ours ? null : s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }, miss));
   if (r && rev && !["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }, miss));
   // The override (#6146): a version came here past the stages before; run them for it, or send another one here.
   if (s.override) b.push(button(`Run the whole pipeline for ${esc(short(s.override.rev))}`, { kind: "primary", data: { "pl-whole": s.override.rev }, title: "Run the skipped stages" }));
-  if ((s.prev || []).length || D.stages.indexOf(s) > 0)
-    b.push(button("Send a version here directly…", { kind: "warn", data: { "dp-tab": "emergency", "em-preset": s.name }, title: "Override" }));
+  if ((s.prev || []).length || D.stages.indexOf(s) > 0) links.push(sendHere(s));
   const bad = r && r.tests ? (r.tests.failed || 0) + (r.tests.error || 0) : 0;
   if (bad && r.id != null && !["running", "queued"].includes(r.state))
     b.push(srcButton(D, s, "rerun", `Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }, miss));
-  return `<div class="pl-bar">${b.join("")}</div>${missLine(D, miss)}`;
+  return (b.length ? `<div class="pl-bar">${b.join("")}</div>` : "") + linksRow(links) + missLine(D, miss);
 }
+
+// The ways to the transition and to the override of a stage are small plain links in one quiet row (#6209, mark
+// 2026-11-19: the outlined red 'Send a version here directly…' under a running deploy was too loud), as the hold
+// options of the transition dialog (arrowOptions).
+const stageLink = (label, data, title) => button(label, { cls: "plain", data, title });
+const sendHere = (s) => stageLink("Send a version here…", { "dp-tab": "emergency", "em-preset": s.name }, "Override");
+const linksRow = (links) => links.length ? `<div class="pl-opts t-s">${links.join("")}</div>` : "";
 
 // The actions on a stage of a deploy target (#6176): its transition, and for deploy a version sent there directly (a
 // deploy item that still waits for the person's yes); Versions in <stage> under it has Run again and Move back here.
 function targetActions(s, r) {
   if (!V.data.controls) return "";
-  const b = [];
-  if (s.transition && !s.transition.fixed) b.push(button("The transition before it", { data: { "pl-arrow": s.name }, title: "Its controls" }));
-  if (s.name === "deploy") b.push(button("Send a version here directly…", { kind: "warn", data: { "dp-tab": "emergency", "em-preset": s.name }, title: "Override" }));
-  return b.length ? `<div class="pl-bar">${b.join("")}</div>` : "";
+  const links = [];
+  if (s.transition && !s.transition.fixed) links.push(stageLink("The transition before it", { "pl-arrow": s.name }, "Its controls"));
+  if (s.name === "deploy") links.push(sendHere(s));
+  return linksRow(links);
 }
 
 // The reason of a hold or a roll back: a small dialog (components/dialog.js). The Emergency tab asks with it too.
@@ -844,8 +864,7 @@ function versionsView(D) {
   const names = D.stages.map(s => s.name);
   const live = new Set(D.envs.map(e => e.rev).filter(Boolean));
   const cell = (c) => c ? st(c.state) : `<span class="muted">·</span>`;
-  return `<div class="muted t-s">Each row is one version, newest on top. Read across to see how far it went.</div>
-    <div class="pl-table"><table class="pl-vtable"><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
+  return `<div class="pl-table"><table class="pl-vtable"><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
     ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${v.deploy
         ? `<span class="link" data-report="${v.deploy}" title="The release report">${esc(short(v.rev))}</span>`
         : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Its tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
