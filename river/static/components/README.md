@@ -37,7 +37,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Share artifact (a canvas on realquicksite) | `rqsPublish.js`: `publishButton()`, `pageLine(page, version)`, `openOnRqs(id, meta, version)` | the button Share artifact of the canvas bar, the line under the bar (link, private or shared, end date, problems), and the dialog before a new version of a shared page (op `canvas_publish`, #5789) |
 | Settings of the Sessions list | `listSettings.js`: `openListSettings()` | the ⚙ at the foot of the list (#5883): one dialog with a tab each for Sessions, Agents, Browsers, Cost and notices; its rows are the Settings tab's (`settings.js` `settingRow`, `saveRow`); All settings opens the Settings tab on that group |
 | End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |
-| A new release | `releaseUpdate.js`: `showRelease(release, {boot, waitForRestart})`, `openRelease()` | the bar at the foot, "A new version of MaximizePM is available", and its dialog with the notes and one button (#5601); from GET /api/update |
+| A new release | `releaseUpdate.js`: `showRelease(release, {boot, waitForRestart})`, `openRelease()` | a line in `#pageNotes` under the top bar (#6184; with app.js's "MaximizePM was updated" line, never over the page), "A new version of MaximizePM is available", and its dialog with the notes and one button (#5601); from GET /api/update |
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
 | Empty list | `empty.js`: `empty(html, {inline})` | "No open items." |

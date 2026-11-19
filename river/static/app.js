@@ -237,7 +237,7 @@ function codeBar(text) {
     bar = document.createElement("div"); bar.id = "newCodeBar"; bar.className = "newcode"; bar.setAttribute("role", "status");
     bar.innerHTML = `<span></span> <button class="btn primary" type="button">Reload</button>`;
     bar.querySelector("button").onclick = () => location.reload();
-    document.body.append(bar);
+    ($("#pageNotes") || document.body).append(bar);  // the line under the top bar, never over the page (#6184)
   }
   bar.querySelector("span").textContent = text;
 }

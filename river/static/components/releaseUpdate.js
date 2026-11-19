@@ -98,7 +98,9 @@ function draw() {
       if (e.target.closest("[data-rel-open]")) return openRelease();
       if (e.target.closest("[data-rel-later]")) return hideForADay();
     });
-    document.body.append(bar);
+    // The line under the top bar, before the code bar; never over the page (#6184).
+    const host = document.getElementById("pageNotes") || document.body;
+    host.prepend(bar);
   }
   bar.innerHTML = `<span>A new version of MaximizePM is available: ${esc(rel.version)}</span>
     ${button("What's new", { kind: "primary", data: { "rel-open": "1" } })}${iconButton("✕", "Later", { data: { "rel-later": "1" } })}`;

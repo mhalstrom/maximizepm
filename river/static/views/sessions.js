@@ -379,6 +379,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The keyboard opens or closes in about 300 ms, and its suggestion bar can come later: fit again until it settles.
   const fitAfter = () => { fitSoon(); for (const ms of [100, 350, 700, 1200]) setTimeout(fit, ms); };
   window.addEventListener("resize", fitSoon);
+  // A notice of a new version opens or closes in the line under the top bar (#6184): the tab's top moves, so fit again.
+  { const notes = document.getElementById("pageNotes"); if (notes) new ResizeObserver(fitSoon).observe(notes); }
   window.addEventListener("scroll", () => { if ($("#sessLayout").classList.contains("phone-kb")) fitSoon(); }, { passive: true });
   // ?kbdebug=1 (remembered; ?kbdebug=0 ends it) shows the numbers of the fit above the message box, so a screenshot
   // from a phone says what the page measured (#4910).

@@ -2098,7 +2098,13 @@ try {
     await fetch("/__bump");
     await until(() => q("#newCodeBar"), "the bar");
     check(q("#newCodeBar").textContent.includes("MaximizePM was updated."), "the bar's text");
+    // #6184: a line under the top bar that pushes the tab down, never over the message box of the chat.
+    check(q("#newCodeBar").parentElement === q("#pageNotes"), "the bar in the line under the top bar");
     await sleep(6000);
+    const bar = q("#newCodeBar").getBoundingClientRect(), lay = q("#sessLayout").getBoundingClientRect();
+    const box = q("#sessText").getBoundingClientRect();
+    check(bar.top >= q("header").getBoundingClientRect().bottom - 1 && bar.bottom <= lay.top + 1, "the bar above the tab");
+    check(box.top >= bar.bottom && box.bottom <= innerHeight + 1, "the message box in the window: " + JSON.stringify([bar.bottom, box.top, box.bottom, innerHeight]));
     check(+sessionStorage.getItem("loads") === 1, "no reload by itself");
     q("#newCodeBar button").click();
   } else {
