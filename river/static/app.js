@@ -36,7 +36,6 @@ import * as ops from "./views/ops.js";
 import * as deploy from "./views/deploy.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
-import { renderHealth } from "./views/health.js";
 import * as settings from "./views/settings.js";
 import { renderCredentials } from "./views/credentials.js";
 import { signinAsks } from "./views/signinAsk.js";
@@ -282,7 +281,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -372,7 +371,7 @@ $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
   plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals();
-  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
+  renderGraph(false); renderLog(true); ops.renderOps(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -451,6 +450,8 @@ function readUrl() {
   // Plan (#5102): /plan/<view>?project=<p>&goal=<g>. The old paths (/board, /projects, ...) answer "not found".
   // Releases and Pipelines left Plan for the Deploy tab (#6136): their old addresses show Deploy's pipelines.
   if (r.tab === "plan" && ["releases", "pipelines"].includes(parts[1])) { r.tab = "deploy"; parts.splice(1); }
+  // Health left Plan for the Cost page (#6217): its old address shows Cost.
+  if (r.tab === "plan" && parts[1] === "health") { r.tab = "sessions"; r.pane = "cost"; }
   if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
   if (r.tab === "deploy") r.deploy = deploy.fromUrl(parts.slice(1));
@@ -493,7 +494,7 @@ function setTab(name, push = true) {
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   plan.renderPlanViews(); plan.renderPlanSide();
-  renderLog(true); renderHealth(true); ops.renderOps(true);
+  renderLog(true); ops.renderOps(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   deploy.renderDeploy(tab === "deploy");  // shown: it reads and draws; hidden: its pipeline stops reading

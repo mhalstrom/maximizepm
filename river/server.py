@@ -6059,7 +6059,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
         if path == "/api/health":
-            # The Health view of Plan (#5356): core.health, the one behind maxpm health, with the goal split and a
+            # The Health section of the Cost page (#5356, #6217): core.health, the one behind maxpm health, with the goal split and a
             # row per day for the graphs.
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}

@@ -20879,7 +20879,7 @@ def _goal_split(conn, t0, t1, pid):
 
 
 def _health_days(conn, t0, t1, pid, minutes, pminutes=0):
-    """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health view (#5356): done
+    """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health section (#5356): done
     items, rework (reopens, lost claims, review fixes), needs-you rows opened, person minutes per done item, the
     idle share of the sampled session time, and the median cost of the items done that day."""
     a, b = iso(t0), iso(t1)

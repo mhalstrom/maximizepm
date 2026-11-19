@@ -9,6 +9,7 @@ import { button } from "../components/button.js";
 import { bar } from "../components/bar.js";
 import { empty } from "../components/empty.js";
 import { nav } from "../page.js";
+import { loadHealth } from "./health.js";
 
 const PERIOD = "river.cost.period", TABLE = "river.cost.table";
 const PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
@@ -90,7 +91,10 @@ function draw(box) {
       button(l, { cls: "cost-tab", pressed: table === k, data: { "cost-table": k } })).join("")}</span><span class="spacer"></span>
       <a class="link t-m" href="api/cost?period=${encodeURIComponent(period)}&csv=${table}" download title="Download as CSV">CSV</a></div>
       ${rowsHtml(d)}</section>
-    <div class="muted t-s cost-note">From the chat logs of the sessions on this computer, priced by model_prices (Settings, Agents). A model call counts for the item its session held then.</div>`;
+    <div class="muted t-s cost-note">From the chat logs of the sessions on this computer, priced by model_prices (Settings, Agents). A model call counts for the item its session held then.</div>
+    <section class="cost-sec"><h3 class="cost-h">Health</h3><div id="costHealth"></div></section>`;
+  // Health (#6217, the Health view of Plan before): the same period; it reads on its own, so the costs show first.
+  loadHealth($("#costHealth"), period);
 }
 
 function wire(box) {
