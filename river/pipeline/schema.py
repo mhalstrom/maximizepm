@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS pipelines (
   secret      TEXT,                      -- the name of the maxpm secret that holds the forge's API token
   ref         TEXT,                      -- the branch that a started workflow runs on (main when none)
   polled_at   TEXT,                      -- the last read of the forge (the adapter reads it every minute)
-  poll_error  TEXT                       -- what the last read said when it failed
+  poll_error  TEXT,                      -- what the last read said when it failed
+  held_reason TEXT,                      -- a hold of every stage: no stage run starts (#6117)
+  held_by     TEXT,
+  held_at     TEXT
 );
 
 -- A place that runs the code: dev, beta, prod, or one server. version_id and since say what runs there now.
@@ -55,6 +58,9 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   created_at   TEXT NOT NULL,
   removed_at   TEXT,                     -- a removed stage keeps its runs; adding its name again brings it back
   junit        TEXT,                     -- a test stage: the JUnit XML file its command writes (in the project folder)
+  held_reason  TEXT,                     -- a hold of its gate: no new version enters (one sent on purpose does, #6117)
+  held_by      TEXT,
+  held_at      TEXT,
   UNIQUE (pipeline_id, name)
 );
 
@@ -103,6 +109,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   approved_by  TEXT,                     -- who let this version in at a manager or person gate
   approved_at  TEXT,
   runner       TEXT,                     -- <pid>:<token> of the maxpm serve process that runs its command
+  purpose      TEXT,                     -- rerun, rollback, or failed:<run id> (its failed tests again); none: the flow
   UNIQUE (pipeline_id, key)
 );
 CREATE INDEX IF NOT EXISTS stage_runs_state ON stage_runs(state);
@@ -196,15 +203,15 @@ def migrate(conn):
     """Add the columns that a queue made by an older version of these tables lacks. core._migrate calls it, inside
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
-    for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error"):  # #6119
-        if c not in cols:
+    for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at"):
+        if c not in cols:  # #6119, #6117
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
-    for c in ("removed_at", "junit"):  # #6113, #6114
+    for c in ("removed_at", "junit", "held_reason", "held_by", "held_at"):  # #6113, #6114, #6117
         if c not in cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
-                 ("runner", "TEXT")):  # #6114
+                 ("runner", "TEXT"), ("purpose", "TEXT")):  # #6114, #6117
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")

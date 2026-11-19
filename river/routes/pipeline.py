@@ -67,4 +67,19 @@ GET = [
     (lambda path: path.startswith("/api/pipeline/"), _with(pipeline)),
 ]
 
-OPS = {}
+def _runner():
+    from ..pipeline import runner
+    return runner
+
+
+# The page's pipeline actions (#6117), as the person chosen in "You are": each one is the maxpm pipeline command of the
+# same name, with its checks (only a person or the manager acts) and a line in the pipeline's history.
+OPS = {
+    "pipeline_hold": lambda c, a, who: _runner().hold(c, a["pipeline"], a.get("stage"), a.get("reason"), who),
+    "pipeline_unhold": lambda c, a, who: _runner().release_hold(c, a["pipeline"], a.get("stage"), who),
+    "pipeline_approve": lambda c, a, who: _runner().approve(c, a["pipeline"], a["stage"], a.get("rev"), who),
+    "pipeline_rerun": lambda c, a, who: _runner().run_again(c, a["pipeline"], a["stage"], a["rev"], who),
+    "pipeline_rerun_failed": lambda c, a, who: _runner().rerun_failed(c, int(a["run"]), who),
+    "pipeline_rollback": lambda c, a, who: _runner().rollback(c, a["pipeline"], a["env"], a["rev"], a.get("reason"), who),
+    "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
+}

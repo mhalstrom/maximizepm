@@ -41,6 +41,7 @@ FLUSH_LINES = 200
 def _row(conn, run_id):
     return conn.execute(
         "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.gate, s.gate_rule, s.pos, s.env_id, "
+        "s.held_reason stage_hold, s.held_by stage_hold_by, p.held_reason pipe_hold, p.held_by pipe_hold_by, "
         "p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
         "JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?",
         (run_id,)).fetchone()
@@ -95,8 +96,7 @@ def start(conn, pipeline, rev=None, actor=None):
                                   f"{busy['name']}")
     run = _queue(conn, p["name"], first["name"], rev)
     with core.tx(conn):
-        core._event(conn, None, actor or "maxpm", f"pipeline {p['name']}: version {rev} started at stage "
-                                                  f"{first['name']} (run #{run})")
+        _act(conn, p["id"], actor, f"started version {rev} at stage {first['name']} (run #{run})")
     return {"pipeline": p["name"], "stage": first["name"], "version": rev, "run": run}
 
 
@@ -129,9 +129,15 @@ def _approve_cmd(r):
 
 
 def gate(conn, r):
-    """(open, note): whether the queued run r may start now, and why not."""
+    """(open, note): whether the queued run r may start now, and why not. A hold of the pipeline stops every start;
+    a hold of the stage's gate stops a version that the flow brings, not one sent on purpose (approve, rerun,
+    roll back)."""
+    if r["pipe_hold"]:
+        return False, f"every stage is held by {r['pipe_hold_by'] or 'a person'}: {r['pipe_hold']}"
     if r["approved_at"]:
         return True, None
+    if r["stage_hold"]:
+        return False, f"held by {r['stage_hold_by'] or 'a person'}: {r['stage_hold']}"
     g, rule = r["gate"], r["gate_rule"]
     if g == "auto":
         if not rule:
@@ -220,8 +226,7 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, gate_note=NULL WHERE id=?",
                      (actor or "a person", store._now(), r["id"]))
-        core._event(conn, None, actor or "maxpm", f"pipeline {p['name']}: approved version {r['rev']} into stage "
-                                                  f"{stage} (run #{r['id']})")
+        _act(conn, p["id"], actor, f"approved version {r['rev']} into stage {stage} (run #{r['id']})")
     if r["gate_item"]:
         it = conn.execute("SELECT status FROM items WHERE id=?", (r["gate_item"],)).fetchone()
         if it and it["status"] not in core.CLOSED_STATES:
@@ -301,6 +306,9 @@ def _execute(conn, run_id):
         limit = core.parse_duration(limit_text).total_seconds()
         env = {**os.environ, "MAXPM_PIPELINE": r["pipeline"], "MAXPM_STAGE": r["stage"], "MAXPM_REV": r["rev"] or "",
                "MAXPM_RUN": str(run_id), "MAXPM_ENV": env_name or ""}
+        if (r["purpose"] or "").startswith("failed:"):  # only the failed tests of that run: one per line
+            env["MAXPM_TESTS"] = "\n".join(f"{t['suite']}.{t['name']}" for t in store.tests(
+                conn, int(r["purpose"].split(":", 1)[1])) if t["state"] in ("failed", "error"))
         began = time.time()
         try:
             if folder and not os.path.isdir(folder):
@@ -343,7 +351,10 @@ def _hand_on(conn, r):
     if r["kind"] == "deploy" and r["env_id"]:
         e = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (r["env_id"],)).fetchone()
         if e:
-            store.deployed(conn, r["pipeline"], e["name"], r["rev"], run_id=r["id"])
+            store.deployed(conn, r["pipeline"], e["name"], r["rev"],
+                           run_id=r["id"], kind="rolledback" if r["purpose"] == "rollback" else "deployed")
+    if r["purpose"] == "rollback" or (r["purpose"] or "").startswith("failed:"):
+        return  # a roll back or a run of some tests hands nothing on: a person decides what comes next
     nxt = conn.execute("SELECT id, name FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL AND pos>? "
                        "ORDER BY pos, id LIMIT 1", (r["pipeline_id"], r["pos"])).fetchone()
     if nxt:
@@ -369,24 +380,108 @@ def _drop_card(conn, item_id, note):
             core.drop(conn, item_id, "maxpm", note=note)
 
 
-def run_again(conn, pipeline, stage, rev, actor=None):
-    """maxpm pipeline rerun: run one stage again for a version, an older one too (a deploy of an older commit is a
-    roll back). The person or the manager asks for it, so its gate counts as passed."""
-    why = core._lead_refusal(conn, actor, "runs a stage again")
+def _lead(conn, actor, what):
+    why = core._lead_refusal(conn, actor, what)
     if why:
         raise core.RiverError(why)
-    p = store._pipeline(conn, pipeline)
+
+
+def _act(conn, pid, actor, text):
+    """Each action is a line of the pipeline's history with its actor (inside a tx; maxpm pipeline history)."""
+    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change) VALUES (?,?,?,?)",
+                 (pid, store._now(), actor, text))
+
+
+def _stage_row(conn, p, stage):
     s = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND name=? AND removed_at IS NULL",
                      (p["id"], stage)).fetchone()
     if not s:
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
+    return s
+
+
+def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None):
+    """maxpm pipeline rerun: run one stage again for a version, an older one too. The person or the manager sends
+    it, so its gate counts as passed (a hold of the whole pipeline still stops it)."""
+    _lead(conn, actor, "runs a stage again")
+    p = store._pipeline(conn, pipeline)
+    _stage_row(conn, p, stage)
     run = _queue(conn, p["name"], stage, rev)
     with core.tx(conn):
-        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?", (actor or "a person",
-                                                                                    store._now(), run))
-        core._event(conn, None, actor or "maxpm", f"pipeline {p['name']}: run stage {stage} again for {rev} "
-                                                  f"(run #{run})")
+        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, purpose=? WHERE id=?",
+                     (actor or "a person", store._now(), purpose, run))
+        _act(conn, p["id"], actor, note or f"run stage {stage} again for {rev} (run #{run})")
     return {"pipeline": p["name"], "stage": stage, "version": rev, "run": run}
+
+
+def hold(conn, pipeline, stage=None, reason=None, actor=None):
+    """maxpm pipeline hold: hold the gate of one stage (no new version enters it), or with no stage every stage
+    (no stage run starts). Work that runs goes on to its end. Needs the reason."""
+    _lead(conn, actor, "holds a pipeline")
+    reason = (reason or "").strip()
+    if not reason:
+        raise core.RiverError("say why: --reason \"<why>\" (the people who look at the pipeline read it)")
+    p = store._pipeline(conn, pipeline)
+    with core.tx(conn):
+        if stage:
+            s = _stage_row(conn, p, stage)
+            conn.execute("UPDATE pipeline_stages SET held_reason=?, held_by=?, held_at=? WHERE id=?",
+                         (reason, actor, store._now(), s["id"]))
+        else:
+            conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=? WHERE id=?",
+                         (reason, actor, store._now(), p["id"]))
+        _act(conn, p["id"], actor, f"held {'the gate of stage ' + stage if stage else 'every stage'}: {reason}")
+    return {"pipeline": p["name"], "stage": stage, "held": reason}
+
+
+def release_hold(conn, pipeline, stage=None, actor=None):
+    """maxpm pipeline unhold: end the hold of a stage's gate, or of every stage."""
+    _lead(conn, actor, "ends a hold of a pipeline")
+    p = store._pipeline(conn, pipeline)
+    with core.tx(conn):
+        if stage:
+            s = _stage_row(conn, p, stage)
+            if not s["held_reason"]:
+                raise core.RiverError(f"the gate of stage {stage} is not held")
+            conn.execute("UPDATE pipeline_stages SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (s["id"],))
+        else:
+            if not p["held_reason"]:
+                raise core.RiverError(f"pipeline {p['name']} is not held")
+            conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (p["id"],))
+        _act(conn, p["id"], actor, f"ended the hold of {'the gate of stage ' + stage if stage else 'every stage'}")
+    return {"pipeline": p["name"], "stage": stage, "held": None}
+
+
+def rollback(conn, pipeline, env, rev, reason=None, actor=None):
+    """maxpm pipeline rollback: put an older version on an environment again: the deploy stage of that environment
+    runs with it, and its gate holds, so the flow brings no newer version there until a person ends the hold."""
+    _lead(conn, actor, "rolls back an environment")
+    p = store._pipeline(conn, pipeline)
+    s = conn.execute("SELECT s.name FROM pipeline_stages s JOIN pipeline_envs e ON e.id=s.env_id WHERE "
+                     "s.pipeline_id=? AND e.name=? AND s.removed_at IS NULL ORDER BY s.pos LIMIT 1",
+                     (p["id"], env)).fetchone()
+    if not s:
+        raise core.RiverError(f"no stage of pipeline {p['name']} deploys to {env}")
+    why = f"rolled back {env} to {rev}" + (f": {reason}" if reason else "")
+    with core.tx(conn):
+        conn.execute("UPDATE pipeline_stages SET held_reason=?, held_by=?, held_at=? WHERE pipeline_id=? AND name=?",
+                     (why, actor, store._now(), p["id"], s["name"]))
+    out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why)
+    return {**out, "env": env, "held": why}
+
+
+def rerun_failed(conn, run_id, actor=None):
+    """maxpm pipeline rerun-failed: run a test stage again for the same version, for its failed tests only: the
+    command gets them in MAXPM_TESTS, one suite.name per line (a forge workflow runs whole)."""
+    _lead(conn, actor, "runs failed tests again")
+    r = _row(conn, run_id)
+    if r is None:
+        raise core.RiverError(f"no stage run {run_id}")
+    bad = [t for t in store.tests(conn, run_id) if t["state"] in ("failed", "error")]
+    if not bad:
+        raise core.RiverError(f"run #{run_id} has no failed test")
+    return run_again(conn, r["pipeline"], r["stage"], r["rev"], actor, purpose=f"failed:{run_id}",
+                     note=f"run the {len(bad)} failed test(s) of run #{run_id} again for {r['rev']}")
 
 
 PROCS = {}  # run id -> the Popen of its command, in this process (stop)
@@ -402,6 +497,8 @@ def stop(conn, run_id, actor=None):
         raise core.RiverError(f"no stage run {run_id}")
     if r["state"] in store.FINAL:
         raise core.RiverError(f"run #{run_id} is {r['state']} already")
+    with core.tx(conn):
+        _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
     if (r["runner"] or "") == "forge:github" or (r["key"] or "").startswith("gh-run-"):
         from . import github
         github.cancel(conn, run_id)  # the next read of GitHub records its end
@@ -474,7 +571,8 @@ def serve_pass(conn):
             store.run_finish(conn, r["id"], "cancelled", errors=f"the yes at the gate was declined (#{r['gate_item']})")
             continue
         if not open_:
-            note = _ask(conn, r, note)
+            if not (r["pipe_hold"] or r["stage_hold"]):  # a held gate asks nobody for a yes
+                note = _ask(conn, r, note)
             if note != r["gate_note"]:
                 with core.tx(conn):
                     conn.execute("UPDATE stage_runs SET gate_note=? WHERE id=?", (note, r["id"]))

@@ -5,10 +5,12 @@
 // versions in each stage. A deploy target with no pipeline of its own shows as its default pipeline, computed from
 // its releases. Reads only: GET api/pipelines, api/pipeline/<name>, api/pipeline-run/<id> (river/routes/pipeline.py);
 // the actions (hold, approve, roll back, run again) come with #6117.
-import { $, esc, getJson, ago, copyText, toast, store } from "../lib.js";
-import { button } from "../components/button.js";
+import { $, esc, getJson, ago, copyText, toast, store, act } from "../lib.js";
+import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
+import { makeDialog } from "../components/dialog.js";
+import { field, textarea, actions } from "../components/form.js";
 import { scope, planShown } from "../page.js";
 
 const V = { list: [], name: null, data: null, run: null, stage: null, tab: "stages", filter: "failed" };
@@ -59,7 +61,10 @@ function draw() {
     { cls: "plan-vbtn", pressed: V.tab === k, data: { "pl-tab": k }, attrs: `role="tab" aria-selected="${V.tab === k}"` })).join("");
   const envs = D.envs.length;
   $("#plNote").innerHTML = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
-    + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : D.project ? ` · project ${esc(D.project)}` : "");
+    + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : D.project ? ` · project ${esc(D.project)}` : "")
+    + (D.default ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
+      : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" })))
+    + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
   $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
   if (V.tab === "stages") fit();
 }
@@ -83,6 +88,7 @@ function stageCard(s) {
 
 function gateEl(s) {
   const g = s.gate || "auto", rule = s.gate_text || g;
+  if (s.held_reason) return `<div class="pl-gate">${chip("c-warn", `⛔<span class="pl-long"> held</span>`, `Held: ${s.held_reason}`)}</div>`;
   const cls = g === "auto" ? "" : "c-human";
   return `<div class="pl-gate">${chip(cls, `${GATE[g] || "→"}<span class="pl-long"> ${esc(rule === "auto" ? "auto" : rule)}</span>`,
     `The gate before ${s.name}: ${rule}`)}</div>`;
@@ -112,7 +118,9 @@ function envTable(D) {
   if (!D.envs.length) return "";
   const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td>${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
     <td class="mono">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td><td>${e.since ? esc(ago(e.since)) : ""}</td>
-    <td class="t-s muted">${(e.history || []).slice(1, 4).map(h => esc(short(h.rev)) + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "")).join(", ")}</td></tr>`).join("");
+    <td class="t-s muted">${(e.history || []).slice(1, 4).filter(h => h.rev && h.rev !== e.rev).map(h => esc(short(h.rev))
+      + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + button("Put back", { data: { "pl-rollback": e.name, rev: h.rev },
+        title: `Roll back to ${short(h.rev)}` }))).join(" ")}</td></tr>`).join("");
   return `<div class="pl-card"><h3>Where each version runs</h3><div class="pl-table"><table>
     <tr><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows}</table></div></div>`;
 }
@@ -155,11 +163,64 @@ function detail() {
   const when = r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
   const item = r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "";
   return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ended ${esc(ago(r.ended_at))}` : ""}${item}</span></div>`
+    + (s.held_reason ? `<div class="pl-banner">Held by ${esc(s.held_by || "a person")}: ${esc(s.held_reason)}</div>` : "")
     + (r.gate_note && r.state === "queued" ? `<div class="t-s">Gate: ${esc(r.gate_note)}</div>` : "")
+    + stageActions(s, r)
     + (r.errors ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
     + gantt(r.step_list || [])
     + (r.output ? `<pre class="pl-pre">${esc(r.output)}</pre>` : "")
     + (r.test_list && r.test_list.length ? tests(r) : "");
+}
+
+// The actions on a stage (#6117): only a person or the manager acts; a default pipeline (a target's releases) has
+// its own actions on Releases.
+function stageActions(s, r) {
+  if (V.data.default) return "";
+  const rev = r && r.version, b = [];
+  b.push(s.held_reason ? button("End the hold", { data: { "pl-unhold": s.name }, title: "New versions enter" })
+    : button("Hold here", { kind: "warn", data: { "pl-hold": s.name }, title: "No new version enters" }));
+  if (r && r.state === "queued" && ["manager", "person"].includes(s.gate) && rev)
+    b.push(button(`Approve ${esc(short(rev))}`, { kind: "primary", data: { "pl-approve": s.name, rev }, title: "Let this version in" }));
+  if (r && ["running", "queued"].includes(r.state) && r.id != null) b.push(button("Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }));
+  if (r && rev && !["running", "queued"].includes(r.state)) b.push(button("Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }));
+  const bad = r && r.tests ? (r.tests.failed || 0) + (r.tests.error || 0) : 0;
+  if (bad && r.id != null && !["running", "queued"].includes(r.state))
+    b.push(button(`Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }));
+  return `<div class="pl-bar">${b.join("")}</div>`;
+}
+
+// The reason of a hold or a roll back: a small dialog (components/dialog.js).
+let askDlg = null, askBox = null, askThen = null;
+function askReason(title, text, go, then) {
+  if (!askDlg) {
+    const d = document.createElement("div");
+    d.id = "plAskDlg"; d.className = "hidden";
+    d.innerHTML = '<div class="box"></div>';
+    document.body.appendChild(d);
+    askBox = d.firstElementChild;
+    askDlg = makeDialog(d);
+  }
+  askThen = then;
+  askBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-askclose": "1" } })}</div>
+    <p class="t-m">${esc(text)}</p>
+    <div class="form">${field("Why?", textarea({ id: "plWhy", rows: 3 }, ""))}</div>
+    ${actions(button("Cancel", { data: { "pl-askclose": "1" } }) + button(go, { kind: "primary", data: { "pl-askgo": "1" } }))}`;
+  askDlg.open();
+  askBox.querySelector("#plWhy").focus();
+  askBox.onclick = async (e) => {
+    if (e.target.closest("[data-pl-askclose]")) return askDlg.close();
+    if (!e.target.closest("[data-pl-askgo]")) return;
+    const why = (askBox.querySelector("#plWhy").value || "").trim();
+    if (!why) return toast("Say why", true);
+    askDlg.close();
+    await askThen(why);
+  };
+}
+
+async function doAct(op, args) {
+  try { await act(op, { pipeline: V.name, ...args }); } catch (e) { return; }
+  runSig = ""; sig = "";
+  renderPipeline(true);
 }
 
 // ---- the test view: each test's result, failed first, and the prompt that analyzes the failures
@@ -198,6 +259,22 @@ function versionsView(D) {
 // ---- clicks
 
 $("#plan-pipelines").addEventListener("click", (e) => {
+  const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback]");
+  if (a) {
+    const d = a.dataset;
+    if (d.plHold !== undefined) return askReason(d.plHold ? `Hold before ${d.plHold}?` : "Hold every stage?",
+      d.plHold ? "No new version enters this stage until you end the hold. A version you send on purpose still does."
+        : "Nothing new starts in any stage. Work that runs goes on to its end.", "Hold",
+      (reason) => doAct("pipeline_hold", { stage: d.plHold || null, reason }));
+    if (d.plUnhold !== undefined) return doAct("pipeline_unhold", { stage: d.plUnhold || null });
+    if (d.plApprove) return doAct("pipeline_approve", { stage: d.plApprove, rev: d.rev });
+    if (d.plStop) return doAct("pipeline_stop", { run: +d.plStop });
+    if (d.plRerun) return doAct("pipeline_rerun", { stage: d.plRerun, rev: d.rev });
+    if (d.plRefail) return doAct("pipeline_rerun_failed", { run: +d.plRefail });
+    if (d.plRollback) return askReason(`Put ${short(d.rev)} back on ${d.plRollback}?`,
+      "Its deploy stage runs with this version, and that gate holds until you end the hold, so no newer version comes by itself.",
+      "Roll back", (reason) => doAct("pipeline_rollback", { env: d.plRollback, rev: d.rev, reason }));
+  }
   const t = e.target.closest("[data-pl-pick],[data-pl-tab],[data-pl-stage],[data-pl-filter],[data-pl-copy]");
   if (!t) return;
   if (t.dataset.plPick) { V.name = t.dataset.plPick; V.stage = null; store("river.pipeline", V.name); return renderPipeline(true); }

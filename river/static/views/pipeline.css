@@ -62,6 +62,8 @@
 .pl-suite { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 .pl-suite .pl-sname { min-width: var(--w-xs); font-size: var(--fs-s); color: var(--muted); }
 .pl-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.pl-banner { padding: var(--sp-3) var(--sp-5); border-radius: var(--r-m); background: var(--warn-bg); color: var(--warn);
+  font-size: var(--fs-m); }
 
 /* A phone: each test is a block, its name on a line of its own, then its result, time and message. */
 @media (max-width: 759px) {

@@ -4175,6 +4175,23 @@ class PipelineRoutes(unittest.TestCase):
         self.assertEqual(self.get("/api/pipeline/nowhere")["code"], 404)
         self.assertEqual(self.get("/api/pipeline-run/999")["code"], 404)
 
+    def test_the_page_s_pipeline_actions_are_for_a_person_or_the_manager(self):
+        """#6117: the page's buttons are server OPS; the permission table gives each one to a person or the manager."""
+        from river import rights
+        from river.pipeline import define
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "web", project=None)
+        define.stage_set(self.c, "web", "build", "build")
+        ops = ("pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
+               "pipeline_rollback", "pipeline_stop")
+        for op in ops:
+            self.assertIn(op, server.OPS)
+            self.assertEqual(rights.OPS[op], rights.LEAD)
+        server.OPS["pipeline_hold"](self.c, {"pipeline": "web", "stage": "build", "reason": "a freeze"}, "mark")
+        self.assertEqual(self.c.execute("SELECT held_reason FROM pipeline_stages").fetchone()[0], "a freeze")
+        server.OPS["pipeline_unhold"](self.c, {"pipeline": "web", "stage": "build"}, "mark")
+        self.assertIsNone(self.c.execute("SELECT held_reason FROM pipeline_stages").fetchone()[0])
+
 
 if __name__ == "__main__":
     unittest.main()

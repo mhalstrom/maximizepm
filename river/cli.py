@@ -1918,6 +1918,16 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
     x.add_argument("id", type=int)
+    x = pls.add_parser("hold", help="hold the gate of a stage (no new version enters it), or with no stage every "
+                       "stage (nothing new starts); work that runs goes on")
+    x.add_argument("name"); x.add_argument("stage", nargs="?"); x.add_argument("--reason", required=True)
+    x = pls.add_parser("unhold", help="end the hold of a stage's gate, or of every stage")
+    x.add_argument("name"); x.add_argument("stage", nargs="?")
+    x = pls.add_parser("rollback", help="put an older version on an environment again: its deploy stage runs with "
+                       "it, and that gate holds until you end the hold")
+    x.add_argument("name"); x.add_argument("env"); x.add_argument("--rev", required=True); x.add_argument("--reason")
+    x = pls.add_parser("rerun-failed", help="run the failed tests of a test stage run again (MAXPM_TESTS lists them)")
+    x.add_argument("id", type=int)
     x = pls.add_parser("run", help="one stage run: its steps, failed tests and last lines; --prompt: the prompt that "
                        "analyzes its failed tests")
     x.add_argument("id", type=int); x.add_argument("--prompt", action="store_true")
@@ -7508,6 +7518,15 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "stop":
         from .pipeline import runner
         return runner.stop(conn, a.id, actor)
+    if sub in ("hold", "unhold", "rollback", "rerun-failed"):
+        from .pipeline import runner
+        if sub == "hold":
+            return runner.hold(conn, a.name, a.stage, a.reason, actor)
+        if sub == "unhold":
+            return runner.release_hold(conn, a.name, a.stage, actor)
+        if sub == "rollback":
+            return runner.rollback(conn, a.name, a.env, a.rev, a.reason, actor)
+        return runner.rerun_failed(conn, a.id, actor)
     if sub == "run":
         from .pipeline import prompt
         return {"text": prompt.failure_prompt(conn, a.id)["text"] if a.prompt else prompt.run_text(conn, a.id)}
@@ -7557,6 +7576,15 @@ def render_pipeline(a, res):
         return
     if sub == "stop":
         print(f"run #{res['run']}: stopped {res['stopped']}")
+        return
+    if sub in ("hold", "unhold"):
+        what = f"the gate of stage {res['stage']}" if res["stage"] else "every stage"
+        print(f"pipeline {res['pipeline']}: {what} " + (f"is held: {res['held']}" if res["held"] else "goes on"))
+        return
+    if sub in ("rollback", "rerun-failed"):
+        print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']})"
+              + (f"; {res['held']}: its gate holds until maxpm pipeline unhold {res['pipeline']} {res['stage']}"
+                 if res.get("held") else ""))
         return
     if sub == "start":
         print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"

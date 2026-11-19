@@ -396,8 +396,8 @@ class JUnit(Base):
         self.assertEqual(store.run_show(self.c, self.run)["suites"][0]["failed"], 1)
 
 
-class Runner(Base):
-    """The no-forge runner (#6114): a fake pipeline of four stages whose commands print '::step' lines."""
+class RunnerBase(Base):
+    """A fake pipeline of four stages whose commands print '::step' lines, for the runner's tests."""
 
     def setUp(self):
         super().setUp()
@@ -430,6 +430,10 @@ class Runner(Base):
     def runs(self):
         return {r["stage"]: r for r in self.c.execute(
             "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+
+class Runner(RunnerBase):
+    """The no-forge runner (#6114)."""
 
     def test_a_version_goes_through_each_stage_and_waits_for_the_person(self):
         self.runner.start(self.c, "app", rev="abc1234")
@@ -573,6 +577,76 @@ class Runner(Base):
         text = out.getvalue()
         self.assertIn("version cli0001 waits at stage build", text)
         self.assertIn("gate: waits for mark's yes on #", text)
+
+
+class Actions(RunnerBase):
+    """Hold, end a hold, roll back, run the failed tests again (#6117); approve, run again and stop are in Runner."""
+
+    def test_a_hold_of_a_gate_and_of_every_stage(self):
+        self.runner.hold(self.c, "app", "beta", "the payment provider has an outage", actor="mark")
+        self.runner.start(self.c, "app", rev="hold001")
+        out = self.passes(4)
+        beta = self.runs()["beta"]
+        self.assertEqual(beta["state"], "queued")
+        self.assertIn("held by mark: the payment provider has an outage", out[-1]["waiting"][beta["id"]])
+        # A version sent on purpose passes a held gate; a hold of every stage stops even that.
+        self.runner.hold(self.c, "app", None, "release freeze", actor="mark")
+        self.runner.approve(self.c, "app", "beta", actor="mark")
+        out = self.passes(1)
+        self.assertIn("every stage is held by mark: release freeze", out[-1]["waiting"][beta["id"]])
+        self.runner.release_hold(self.c, "app", None, actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        self.runner.release_hold(self.c, "app", "beta", actor="mark")
+        with self.assertRaises(RiverError):
+            self.runner.release_hold(self.c, "app", "beta", actor="mark")  # not held
+        with self.assertRaises(RiverError):
+            self.runner.hold(self.c, "app", "beta", "  ", actor="mark")  # no reason
+        with self.assertRaises(RiverError):
+            self.runner.hold(self.c, "app", "beta", "x", actor="w1")  # an agent
+        changes = [h["change"] for h in define.history(self.c, "app")[:6]]
+        self.assertIn("held every stage: release freeze", changes)
+        self.assertIn("ended the hold of the gate of stage beta", changes)
+
+    def test_roll_back_an_environment(self):
+        for rev in ("old0001", "new0002"):
+            self.runner.start(self.c, "app", rev=rev)
+            self.passes(4)
+        self.assertEqual(store.show(self.c, "app")["envs"][0]["rev"], "new0002")
+        prod_runs = lambda: self.c.execute("SELECT COUNT(*) FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+                                           "WHERE s.name='prod'").fetchone()[0]
+        before = prod_runs()
+        r = self.runner.rollback(self.c, "app", "beta", "old0001", reason="new0002 breaks sign-in", actor="mark")
+        self.assertEqual((r["stage"], r["held"]), ("beta", "rolled back beta to old0001: new0002 breaks sign-in"))
+        self.passes(2)
+        env = store.show(self.c, "app")["envs"][0]
+        self.assertEqual((env["rev"], env["history"][0]["kind"]), ("old0001", "rolledback"))
+        self.assertEqual(prod_runs(), before)  # a roll back hands nothing on
+        self.runner.start(self.c, "app", rev="new0003")
+        out = self.passes(3)
+        self.assertIn("rolled back beta to old0001", self.runs()["beta"]["gate_note"])  # the gate holds
+        with self.assertRaises(RiverError):
+            self.runner.rollback(self.c, "app", "nowhere", "old0001", actor="mark")
+
+    def test_run_the_failed_tests_again(self):
+        define.stage_set(self.c, "app", "test", run=(
+            "printf '%s' \"$MAXPM_TESTS\" > asked.txt; printf '<testsuite name=\"u\"><testcase classname=\"u\" "
+            "name=\"a\"/><testcase classname=\"u\" name=\"b\"><failure message=\"no\"/></testcase></testsuite>' "
+            "> report.xml"))
+        self.runner.start(self.c, "app", rev="tst0001")
+        self.passes(2)
+        first = self.runs()["test"]["id"]
+        self.assertEqual(self.c.execute("SELECT state FROM stage_runs WHERE id=?", (first,)).fetchone()[0], "failed")
+        r = self.runner.rerun_failed(self.c, first, actor="mark")
+        self.passes(1)
+        with open(os.path.join(self.folder, "asked.txt")) as f:
+            self.assertEqual(f.read(), "u.b")
+        self.assertEqual(self.c.execute("SELECT purpose FROM stage_runs WHERE id=?", (r["run"],)).fetchone()[0],
+                         f"failed:{first}")
+        build_runs = self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0]
+        with self.assertRaises(RiverError):
+            self.runner.rerun_failed(self.c, self.runs()["build"]["id"], actor="mark")  # no failed test
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], build_runs)
 
 
 class DefaultPipelines(Base):
