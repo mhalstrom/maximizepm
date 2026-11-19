@@ -125,7 +125,7 @@ OPS.update({op: LEAD for op in (
 OPS.update({op: ONLY_PERSON for op in (
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
-    "relay_disconnect", "release_changes", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",
+    "relay_disconnect", "release_changes", "release_download", "release_now", "release_agent", "release_update", "rqs_connect", "session_interrupt",
     "session_pin", "session_restart", "session_send", "session_setting", "session_upload",
     "session_upload_drop", "setup_agent_add", "setup_block", "setup_maxpm_cmd", "setup_ntfy", "setup_skills",
     "shell_close", "shell_keys", "shell_open", "start_manager", "tailnet_serve", "takeover_seen", "takeovers_seen",

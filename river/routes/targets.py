@@ -30,6 +30,8 @@ OPS = {
                                                **server._launch_args(a)),
     "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
     "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
+    "release_agent": lambda c, a, who: server.release_with_agent(c, a["target"], actor=who, agent=a.get("agent"),
+                                                                 **server._launch_args(a)),  # #6194
     "release_summary": lambda c, a, who: report.summary_set(c, int(a["id"]), a.get("text"), who),
     "target_cut": lambda c, a, who: core.target_cut(c, a["target"], a.get("rev"), who),
     "target_hook": lambda c, a, who: core.target_hook(c, a["target"], a.get("event"), a.get("command"),

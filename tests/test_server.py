@@ -1184,6 +1184,38 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, r["session_name"], focus=r["focus"])
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", r["deploy"]["id"]))
 
+    def test_release_with_an_agent_starts_the_release_and_a_session_that_watches_it(self):
+        """#6194 (mark 2026-11-19: 'one option should for sure be "Release Via Agent"'): a target with a deploy hook and
+        a cadence that holds the release: the release starts now, a task to watch and fix it is added (found during
+        the deploy item), and a fresh session starts on that task; the session never takes the deploy item."""
+        core.target_add(self.c, "web")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "dev")
+        core.target_hook(self.c, "web", "deploy", "bash release.sh", actor="mark")
+        core.target_cadence(self.c, "web", "1w", "mark")
+        for title in ("page", "footer"):  # the first release went out; the second change waits for the cadence
+            x = core.item_add(self.c, "site", title)["id"]
+            core.claim(self.c, x, "dev")
+            core.done(self.c, x, "commit", "dev", ship_it=True)
+            if title == "page":
+                first = self.c.execute("SELECT MAX(id) FROM items WHERE kind='deploy'").fetchone()[0]
+                core.target_cut(self.c, "web", rev="aaaaaaa", actor=None)
+                with core.tx(self.c):
+                    self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(core.now()), first))
+        self.assertTrue(core.release_plan(self.c, "web")["waits"])
+        sent = []
+        r = server.release_with_agent(self.c, "web", actor="mark", runner=sent.append)
+        dep = r["deploy"]
+        self.assertFalse(core.release_plan(self.c, "web")["waits"])  # it goes now
+        task = core.item_show(self.c, r["task"])
+        self.assertIn(f"deploy #{dep}", task["title"])
+        self.assertIn("never run the release command", task["context"])
+        self.assertIn(f"MAXPM_FOCUS=item:{r['task']}", sent[-1])
+        b = core.go(self.c, self.dir.name, r["session_name"], focus=f"item:{r['task']}")
+        self.assertEqual(b["item"]["id"], r["task"])  # the watch task, not the deploy item
+        self.assertIsNotNone(core.deploy_hook_refusal(self.c, core._item(self.c, dep), r["session_name"]))
+
     def test_claim_next_by_a_person_opens_an_agent_that_helps(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         core.register(self.c, "mark", human=True)

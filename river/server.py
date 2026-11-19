@@ -447,6 +447,41 @@ def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, 
                                  model, effort, options)}
 
 
+RELEASE_AGENT_PROMPT = (
+    "Watch and fix the release of target {target} (deploy #{dep}). Read the report first: maxpm target report {dep}. "
+    "The deploy hook runs the release (maxpm serve); you never run the release command yourself. Follow its steps "
+    "with maxpm show {dep}. When the deploy fails, MaximizePM opens a fix item with the output: take it, find the "
+    "cause, fix it in the code, test, commit and close it; the release then starts again through the hook. When the "
+    "release is out and its watch passes, write what happened on the deploy item (maxpm send note \"...\" --item "
+    "{dep}) and close your task.")
+
+
+def release_with_agent(conn, target, actor=None, runner=None, agent=None, model=None, effort=None, options=None):
+    """Release with an agent (#6194, mark 2026-11-19: 'one option should for sure be "Release Via Agent" which has an
+    agent handle it'). A target with a deploy hook: the release starts now when the cadence holds it (release_now),
+    a task 'Watch and fix the release' is added, found during the deploy item, and a fresh session starts on it: it
+    reads the report, follows the hook's steps, takes the fix item of a failed deploy and fixes the code, and the hook
+    runs the release again. No session takes the deploy item or types its command (deploy_hook_refusal), and a
+    person's approval still comes first (deploy_hook_start). A target with no deploy hook: Deploy now."""
+    if not core.deploy_hook(conn, target):
+        return deploy_now(conn, target, False, runner, agent, actor, model, effort, options)
+    plan = core.release_plan(conn, target)
+    dep = plan["deploy"] or plan["running"]
+    if dep is None or (plan["deploy"] and not plan["ships"] and not plan["running"]):
+        raise RiverError(f"nothing is collected for {target}: ask for items to go out first (maxpm ship <id>, or "
+                         f"done --ship)")
+    if plan["waits"] and plan["deploy"]:
+        core.release_now(conn, target, f"Released with an agent by {actor or 'a person'} from the Deploy tab", actor)
+        dep = plan["deploy"]
+    p = _target_folder(conn, target)
+    it = core.item_add(conn, p["name"], f"Watch and fix the release of {target} (deploy #{dep})", actor=actor,
+                       doer="ai", found_during=dep, short=f"Watch the {target} release",
+                       context=RELEASE_AGENT_PROMPT.format(target=target, dep=dep))
+    r = dispatch_item(conn, it["id"], runner, agent, actor, model, effort, options,
+                      prompt=RELEASE_AGENT_PROMPT.format(target=target, dep=dep))
+    return {**r, "target": target, "deploy": dep, "task": it["id"]}
+
+
 def _target_folder(conn, target):
     """A folder to start a session for a target: the first of its projects that has one."""
     p = next((core._project(conn, x["name"]) for x in core.target_show(conn, target)["projects"]

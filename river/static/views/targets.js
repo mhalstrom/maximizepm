@@ -21,8 +21,8 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 // A time a person reads: "Tue 21:43" within a week, else "Nov 30 21:43".
 function when(iso) {
   const d = new Date(iso), soon = d - Date.now() < 6 * 864e5;
-  return d.toLocaleString([], soon ? { weekday: "short", hour: "2-digit", minute: "2-digit" }
-    : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString([], soon ? { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }  // #6206
+    : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 // The state of one release in plain words: what it is now, and when it can go out.
@@ -182,15 +182,16 @@ export function onClick(t) {
   // starts now first (release_now, with the reason), as Release now does. A release that waits for the person's yes
   // shows Approve instead of this button (pipeline.js arrowNow).
   if (t.dataset.relagent) return run(async () => {
-    const name = t.dataset.relagent, tg = (S.targets || []).find(x => x.name === name) || {};
-    const ch = await chooseLaunch(S, { title: "Release via agent", go: "Start the agent",
-      what: `release ${name}: a new agent session reads the release report, starts the release, watches its steps, and on a failure fixes the cause and starts it again` });
+    // #6194: op release_agent (server.release_with_agent): with a deploy hook, the release starts and a new session
+    // watches it and fixes what fails (the hook runs the release); with none, Deploy now.
+    const name = t.dataset.relagent;
+    const ch = await chooseLaunch(S, { title: "Release with an agent", go: "Start the agent",
+      what: `release ${name}: a new agent session starts, reads the release report, follows the release's steps, and on a failure fixes the cause so the release runs again` });
     if (!ch) return;
     try {
-      if (tg.release && tg.release.waits) await act("release_now", { target: name, reason: `Released via agent by ${actor() || "a person"} from the Deploy tab` });
-      const r = await act("deploy_now", { target: name, review: false, ...launchArgs(ch) });
-      toast(!r.ready ? `#${r.start.id} waits on ${r.waits_on.map(w => "#" + w.id).join(", ")}; the agent starts when they are done`
-        : r.alerted ? `#${r.start.id} is ready; alerted the owner ${r.alerted}` : `Started ${r.agent} to release ${name}`);
+      const r = await act("release_agent", { target: name, ...launchArgs(ch) });
+      toast(r.task ? `Started ${r.agent || "an agent"} on #${r.task} to release ${name}` : r.alerted ? `Alerted the owner ${r.alerted}`
+        : `Started ${r.agent || "an agent"} to release ${name}`);
       pickStage(name, "deploy"); openTarget(name);
     } catch (e) { /* toast shown */ }
   });
