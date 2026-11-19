@@ -136,6 +136,46 @@ try {
         self.assertEqual(r["over"], [], r)
         self.assertLessEqual(r["scroll"], r["client"], r)
 
+    def test_deploy_runners_fits_a_390_px_screen(self):
+        """#6171: Deploy > Runners at 390 px (a real phone frame): the bar with Add a runner, a runner with a long
+        SSH target, This computer, the agents on runners with a long result, and the command block stay inside the
+        screen; only the command block scrolls sideways, in its own box. (A screenshot of headless Chrome with
+        --window-size=390 lays the page out at 500 px and cuts it: that is no phone, see #5415.)"""
+        core.register(self.c, "mark", human=True)
+        item = core.item_add(self.c, "site", "Fix the failing build step of the release pipeline")["id"]
+        t = core.iso(core.now())
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO runners(name, ssh, added_by, added_at, system, version, tailnet, clis, cli, "
+                           "state, checked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           ("ci-build-server-1", "ci-runner@ci-build-server-1.tailnet-example.ts.net", "mark", t,
+                            "Linux x86_64", "maxpm 0.9.0", "100.101.102.103",
+                            json.dumps({"claude": "2.1.40 (Claude Code)", "codex": "codex-cli 0.70.0"}), "claude", "ok", t))
+            for state, result in (("running", None), ("failed", "the tests failed twice: " + "/a-long-folder-name" * 8)):
+                self.c.execute("INSERT INTO runner_runs(runner, item, agent, pipeline, rule, state, cli, queued_at, "
+                               "started_at, result, cost) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                               ("ci-build-server-1", item, "runner-agent-1", "release-pipeline", "on-stage-failed",
+                                state, "claude", t, t, result, 1.25))
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('[data-dp-part="runners"]'), "Deploy and its parts");
+  q('[data-dp-part="runners"]').click();
+  await until(() => q("#dpPart .rn-cmds") && q("#dpPart [data-rn-stop]"), "Deploy > Runners with its runs");
+  await new Promise(r => setTimeout(r, 300));
+  const cmds = q("#dpPart .rn-cmds");
+  const over = [...q("#dpPart").querySelectorAll("*")].filter(e => !cmds.contains(e) || e === cmds)
+    .filter(e => e.getBoundingClientRect().width && e.getBoundingClientRect().right > innerWidth + 0.5)
+    .map(e => e.tagName + "." + e.className + " " + Math.round(e.getBoundingClientRect().right));
+  post({ w: innerWidth, over: over.slice(0, 8), page: document.documentElement.scrollWidth <= innerWidth,
+    add: q('#dpPart [data-rn-add]').getBoundingClientRect().right <= innerWidth,
+    cmdsScroll: cmds.scrollWidth > cmds.clientWidth });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="390,844")
+        self.assertEqual(r["w"], 390, r)
+        self.assertEqual(r["over"], [], r)
+        self.assertTrue(r["page"] and r["add"], r)
+        self.assertTrue(r["cmdsScroll"], r)  # the long command lines scroll in their box, not the page
+
     def test_the_arrows_of_a_pipeline_show_their_transitions_and_open_their_controls(self):
         """#6139: each arrow between two stages shows its mode or the control that holds it, who set it and the
         version that waits there; a click opens its controls with their buttons. At 1280 and at 390 px."""
