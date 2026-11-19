@@ -186,7 +186,8 @@ one.
 ## Connect another system with a plugin
 
 Any other release system (Jenkins, Argo CD, a cron job, a deploy script)
-connects through a plugin. `maxpm pipeline plugins` lists the installed
+connects through a plugin, or sends its events with no plugin (next
+part). `maxpm pipeline plugins` lists the installed
 ones, with the actions each one does. Connect a pipeline to one:
 
 ```
@@ -286,6 +287,49 @@ code before you write a plugin:
   secret.
 - **Its test**: `tests/test_pipeline.py`, class PulumiDelivery, against
   recorded answers.
+
+## Send events with no plugin
+
+A system that MaximizePM does not ask (Jenkins, Argo CD, Octopus, a cron
+job) can tell MaximizePM what it does. It sends the events of the form in
+"The events" below, for one pipeline:
+
+```
+maxpm pipeline event <pipeline> --file events.json      # or --file - (stdin)
+maxpm pipeline report <run> --steps output.txt --junit junit.xml
+```
+
+- `event` takes one JSON object, a JSON list, or one object on each line.
+  All the events go in, or none (the reply says what is wrong). Give each
+  event an id that is the same each time you send the same change: the same
+  event sent twice changes nothing.
+- `report` adds `::step` lines (as a stage's script prints them, "Write a
+  stage's script") and a JUnit file to a stage run (`--steps -` reads stdin).
+- A run that an event ends as passed hands its version to the next stage,
+  as a run of a forge does. Give the stage's transition the mode `forge`
+  when the system starts its runs itself.
+- Only a person or the manager runs these commands (a cron job of the person
+  runs as the person).
+
+Over HTTP, from a program on this computer or on the person's tailnet:
+
+```
+maxpm secret put ci-events          # a long random value, unseen
+maxpm pipeline intake <pipeline> --secret ci-events     # --off: no more
+curl -X POST http://127.0.0.1:<serve port>/api/pipeline-events \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"pipeline": "<pipeline>", "events": [...]}'
+```
+
+- The token is the value of the secret that `intake` names: it reaches that
+  pipeline only. A wrong or missing token gets 401; a pipeline with no
+  intake secret gets 403.
+- `{"run": <id>, "steps": "<lines>", "junit": "<xml>"}` reports steps and
+  tests, as `maxpm pipeline report` does.
+- `maxpm serve` takes the request only from this computer or from the
+  person's tailnet, and never from a page in a browser.
+- Each request that changes something is a line of the audit log, with the
+  token's secret as its actor.
 
 ## Write a plugin
 

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS pipelines (
   stop_runs       INTEGER,               -- 1: an operator stopped the pipeline (#6145): with the hold above, a running
                                          -- stage stops after its present step
   agents_operate  INTEGER,               -- 1: agent sessions on the operator list may press the emergency actions
-  runners     TEXT                       -- JSON list of the runners its trigger rules may use (#6151)
+  runners     TEXT,                      -- JSON list of the runners its trigger rules may use (#6151)
+  intake_secret   TEXT                   -- events in over HTTP (#6163): the maxpm secret whose value a sender shows
 );
 
 -- The operators of a pipeline (#6145; Decision 7, mark 2026-11-18: "operators can, we audit who does them"): the
@@ -424,8 +425,8 @@ def migrate(conn):
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
     for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
-              "forge_url", "plugin_settings", "plugin_state", "runners"):
-        if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use
+              "forge_url", "plugin_settings", "plugin_state", "runners", "intake_secret"):
+        if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use; #6163
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     for c in ("stop_runs", "agents_operate"):  # #6145
         if c not in cols:

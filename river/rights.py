@@ -46,7 +46,8 @@ COMMANDS = {
                  "runs": ANY, "move-back": LEAD,  # #6141
                  "triggers": ANY, "trigger": LEAD,  # #6150
                  # #6145: operators.change takes a person, operators.check the pipeline's operators
-                 "operators": ANY, "emergency": ANY},
+                 "operators": ANY, "emergency": ANY,
+                 "event": LEAD, "report": LEAD, "intake": LEAD},  # #6163: events in from any system
     # #6151: a runner runs agents with the queue's rights: a person or the manager adds, changes and stops them
     "runner": {"list": ANY, "runs": ANY, "log": ANY, "add": LEAD, "check": LEAD, "set": LEAD, "remove": LEAD,
                "allow": LEAD, "deny": LEAD, "stop": LEAD},

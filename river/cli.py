@@ -1934,6 +1934,17 @@ def build_parser(only=None):
     x.add_argument("--url", help="the forge's address: Gitea and Forgejo need it (https://codeberg.org); a "
                    "self-hosted GitLab")
     x = pls.add_parser("plugins", help="the installed plugins: name, version, level and the actions each one does")
+    x = pls.add_parser("event", help="send CDEvents to a pipeline from any system (one JSON object, a list, or one "
+                       "object on each line): --file <path>, or --file - for stdin")
+    x.add_argument("name"); x.add_argument("--file", required=True, help="the events: a file, or - for stdin")
+    x = pls.add_parser("report", help="add '::step' lines and a JUnit file to a stage run, from any system")
+    x.add_argument("id", type=int, help="the stage run")
+    x.add_argument("--steps", help="a file of '::step' lines and other output, or - for stdin")
+    x.add_argument("--junit", help="a JUnit XML file")
+    x = pls.add_parser("intake", help="let a system send events over HTTP (POST /api/pipeline-events) with the value "
+                       "of a maxpm secret as its token")
+    x.add_argument("name"); x.add_argument("--secret", help="the maxpm secret whose value is the token")
+    x.add_argument("--off", action="store_true", help="take no events over HTTP")
     x = pls.add_parser("accounts", help="the forge tokens of the pipelines: the account each one is, when it runs "
                        "out, the repositories it reaches, refused or missing, and which pipelines use it")
     x.add_argument("--check", action="store_true", help="ask the forges now (a person or the manager)")
@@ -7671,6 +7682,23 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "accounts":  # #6147
         from .pipeline import accounts
         return accounts.check_now(conn, a.secret, actor) if a.check else accounts.listing(conn)
+    if sub in ("event", "report", "intake"):  # #6163: events in from any system
+        from .pipeline import intake
+
+        def read(path):
+            if not path:
+                return None
+            if path == "-":
+                return sys.stdin.read() if sys.stdin and not sys.stdin.isatty() else ""
+            with open(os.path.expanduser(path), encoding="utf-8") as f:
+                return f.read(intake.MAX_BYTES + 1)
+        if sub == "event":
+            return intake.event_cmd(conn, a.name, read(a.file), actor)
+        if sub == "report":
+            return intake.report_cmd(conn, a.id, read(a.steps), read(a.junit), actor)
+        if not a.off and not a.secret:
+            raise RiverError("name the secret (--secret <name>) or turn it off (--off)")
+        return intake.set_secret(conn, a.name, None if a.off else a.secret, actor)
     if sub in ("plugins", "plugin"):  # #6159
         from .pipeline import plugin
         return plugin.listing() if sub == "plugins" else plugin.describe(a.plugin)
@@ -7932,6 +7960,20 @@ def render_pipeline(a, res):
         return
     if sub == "run":
         print(res["text"])
+        return
+    if sub == "event":
+        print(f"pipeline {res['pipeline']}: {res['events']} event(s) kept"
+              + (f", {res['duplicates']} sent before" if res["duplicates"] else "")
+              + (f"; stage runs {', '.join('#' + str(r) for r in res['runs'])}" if res["runs"] else ""))
+        return
+    if sub == "report":
+        print(f"run #{res['run']}: {res['steps']} step line(s), {res['lines']} other line(s), {res['tests']} test(s)"
+              + (f", {res['failed']} failed" if res.get("failed") else ""))
+        return
+    if sub == "intake":
+        print(f"pipeline {res['pipeline']}: " + (f"takes events over HTTP with the value of secret {res['secret']} as "
+                                                  "its token (POST /api/pipeline-events)" if res["secret"] else
+                                                  "takes no events over HTTP"))
         return
     if sub == "accounts":
         if not res:

@@ -494,13 +494,8 @@ def _take(conn, p, m, answer):
             raise core.RiverError(f"plugin {m['name']}: its state is more than {STATE_MAX // 1024} KB")
         with core.tx(conn):
             conn.execute("UPDATE pipelines SET plugin_state=? WHERE id=?", (state, p["id"]))
-    new = [r for r in res if not r.get("duplicate")]
-    for r in new:
-        if r["type"].startswith("dev.cdevents.pipelinerun.finished") and r["run"]:
-            row = conn.execute("SELECT state FROM stage_runs WHERE id=?", (r["run"],)).fetchone()
-            if row and row["state"] == "passed":
-                runner.hand_on(conn, r["run"])
-    return len(new), tests
+    runner.hand_on_passed(conn, res)
+    return len([r for r in res if not r.get("duplicate")]), tests
 
 
 def poll(conn, p):

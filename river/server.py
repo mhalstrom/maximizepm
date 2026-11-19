@@ -6124,6 +6124,29 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, {"error": why})
         return bool(why)
 
+    def _pipeline_events(self):
+        """POST /api/pipeline-events (#6163): a deployment system's events, steps or JUnit for one pipeline. _refuse
+        let it in (this computer, or the person's tailnet); a browser page (it sends Origin) may not send it, and the
+        Bearer token must be the value of the pipeline's intake secret (pipeline/intake.py)."""
+        from .pipeline import intake
+        if self.headers.get("Origin"):
+            return self._send(403, {"error": "a page may not send pipeline events; send them from a program"})
+        size = int(self.headers.get("Content-Length") or 0)
+        if size > intake.MAX_BYTES:
+            return self._send(413, {"error": f"the request is larger than {intake.MAX_BYTES} bytes"})
+        try:
+            body = json.loads(self.rfile.read(size) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "the body is not JSON"})
+        auth = self.headers.get("Authorization") or ""
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+        conn = core.connect()
+        try:
+            status, answer = intake.http(conn, token, body)
+        finally:
+            conn.close()
+        return self._send(status, answer)
+
     def _mcp(self, method):
         """/mcp: river's MCP tools over Streamable HTTP, for this computer only (mcp.local_refusal)."""
         from . import mcp
@@ -6227,6 +6250,8 @@ class Handler(BaseHTTPRequestHandler):
             if ans.get("error"):
                 return self._send(500, ans)
             return self._send(200, ans)
+        if self.path == "/api/pipeline-events":  # #6163: events in from any system, with a token of the pipeline
+            return self._pipeline_events()
         if self.path != "/api/action":
             return self._send(404, {"error": "not found"})
         # Same-origin check: of the pages on this computer, only river's own acts (a river command sends no Origin).

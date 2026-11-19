@@ -533,6 +533,16 @@ def hand_on(conn, run_id):
     _hand_on(conn, _row(conn, run_id))
 
 
+def hand_on_passed(conn, results):
+    """After store.ingest of events from outside (a plugin, events in): each run that a new finished event left as
+    passed hands its version on, in the order of the events."""
+    for r in results:
+        if not r.get("duplicate") and r["type"].startswith("dev.cdevents.pipelinerun.finished") and r.get("run"):
+            row = conn.execute("SELECT state FROM stage_runs WHERE id=?", (r["run"],)).fetchone()
+            if row and row["state"] == "passed":
+                hand_on(conn, r["run"])
+
+
 def _drop_card(conn, item_id, note):
     if item_id:
         it = conn.execute("SELECT status FROM items WHERE id=?", (item_id,)).fetchone()

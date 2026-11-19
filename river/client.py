@@ -68,7 +68,8 @@ REMOTE_SUBS = {"review": {"fail"}, "expert": {None, "list", "adopt", "request", 
 # #5975 (only serve writes the queue): a file that a command reads is read here, in the caller's own sandbox, and
 # serve's runner gets its text in a file of its own; serve, outside every sandbox, never opens a path that a caller
 # names. '-' (stdin) is read here too. Options per (command, subcommand) and positions per (command, subcommand).
-READ_OPTS = {("add", None): ("--from",), ("goal", "handoff"): ("--file",), ("expert", "notes"): ("--put",)}
+READ_OPTS = {("add", None): ("--from",), ("goal", "handoff"): ("--file",), ("expert", "notes"): ("--put",),
+             ("pipeline", "event"): ("--file",), ("pipeline", "report"): ("--steps", "--junit")}  # #6163
 READ_POS = {("canvas", "put"): 0, ("canvas", "section"): 2}
 READ_MAX = 8 << 20  # a larger file runs in the caller's process
 CANVAS_LOCAL = {"save"}  # it writes a file
