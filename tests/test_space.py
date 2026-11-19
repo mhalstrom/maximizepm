@@ -212,6 +212,10 @@ class Folder(SpaceBase):
         b1 = self.file("backups/one.tgz", 100_000, age_days=40)
         b2 = self.file("backups/two.tgz", 100_000, age_days=35)
         self.assertTrue(prof.is_dir())
+        # The new queue's WAL file holds every page of the schema (1.9 MB); the limit below works only while the
+        # folder stays under about 3.3 MB, so a larger schema (#6112) failed the test. Without the WAL, the folder
+        # is the queue's own size.
+        self.c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         total = space.tree_bytes(self.root)
         core.config_set(self.c, "folder_max_size", str(total - 300_000))
         dry = space.run(self.c, dry_run=True)

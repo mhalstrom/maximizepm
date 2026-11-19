@@ -694,6 +694,9 @@ AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert")
 # The agents MaximizePM starts, and their options, come from the agent adapters (river/agents, #5169, #5185): see
 # launch_platforms() and the end of this module, where the built-in adapters' setting defaults go in DEFAULT_SETTINGS.
 
+# The pipeline package keeps its own tables (#6112); SCHEMA ends with them.
+from .pipeline.schema import SCHEMA as _PIPELINE_SCHEMA  # noqa: E402
+
 SCHEMA = """
 -- One-time data changes that already ran (key: the change).
 CREATE TABLE IF NOT EXISTS meta (
@@ -1739,7 +1742,7 @@ CREATE INDEX IF NOT EXISTS events_item ON events(item_id);
 CREATE INDEX IF NOT EXISTS messages_to ON messages(to_agent, read_at);
 CREATE INDEX IF NOT EXISTS messages_item ON messages(item_id);
 CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id);
-"""
+""" + _PIPELINE_SCHEMA
 
 
 class RiverError(Exception):
