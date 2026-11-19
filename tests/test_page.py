@@ -382,6 +382,51 @@ try {
             self.assertIn("What it can do", r["dlg"], r)
             self.assertEqual(r["dlgOver"], [], r)
 
+    def test_the_next_step_waits_on_the_graph_and_approves_in_place(self):
+        """#6193 (mark 2026-11-19: 'it has to be obvious'): a release that waits for the person's yes shows under the
+        graph as the next step, its approval card highlighted, with 'Approve and release #N'; one confirm approves the
+        person's approval item as them. Deploy now does not show while the yes waits. At 1920 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        core.config_set(self.c, "release_approval", "person", project="web")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MAX(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        core.release_yes_pass(self.c)
+        appr = core._approvals(self.c, dep)[0]["id"]
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('.pl-next [data-pl-yes]'), "the next step");
+  const b = q('.pl-next [data-pl-yes]').getBoundingClientRect();
+  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " "), waits: [...document.querySelectorAll(".pl-waits")].map(e => e.dataset.plStage || e.dataset.plArrow),
+    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]') };
+  q('.pl-next [data-pl-yes]').click();
+  await until(() => q('#plAskDlg:not(.hidden) [data-pl-askgo]'), "the confirm");
+  out.confirm = q("#plAskDlg").textContent.replace(/\s+/g, " ");
+  q('#plAskDlg [data-pl-askgo]').click();
+  await until(() => !q('.pl-next [data-pl-yes]'), "the yes is given");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1920,1080", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertIn(f"Next: your yes for release #{dep}", r["next"], r)
+            self.assertIn(f"Approve and release #{dep}", r["next"], r)
+            self.assertEqual(r["waits"], ["approval"], r)
+            self.assertTrue(r["inView"], r)  # no scroll
+            self.assertFalse(r["deploy"], r)  # never around the yes
+            self.assertIn(f"Approve release #{dep}?", r["confirm"], r)
+            st = self.c.execute("SELECT status, assignee FROM items WHERE id=?", (appr,)).fetchone()
+            self.assertEqual(st["status"], "done", r)
+            with core.tx(self.c):  # open it again for the next size
+                self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
+
     def test_the_head_names_the_definition_version_and_versions_go_back(self):
         """#6143: the head of a pipeline's page names its definition version; Versions lists them, shows what one
         changed, and Go back makes one more version. At 1280 and at 390 px, nothing wider than the page."""

@@ -8,7 +8,7 @@
 // approve, roll back, run again) are #6117. The arrow between two stages is a transition (#6139; canvas
 // deploy-tab-mockup picture 4): it shows its mode, its state, who set it, until when and the waiting version, and a
 // click opens its controls (Approve, Block until, Delay, Disable, Let one version pass, Freeze, the mode and window).
-import { $, esc, getJson, ago, left, copyText, toast, act } from "../lib.js";
+import { $, esc, getJson, ago, left, copyText, toast, act, actor } from "../lib.js";
 import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
@@ -82,7 +82,9 @@ export function releaseButton(D) {
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
   const item = D.waits ? (D.waits[0] || {}).item : appr && appr.state === "queued" ? appr.item : null;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {}).item;
-  if (item) return button(`Approve release${dep ? " #" + dep : ""}`, { kind: "primary", data: { "dp-card": item }, title: "Approve or decline" });
+  // #6193: the yes in place (one confirm, then done on the person's approval item as them); the card for its details.
+  if (item) return button(`Approve and release${dep ? " #" + dep : ""}`, { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Give your yes" })
+    + button("Open the card", { data: { "dp-card": item }, title: "Approve or decline" });
   const r = D.release;
   return r ? button(`Release ${r.tasks} task${r.tasks === 1 ? "" : "s"} now`, { kind: "primary", data: { relnow: D.name, relshow: "1" },
     title: "Start the release" }) : "";
@@ -108,16 +110,32 @@ function headControls(D) {
 // Where the next step waits on the graph, for its highlight (pl-waits): the approval card while it waits for the
 // person's yes, else the chip after holding ("→<stage>") while collected tasks wait for the release; else null.
 function nextAt(D) {
-  if (!D || !D.default) return null;
+  if (!D) return null;
+  if (!D.default) { const s = yesWaits(D); return s ? "→" + s.name : null; }
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
   if (appr && appr.state === "queued" && appr.item) return "approval";
   const i = D.stages.findIndex(s => s.holding);
   return D.release && i >= 0 && D.stages[i + 1] ? "→" + D.stages[i + 1].name : null;
 }
 
+// A pipeline of its own (#6193): the first transition where a version waits for a person's yes.
+function yesWaits(D) {
+  if (D.followed) return null;
+  return D.stages.find(s => { const t = s.transition, w = t && (t.waiting || [])[0];
+    return w && NEEDS_YES.includes(t.mode) && !w.approved_by && t.state !== "blocked" && t.state !== "disabled"; }) || null;
+}
+
+// Deploy now and Review and deploy in words (#6193: 'unclear: say what each does'); a tooltip stays 1-4 words (p146).
+const DEPLOY_WORDS = "Deploy now starts an agent session that takes the release and deploys it. Review and deploy starts a review session first; the deploy follows when the review passes.";
+
 function nextBar(D) {
+  if (!D.default) {  // #6193: every pipeline names its next step
+    const s = yesWaits(D), w = s && s.transition.waiting[0];
+    return s ? `<div class="pl-next"><span class="t-m">Next: <span class="pl-ver">${esc(short(w.rev))}</span> waits for your yes before ${esc(s.name)}.</span>
+      <span class="spacer"></span>${button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Let this version in" })}</div>` : "";
+  }
   const b = headControls(D);
-  if (!D.default || !b) return "";
+  if (!b) return "";
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run || {}, R = D.release;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {});
   const text = appr.state === "queued" && appr.item
@@ -125,7 +143,8 @@ function nextBar(D) {
     : R ? `Next: ${R.tasks} task${R.tasks === 1 ? "" : "s"} wait for the release. Without a click: ${esc(R.text)}.`
     : "Next: the collected tasks can go out.";
   const agent = R ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
-  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}</div>`;
+  const help = b.includes("data-deploy=") ? `<div class="muted t-s pl-next-help">${DEPLOY_WORDS}</div>` : "";
+  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}${help}</div>`;
 }
 
 function draw() {
@@ -557,6 +576,7 @@ function arrowNow(D, s) {
   const waitsYes = releaseButton(D).includes("dp-card"), agent = D.default && !waitsYes && (R || h.commits)
     ? button("Release via agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
   const b = headControls(D) + agent;
+  if (b.includes("data-deploy=")) lines.push(`<span class="muted">${DEPLOY_WORDS}</span>`);  // #6193
   return `<h3>What it does now</h3>${lines.map(x => `<div class="t-m">${x}</div>`).join("")}${b ? `<div class="pl-bar">${b}</div>` : ""}<h3>What it can do</h3>`;
 }
 
@@ -808,6 +828,21 @@ async function drawTasks(rev) {
 }
 
 // ---- clicks
+
+// Approve and release (#6193): the person's yes on the release's approval item, from the graph's Next bar, the chip's
+// dialog or the Deploy list, after one confirm; the same 'done' that the approval card sends (waitDialog.js), as them.
+document.addEventListener("click", (e) => {
+  const y = e.target.closest("[data-pl-yes]");
+  if (!y) return;
+  const id = +y.dataset.plYes, dep = y.dataset.dep;
+  if (!actor()) return toast("Choose your name in 'You are' first", true);
+  askForm(`Approve release${dep ? " #" + dep : ""}?`, "After your yes it goes to production through its deploy hook.",
+    "Approve and release", [], async (v) => {
+      try { await act("done", { id, output: v.why || "Approved from the Deploy tab" }); } catch (err) { return; }
+      toast(`Release${dep ? " #" + dep : ""} approved: it goes out now`);
+      if (V.shown) { if (dep && V.data && V.data.default) pickStage(V.name, "deploy"); renderPipeline(true); }
+    }, false);
+});
 
 $("#dpStages").addEventListener("click", (e) => {
   // #6189: a button in the transition's dialog closes it first (its action may open a dialog of its own).
