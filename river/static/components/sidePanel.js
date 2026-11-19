@@ -32,6 +32,7 @@ import { findMark, findClear, findGo } from "./findText.js";
 import { queueHtml } from "./agentActions.js";
 import { button, iconButton } from "./button.js";
 import { publishButton, pageLine, openOnRqs } from "./rqsPublish.js";
+import { tasksHtml } from "./artifactTasks.js";
 import { S } from "../page.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
@@ -381,7 +382,8 @@ function drawBar(t, meta) {
   if (t.title !== title) { t.title = title; renderTabs(); }
   // The realquicksite page of the canvas (#5789): its own line under the bar, drawn when it changed.
   t.meta = meta;
-  const line = pageLine(meta.page, v);
+  // The tasks and questions that review or name the canvas (#6208), on the same line.
+  const line = pageLine(meta.page, v) + tasksHtml(meta.tasks);
   if (t.rqs && t.rqs._html !== line) { t.rqs.innerHTML = line; t.rqs._html = line; }
   const sigNow = JSON.stringify([meta.versions, v, t.pin, meta.item_id, meta.item_title, meta.kind, Math.floor(Date.now() / 60000)]);
   if (sigNow === t.barSig || bar.contains(document.activeElement)) return;

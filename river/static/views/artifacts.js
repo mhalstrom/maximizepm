@@ -7,6 +7,7 @@ import { chip } from "../components/chip.js";
 import { openFullScreen } from "../components/sidePanel.js";
 import { button } from "../components/button.js";
 import { empty as emptyState } from "../components/empty.js";
+import { tasksHtml } from "../components/artifactTasks.js";
 
 const KIND = { canvas: "canvas", file: "file", page: "local page", artifact: "claude.ai artifact", rqs: "realquicksite page" };
 // A page on another site that refuses a frame or needs its own sign-in (#5789): a link that opens a new tab.
@@ -27,7 +28,8 @@ export function showRows(el, rows, empty) {
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
         <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} <span class="art-meta">${a.how === "wrote" ? "written by" : a.how === "published" ? "a canvas of" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}</span>
-          <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
+          <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div>
+        ${tasksHtml(a.tasks)}</div>
       <div class="art-btns">${OUTSIDE[a.kind]
         ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="${OUTSIDE[a.kind][1]}">${OUTSIDE[a.kind][0]}</a>`
         : button("Open", { data: { "art-open": i } })}

@@ -463,6 +463,10 @@ def _print_show(a):
     for p in a.get("plan") or []:  # #5989
         print(f"  from plan: {p['canvas']}, part '{p['part']}' (in plan version {p['plan_version']} of {p['plans']}): "
               f"maxpm canvas plan {p['canvas']}")
+    if a.get("artifact_links"):  # #6208
+        print("  reviews or names:")
+        for line in artifact_lines(a["artifact_links"], "    "):
+            print(line)
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
     if a.get("artifacts"):
@@ -564,6 +568,8 @@ def _print_brief(a, n=240):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    if a.get("artifact_links"):  # #6208
+        print("  reviews or names: " + "; ".join(line.strip() for line in artifact_lines(a["artifact_links"], "")))
     ap = a.get("approval")
     if ap:  # #5957
         print("  approval: " + ", ".join((["one action"] if ap["once"] else []) + ([f"only on {ap['on_day']}"]
@@ -878,6 +884,18 @@ LEVEL_HELP = ("high (the default) or low. A person's message wakes the manager a
               "more: its message waits for the manager's beat and escalates by the sender's state (#5976, #5977)")
 BLOCKED_HELP = ("a person's message that cannot wait wakes the manager's watch at once. An agent's flag counts no more: "
                 "its message escalates when it stops working (#5976)")
+ARTIFACT_HELP = ("the artifact it reviews or is about: a canvas name, a full file path, or an address (repeatable); "
+                 "the artifact then links back to it (#6208). A canvas, file or address in the text is linked too")
+
+
+def _artifact_args(a):
+    """The --artifact values, a relative file path made full from this folder (core reads it in another process)."""
+    out = []
+    for x in getattr(a, "artifact", None) or ():
+        p = Path(x).expanduser()
+        rel = not p.is_absolute() and not re.match(r"https?://", x, re.I) and ("/" in x or p.exists())
+        out.append(str(p.resolve()) if rel else x)
+    return out
 
 
 class _Null:
@@ -2153,6 +2171,7 @@ def build_parser(only=None):
     x.add_argument("--blocks", type=int, help="item that must wait on this new one (usually the one you hold)")
     x.add_argument("--found-during", type=int, dest="found_during",
                    help="the item you were working on when you found this (links them; not a dependency)")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     g = x.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="mode", action="store_const", const="keep",
                    help="with --blocks: keep holding that item and do this one yourself now")
@@ -2220,6 +2239,7 @@ def build_parser(only=None):
     x.add_argument("--due", help="due date (2026-10-15, 'fri 17:00'), or none to remove it")
     x.add_argument("--goal", action="append", help="tag the item with a goal (repeatable)")
     x.add_argument("--untag", action="append", help="remove a goal tag (repeatable)")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     x.add_argument("--unreserve", action="store_true", help="end the reservation of an open item (\"reserved for <agent>\"), "
                    "so every agent can take it: that agent, a person, or a manager (the same as maxpm push <id> --cancel)")
 
@@ -2579,6 +2599,7 @@ def build_parser(only=None):
         x.add_argument("--holder-of", type=int, help="send it to whoever holds this item")
         x.add_argument("--item", type=int, help="the item it is about (without an agent: its holder)")
         x.add_argument("--goal", help="send it to the owner of this goal")
+        x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
         x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
         x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
         x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does "
@@ -2614,6 +2635,7 @@ def build_parser(only=None):
     x.add_argument("--to", help="agent name"); x.add_argument("--item", type=int, help="the item it is about; without --to it goes to the holder")
     x.add_argument("--reply", type=int, help="message id this replies to (goes to its sender)")
     x.add_argument("--goal", help="send it to the owner of this goal")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does with it "
@@ -4939,7 +4961,7 @@ def dispatch(conn, a, actor):
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True, approve_once=a.once,
-                            approve_on=a.approve_on,
+                            approve_on=a.approve_on, artifacts=_artifact_args(a),
                             # a Look or Approve item carries the thing itself (#5956, policy g3)
                             thing_type=(a.atype or core.action_type(title)) if a.doer == "human" else None)
         if a.atype and res.get("id"):
@@ -4954,7 +4976,8 @@ def dispatch(conn, a, actor):
             core.cancel_push(conn, a.id, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, _models(a),
-                              tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
+                              tier=a.tier, kind=a.kind, short=a.short, changed=a.changed,
+                              artifacts=_artifact_args(a))
     if c == "list":
         rows = core.item_list(conn, a.project, a.status, a.all, a.goal)
         return rows[:a.limit] if a.limit and a.limit > 0 else rows
@@ -5178,7 +5201,7 @@ def dispatch(conn, a, actor):
         if kind == "question" and to and core._is_person(conn, to):  # #5956, policy g3
             _thing_check(conn, core.action_type(text, "decide"), text, item=a.item)
         return core.message(conn, kind, text, to, a.holder_of, a.item, getattr(a, "file", None), os.getcwd(), actor,
-                            a.goal, a.level, a.blocked)
+                            a.goal, a.level, a.blocked, _artifact_args(a))
     if c == "decline":
         if a.message:
             return core.decline_message(conn, a.id, a.note, actor)
@@ -5204,7 +5227,7 @@ def dispatch(conn, a, actor):
             body = core.typed_body(a.text, a.atype, a.kind)
             _thing_check(conn, core.action_type(body, "decide"), body, item=a.item)
         return core.send(conn, a.kind, core.typed_body(a.text, a.atype, a.kind), a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
-                         a.item, a.reply, actor, a.level, a.blocked)
+                         a.item, a.reply, actor, a.level, a.blocked, _artifact_args(a))
     if c == "answer":
         return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
     if c == "withdraw":
@@ -6116,6 +6139,10 @@ def render_go(b):
             out.append(f"  canvas {cv['name']} v{cv['version']}: "
                        + (f"{cv['open_comments']} open comment(s) wait for a change: {r} canvas comments {cv['name']} --open"
                           if cv["open_comments"] else f"no open comments ({r} canvas show {cv['name']})"))
+        named = [x for x in it.get("artifact_links") or [] if x["how"] != "made for"]  # #6208
+        if named:
+            out.append("  reviews or names (read it first):")
+            out += artifact_lines(named, "    ")
         if b.get("related"):
             out.append(f"  RELATED (look first: some of it may be done or in progress; {r} show <id>):")
             out += _related_lines(b["related"], "  ")
@@ -7154,6 +7181,33 @@ def render_browser(a, res):
     else:
         print("  controlled by nobody: maxpm browser control takes it")
 
+def task_line(t):
+    """One task or question that reviews or names an artifact (#6208), as core.artifact_tasks gives it."""
+    if t.get("message"):
+        return (f"asked in {t.get('message_kind') or 'message'} #{t['message']}" + (f" to {t['to']}" if t.get("to") else "")
+                + (f" about #{t['item']}" if t.get("item") else "") + f" ({t['state']})")
+    word = "made for" if t["how"] == "made for" else "reviewed in"
+    return f"{word} #{t['item']} {core.short_title(t.get('title') or '', t.get('short'))} ({t['state']})"
+
+
+def task_lines(tasks, indent="  "):
+    return [f"{indent}{task_line(t)}" for t in tasks or ()]
+
+
+def artifact_lines(links, indent="  "):
+    """The artifacts a task or a question reviews or names (#6208): what opens each one."""
+    out = []
+    for x in links or ():
+        if x["kind"] == "canvas":
+            c = x.get("canvas") or {}
+            out.append(f"{indent}canvas {c.get('name')} v{c.get('version')} ({c.get('project')}): maxpm canvas show "
+                       f"{c.get('name')} --project {c.get('project')}")
+        else:
+            out.append(f"{indent}{ {'file': 'file', 'page': 'page', 'artifact': 'claude.ai artifact'}.get(x['kind'], x['kind'])} "
+                       f"{x['target']}")
+    return out
+
+
 def render_canvas(a, res):
     v = a.cvcmd
     if v == "kit":
@@ -7227,6 +7281,8 @@ def render_canvas(a, res):
               + (f": {sh['note']}" if sh["note"] else ""))
         print("  versions: " + ", ".join(f"v{x['version']} {x['author']}" for x in res["versions"]))
         for line in page_lines(res.get("page")):
+            print(line)
+        for line in task_lines(res.get("tasks")):
             print(line)
         for r in res["comments"]:
             print("\n".join(_comment_lines(r)))
@@ -7401,6 +7457,8 @@ def render_artifacts(res, a):
         name = f' "{_cut(r["title"], 50)}" v{r["version"]}' if r["kind"] == "canvas" else ""
         extra = f", {r['open_comments']} open comment(s)" if r.get("open_comments") else ""
         print(f"{r['n']:>3}. {r['label']:<9} {r['target']}{name}  ({_art_where(r)}{extra}; id {r['id']})")
+        for line in task_lines(r.get("tasks"), "       "):  # #6208
+            print(line)
     if res["total"] > len(rows):
         print(f"... {res['total'] - len(rows)} more: -n {res['total']}")
     flags = "".join(f" --{k} {v}" for k, v in (("agent", a.agent), ("item", a.item), ("since", a.since)) if v is not None)

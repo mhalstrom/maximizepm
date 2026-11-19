@@ -970,6 +970,8 @@ window.addEventListener("popstate", openFromUrl);
 window.riverOpenInPanel = async (session, target) => {
   // A page with the person's own sign-in opens in a new tab in the click itself, before an await can lose it (#5804).
   if (ownSignIn(target)) return openInPanel(target, session);
+  // A link in the item drawer (its Artifacts, #6208): the drawer closes, so the panel it opens is not behind it.
+  if (drawer.isOpen()) { drawer.close(); openItem = null; }
   if (tab !== "sessions") await setTab("sessions");
   if (session) sessionsTab.pick(session);
   openInPanel(target, session);

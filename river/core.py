@@ -1309,6 +1309,24 @@ CREATE TABLE IF NOT EXISTS canvas_pages (
   responses_at   TEXT,                        -- the newest comment or vote already brought back (#5790)
   checked_at     TEXT                         -- the last read of the responses (#5790)
 );
+-- Artifact links (#6208): a task or a question that reviews or names an artifact (a canvas, a file, a local page, a
+-- claude.ai artifact), kept both ways. Made when an item or a question names it in its text, or by --artifact.
+-- A canvas's own item (canvases.item_id) is a link too, read from there. Readers: artifact_tasks (the canvas bar,
+-- maxpm canvas show, the Artifacts lists, maxpm artifacts) and artifacts_of (maxpm show, the go briefing, the item
+-- view, the Waits for you cards).
+CREATE TABLE IF NOT EXISTS artifact_links (
+  id          INTEGER PRIMARY KEY,
+  target      TEXT NOT NULL,                -- canvas:<id>, a full file path, a page or claude.ai address (artifact_key)
+  kind        TEXT NOT NULL,                -- canvas, file, page, artifact
+  item_id     INTEGER REFERENCES items(id),
+  message_id  INTEGER REFERENCES messages(id),
+  how         TEXT NOT NULL,                -- named (in its text), flag (--artifact)
+  actor       TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifact_links_target ON artifact_links(target);
+CREATE INDEX IF NOT EXISTS artifact_links_item ON artifact_links(item_id);
+CREATE INDEX IF NOT EXISTS artifact_links_message ON artifact_links(message_id);
 
 -- The names of the secrets that sessions saved (#5757, river/vault.py), never their values: those are in the macOS
 -- Keychain (or secrets/ beside the queue). Readers: maxpm secret list, and get (an unknown name is refused).
@@ -2162,7 +2180,7 @@ def schema_print():
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
     for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts,
-              _migrate_report_cards, _pipeline_migrate):
+              _migrate_report_cards, _pipeline_migrate, _migrate_artifact_links):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -2187,6 +2205,7 @@ def _upgrade(conn):
         _migrate_launch_agents(conn)
         _migrate_levels(conn)
         _migrate_big_file_conflicts(conn)
+        _migrate_artifact_links(conn)
         _migrate_person_prompts(conn)
         _migrate_report_cards(conn)
         with tx(conn):
@@ -10191,8 +10210,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
              kind=None, short=None, start=None, start_check=False, approve_once=False, approve_on=None,
-             thing_type=None):
-    """Add an item. `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
+             thing_type=None, artifacts=()):
+    """Add an item. `artifacts` (maxpm add --artifact): the canvases, files or pages it reviews (artifact_ref);
+    the ones its title, context or notes name are linked too (#6208). `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
     yes counts for one action, and/or only on that day (approvals, #5957). `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
     (a timed outside blocker that the sweep ends); 'now' says that it can start now. `start_check` (maxpm add):
@@ -10281,6 +10301,10 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             _earlier_store(conn, "item", iid, earlier)
         if doer == "human":  # the page, picture or commit it names goes on its card (#5956)
             _exhibits_store(conn, "item", iid, exhibit_sources(f"{title}\n{context or ''}\n{notes or ''}", p["path"]))
+        _link_artifacts(conn, [artifact_ref(conn, x, p["id"]) for x in artifacts or ()], item_id=iid, how="flag",
+                        actor=actor)
+        _link_artifacts(conn, artifact_refs(conn, f"{title}\n{context or ''}\n{notes or ''}", p["id"]), item_id=iid,
+                        actor=actor)
         if approve_once or approve_on:
             conn.execute("INSERT INTO approvals(item_id, once, on_day) VALUES (?,?,?)", (iid, int(bool(approve_once)), day))
             _event(conn, iid, actor, "approval: " + ", ".join(
@@ -10534,7 +10558,7 @@ def _changed(col, old):
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, models=None,
-              tier=None, kind=None, short=None, changed=None):
+              tier=None, kind=None, short=None, changed=None, artifacts=()):
     tier = _check_tier(tier)
     kind = _check_kind(kind)
     short = check_short(short) if short is not None else None
@@ -10595,6 +10619,14 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
                 _event(conn, it["id"], actor, _changed(col, it[col]) if col in ("context", "check") else f"{col} changed")
                 if col == "touches":
                     _sync_conflicts(conn, it["id"], actor)
+        # #6208: the artifacts named by --artifact, and the ones a changed text names (old links stay).
+        pid = conn.execute("SELECT project_id FROM items WHERE id=?", (it["id"],)).fetchone()[0]
+        _link_artifacts(conn, [artifact_ref(conn, x, pid) for x in artifacts or ()], item_id=it["id"], how="flag",
+                        actor=actor)
+        texts = [v for v, old in ((title, it["title"]), (notes, it["notes"]), (context, it["context"]))
+                 if v is not None and v != old]
+        if texts:
+            _link_artifacts(conn, artifact_refs(conn, "\n".join(texts), pid), item_id=it["id"], actor=actor)
     return item_show(conn, item_id)
 
 
@@ -11259,9 +11291,9 @@ def _holder_of(conn, item_id):
 
 
 def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd=None, actor=None, goal=None,
-            level=None, blocked=False):
+            level=None, blocked=False, artifacts=()):
     """The shortcuts maxpm alert / ask / note (design 7.4): to an agent, to the holder of an item, or
-    (questions) to every agent whose held items touch a file. Returns the messages sent."""
+    (questions) to every agent whose held items touch a file. Returns the messages sent. artifacts: send's."""
     if sum(x is not None for x in (to, holder_of, file, goal)) > 1:
         raise RiverError("give one of: an agent name, --holder-of <id>, --goal <name>, or --file <path>")
     if goal is not None:
@@ -11272,14 +11304,14 @@ def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd
         targets = [a["name"] for a in who(conn, file=file, cwd=cwd) if a["name"] != actor]
         if not targets:
             raise RiverError(f"no agent holds an item that touches {file} (maxpm who --file {file})")
-        return [send(conn, kind, body, t, item, None, actor, level, blocked) for t in targets]
+        return [send(conn, kind, body, t, item, None, actor, level, blocked, artifacts) for t in targets]
     if holder_of is not None:
         to = _holder_of(conn, holder_of)
         if item is None:
             item = holder_of
     if to is None and item is None:
         raise RiverError("say who gets it: an agent name, --holder-of <id>, or --item <id> (its holder)")
-    return [send(conn, kind, body, to, item, None, actor, level, blocked)]
+    return [send(conn, kind, body, to, item, None, actor, level, blocked, artifacts)]
 
 
 def decline_message(conn, msg_id, note=None, actor=None):
@@ -12029,6 +12061,216 @@ def exhibits_for(conn, kind, ref_ids):
         out.setdefault(r["ref_id"], []).append({"id": r["id"], "what": r["what"], "source": r["source"],
                                                 "ready": bool(r["path"] or r["has_body"]), "error": r["error"]})
     return out
+
+
+# Artifact links (#6208, mark 2026-11-19: 'when we get a task that is linked to an artifact review we need to link
+# back to the task from the artifact in maxpm'). Before, an item or a question named its canvas or file only in its
+# text (question #17840: "canvas planner-readme v2, file /private/tmp/.../planner-readme.md"), and the canvas did not
+# show the task that reviewed it.
+_CANVAS_REF = re.compile(r"\bcanvas(?:es)?[ :]+[\"'`]?(c?\d+|[a-z0-9][\w.-]*)", re.I)
+# Words after "canvas" that are its commands or plain words, never a name to look up.
+CANVAS_WORDS = {"put", "show", "list", "open", "comments", "comment", "section", "design", "save", "publish", "reply",
+                "resolve", "accept", "reject", "edit", "view", "bar", "tab", "page", "the", "a", "and", "or", "of", "is",
+                "that", "with", "for", "in", "on", "to", "notes", "version", "versions", "answer", "send"}
+ART_LINK_MESSAGES = ("question", "alert")  # the kinds of message whose text links an artifact by itself
+
+
+def _canvas_named(conn, name, project_id=None):
+    """The id of the canvas that a text names (a name, c12, or 12 after 'canvas:'): the one of project_id first,
+    else the only one of that name. None when there is none or the name is in two other projects."""
+    if re.fullmatch(r"c?\d+", name):
+        r = conn.execute("SELECT id FROM canvases WHERE id=? AND deleted_at IS NULL", (int(name.lstrip("c")),)).fetchone()
+        return r["id"] if r else None
+    rows = conn.execute("SELECT id, project_id FROM canvases WHERE name=? AND deleted_at IS NULL", (name.lower(),)).fetchall()
+    mine = [r for r in rows if project_id is not None and r["project_id"] == project_id]
+    return (mine or rows)[0]["id"] if len(mine or rows) == 1 else None
+
+
+def artifact_refs(conn, text, project_id=None):
+    """[(kind, target)] of the artifacts a text names: a canvas ('canvas planner-readme', 'canvas:12'), a full file
+    path of a page, picture or Markdown file, a local page address, a claude.ai artifact address (the same forms
+    as the Artifacts tab, sessions._hits_in)."""
+    from . import sessions
+    out = []
+    for m in _CANVAS_REF.finditer(text or ""):
+        name = m.group(1).rstrip(".-")
+        if name.lower() in CANVAS_WORDS:
+            continue
+        cid = _canvas_named(conn, name, project_id)
+        if cid is not None:
+            out.append(("canvas", f"canvas:{cid}"))
+    out += [(h["kind"], h["target"]) for h in sessions._hits_in(text or "", None, "named")]
+    return list(dict.fromkeys(out))
+
+
+def artifact_ref(conn, ref, project_id=None):
+    """(kind, target) of one artifact that a person or a session names with --artifact: a canvas (its name, c12 or
+    canvas:12), a full file path, or a web address. RiverError when it names none."""
+    from . import sessions
+    ref = (ref or "").strip()
+    if not ref:
+        raise RiverError("--artifact needs a canvas name, a full file path, or an address")
+    if re.match(r"https?://", ref, re.I):
+        key = sessions.artifact_key(ref)
+        return ("artifact" if key.lower().startswith("https://claude.ai/") else "page"), key
+    if ref.startswith(("/", "~")):
+        f = Path(ref).expanduser()
+        if not f.exists():
+            raise RiverError(f"--artifact {ref}: no such file")
+        return "file", str(f.resolve())
+    name = ref.split(":", 1)[1] if ref.lower().startswith("canvas:") else ref
+    cid = _canvas_named(conn, name, project_id)
+    if cid is None:
+        raise RiverError(f"--artifact {ref}: no canvas of that name (maxpm canvas list); a file needs its full path, "
+                         "a page its address (http...)")
+    return "canvas", f"canvas:{cid}"
+
+
+def _link_artifacts(conn, refs, item_id=None, message_id=None, how="named", actor=None, event=True):
+    """Inside a tx: keep each (kind, target) as a link of the item or the message, once. The item's history says
+    which artifacts it reviews or names (event False: the one-time fill writes no history). Returns the new links."""
+    new = []
+    for kind, target in refs:
+        if conn.execute("SELECT 1 FROM artifact_links WHERE target=? AND item_id IS ? AND message_id IS ?",
+                        (target, item_id, message_id)).fetchone():
+            continue
+        conn.execute("INSERT INTO artifact_links(target, kind, item_id, message_id, how, actor, created_at) "
+                     "VALUES (?,?,?,?,?,?,?)", (target, kind, item_id, message_id, how, actor, iso(now())))
+        new.append((kind, target))
+        if event and item_id is not None and message_id is None:
+            _event(conn, item_id, actor, f"artifact linked: {target}")
+    return new
+
+
+def _task_state(status=None, mkind=None, mstate=None):
+    """The state word of a linked task or question."""
+    if mkind:
+        if mstate in ("answered", "accepted", "declined"):
+            return mstate
+        return "waits for an answer" if mkind == "question" else "open"
+    return {"in_progress": "in progress"}.get(status, status or "gone")
+
+
+def artifact_tasks(conn, targets):
+    """{target: [{item, short, title, status, doer, state, how, message, message_kind, to}]}: the tasks and questions
+    that review or name each artifact (#6208), oldest link first; a canvas's own item first (how 'made for')."""
+    targets = list(dict.fromkeys(t for t in targets if t))
+    out = {t: [] for t in targets}
+    if not targets:
+        return out
+    marks = ",".join("?" * len(targets))
+    cids = [int(t.split(":", 1)[1]) for t in targets if t.startswith("canvas:") and t.split(":", 1)[1].isdigit()]
+    if cids:
+        for r in conn.execute(f"SELECT c.id, i.id item, i.title, i.short, i.status, i.doer FROM canvases c "
+                              f"JOIN items i ON i.id=c.item_id WHERE c.id IN ({','.join('?' * len(cids))})", cids):
+            out[f"canvas:{r['id']}"].append({"item": r["item"], "short": r["short"], "title": r["title"],
+                                             "status": r["status"], "doer": r["doer"], "state": _task_state(r["status"]),
+                                             "how": "made for", "message": None, "message_kind": None, "to": None})
+    for r in conn.execute(
+            f"SELECT l.target, l.item_id, l.message_id, l.how, i.title, i.short, i.status, i.doer, m.kind mkind, "
+            f"m.state mstate, m.to_agent, m.answered_at FROM artifact_links l LEFT JOIN items i ON i.id=l.item_id "
+            f"LEFT JOIN messages m ON m.id=l.message_id WHERE l.target IN ({marks}) ORDER BY l.id", targets):
+        rows = out[r["target"]]
+        if r["message_id"] is None and any(x["item"] == r["item_id"] and x["message"] is None for x in rows):
+            continue  # the canvas's own item, named in its text too
+        mstate = "answered" if r["mkind"] and r["answered_at"] and r["mstate"] not in ("accepted", "declined") else r["mstate"]
+        rows.append({"item": r["item_id"], "short": r["short"], "title": r["title"], "status": r["status"],
+                     "doer": r["doer"], "state": _task_state(r["status"], r["mkind"], mstate), "how": r["how"],
+                     "message": r["message_id"], "message_kind": r["mkind"], "to": r["to_agent"]})
+    return out
+
+
+def _artifact_label(conn, kind, target, canvases):
+    if kind == "canvas":
+        c = canvases.get(target)
+        return c["title"] or c["name"] if c else target
+    if kind == "file":
+        return Path(target).name
+    return re.sub(r"^https?://", "", target)
+
+
+def artifacts_of(conn, item_ids=(), message_ids=()):
+    """({item_id: [link]}, {message_id: [link]}): the artifacts that each item or question reviews or names (#6208),
+    with the canvases that belong to an item. A link: {kind, target, label, how, canvas (name, project, version) for
+    a canvas}. A question's own links come with its item's, the same artifact once."""
+    items = [int(x) for x in item_ids if x is not None]
+    msgs = [int(x) for x in message_ids if x is not None]
+    by_item, by_msg = {i: [] for i in items}, {m: [] for m in msgs}
+    if not items and not msgs:
+        return by_item, by_msg
+    rows = []
+    if items:
+        q = ",".join("?" * len(items))
+        rows += [("item", r["item_id"], "canvas", f"canvas:{r['id']}", "made for") for r in conn.execute(
+            f"SELECT id, item_id FROM canvases WHERE deleted_at IS NULL AND item_id IN ({q}) ORDER BY id", items)]
+        rows += [("item", r["item_id"], r["kind"], r["target"], r["how"]) for r in conn.execute(
+            f"SELECT item_id, kind, target, how FROM artifact_links WHERE item_id IN ({q}) AND message_id IS NULL "
+            f"ORDER BY id", items)]
+    if msgs:
+        q = ",".join("?" * len(msgs))
+        rows += [("message", r["message_id"], r["kind"], r["target"], r["how"]) for r in conn.execute(
+            f"SELECT message_id, kind, target, how FROM artifact_links WHERE message_id IN ({q}) ORDER BY id", msgs)]
+    cids = sorted({int(t.split(":", 1)[1]) for _w, _r, k, t, _h in rows if k == "canvas"})
+    canvases = {}
+    if cids:
+        for c in conn.execute(f"SELECT c.id, c.name, c.title, c.deleted_at, p.name project, (SELECT MAX(version) FROM "
+                              f"canvas_versions v WHERE v.canvas_id=c.id) version FROM canvases c JOIN projects p "
+                              f"ON p.id=c.project_id WHERE c.id IN ({','.join('?' * len(cids))})", cids):
+            canvases[f"canvas:{c['id']}"] = dict(c)
+    for where, ref, kind, target, how in rows:
+        if kind == "canvas" and (target not in canvases or canvases[target]["deleted_at"]):
+            continue
+        dest = (by_item if where == "item" else by_msg)[ref]
+        if any(x["target"] == target for x in dest):
+            continue
+        link = {"kind": kind, "target": target, "label": _artifact_label(conn, kind, target, canvases), "how": how}
+        if kind == "canvas":
+            c = canvases[target]
+            link["canvas"] = {"name": c["name"], "project": c["project"], "version": c["version"]}
+        dest.append(link)
+    return by_item, by_msg
+
+
+def message_artifacts(conn, message_ids):
+    """{message_id: [link]}: a question's links, then the links of its item, the same artifact once (#6208)."""
+    ids = [int(x) for x in message_ids if x is not None]
+    if not ids:
+        return {}
+    about = {r["id"]: r["item_id"] for r in conn.execute(
+        f"SELECT id, item_id FROM messages WHERE id IN ({','.join('?' * len(ids))})", ids)}
+    by_item, by_msg = artifacts_of(conn, [i for i in about.values() if i is not None], ids)
+    out = {}
+    for m in ids:
+        links = list(by_msg.get(m, []))
+        for x in by_item.get(about.get(m), []):
+            if not any(y["target"] == x["target"] for y in links):
+                links.append(x)
+        out[m] = links
+    return out
+
+
+def _migrate_artifact_links(conn):
+    """Once (#6208): the links of the open items, the items closed in the last 30 days, and the questions and alerts
+    of the last 30 days, from their texts."""
+    if conn.execute("SELECT 1 FROM meta WHERE key='artifact_links'").fetchone():
+        return
+    since = iso(now() - timedelta(days=30))
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='artifact_links'").fetchone():
+            return
+        conn.execute("INSERT INTO meta(key, value) VALUES ('artifact_links', ?)", (iso(now()),))
+        for r in conn.execute("SELECT id, project_id, title, notes, context FROM items WHERE status IN "
+                              "('open','in_progress','held') OR closed_at>=?", (since,)).fetchall():
+            refs = artifact_refs(conn, f"{r['title']}\n{r['context'] or ''}\n{r['notes'] or ''}", r["project_id"])
+            if refs:
+                _link_artifacts(conn, refs, item_id=r["id"], actor="maxpm", event=False)
+        for r in conn.execute(
+                f"SELECT m.id, m.item_id, m.body, i.project_id FROM messages m LEFT JOIN items i ON i.id=m.item_id "
+                f"WHERE m.kind IN ({','.join('?' * len(ART_LINK_MESSAGES))}) AND m.from_agent<>'maxpm' AND m.created_at>=?",
+                (*ART_LINK_MESSAGES, since)).fetchall():
+            refs = artifact_refs(conn, r["body"], r["project_id"])
+            if refs:
+                _link_artifacts(conn, refs, item_id=r["item_id"], message_id=r["id"], actor="maxpm", event=False)
 
 
 def exhibits_pending(conn, limit=4):
@@ -15076,10 +15318,13 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
              "message": earlier_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
     shown = {"item": exhibits_for(conn, "item", [r["item_id"] for r in rows if r["kind"] == "item"]),
              "message": exhibits_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
+    arts = {"item": artifacts_of(conn, [r["item_id"] for r in rows if r["kind"] == "item"])[0],
+            "message": message_artifacts(conn, [r["message_id"] for r in rows if r["kind"] == "message"])}
     for r in rows:
         ref = r["item_id"] if r["kind"] == "item" else r["message_id"]
         r["earlier"] = early[r["kind"]].get(ref, [])
         r["exhibits"] = shown[r["kind"]].get(ref, [])  # #5956
+        r["artifact_links"] = arts[r["kind"]].get(ref, [])  # what it reviews or names (#6208)
         del r["_key"]
         r["notifications"] = [dict(x) for x in conn.execute(
             "SELECT channel, state, attempts, last_error, sent_at FROM notifications WHERE event_id=? ORDER BY channel",
@@ -17946,6 +18191,7 @@ def item_show(conn, item_id, ann=None):
         a["release_yes"] = release_yes_of(conn, iid)  # a sign-off on a release: its card shows the report (#6039)
         a["exhibits"] = exhibits_for(conn, "item", [iid]).get(iid, [])  # #5956
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
+    a["artifact_links"] = artifacts_of(conn, [iid])[0].get(iid, [])  # what it reviews or names (#6208)
     return a
 
 
@@ -18109,10 +18355,11 @@ def escalate_by_state(conn):
     return out
 
 
-def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False):
+def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False, artifacts=()):
     """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. For a message to
     the manager, level (high, low) says how long it waits before it wakes the manager's watch, and blocked says
-    that the sender's item cannot move until the answer: the watch returns for it at once."""
+    that the sender's item cannot move until the answer: the watch returns for it at once. artifacts (--artifact):
+    the canvases, files or pages it is about; a question or an alert links the ones its text names too (#6208)."""
     if not actor:
         raise RiverError("sending needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if kind not in SEND_KINDS:
@@ -18162,6 +18409,11 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             root = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
                                 (item,)).fetchone() if item is not None else None
             _exhibits_store(conn, "message", mid, exhibit_sources(body, root["path"] if root else None))
+        pid = conn.execute("SELECT project_id FROM items WHERE id=?", (item,)).fetchone()[0] if item is not None else None
+        _link_artifacts(conn, [artifact_ref(conn, x, pid) for x in artifacts or ()], item_id=item, message_id=mid,
+                        how="flag", actor=actor)
+        if kind in ART_LINK_MESSAGES and actor != "maxpm":
+            _link_artifacts(conn, artifact_refs(conn, body, pid), item_id=item, message_id=mid, actor=actor)
         held = _hold_question(conn, mid) if kind in ("question", "alert") else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
@@ -19143,6 +19395,7 @@ def canvas_show(conn, ref, project=None, version=None):
         "SELECT version, author, note, created_at, LENGTH(body) chars FROM canvas_versions WHERE canvas_id=? "
         "ORDER BY version", (c["id"],))]
     d["comments"] = _canvas_threads(conn, c["id"])
+    d["tasks"] = artifact_tasks(conn, [f"canvas:{c['id']}"])[f"canvas:{c['id']}"]  # who reviews or names it (#6208)
     return d
 
 

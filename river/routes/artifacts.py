@@ -24,7 +24,8 @@ def canvas_rows(conn, agent=None, item=None, since=None):
     # The realquicksite page of a canvas (#5789), as an artifact of the canvas's item.
     pages = {r["canvas_id"]: r for r in conn.execute(
         "SELECT canvas_id, url, access, version, published_at FROM canvas_pages WHERE url IS NOT NULL")}
-    rows += [{"kind": "rqs", "target": p["url"], "session": c["agent"], "how": "published", "item": c["item_id"],
+    rows += [{"kind": "rqs", "target": p["url"], "target_canvas": c["id"], "session": c["agent"], "how": "published",
+              "item": c["item_id"],
               "at": p["published_at"], "title": c["title"] or c["name"], "name": c["name"], "version": p["version"],
               "access": p["access"], "project": c["project"]}
              for c in heads for p in [pages.get(c["id"])] if p and (not since or (p["published_at"] or "") >= since)]
@@ -47,8 +48,12 @@ def listing(conn, agent=None, item=None, since=None, terminals=None):
     sessions wrote or named, newest first. agent, item: of that session or item only, also long ago; since: an ISO
     time. With neither agent nor item, terminals (server.agent_terminals) names the running sessions."""
     from .. import sessions
-    return canvas_rows(conn, agent, item, since) + sessions.artifacts(
+    rows = canvas_rows(conn, agent, item, since) + sessions.artifacts(
         conn, None if agent or item is not None else terminals, shows_file(conn), agent=agent, item=item, since=since)
+    # The tasks and questions that review or name each one (#6208); a realquicksite page goes with its canvas.
+    key = lambda r: f"canvas:{r['target_canvas']}" if r.get("target_canvas") else r["target"]
+    tasks = core.artifact_tasks(conn, [key(r) for r in rows])
+    return [dict(r, tasks=tasks.get(key(r), [])) for r in rows]
 
 
 def artifacts(h, path):

@@ -557,3 +557,7 @@ button.tc-unfold { display: none; }
 .wk-foot .spacer { flex: 1; }
 .wk-zl { display: flex; align-items: center; gap: var(--sp-2); }
 .wk-zone { width: var(--w-l); max-width: 100%; }  /* the time zone field (#6206) */
+/* The links between an artifact and its tasks (#6208, components/artifactTasks.js). */
+.art-tasks, .art-links { margin-top: var(--sp-1); color: var(--muted); overflow-wrap: anywhere; }
+.art-tasks .link, .art-links .link, .art-links a { color: var(--accent); }
+.sp-crqs .art-tasks { margin-top: 0; }

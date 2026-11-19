@@ -10,6 +10,7 @@ import { chip, prioNumChip, projectChip } from "./chip.js";
 import { button } from "./button.js";
 import { earlierHtml } from "./card.js";
 import { answerOptions } from "./canvasDoc.js";
+import { artifactsHtml } from "./artifactTasks.js";
 
 export const TYPES = ["decide", "look", "approve", "do", "read"];
 export const typeChip = (t) => t ? chip("c-type-" + t, t[0].toUpperCase() + t.slice(1), "What you do with it") : "";
@@ -21,21 +22,21 @@ export function fromEvent(e) {
   return e.kind === "item"
     ? { kind: "item", id: e.item_id, item_id: e.item_id, title: e.item_title || "", detail: e.item_context || e.item_notes || "",
         type: e.type, priority: e.priority, project: e.project, at: e.opened_at, earlier: e.earlier || [],
-        exhibits: e.exhibits || [] }
+        exhibits: e.exhibits || [], artifacts: e.artifact_links || [] }
     : { kind: "question", id: e.message_id, item_id: e.item_id, title: e.body || "", type: e.type, level: e.message_level,
         blocked: e.message_blocked, project: e.project, from: e.from_agent, at: e.opened_at, earlier: e.earlier || [],
-        exhibits: e.exhibits || [] };
+        exhibits: e.exhibits || [], artifacts: e.artifact_links || [] };
 }
 export function fromWaiting(w, session) {
   return { kind: "question", id: w.id, item_id: w.item_id, title: w.body || "", type: w.type || "decide", level: w.level,
     blocked: w.blocked, from: w.from || session, at: w.asked_at, note: w.note, earlier: w.earlier || [],
-    exhibits: w.exhibits || [] };
+    exhibits: w.exhibits || [], artifacts: w.artifact_links || [] };
 }
 export function fromItem(it) {
   return { kind: "item", id: it.id, item_id: it.id, title: it.title || "", detail: it.context || it.notes || "",
     type: it.type, priority: it.effective_priority != null ? it.effective_priority : it.priority, project: it.project,
     at: it.created_at, earlier: it.earlier || [], tries: it.tries || null, exhibits: it.exhibits || [],
-    release: it.release_yes || null };
+    artifacts: it.artifact_links || [], release: it.release_yes || null };
 }
 
 // The thing itself (#5956, policy g3): the screenshot of a page the card names, a picture file, or a commit's diff,
@@ -153,6 +154,7 @@ export function cardHtml(c, { pane = false } = {}) {
       <div class="wq">${esc(c.title)}</div>
       ${c.detail ? `<div class="acard-d">${esc(clip(c.detail, 1200))}</div>` : ""}
       ${rel ? releaseHtml(rel) : ""}
+      ${artifactsHtml(c.artifacts, { line: true })}
       ${exhibitsHtml(c)}
       ${c.note ? `<div class="muted">The manager: ${esc(c.note)}</div>` : ""}
       ${c.tries && c.tries.length ? triesHtml(c) : optionsHtml(c)}
