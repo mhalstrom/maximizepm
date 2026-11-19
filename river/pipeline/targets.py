@@ -188,8 +188,8 @@ def default_pipeline(conn, name):
            "since": live["closed_at"] if live else None,
            "history": [{"kind": "deployed", "at": d["closed_at"], "run_id": None,
                         "rev": d["cut_rev"] or f"deploy #{d['id']}"} for d in done[:5]]}
-    project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 ORDER BY rank, id LIMIT 1",
-                           (name,)).fetchone()
+    project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id "
+                           "LIMIT 1", (name, f"deploy-{name}")).fetchone()  # not the deploy project of the target
     return {"name": name, "project": project["name"] if project else None, "default": True, "stages": stages,
             "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
                                          "version": next(iter(r["runs"].values()))["version"],

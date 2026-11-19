@@ -33,7 +33,7 @@ COMMANDS = {
                "risk": LEAD, "mode": LEAD, "releaser": LEAD,
                "report": ANY, "summary": LEAD, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
-                 "history": ANY, "start": ANY, "approve": LEAD},  # #6113, #6114
+                 "history": ANY, "start": ANY, "approve": LEAD, "run": ANY},  # #6113, #6114, #6116
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -64,7 +64,7 @@ READS = {"project show", "project list", "canvas list", "canvas show", "canvas c
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
-         "pipeline list", "pipeline show", "pipeline history"}
+         "pipeline list", "pipeline show", "pipeline history", "pipeline run"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).

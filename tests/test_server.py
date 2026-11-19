@@ -4123,6 +4123,57 @@ class Watched(unittest.TestCase):
         names = {f.relative_to(server.PKG).as_posix() for f in server._code_files()}
         self.assertIn("server.py", names)
         self.assertIn("routes/sessions.py", names)
+        self.assertIn("pipeline/runner.py", names)  # #6116: the runner of serve's loop restarts with its code
+        self.assertIn("agents/claude.py", names)
+
+
+class PipelineRoutes(unittest.TestCase):
+    """The reads of the pipeline view of Plan (#6116): api/pipelines, api/pipeline/<name>, api/pipeline-run/<id>."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def get(self, path):
+        h, out = server.Handler.__new__(server.Handler), {}
+        h.path = path
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        for test, handler in server.VIEW_GET:
+            if test(path):
+                handler(h, path)
+                return out
+        raise AssertionError("no route for " + path)
+
+    def test_a_pipeline_its_run_and_a_target_as_its_default(self):
+        from river.pipeline import define, junit, store
+        core.project_add(self.c, "web")
+        core.target_add(self.c, "web-prod", "", None)
+        core.project_add(self.c, "shop", target="web-prod")
+        define.pipeline_add(self.c, "web-app", project="web")
+        define.stage_set(self.c, "web-app", "test", "test")
+        run = store.run_start(self.c, "web-app", "test", version="abc1234")
+        junit.ingest_junit(self.c, run, xml='<testsuite name="u"><testcase name="ok"/><testcase name="bad">'
+                                             '<failure message="2 != 3"/></testcase></testsuite>')
+        store.run_finish(self.c, run, "failed")
+        names = {p["name"]: p for p in self.get("/api/pipelines")["body"]["pipelines"]}
+        self.assertEqual((names["web-app"]["default"], names["web-prod"]["default"]), (False, True))
+        self.assertEqual(names["web-prod"]["projects"], ["shop"])
+        p = self.get("/api/pipeline/web-app")["body"]
+        self.assertEqual((p["stages"][0]["last_run"]["id"], p["versions"][0]["rev"]), (run, "abc1234"))
+        r = self.get(f"/api/pipeline-run/{run}")["body"]
+        self.assertEqual([t["name"] for t in r["test_list"]], ["bad", "ok"])  # failed first
+        self.assertIn("1. u.bad: 2 != 3. new test: no earlier run.", r["prompt"])
+        d = self.get("/api/pipeline/web-prod")["body"]
+        self.assertTrue(d["default"])
+        self.assertEqual(d["versions"], [])
+        self.assertEqual(self.get("/api/pipeline/nowhere")["code"], 404)
+        self.assertEqual(self.get("/api/pipeline-run/999")["code"], 404)
 
 
 if __name__ == "__main__":

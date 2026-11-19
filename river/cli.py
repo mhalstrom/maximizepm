@@ -1908,6 +1908,9 @@ def build_parser(only=None):
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
+    x = pls.add_parser("run", help="one stage run: its steps, failed tests and last lines; --prompt: the prompt that "
+                       "analyzes its failed tests")
+    x.add_argument("id", type=int); x.add_argument("--prompt", action="store_true")
     x = pls.add_parser("approve", help="let a version that waits at a stage's gate in now (a person gate takes a "
                        "person)")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev")
@@ -7487,6 +7490,9 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "approve":
         from .pipeline import runner
         return runner.approve(conn, a.name, a.stage, a.rev, actor)
+    if sub == "run":
+        from .pipeline import prompt
+        return {"text": prompt.failure_prompt(conn, a.id)["text"] if a.prompt else prompt.run_text(conn, a.id)}
     if sub == "gate":
         return define.gate_set(conn, a.name, a.stage, " ".join(a.rule), actor)
     if sub == "export":
@@ -7519,6 +7525,9 @@ def render_pipeline(a, res):
             print(f"{h['at']}  {h['actor'] or 'a person'}: {h['change']}")
         if not res["history"]:
             print(f"pipeline {res['pipeline']} has no changes")
+        return
+    if sub == "run":
+        print(res["text"])
         return
     if sub == "start":
         print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"

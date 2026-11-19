@@ -33,6 +33,7 @@ import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
 import * as ops from "./views/ops.js";
+import { renderPipeline } from "./views/pipeline.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
 import { renderHealth } from "./views/health.js";
@@ -279,7 +280,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); renderPipeline(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -366,7 +367,7 @@ $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
   plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals(); targets.renderTargets();
-  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
+  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderPipeline(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {

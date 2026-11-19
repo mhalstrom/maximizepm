@@ -86,8 +86,9 @@ def page_html(path):
 
 
 def _code_files():
-    """The server's Python code: river/*.py and the routes of each view (river/routes/*.py, #4656)."""
-    return sorted(PKG.glob("*.py")) + sorted(PKG.glob("routes/*.py"))
+    """The server's Python code: river/*.py, the routes of each view (river/routes/*.py, #4656), the agent adapters
+    (river/agents) and the pipeline package (river/pipeline, #6116: a change there alone did not restart serve)."""
+    return sorted(PKG.glob("*.py")) + sorted(f for d in ("routes", "agents", "pipeline") for f in PKG.glob(d + "/*.py"))
 
 
 def _watched():
@@ -5564,10 +5565,10 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import (artifacts, browser, canvas, changes, cost, done, projects, secrets, sessions, settings,
-                         targets, terminal, you)
+    from .routes import (artifacts, browser, canvas, changes, cost, done, pipeline, projects, secrets, sessions,
+                         settings, targets, terminal, you)
     views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser, secrets, changes,
-             cost)
+             cost, pipeline)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key

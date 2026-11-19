@@ -651,6 +651,58 @@ class DefaultPipelines(Base):
         self.assertEqual(len(p["releases"]), self.targets.RELEASES)
 
 
+class Prompt(Base):
+    """The prompt that analyzes the failed tests of a stage run (#6116)."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import prompt
+        self.prompt = prompt
+        self.toolscaled()
+
+    def run_with(self, rev, failing, state):
+        run = store.run_start(self.c, "toolscaled", "test", version=rev)
+        cases = "".join(f'<testcase classname="api" name="{n}">' + (f'<failure message="{n} broke">trace {n}</failure>'
+                        if n in failing else "") + "</testcase>" for n in ("a", "b", "c"))
+        junit.ingest_junit(self.c, run, xml=f'<testsuite name="s">{cases}</testsuite>')
+        store.run_finish(self.c, run, state)
+        return run
+
+    def test_version_last_pass_history_and_where_the_output_is(self):
+        self.run_with("1111111", [], "passed")
+        self.run_with("2222222", ["b"], "failed")
+        self.run_with("3333333", [], "passed")
+        run = self.run_with("4444444", ["a", "b"], "failed")
+        p = self.prompt.failure_prompt(self.c, run)
+        text = p["text"]
+        self.assertIn("failed for version 4444444 (run #%d): 2 of 3 tests failed." % run, text)
+        self.assertIn("The last version that passed this stage: 3333333.", text)
+        self.assertIn("1. api.a: a broke. new: passed the 3 earlier run(s).", text)
+        self.assertIn("2. api.b: b broke. flaky: failed in 1 of the 3 earlier run(s).", text)
+        self.assertIn("   trace a", text)
+        self.assertIn(f"The full output: maxpm pipeline run {run}", text)
+        self.assertEqual((p["failed"], p["tests"], p["passed"]), (2, 3, "3333333"))
+        out = self.prompt.run_text(self.c, run)
+        self.assertIn("failed: api.a: a broke", out)
+
+    def test_the_commits_between_from_git(self):
+        import subprocess
+        folder = os.path.join(self.dir.name, "repo")
+        os.makedirs(folder)
+        git = lambda *a: subprocess.run(["git", "-C", folder, *a], capture_output=True, text=True, check=True).stdout
+        git("init", "-q")
+        revs = []
+        for n in range(3):
+            git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", f"change {n}")
+            revs.append(git("rev-parse", "HEAD").strip())
+        core.project_add(self.c, "toolscaled", path=folder)
+        self.run_with(revs[0], [], "passed")
+        run = self.run_with(revs[2], ["a"], "failed")
+        text = self.prompt.failure_prompt(self.c, run)["text"]
+        self.assertIn(f"git log {revs[0]}..{revs[2]}, 2 commit(s):", text)
+        self.assertIn("change 2", text)
+
+
 class Speed(Base):
     def test_each_read_under_100_ms(self):
         """Policy p147: a pipeline with 400 runs, 2000 steps and 10800 test results reads fast."""
