@@ -7623,6 +7623,11 @@ def render_pipeline(a, res):
                   + (f": {r['errors']}" if r.get("errors") else ""))
             if r["state"] == "queued" and r.get("gate_note"):
                 print(f"       gate: {r['gate_note']}")
+            for x in (r.get("step_list") or [])[:12]:  # a default pipeline's steps (#6126)
+                secs = x.get("seconds")
+                print(f"         step {x['name']}" + (f" on {x['host']}" if x.get("host") else "") + f": {x['state']}"
+                      + (f", {secs:.0f}s" if secs is not None else "")
+                      + (f", ended {x['ended_at']}" if x.get("ended_at") else ""))
     for e in res["envs"]:
         print(f"  env {e['name']}: " + (f"{e['rev']} since {e['since']}" if e["rev"] else "no version yet")
               + (f"  (target {e['target']})" if e["target"] else ""))

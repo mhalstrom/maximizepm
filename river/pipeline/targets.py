@@ -51,6 +51,25 @@ def _hook_run(h):
             else None}
 
 
+def _steps(conn, hooks):
+    """The steps of hook runs: the '::step' lines each one printed (hook_steps, #6126), or the run as one step when
+    it printed none. A step still open when its hook ended shows as stopped."""
+    out = []
+    for h in hooks:
+        rows = conn.execute("SELECT * FROM hook_steps WHERE hook_run=? ORDER BY COALESCE(started_at, ended_at), id",
+                            (h["id"],)).fetchall()
+        if not rows:
+            out.append(_hook_run(h))
+            continue
+        for s in rows:
+            state = "stopped" if s["state"] == "running" and h["ended_at"] else s["state"]
+            out.append({"name": s["name"], "host": s["host"], "kind": s["kind"], "state": state,
+                        "started_at": s["started_at"], "ended_at": s["ended_at"] or (h["ended_at"] if state == "stopped"
+                                                                                       else None),
+                        "seconds": s["seconds"], "output": None, "note": s["note"]})
+    return out
+
+
 def _run(name, state, started=None, ended=None, version=None, steps=None, item=None, errors=None):
     steps = steps or []
     counts = {}
@@ -112,8 +131,8 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
     cut_hooks = [_hook_run(h) for h in hooks if h["event"] == "release-cut"]
     if cut_hooks:
         last = cut_hooks[-1]
-        out["build"] = _run("build", last["state"], cut_hooks[0]["started_at"], last["ended_at"], steps=cut_hooks,
-                            errors=last["note"])
+        out["build"] = _run("build", last["state"], cut_hooks[0]["started_at"], last["ended_at"],
+                            steps=_steps(conn, [h for h in hooks if h["event"] == "release-cut"]), errors=last["note"])
     if reviews:
         rv = report._review(conn, dep["id"])
         if rv:
@@ -136,7 +155,8 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
     if st == "queued" and runs and runs[-1]["state"] in ("running", "failed"):
         st = runs[-1]["state"]
     out["deploy"] = _run("deploy", st, dep["claimed_at"] or (runs[0]["started_at"] if runs else None),
-                         dep["closed_at"] if dep["status"] == "done" else None, steps=deploy_steps, item=dep["id"],
+                         dep["closed_at"] if dep["status"] == "done" else None,
+                         steps=_steps(conn, [h for h in hooks if h["event"] in ("deploy", "deployed")]), item=dep["id"],
                          errors=runs[-1]["note"] if runs and runs[-1]["state"] == "failed" else None)
     w = _watch(conn, t, dep, next_at, checks)
     if w:

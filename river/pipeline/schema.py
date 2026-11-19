@@ -64,6 +64,24 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   UNIQUE (pipeline_id, name)
 );
 
+-- The '::step' lines of a deploy target's hook run (#6126): its parts with their times, as the hook prints them.
+-- hook_run is a row of MaximizePM's hook_runs (an id, as the package keeps no foreign key). Reader: the default
+-- pipeline of the target (targets.py: the steps of its build and deploy stages).
+CREATE TABLE IF NOT EXISTS hook_steps (
+  id           INTEGER PRIMARY KEY,
+  hook_run     INTEGER NOT NULL,
+  name         TEXT NOT NULL,
+  kind         TEXT,
+  host         TEXT,
+  parallel     INTEGER NOT NULL DEFAULT 0,
+  state        TEXT NOT NULL,            -- running, passed, failed, skipped (stopped: the hook ended first, at read)
+  started_at   TEXT,
+  ended_at     TEXT,
+  seconds      REAL,
+  note         TEXT
+);
+CREATE INDEX IF NOT EXISTS hook_steps_run ON hook_steps(hook_run, id);
+
 -- Each change of a pipeline's definition, with its actor (#6113). Readers: maxpm pipeline history, the view.
 CREATE TABLE IF NOT EXISTS pipeline_changes (
   id           INTEGER PRIMARY KEY,

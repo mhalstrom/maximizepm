@@ -14,6 +14,7 @@ Every other line goes to the last lines of the run, and of the newest open step.
 
 import re
 import uuid
+from datetime import timedelta
 
 from .. import core
 from . import cdevents, store
@@ -90,6 +91,43 @@ def _event(conn, run, step, at, source):
                           "where": step["where"] or (open_["host"] if open_ else None), "seconds": step["seconds"],
                           "note": step["note"]},
                          source, when)
+
+
+def hook_lines(conn, hook_run, lines, at=None):
+    """The '::step' lines of a deploy target's hook run (#6126), into hook_steps: core._run_hook gives them as they
+    come. A line's at= time is taken as given; with none, the time of this call. Returns the number of step lines."""
+    now = cdevents.timestamp(at) if at else core.iso(core.now())
+    n = 0
+    with core.tx(conn):
+        for line in lines:
+            step = parse(line)
+            if step is None:
+                continue
+            n += 1
+            when = step["at"] or now
+            if step["op"] == "start":
+                conn.execute("INSERT INTO hook_steps(hook_run, name, kind, host, parallel, state, started_at, note) "
+                             "VALUES (?,?,?,?,?, 'running', ?,?)", (hook_run, step["name"][:200], step["kind"],
+                                                                     step["where"], int(step["parallel"]), when,
+                                                                     step["note"]))
+                continue
+            q, args = "SELECT * FROM hook_steps WHERE hook_run=? AND name=? AND state='running'", [hook_run, step["name"]]
+            if step["where"]:
+                q, args = q + " AND host=?", args + [step["where"]]
+            row = conn.execute(q + " ORDER BY id DESC LIMIT 1", args).fetchone()
+            secs = step["seconds"]
+            if row is None:  # an end line with no start: it started the time taken before
+                started = core.iso(core.parse_iso(when) - timedelta(seconds=secs)) if secs is not None else None
+                conn.execute("INSERT INTO hook_steps(hook_run, name, kind, host, state, started_at, ended_at, seconds, "
+                             "note) VALUES (?,?,?,?,?,?,?,?,?)", (hook_run, step["name"][:200], step["kind"],
+                                                                   step["where"], step["state"], started, when, secs,
+                                                                   step["note"]))
+                continue
+            if secs is None:
+                secs = (core.parse_iso(when) - core.parse_iso(row["started_at"])).total_seconds()
+            conn.execute("UPDATE hook_steps SET state=?, ended_at=?, seconds=?, note=COALESCE(?, note) WHERE id=?",
+                         (step["state"], when, secs, step["note"], row["id"]))
+    return n
 
 
 def ingest_output(conn, run_id, text, at=None, source="maxpm"):

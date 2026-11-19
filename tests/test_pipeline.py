@@ -706,6 +706,58 @@ class DefaultPipelines(Base):
         self.assertEqual([s["state"] for s in runs["deploy"]["step_list"]], ["failed", "passed"])
         self.assertEqual(runs["watch"]["step_list"][0]["name"], "web-prod/up")
 
+    def hook_run(self, event, command, dep):
+        hid = self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, rev, queued_at, started_at) "
+                             "VALUES ('web-prod',?,?,?, 'aaaaaaa', ?, ?)",
+                             (event, command, dep, core.iso(core.now()), core.iso(core.now()))).lastrowid
+        return dict(self.c.execute("SELECT * FROM hook_runs WHERE id=?", (hid,)).fetchone())
+
+    def test_a_hook_s_step_lines_are_the_steps_of_its_stage(self):
+        """#6126: toolscaled-prod's release scripts print '::step' lines with at= times; the default pipeline lists
+        them, one step for each server too."""
+        dep = self.release("aaaaaaa", "A change")
+        lines = ["::step start image-build kind=build at=2026-11-18T10:00:00Z", "building",
+                 "::step end image-build passed at=2026-11-18T10:09:00Z",
+                 "::step start activate kind=deploy where=edge-1 at=2026-11-18T10:10:00Z",
+                 "::step start activate kind=deploy where=cell-1 at=2026-11-18T10:10:30Z",
+                 "::step end activate where=edge-1 passed at=2026-11-18T10:12:00Z",
+                 "::step end activate where=cell-1 failed readyz at=2026-11-18T10:14:00Z"]
+        cmd = "printf '%s\\n' " + " ".join(f"'{x}'" for x in lines)
+        core._run_hook(self.c, self.hook_run("deploy", cmd, dep), cwd=self.dir.name)
+        p = self.targets.default_pipeline(self.c, "web-prod")
+        steps = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]["step_list"]
+        self.assertEqual([(s["name"], s["host"], s["state"], s["seconds"]) for s in steps],
+                         [("image-build", None, "passed", 540), ("activate", "edge-1", "passed", 120),
+                          ("activate", "cell-1", "failed", 210)])
+        self.assertEqual(steps[2]["note"], "readyz")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "show", "web-prod"])
+        self.assertIn("step activate on cell-1: failed, 210s, ended 2026-11-18T10:14:00Z", out.getvalue())
+
+    def test_the_steps_show_while_the_hook_runs(self):
+        import threading
+        dep = self.release("bbbbbbb", "Another change")
+        run = self.hook_run("release-cut", "echo '::step start preview'; sleep 3; echo '::step end preview passed'", dep)
+        done = []
+
+        def go():
+            c = core.connect(self.path)
+            try:
+                core._run_hook(c, run, cwd=self.dir.name)
+            finally:
+                c.close()
+                done.append(1)
+        threading.Thread(target=go, daemon=True).start()
+        timing.wait_for(lambda: self.c.execute("SELECT state FROM hook_steps WHERE hook_run=?", (run["id"],)).fetchone(),
+                        what="the step as it starts")
+        self.assertFalse(done)  # it shows while the hook still runs
+        self.assertEqual(self.c.execute("SELECT state FROM hook_steps").fetchone()[0], "running")
+        timing.wait_for(lambda: done, timeout=20, what="the hook's end")
+        self.assertEqual(self.c.execute("SELECT state FROM hook_steps").fetchone()[0], "passed")
+
     def test_review_and_the_person_s_yes_are_stages_when_the_target_has_them(self):
         core.config_set(self.c, "review", "on", project="web")
         core.config_set(self.c, "release_approval", "person", project="web")

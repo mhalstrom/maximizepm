@@ -8632,15 +8632,28 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
         except sqlite3.Error:
             pass  # a busy queue: hook_runs_cut then finds the run by its runner alone
 
+    from .pipeline import steps as pipeline_steps
+    stepped = []
+
+    def lines(ls):  # #6126: the hook's '::step' lines, as they come: the default pipeline shows them as steps
+        if any("::step" in x for x in ls):
+            pipeline_steps.hook_lines(conn, run["id"], ls)
+            stepped.append(True)
+
     t0 = time.monotonic()
     code, timed_out, text = None, False, ""
     try:
         if where and not os.path.isdir(where):
             raise OSError(f"the folder {where} does not exist")
         r = (HOOK_RUNNER(cmd, where, limit, renew, env) if HOOK_RUNNER
-             else _run_command(cmd, where, limit, renew, env, started=started))
+             else _run_command(cmd, where, limit, renew, env, started=started, on_lines=lines))
         code, timed_out = r.returncode, bool(getattr(r, "timed_out", False))
         text = ((r.stdout or "") + (r.stderr or "")).strip()
+        if not stepped and "::step" in text:  # a runner that gave no lines as they came (a test's)
+            try:
+                pipeline_steps.hook_lines(conn, run["id"], text.splitlines())
+            except Exception:  # noqa: BLE001 - the record of the steps never stops the hook
+                pass
     except OSError as e:
         text = f"the command did not start: {e}"
     secs = time.monotonic() - t0
@@ -16649,13 +16662,90 @@ def review_record(conn, item_id, output=None, actor=None, ran=None, reviewed=Non
 REVIEW_RENEW_EVERY = 60  # seconds between lease renewals while a review command runs; the tests make it short
 
 
-def _run_command(cmd, cwd, limit, renew=None, env=None, started=None):
-    """Run a shell command in its own process group and capture its output.
+def _run_streamed(cmd, cwd, limit, renew, env, started, on_lines):
+    """_run_command that also gives the output to on_lines(lines) as it comes, about every second (#6126: a hook's
+    '::step' lines). stderr goes into stdout, so the lines keep their order. on_lines never stops the command."""
+    import queue
+    import subprocess
+    import threading
+    import time
+    p = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         errors="replace", start_new_session=True)
+    if started:
+        started(p.pid)
+    got = queue.Queue()
+
+    def read():
+        try:
+            for line in p.stdout:
+                got.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            got.put(None)
+    threading.Thread(target=read, daemon=True, name="maxpm-hook-output").start()
+    end = time.monotonic() + limit if limit > 0 else None
+    out, new, last_flush, last_renew = [], [], time.monotonic(), time.monotonic()
+    timed_out = done = False
+    stopped_at = None
+
+    def flush():
+        if new:
+            try:
+                on_lines([x.rstrip("\n") for x in new])
+            except Exception:  # noqa: BLE001 - the record of the steps never stops the hook
+                pass
+            new.clear()
+    while not done:
+        try:
+            line = got.get(timeout=0.5)
+            if line is None:
+                done = True
+            else:
+                out.append(line)
+                new.append(line)
+        except queue.Empty:
+            pass
+        t = time.monotonic()
+        if done or t - last_flush >= 1.0:
+            flush()
+            last_flush = t
+        if renew and t - last_renew >= REVIEW_RENEW_EVERY:
+            last_renew = t
+            try:
+                renew()
+            except sqlite3.Error:
+                pass
+        if end is not None and not timed_out and t >= end:
+            timed_out, stopped_at = True, t
+            _stop_group(p)
+        if stopped_at is not None and t - stopped_at > 15:
+            break  # a process outside the group holds the pipe open
+    flush()
+    try:
+        code = p.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        code = None
+    finally:
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+    r = subprocess.CompletedProcess(cmd, code, "".join(out), "")
+    if timed_out:
+        r.timed_out = True
+    return r
+
+
+def _run_command(cmd, cwd, limit, renew=None, env=None, started=None, on_lines=None):
+    """Run a shell command in its own process group and capture its output. With on_lines: _run_streamed.
 
     renew runs every REVIEW_RENEW_EVERY seconds while the command runs, so a long gate keeps the
     reviewer's leases. After limit seconds (0: none) the whole group stops: SIGTERM, then SIGKILL, so no build
     is left running without an owner. started(pid) runs once the command's process exists. The result has
     returncode, stdout, stderr, and timed_out."""
+    if on_lines is not None:
+        return _run_streamed(cmd, cwd, limit, renew, env, started, on_lines)
     import subprocess
     import time
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
