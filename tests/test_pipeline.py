@@ -558,6 +558,99 @@ class Runner(Base):
         self.assertIn("gate: waits for mark's yes on #", text)
 
 
+class DefaultPipelines(Base):
+    """Each deploy target of today as a default pipeline, computed from its records (#6115)."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import targets
+        self.targets = targets
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "web-prod", "deploys web", None)
+        core.project_add(self.c, "web", target="web-prod")
+
+    def release(self, rev, title):
+        i = core.item_add(self.c, "web", title, actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MAX(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "web-prod", rev=rev, actor=None)
+        return dep
+
+    def hook(self, dep, event, code, rev, at):
+        self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, rev, queued_at, started_at, ended_at, "
+                       "exit_code, seconds, output) VALUES ('web-prod',?,'make it',?,?,?,?,?,?,60,'last line')",
+                       (event, dep, rev, at, at, at, code))
+
+    def test_a_target_shows_its_releases_as_stage_runs(self):
+        old = core.iso(core.now() - core.timedelta(days=2))
+        d1 = self.release("aaaaaaa", "First change")
+        self.hook(d1, "release-cut", 0, "aaaaaaa", old)
+        self.hook(d1, "deploy", 2, "aaaaaaa", old)
+        self.hook(d1, "deploy", 0, "aaaaaaa", old)
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (old, d1))
+        cid = self.c.execute("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
+                             "recover_after, timeout, severity, created_at) VALUES ('target','web-prod','up','http',"
+                             "'{}','1m',1,1,'10s','item',?)", (old,)).lastrowid
+        self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status) VALUES (?, 'k', ?, ?, 'ok')",
+                       (cid, old, old))
+        d2 = self.release("bbbbbbb", "Second change")
+        p = self.targets.default_pipeline(self.c, "web-prod")
+        self.assertTrue(p["default"])
+        self.assertEqual([s["name"] for s in p["stages"]], ["cut", "build", "deploy", "watch"])
+        self.assertEqual(p["stages"][2]["env"], "web-prod")
+        self.assertEqual(p["stages"][2]["run"], None)  # no deploy hook set now: the runs keep their command
+        self.assertEqual([r["version"] for r in p["releases"]], ["bbbbbbb", "aaaaaaa"])
+        self.assertEqual(p["releases"][0]["stages"], {"cut": {"state": "passed", "item": d2},
+                                                      "deploy": {"state": "queued", "item": d2}})
+        first = {k: v["state"] for k, v in p["releases"][1]["stages"].items()}
+        self.assertEqual(first, {"cut": "passed", "build": "passed", "deploy": "passed", "watch": "passed"})
+        deploy = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
+        self.assertEqual(deploy["state"], "queued")  # the newest release's
+        env = p["envs"][0]
+        self.assertEqual((env["rev"], env["since"]), ("aaaaaaa", old))
+        # The deploy hook's runs are the steps of the first release's deploy stage: one failed, then one passed.
+        runs = self.targets._release(self.c, self.targets._target(self.c, "web-prod"),
+                                     self.c.execute("SELECT * FROM items WHERE id=?", (d1,)).fetchone(), None, False,
+                                     False, self.targets._checks(self.c, "web-prod"))
+        self.assertEqual([s["state"] for s in runs["deploy"]["step_list"]], ["failed", "passed"])
+        self.assertEqual(runs["watch"]["step_list"][0]["name"], "web-prod/up")
+
+    def test_review_and_the_person_s_yes_are_stages_when_the_target_has_them(self):
+        core.config_set(self.c, "review", "on", project="web")
+        core.config_set(self.c, "release_approval", "person", project="web")
+        self.release("ccccccc", "A change")
+        names = [s["name"] for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]]
+        self.assertEqual(names, ["cut", "review", "approval", "deploy", "watch"])
+        approval = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
+                        if s["name"] == "approval")
+        self.assertEqual(approval["gate"], "person")
+
+    def test_list_and_show_and_a_target_that_a_pipeline_covers(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "mark", "pipeline", "list"])
+            cli.run(["--as", "mark", "pipeline", "show", "web-prod"])
+        self.assertIn("web-prod  (a deploy target: its default pipeline)", out.getvalue())
+        self.assertIn("(the default pipeline of deploy target web-prod, from its releases)", out.getvalue())
+        define.pipeline_add(self.c, "web", project="web")
+        define.env_set(self.c, "web", "prod", target="web-prod")
+        self.assertEqual(self.targets.default_list(self.c), [])
+        with self.assertRaises(RiverError):
+            self.targets.default_pipeline(self.c, "nowhere")
+
+    def test_ten_releases_read_under_100_ms(self):
+        for n in range(12):
+            d = self.release(f"{n:07x}", f"Change {n}")
+            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?",
+                           (core.iso(core.now() - core.timedelta(hours=12 - n)), d))
+        t = time.monotonic()
+        p = self.targets.default_pipeline(self.c, "web-prod")
+        self.assertLess(time.monotonic() - t, timing.limit(0.1))
+        self.assertEqual(len(p["releases"]), self.targets.RELEASES)
+
+
 class Speed(Base):
     def test_each_read_under_100_ms(self):
         """Policy p147: a pipeline with 400 runs, 2000 steps and 10800 test results reads fast."""

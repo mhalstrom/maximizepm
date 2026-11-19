@@ -7467,12 +7467,15 @@ def _pipeline_cmd(conn, a, actor):
     """maxpm pipeline (#6113): the definition of a pipeline; river/pipeline/define.py does the work."""
     from .pipeline import define, store
     sub = a.plcmd  # who may run each one: river/rights.py
+    from .pipeline import targets
     if sub == "list":
-        return store.pipelines(conn)
+        return store.pipelines(conn) + targets.default_list(conn)
     if sub == "add":
         return define.pipeline_add(conn, a.name, a.project, a.notes, actor)
-    if sub == "show":
-        return store.show(conn, a.name)
+    if sub == "show":  # a target with no pipeline of its own shows as its default pipeline (#6115)
+        if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (a.name,)).fetchone():
+            return store.show(conn, a.name)
+        return targets.default_pipeline(conn, a.name)
     if sub == "env":
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
@@ -7502,7 +7505,8 @@ def render_pipeline(a, res):
         if not res:
             print("no pipelines; add one: maxpm pipeline add <name> --project <project>")
         for p in res:
-            print(f"{p['name']}" + (f"  (project {p['project']})" if p["project"] else ""))
+            print(f"{p['name']}" + (f"  (project {p['project']})" if p["project"] else "")
+                  + ("  (a deploy target: its default pipeline)" if p.get("default") else ""))
         return
     if sub == "export":
         if "file" in res:
@@ -7535,7 +7539,9 @@ def render_pipeline(a, res):
         print(f"pipeline {res['pipeline']}: {what} {res['changed']}" + (f" ({extra})" if extra else ""))
         return
     # show
-    print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else ""))
+    print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else "")
+          + ("  (the default pipeline of deploy target " + res["name"] + ", from its releases)" if res.get("default")
+             else ""))
     if not res["stages"]:
         print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
     for s in res["stages"]:
@@ -7544,7 +7550,8 @@ def render_pipeline(a, res):
               f"  {does}")
         r = s["last_run"]
         if r:
-            print(f"       last run #{r['id']}: {r['state']}" + (f", version {r['version']}" if r["version"] else "")
+            label = f"run #{r['id']}" if "id" in r else f"item #{r['item']}" if r.get("item") else "run"
+            print(f"       last {label}: {r['state']}" + (f", version {r['version']}" if r["version"] else "")
                   + (f", started {r['started_at']}" if r["started_at"] else "")
                   + (f", ended {r['ended_at']}" if r["ended_at"] else "")
                   + (f": {r['errors']}" if r.get("errors") else ""))
