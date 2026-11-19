@@ -12,6 +12,8 @@ The stages, left to right, as a target has them:
     approval (approve) the person's yes, when release_approval is person
     deploy   (deploy)  the deploy item, with the deploy hook's runs as its steps; its environment is the target
     watch    (check)   the target's checks after the release, until its last watch time (24h with none)
+and, on rows of their own after deploy, a branch for each '<branch>/<step>' name of the deploy hook's steps (#6186:
+maximizepm-github's downloads: the tag, each job of the build of the apps, the published files).
 
 The result has the form of store.show (name, project, stages with last_run, envs) and of store.versions (releases),
 with "default": true.
@@ -81,6 +83,34 @@ def _steps(conn, hooks):
                         "started_at": s["started_at"], "ended_at": s["ended_at"] or (h["ended_at"] if state == "stopped"
                                                                                        else None),
                         "seconds": s["seconds"], "output": None, "note": s["note"]})
+    return out
+
+
+# A branch after the deploy stage (#6186): a deploy hook's step named '<branch>/<step>' (downloads/tag,
+# downloads/build-mac) belongs to the stage <branch>, which the default pipeline draws after deploy, beside the watch.
+# maximizepm-github: the push of main is the deploy; the tag, the build of the apps and the published downloads are the
+# branch 'downloads'. A branch never takes the name of a stage of the target.
+_BRANCH = re.compile(r"^([a-z][a-z0-9-]{0,30})/(\S+)$")
+_STAGE_NAMES = ("holding", "build", "review", "approval", "deploy", "watch")
+
+
+def _branch_steps(steps):
+    """The steps of a deploy hook split: (the deploy stage's own, {branch: its steps with the short name})."""
+    own, branches = [], {}
+    for s in steps:
+        m = _BRANCH.match(s["name"] or "")
+        if m and m.group(1) not in _STAGE_NAMES:
+            branches.setdefault(m.group(1), []).append(dict(s, name=m.group(2)))
+        else:
+            own.append(s)
+    return own, branches
+
+
+def branch_names(releases):
+    """The branch stages that the releases of a target ran (release_runs), in the order of their first run."""
+    out = []
+    for r in reversed(releases):
+        out += [n for n in r["runs"] if n not in _STAGE_NAMES and n not in out]
     return out
 
 
@@ -213,18 +243,27 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
             a = yes[0]
             out["approval"] = _run("approval", _ITEM_STATE.get(a["status"], "queued"), a["created_at"], a["closed_at"],
                                    item=a["id"])
-    deploy_steps = [_hook_run(h) for h in hooks if h["event"] in ("deploy", "deployed")]
+    deploy_hooks = [h for h in hooks if h["event"] in ("deploy", "deployed")]
+    deploy_steps = [_hook_run(h) for h in deploy_hooks]
     st = _ITEM_STATE.get(dep["status"], "queued")
     runs = [s for s in deploy_steps if s["name"] == "deploy"]
     if st == "queued" and runs and runs[-1]["state"] in ("running", "failed"):
         st = runs[-1]["state"]
+    steps, branched = _branch_steps(_steps(conn, deploy_hooks))
     out["deploy"] = _run("deploy", st, dep["claimed_at"] or (runs[0]["started_at"] if runs else None),
-                         dep["closed_at"] if dep["status"] == "done" else None,
-                         steps=_steps(conn, [h for h in hooks if h["event"] in ("deploy", "deployed")]), item=dep["id"],
+                         dep["closed_at"] if dep["status"] == "done" else None, steps=steps, item=dep["id"],
                          errors=runs[-1]["note"] if runs and runs[-1]["state"] == "failed" else None)
     w = _watch(conn, t, dep, next_at, checks)
     if w:
         out["watch"] = w
+    hook_ends = bool(deploy_hooks) and all(h["ended_at"] for h in deploy_hooks)
+    for name, ss in branched.items():
+        failed = next((s for s in ss if s["state"] in ("failed", "stopped")), None)
+        state = "failed" if failed else "passed" if hook_ends else "running"
+        out[name] = _run(name, state, ss[0]["started_at"],
+                         ss[-1]["ended_at"] if state != "running" else None, steps=ss, item=dep["id"],
+                         errors=(f"step {failed['name']} {failed['state']}" + (f": {failed['note']}" if failed["note"]
+                                                                                else "")) if failed else None)
     label = rev or f"deploy #{dep['id']}"
     for r in out.values():
         r["version"] = label
@@ -316,6 +355,12 @@ def default_pipeline(conn, name):
                        "env": name if stage == "deploy" else None, "transition": arrow,
                        "tier": "prod" if stage in ("deploy", "watch") else None,  # #6137: the target is production
                        "junit": None, "last_run": last})
+    for stage in branch_names(releases):  # #6186: after deploy, a row of its own beside the watch
+        last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
+        stages.append({"name": stage, "pos": len(stages) + 1, "kind": "deploy", "run": hook.get("deploy"),
+                       "workflow": None, "env": None, "prev": ["deploy"],
+                       "transition": dict(transitions.plain("auto"), **{"from": ["deploy"]}), "tier": "prod",
+                       "junit": None, "last_run": last, "branch": True})
     live = done[0] if done else None
     env = {"name": name, "target": name, "url": None, "notes": t["description"],
            "rev": (live["cut_rev"] or f"deploy #{live['id']}") if live else None,

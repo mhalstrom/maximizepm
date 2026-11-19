@@ -278,7 +278,9 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     """'Versions in <stage>' of a target's pipeline, in the form of store.stage_versions: one row for each release that
     reached the stage, newest first; a version sent on purpose names who sent it and why."""
     from . import targets
-    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"]:
+    releases = targets.release_runs(conn, p["target"], targets._deploys(conn, p["target"], limit))
+    # A branch after deploy (#6186, downloads) has no stored row: its runs come from the deploy hook's steps.
+    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"] + targets.branch_names(releases):
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
     sends = {}
     for r in conn.execute("SELECT * FROM target_sends WHERE pipeline_id=? ORDER BY id", (p["id"],)):
@@ -288,7 +290,7 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     live = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='done' AND closed_at IS NOT "
                         "NULL ORDER BY id DESC LIMIT 1", (p["target"],)).fetchone()
     out = []
-    for rel in targets.release_runs(conn, p["target"], targets._deploys(conn, p["target"], limit)):
+    for rel in releases:
         r = rel["runs"].get(stage)
         if r is None:
             continue
@@ -305,7 +307,7 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
                     "why": sent["reason"] if sent else None,  # #6182: not 'the release of deploy #N' on every row
                     "state": r["state"], "queued_at": r["started_at"], "started_at": r["started_at"],
                     "ended_at": r["ended_at"], "seconds": took, "errors": r["errors"], "live": is_live})
-    return {"pipeline": p["name"], "stage": stage, "kind": targets.KINDS.get(stage), "env_id": None, "runs": out,
+    return {"pipeline": p["name"], "stage": stage, "kind": targets.KINDS.get(stage, "deploy"), "env_id": None, "runs": out,
             "branches": [], "target": p["target"]}
 
 

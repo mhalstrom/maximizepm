@@ -37,6 +37,52 @@ REPORT = {
 }
 NOTES_MD = "New: old text of an earlier version.\n\n## Download\n\n- `MaximizePM-{VERSION}-arm64.dmg` of {TAG}\n"
 
+# A fake gh for the release script and downloads.py: the run of the workflow desktop-release for a tag (its head
+# commit read with git from the folder it runs in), its four jobs, and the GitHub release with its files.
+FAKE_GH = textwrap.dedent('''\
+    import json, os, subprocess, sys
+    home = os.environ["FAKE_GH"]
+    a = sys.argv[1:]
+    with open(os.path.join(home, "gh.log"), "a") as f:
+        f.write(" ".join(a) + "\\n")
+    st = json.load(open(os.path.join(home, "gh.json")))
+    def flag(name):
+        return a[a.index(name) + 1] if name in a else None
+    def sha(tag):
+        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", tag + "^{commit}"], capture_output=True, text=True)
+        return r.stdout.strip()
+    url = "https://github.example/actions/runs/7"
+    if a[:2] == ["run", "list"]:
+        head = sha(flag("--branch"))
+        out = [] if st["run"] == "none" or not head else [
+            {"databaseId": 7, "headSha": head, "status": "completed", "conclusion": st["run"], "url": url,
+             "createdAt": "2026-11-19T10:00:00Z"}]
+        print(json.dumps(out))
+    elif a[:2] == ["run", "view"]:
+        bad = st["run"] == "failure"
+        jobs = [("checks", "success"), ("mac", "failure" if bad else "success"),
+                ("mac-intel", "skipped" if bad else "success"), ("publish", "skipped" if bad else "success")]
+        print(json.dumps({"status": "completed", "conclusion": st["run"], "url": url, "jobs": [
+            {"name": n, "status": "completed", "conclusion": c, "startedAt": "2026-11-19T10:01:00Z",
+             "completedAt": "2026-11-19T10:09:00Z", "url": url + "/job/" + n} for n, c in jobs]}))
+    elif a[:2] == ["release", "view"]:
+        tag = a[2] if len(a) > 2 and not a[2].startswith("-") else st.get("latest")
+        if not tag or st["run"] != "success":
+            sys.exit("release not found")
+        v = tag[1:]
+        names = [n for n in ("manifest.json", "MaximizePM-%s-arm64.dmg" % v, "MaximizePM-%s-x64.dmg" % v,
+                             "MaximizePM-%s-code.tar.gz" % v) if n not in st.get("missing", [])]
+        print(json.dumps({"tagName": tag, "url": "https://github.example/releases/" + tag,
+                          "assets": [{"name": n} for n in names]}))
+    elif a[:2] == ["release", "download"]:
+        v = st.get("manifest") or a[2][1:]
+        print(json.dumps({"version": v, "code": {"name": "MaximizePM-%s-code.tar.gz" % v}}))
+    elif a[:2] == ["release", "edit"]:
+        open(os.path.join(home, "notes.md"), "w").write(open(flag("--notes-file")).read())
+    else:
+        sys.exit("fake gh: no answer for " + " ".join(a))
+    ''')
+
 
 class Notes(unittest.TestCase):
     def test_groups_tasks_and_download(self):
@@ -94,21 +140,18 @@ class Script(unittest.TestCase):
         _write(os.path.join(self.repo, "feature.txt"), "new\n")
         self.git("add", "feature.txt")
         self.git("commit", "--quiet", "-m", "a feature (#1)")
-        # The fake gh: 'release view' answers when the file 'released' exists; 'release edit' keeps the notes.
+        # The fake gh (FAKE_GH) answers from gh.json; 'release edit' keeps the notes in notes.md.
         bin_ = os.path.join(self.tmp, "bin")
         self.gh_log = os.path.join(self.tmp, "gh.log")
-        _write(os.path.join(bin_, "gh"), textwrap.dedent(f"""\
-            #!/bin/sh
-            echo "$*" >> {self.gh_log}
-            case "$1 $2" in
-              "release view") test -f {self.tmp}/released ;;
-              "release edit") while [ $# -gt 0 ]; do [ "$1" = --notes-file ] && cp "$2" {self.tmp}/notes.md; shift; done ;;
-            esac
-            """), stat.S_IXUSR)
+        _write(os.path.join(bin_, "gh"), f"#!{sys.executable}\n" + FAKE_GH, stat.S_IXUSR)
         _write(os.path.join(bin_, "maxpm"), f"#!/bin/sh\ncat {self.tmp}/report.json\n", stat.S_IXUSR)
         _write(os.path.join(self.tmp, "report.json"), json.dumps(REPORT))
-        _write(os.path.join(self.tmp, "released"), "")
-        self.env.update({"GH": os.path.join(bin_, "gh"), "MAXPM_BIN": os.path.join(bin_, "maxpm")})
+        self.github()
+        self.env.update({"GH": os.path.join(bin_, "gh"), "MAXPM_BIN": os.path.join(bin_, "maxpm"), "FAKE_GH": self.tmp})
+
+    def github(self, **state):
+        """What the fake GitHub answers: run success|failure|none, missing (asset names), manifest (a version)."""
+        _write(os.path.join(self.tmp, "gh.json"), json.dumps(dict({"run": "success"}, **state)))
 
     def git(self, *args, cwd=None):
         r = subprocess.run(["git", *args], cwd=cwd or self.repo, env=getattr(self, "env", None) or None,
@@ -159,10 +202,60 @@ class Script(unittest.TestCase):
             notes = f.read()
         self.assertTrue(notes.startswith("MaximizePM 1.4.0 ships 4 tasks."), notes)
         self.assertIn("MaximizePM-1.4.0-arm64.dmg", notes)
-        for name in ("check", "version", "test", "commit", "push", "release", "notes"):
+        steps = ("check", "version", "test", "commit", "push", "downloads/tag", "downloads/build-checks",
+                 "downloads/build-mac", "downloads/build-mac-intel", "downloads/build-publish", "downloads/published",
+                 "notes")
+        for name in steps:
             self.assertIn(f"::step start {name} ", r.stdout)
             self.assertIn(f"::step end {name} passed ", r.stdout)
+        starts = [line.split()[2] for line in r.stdout.splitlines() if line.startswith("::step start ")]
+        self.assertEqual(starts, list(steps))
+        # Each job of the build names its link, which the pipeline shows on the step.
+        self.assertIn("::step end downloads/build-mac passed at=2026-11-19T10:09:00Z "
+                      "https://github.example/actions/runs/7/job/mac", r.stdout)
         self.assertTrue(r.stdout.rstrip().endswith(f"github-release: released v1.4.0 at {head}"), r.stdout)
+
+    def test_a_failed_build_stops_the_release_with_the_runs_link_and_keeps_the_tag(self):
+        self.github(run="failure")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("::step end downloads/build-mac failed ", r.stdout)
+        self.assertIn("::step end downloads/build-publish skipped ", r.stdout)
+        self.assertIn("the build of v1.4.0 ended failure (failed: mac): https://github.example/actions/runs/7", r.stdout)
+        self.assertNotIn("::step start notes", r.stdout)
+        self.assertEqual(self.origin_ref("refs/tags/v1.4.0^{commit}"), self.git("rev-parse", "HEAD"))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "notes.md")))
+
+    def test_a_missing_download_or_a_wrong_manifest_stops_the_release(self):
+        for state, words in ((dict(missing=["MaximizePM-1.4.0-x64.dmg"]), "no MaximizePM-1.4.0-x64.dmg"),
+                             (dict(manifest="1.3.0"), "manifest.json names version '1.3.0', not 1.4.0")):
+            with self.subTest(words):
+                self.github(**state)
+                r = self.run_script()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("::step end downloads/published failed ", r.stdout)
+                self.assertIn(words, r.stdout)
+                self.assertNotIn("::step start notes", r.stdout)
+        # Then GitHub has every file: a new run of the hook checks them again and writes the notes, with no new tag.
+        self.github()
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIsNone(self.origin_ref("refs/tags/v1.5.0"))
+
+    def test_the_watch_check_of_the_latest_release(self):
+        script = os.path.join(ROOT, "scripts", "release", "downloads.py")
+        cases = ((dict(latest="v1.3.0"), 0, "OK - the latest release v1.3.0 has both .dmg files"),
+                 (dict(latest="v1.3.0", missing=["manifest.json"]), 2, "CRITICAL - the latest release v1.3.0 lacks "
+                                                                       "downloads: no manifest.json"),
+                 (dict(latest="v1.3.0", manifest="1.2.1"), 2, "names version '1.2.1'"),
+                 (dict(run="failure"), 3, "UNKNOWN - could not ask GitHub"))
+        for state, code, words in cases:
+            with self.subTest(words):
+                self.github(**state)
+                r = subprocess.run([sys.executable, script, "check"], cwd=self.repo, env=self.env, capture_output=True,
+                                   text=True, timeout=60)
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                self.assertIn(words, r.stdout.splitlines()[0])
 
     def test_patch(self):
         r = self.run_script("--patch")
@@ -247,17 +340,19 @@ class Script(unittest.TestCase):
         self.assertIsNone(self.origin_ref("refs/tags/v1.5.0"))
 
     def test_after_the_push_a_new_run_only_waits_and_writes_the_notes(self):
-        os.remove(os.path.join(self.tmp, "released"))  # GitHub has not made the release yet
+        self.github(run="none")  # the build of the tag has not started within the wait
         r = self.run_script()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("::step end release failed", r.stdout)
+        self.assertIn("the build of v1.4.0 did not start (no run of desktop-release.yml for v1.4.0", r.stdout)
         head = self.git("rev-parse", "HEAD")
         self.assertEqual(self.origin_ref("refs/tags/v1.4.0^{commit}"), head)
-        _write(os.path.join(self.tmp, "released"), "")
+        self.github()
         r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertNotIn("::step start test", r.stdout)
         self.assertNotIn("::step start push", r.stdout)
+        self.assertNotIn("::step start downloads/tag", r.stdout)
+        self.assertIn("::step end downloads/build-publish passed", r.stdout)
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertIsNone(self.origin_ref("refs/tags/v1.5.0"))
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "notes.md")))

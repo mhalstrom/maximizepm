@@ -33,11 +33,19 @@
 #   commit    'Release vX.Y.Z (deploy #<id>)' on that worktree, then main of
 #             the main tree forward to it (merge --ff-only, the one git
 #             change the main tree takes)
-#   push      git push origin <commit>:refs/heads/main, then the annotated tag
-#             vX.Y.Z; the workflow desktop-release builds the apps and makes
-#             the GitHub release from the tag
-#   release   wait until GitHub has the release of the tag (RELEASE_WAIT
-#             seconds, default 75 minutes, within deploy_timeout 2h)
+#   push      git push origin <commit>:refs/heads/main
+# The downloads branch (#6186): the steps named downloads/<step> show in the
+# stage 'downloads' of the target's pipeline, beside the watch of main:
+#   downloads/tag        git push of the annotated tag vX.Y.Z, which starts
+#                        the workflow desktop-release
+#   downloads/build-<job>  each job of that run (checks, mac, mac-intel,
+#                        publish), with its link (scripts/release/downloads.py
+#                        watch; RELEASE_WAIT seconds, default 60 minutes,
+#                        within deploy_timeout 2h). A failed job stops the
+#                        release with the run's link
+#   downloads/published  the GitHub release has both .dmg files, the code
+#                        archive and manifest.json of this version
+# Then the last step of the release:
 #   notes     gh release edit with the notes from maxpm target report
 #             <deploy id> (scripts/release/release_notes.py: the 'changed'
 #             line of each done task of project maximizepm, by goal, and the
@@ -48,7 +56,7 @@
 # It never force-pushes, never moves a tag, and changes no file of the main
 # tree except by the fast-forward. When origin has the tag at HEAD of main
 # already (the push went out and a later step failed), a new run only waits
-# for the GitHub release and writes its notes.
+# for the build, checks the downloads and writes the notes.
 #
 # For the tests (tests/test_github_release.py): GH (the gh command),
 # MAXPM_BIN (the maxpm command), RELEASE_TEST_CMD (the test command),
@@ -83,7 +91,7 @@ main() {
 
   local gh="${GH:-gh}" maxpm="${MAXPM_BIN:-$tree/bin/maxpm}"
   local test_cmd="${RELEASE_TEST_CMD:-python3 -m unittest discover -s tests -t .}"
-  local wait_s="${RELEASE_WAIT:-4500}" poll="${RELEASE_POLL:-30}"
+  local wait_s="${RELEASE_WAIT:-3600}" poll="${RELEASE_POLL:-30}"
   local deploy="${MAXPM_DEPLOY:-}" remote=origin
   local step="" scratch="" wt=""
 
@@ -178,7 +186,7 @@ PY
   if [ -n "$cur_tag" ] && [ "$cur_tag" = "$head" ]; then
     new="$cur"
     resume=1
-    echo "github-release: $remote has v$cur at HEAD of main already: only the GitHub release and its notes are left"
+    echo "github-release: $remote has v$cur at HEAD of main already: only the build, the downloads and the notes are left"
   elif [ -n "$cur_tag" ]; then
     local major minor patch
     IFS=. read -r major minor patch <<<"$cur"
@@ -198,7 +206,7 @@ PY
   step_end passed
 
   if [ -n "$dry_run" ]; then
-    echo "github-release: dry run: it would test main with the version $new, commit 'Release v$new (deploy #${deploy:-none})' when the version changes, move main to it, push it to $remote main, push the tag v$new, wait for the GitHub release and write its notes"
+    echo "github-release: dry run: it would test main with the version $new, commit 'Release v$new (deploy #${deploy:-none})' when the version changes, move main to it, push it to $remote main, push the tag v$new, wait for the build of the downloads, check them and write the release notes"
     return 0
   fi
 
@@ -262,21 +270,22 @@ PY
       git tag -a "v$new" -m "MaximizePM v$new" "$commit" || fail "git tag v$new failed"
     fi
     git push --quiet "$remote" "$commit:refs/heads/main" || fail "git push $remote main failed (never forced)"
+    echo "github-release: pushed main $commit to $remote"
+    step_end passed
+
+    # ---- the downloads branch (#6186): the tag starts the build of the apps
+    step_start downloads/tag deploy
     git push --quiet "$remote" "refs/tags/v$new" || fail "git push of the tag v$new failed"
-    echo "github-release: pushed main $commit and the tag v$new to $remote"
+    echo "github-release: pushed the tag v$new to $remote"
     step_end passed
   fi
 
-  # ---- release: the workflow desktop-release makes the GitHub release of the tag
-  step_start release wait
-  local waited=0
-  until "$gh" release view "v$new" --json tagName >/dev/null 2>&1; do
-    [ "$waited" -ge "$wait_s" ] \
-      && fail "the tag v$new is pushed, but GitHub has no release v$new after ${wait_s}s: see the run of the workflow desktop-release for v$new; a new run of this hook only waits again and writes the notes"
-    sleep "$poll"
-    waited=$((waited + poll))
-  done
-  echo "github-release: GitHub has the release v$new"
+  # ---- downloads: the workflow desktop-release builds the apps and makes the GitHub release of the tag; each of
+  # its jobs is a step downloads/build-<job>. A failed build stops the release with the run's link.
+  python3 "$here/downloads.py" watch --tag "v$new" --sha "$commit" --wait "$wait_s" --poll "$poll" \
+    || fail "the tag v$new is pushed and stays; fix the build, then a new run of this hook (after the fix, a new version) releases again"
+  step_start downloads/published check
+  python3 "$here/downloads.py" assets --tag "v$new" || fail "the GitHub release v$new lacks downloads"
   step_end passed
 
   # ---- notes
