@@ -88,8 +88,9 @@ class Base(unittest.TestCase):
         old = plugin.DIRS
         plugin.DIRS = [SHIPPED, self.plugins]
         self.addCleanup(setattr, plugin, "DIRS", old)
-        plugin._SECRETS.clear()
-        self.addCleanup(plugin._SECRETS.clear)
+        from river.pipeline import forge
+        forge._TOKENS.clear()
+        self.addCleanup(forge._TOKENS.clear)
         get = mock.patch("river.vault.get", lambda conn, name, **kw: f"value-of-{name}".encode())
         get.start()
         self.addCleanup(get.stop)
@@ -158,7 +159,7 @@ class Manifests(Base):
         rows = {p["name"]: p for p in plugin.listing()}
         self.assertIn("error", rows["bad0"])
         with self.assertRaises(RiverError) as e:
-            plugin.find("github")
+            plugin.find("gitlab")  # an adapter that is still a module, not a plugin
         self.assertIn("no plugin", str(e.exception))
 
     def test_a_reserved_name_is_refused(self):
@@ -335,6 +336,30 @@ class Actions(Base):
         self.assertEqual(store.show(self.c, "app")["source"]["kind"], "here")
         define.forge_set(self.c, "app", "pulumi", repo="o/p/s", secret="pd")
         self.assertNotIn("rollback", store.show(self.c, "app")["source"]["actions"])
+
+
+class GitHubPlugin(Base):
+    """The shipped plugin github (#6160) as a process: its manifest, its describe, and its refusals before any call
+    of the API. Its reads and actions against recorded API answers: tests/test_pipeline.py GitHub and GiteaForgejo."""
+
+    def test_describe_and_the_source_of_a_github_pipeline(self):
+        out = plugin.describe("github")
+        self.assertEqual((out["level"], out["actions"]), ("act", ["start", "stop", "rerun", "rollback"]))
+        self.assertEqual(sorted(out["secrets"]), ["token"])
+        define.forge_set(self.c, "app", "gitea", repo="o/app", secret="tok", url="https://git.example.com")
+        src = store.show(self.c, "app")["source"]
+        self.assertEqual((src["kind"], src["name"]), ("plugin", "github"))
+        p = self.pipeline()
+        self.assertEqual(plugin._config(p), {"settings": {"forge": "gitea", "repo": "o/app",
+                                                          "url": "https://git.example.com"}, "secrets": {"token": "tok"}})
+
+    def test_a_poll_with_no_address_says_what_to_set(self):
+        define.forge_set(self.c, "app", "gitea", repo="o/app", secret="tok", url="https://git.example.com")
+        with core.tx(self.c):
+            self.c.execute("UPDATE pipelines SET forge_url=NULL")
+        runner.serve_pass(self.c)
+        self.assertIn("plugin github: the pipeline names no address for its Gitea: maxpm pipeline forge <pipeline> "
+                      "gitea --url https://<host>", self.pipeline()["poll_error"])
 
 
 class Jsonl(Base):

@@ -32,7 +32,7 @@ import re
 import urllib.parse
 
 from .. import core
-from . import cdevents, github, store
+from . import cdevents, forge, store
 
 POLL_EVERY = 60
 READ_MAX = 20
@@ -58,14 +58,14 @@ def _base(p):
 def call(conn, p, method, path, body=None, missing=False, ok=()):
     """One call of the Pulumi API for pipeline p, as JSON. missing: None for a 404; ok: other statuses that are not
     a failure (a 409 'the gate is not open': someone continued it). Refuses on any other status of 300 or more."""
-    headers = {"Authorization": f"token {github._token(conn, p)}", "Accept": "application/json",
+    headers = {"Authorization": f"token {forge.token(conn, p)}", "Accept": "application/json",
                "User-Agent": "maxpm-pipeline"}
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
     url = _root(p) + path if path.startswith("/api/") else _base(p) + path
-    status, out = (FETCH or github._fetch)(method, url, headers, data)
+    status, out = (FETCH or forge.fetch)(method, url, headers, data)
     if (missing and status == 404) or status in ok:
         return None
     if status >= 300:
@@ -207,7 +207,7 @@ def _read_run(conn, p, n, stages, first, counts):
         key = f"pd-{n}-{s['workflow']}"
         row = conn.execute("SELECT * FROM stage_runs WHERE pipeline_id=? AND key=?", (p["id"], key)).fetchone()
         evs = [e for e in _events(conn, p, s, n, st, run_status, rev, row, s["workflow"] == first)
-               if not github._seen_by(conn, "pulumi", e["context"]["id"])]
+               if not forge.seen_by(conn, "pulumi", e["context"]["id"])]
         if evs:
             store.ingest(conn, evs)
             counts["events"] += len(evs)

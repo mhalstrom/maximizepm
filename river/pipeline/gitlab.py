@@ -16,15 +16,15 @@ pipeline whose forge is gitlab (maxpm pipeline forge <name> gitlab --repo group/
 A gated stage of manual jobs (when: manual) starts when its gate opens: dispatch plays them. A run again or a roll
 back (maxpm pipeline rerun, rollback) of a commit retries the stage's jobs in that commit's pipeline, which is
 GitLab's own roll back of an environment. cancel cancels the stage's running jobs. The token is the value of a
-maxpm secret (a project access token with the api scope), sent as PRIVATE-TOKEN. FETCH is the test hook, as in
-github.py.
+maxpm secret (a project access token with the api scope), sent as PRIVATE-TOKEN. FETCH is the test hook:
+fn(method, url, headers, body) -> (status, bytes).
 """
 
 import json
 import urllib.parse
 
 from .. import core
-from . import cdevents, github, store
+from . import cdevents, forge, store
 
 POLL_EVERY = 60
 PIPELINES = 10
@@ -45,12 +45,12 @@ def _pid(p):
 
 def call(conn, p, method, path, body=None):
     """One call of the GitLab API for pipeline p, as JSON. Refuses on a status of 300 or more."""
-    headers = {"PRIVATE-TOKEN": github._token(conn, p), "Accept": "application/json", "User-Agent": "maxpm-pipeline"}
+    headers = {"PRIVATE-TOKEN": forge.token(conn, p), "Accept": "application/json", "User-Agent": "maxpm-pipeline"}
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    status, out = (FETCH or github._fetch)(method, _base(p) + path, headers, data)
+    status, out = (FETCH or forge.fetch)(method, _base(p) + path, headers, data)
     if status >= 300:
         try:
             msg = json.loads(out or b"{}").get("message") or json.loads(out or b"{}").get("error") or ""
@@ -164,7 +164,7 @@ def poll(conn, p):
             if s is None:
                 continue
             evs, state = _events(conn, p, s, pl, js)
-            evs = [e for e in evs if not github._seen_by(conn, "gitlab", e["context"]["id"])]
+            evs = [e for e in evs if not forge.seen_by(conn, "gitlab", e["context"]["id"])]
             finished = any(e["context"]["type"].startswith("dev.cdevents.pipelinerun.finished") for e in evs)
             if evs:
                 store.ingest(conn, evs)
@@ -186,7 +186,7 @@ def poll(conn, p):
                 (p["id"], e["name"])).fetchone():
             continue
         eid = f"gl-dep-{d['id']}"
-        if github._seen_by(conn, "gitlab", eid):
+        if forge.seen_by(conn, "gitlab", eid):
             continue
         store.ingest(conn, cdevents.make("service", "deployed", f"{p['name']}/{e['name']}",
                                          {"environment": {"id": e["name"], "source": "gitlab"}},

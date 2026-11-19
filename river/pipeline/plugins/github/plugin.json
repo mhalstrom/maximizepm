@@ -1,0 +1,20 @@
+{
+  "contract": 1,
+  "name": "github",
+  "version": "1.0.0",
+  "level": "act",
+  "description": "GitHub Actions (also Gitea and Forgejo Actions): reads each stage's workflow runs, their jobs, their JUnit artifacts and the environments' deployments; starts a gated workflow with workflow_dispatch, runs it again for an older commit, and stops a run.",
+  "run": ["{python}", "plugin.py"],
+  "actions": ["start", "stop", "rerun", "rollback"],
+  "settings": {
+    "repo": {"required": true, "help": "owner/name"},
+    "forge": {"help": "github, gitea or forgejo", "default": "github"},
+    "url": {"help": "the address of a Gitea or Forgejo server, such as https://codeberg.org"},
+    "ref": {"help": "the branch a started workflow runs on", "default": "main"}
+  },
+  "secrets": {
+    "token": {"help": "a fine-grained token: Actions read and write, Deployments read, Contents read"}
+  },
+  "poll_every": 60,
+  "timeout": 120
+}

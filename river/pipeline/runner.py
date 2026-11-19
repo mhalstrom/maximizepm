@@ -35,14 +35,15 @@ from .. import core
 from . import audit, cdevents, junit, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
-          "pulumi": "Pulumi Delivery"}  # the forges with an adapter (Pulumi Delivery: #6133)
-_ADAPTERS = {"gitea": "github", "forgejo": "github"}  # Gitea and Forgejo have GitHub's Actions API (#6122)
+          "pulumi": "Pulumi Delivery"}  # the forges that MaximizePM knows by name (Pulumi Delivery: #6133)
+# GitHub, Gitea and Forgejo run through the shipped plugin github (plugins/github, #6160); GitLab and Pulumi Delivery
+# are still Python modules (river/pipeline/<forge>.py) until their plugins replace them.
 
 
 def _adapter(forge):
-    """The module of a forge's adapter: river/pipeline/<forge>.py."""
+    """The module of a forge's adapter that is still a Python module: river/pipeline/<forge>.py."""
     import importlib
-    return importlib.import_module(f"{__package__}.{_ADAPTERS.get(forge, forge)}")
+    return importlib.import_module(f"{__package__}.{forge}")
 
 
 RUNNING = {}  # run id -> the thread of this process that runs it; server.restart_blocked waits for them
@@ -665,7 +666,8 @@ def stop(conn, run_id, actor=None):
             _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})", "stop",
                  f"stage {r['stage']}", r["rev"], run_id)
         plugin.act(conn, run_id, "stop")  # the next poll records its end
-        return {"run": run_id, "stopped": f"by plugin {r['forge']}"}
+        return {"run": run_id, "stopped": f"on {FORGES[r['forge']]}" if r["forge"] in FORGES
+                else f"by plugin {r['forge']}"}
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})", "stop",
              f"stage {r['stage']}", r["rev"], run_id)
@@ -724,12 +726,10 @@ def serve_pass(conn):
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
     transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
-    from . import github
-    github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
-    _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121); Gitea and Forgejo: github.poll_due (#6122)
+    _adapter("gitlab").poll_due(conn)  # the GitLab pipelines, once a minute each (#6121)
     _adapter("pulumi").poll_due(conn)  # and the Pulumi Delivery ones (#6133)
     from . import plugin
-    plugin.poll_due(conn)  # and the pipelines whose source is a plugin (#6159)
+    plugin.poll_due(conn)  # and the pipelines whose source is a plugin: GitHub, Gitea, Forgejo too (#6159, #6160)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
@@ -767,11 +767,12 @@ def serve_pass(conn):
                      f"#{r['gate_item']} (run #{r['id']})", "approve", f"the transition into {r['stage']}", r["rev"],
                      r["id"])
         started.append(r["id"])
-        if forge and r["forge"] not in FORGES:  # the gate opened: the plugin starts it in its system (#6159)
+        if forge and r["forge"] not in plugin.BUILTIN_ACTIONS:  # the gate opened: the plugin starts it (#6159)
             try:
                 plugin.act(conn, r["id"], plugin.action_for(r["purpose"]))
             except core.RiverError as e:
-                store.run_finish(conn, r["id"], "failed", errors=f"plugin {r['forge']} did not start it: {e}")
+                store.run_finish(conn, r["id"], "failed", errors=f"{FORGES.get(r['forge']) or 'plugin ' + r['forge']} "
+                                 f"did not start it: {e}")
         elif forge:  # the gate opened: the forge runs it (#6119, #6121)
             try:
                 _adapter(r["forge"]).dispatch(conn, r["id"])

@@ -1405,18 +1405,47 @@ def junit_zip(xml):
     return buf.getvalue()
 
 
+def in_process_plugin(fetch):
+    """A plugin.RUNNER that runs a shipped Python plugin in this process, with fetch as its HTTP: the recorded answers
+    of a fake API (#6160). The plugin answers as its process would: (exit code, the JSON answer, stderr)."""
+    import importlib.util
+    mods = {}
+
+    def run(argv, folder, request, timeout):
+        if folder not in mods:
+            spec = importlib.util.spec_from_file_location("maxpm_plugin_" + os.path.basename(folder),
+                                                          os.path.join(folder, "plugin.py"))
+            mods[folder] = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mods[folder])
+        mod = mods[folder]
+        try:
+            out, code = mod.handle(json.loads(json.dumps(request)), fetch=fetch), 0
+        except mod.Failed as e:
+            out, code = {"error": str(e)}, 1
+        return code, json.dumps(out).encode(), ""
+    return run
+
+
+def plugin_hooks(test, fetch):
+    """The GitHub plugin (and GitLab, Pulumi adapters) with a fake API and the secret 'test-token'."""
+    import types
+    from river.pipeline import forge, plugin
+    old = (plugin.RUNNER, forge.secret)
+    plugin.RUNNER, forge.secret = in_process_plugin(fetch), lambda conn, name, use=None: "test-token"
+    test.addCleanup(lambda: setattr(plugin, "RUNNER", old[0]) or setattr(forge, "secret", old[1]))
+    return types.SimpleNamespace(poll=plugin.poll)
+
+
 class GitHub(Base):
-    """The GitHub adapter (#6119): runs, jobs, JUnit artifacts and deployments read into events; a gated workflow
-    starts after its gate; cancel."""
+    """The GitHub source, the shipped plugin github (#6119, #6160): runs, jobs, JUnit artifacts and deployments read
+    into events; a gated workflow starts after its gate; cancel. The plugin runs in this process against the fake API."""
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import github, runner
-        self.gh, self.runner = github, runner
+        from river.pipeline import runner
+        self.runner = runner
         self.api = FakeGitHub()
-        old = (github.FETCH, github._token)
-        github.FETCH, github._token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(github, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        self.gh = plugin_hooks(self, self.api)
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "maximizepm")
@@ -1581,17 +1610,15 @@ class FakeForge(FakeGitHub):
 
 
 class GiteaForgejo(Base):
-    """The Gitea and Forgejo adapter (#6122): github.py with their address, token and run forms. Gitea lists runs in
+    """Gitea and Forgejo (#6122): the plugin github with their address, token and run forms. Gitea lists runs in
     GitHub's form; Forgejo in its own (title, commit_sha, one status word) and has no jobs, artifacts or cancel."""
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import github, runner
-        self.gh, self.runner = github, runner
+        from river.pipeline import runner
+        self.runner = runner
         self.api = FakeForge()
-        old = (github.FETCH, github._token)
-        github.FETCH, github._token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(github, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        self.gh = plugin_hooks(self, self.api)
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "shop")
@@ -1691,12 +1718,12 @@ class GitLab(Base):
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import github, gitlab, runner
+        from river.pipeline import forge, gitlab, runner
         self.gl, self.runner = gitlab, runner
         self.api = FakeGitLab()
-        old = (gitlab.FETCH, github._token)
-        gitlab.FETCH, github._token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(gitlab, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        old = (gitlab.FETCH, forge.token)
+        gitlab.FETCH, forge.token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(gitlab, "FETCH", old[0]) or setattr(forge, "token", old[1]))
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "shop")
@@ -1811,12 +1838,12 @@ class PulumiDelivery(Base):
 
     def setUp(self):
         super().setUp()
-        from river.pipeline import github, pulumi, runner
+        from river.pipeline import forge, pulumi, runner
         self.pd, self.runner = pulumi, runner
         self.api = FakePulumi()
-        old = (pulumi.FETCH, github._token)
-        pulumi.FETCH, github._token = self.api, lambda conn, p: "test-token"
-        self.addCleanup(lambda: setattr(pulumi, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        old = (pulumi.FETCH, forge.token)
+        pulumi.FETCH, forge.token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(pulumi, "FETCH", old[0]) or setattr(forge, "token", old[1]))
         runner.SYNC["on"] = True
         self.addCleanup(runner.SYNC.update, on=False)
         core.project_add(self.c, "shop")

@@ -207,7 +207,7 @@ def for_pipeline(conn, p):
 
 def check(conn, k, users=None):
     """Ask the forge about account k now and keep its answer. Returns the account as listing shows it."""
-    from . import github
+    from . import forge
     users = users if users is not None else _users(conn).get(k, [])
     if not users:
         raise core.RiverError(f"no pipeline uses the {FORGE_NAMES.get(k[0], k[0])} token {k[2]}")
@@ -220,7 +220,7 @@ def check(conn, k, users=None):
         return _view(conn, k, users, saved)
     repos = sorted({x["repo"] for x in users if x["repo"]})
     try:
-        got = _ask(p, github._token(conn, p), repos)
+        got = _ask(p, forge.token(conn, p), repos)
     except (core.RiverError, OSError, ValueError) as e:
         with core.tx(conn):
             conn.execute("UPDATE pipeline_accounts SET state='error', error=?, checked_at=? WHERE forge=? AND host=? "
@@ -237,7 +237,7 @@ def check(conn, k, users=None):
                          "host=? AND secret=?", (now, got["owner"], got["kind"], got["expires_at"],
                                                  json.dumps(got["repos"]), got["scopes"], *k))
     if "refused" in got:
-        github._TOKENS.pop(k[2], None)  # a new token saved under the same name is read anew, not from memory
+        forge.forget(k[2])  # a new token saved under the same name is read anew, not from memory
     return _view(conn, k, users, saved)
 
 

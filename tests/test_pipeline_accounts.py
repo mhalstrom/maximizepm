@@ -10,7 +10,7 @@ from unittest import mock
 
 from river import cli, core
 from river.core import RiverError
-from river.pipeline import accounts, define, github, runner
+from river.pipeline import accounts, define, forge, plugin, runner
 from river.routes import pipeline as routes
 
 
@@ -39,10 +39,10 @@ class Base(unittest.TestCase):
         self.c = core.connect()
         self.addCleanup(self.c.close)
         self.api = FakeForge()
-        old = (accounts.FETCH, github._token)
+        old = (accounts.FETCH, forge.token)
         accounts.FETCH = self.api
-        github._token = lambda conn, p: f"value-of-{p['secret']}"
-        self.addCleanup(lambda: setattr(accounts, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        forge.token = lambda conn, p: f"value-of-{p['secret']}"
+        self.addCleanup(lambda: setattr(accounts, "FETCH", old[0]) or setattr(forge, "token", old[1]))
         core.register(self.c, "mark", human=True)
         core.register(self.c, "boss")
         with core.tx(self.c):
@@ -184,7 +184,7 @@ class Accounts(Base):
         self.assertEqual(self.alerts(), [])
 
     def test_the_serve_pass_of_the_runner_checks_them(self):
-        with mock.patch.object(github, "poll_due", lambda conn: {}):  # no read of the runs on the real GitHub
+        with mock.patch.object(plugin, "poll_due", lambda conn: {}):  # no read of the runs on the real GitHub
             runner.serve_pass(self.c)
         self.assertEqual(accounts.listing(self.c)[0]["owner"], "mhalstrom")
 

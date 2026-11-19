@@ -176,10 +176,38 @@ shows an action that the plugin does not do (run again, roll back, stop) as
 "not available for this source", and the command for it is refused: do that
 step in the system itself.
 
-MaximizePM ships one plugin: `jsonl`. It follows a file of JSON lines that
-another program writes, one line for each change of a run, and it writes
-start and stop requests to a second file. Read its code before you write a
-plugin: `river/pipeline/plugins/jsonl/`.
+MaximizePM ships two plugins. Read their code before you write a plugin:
+
+- `github` (`river/pipeline/plugins/github/`): the GitHub, Gitea and
+  Forgejo source above, the full example. `maxpm pipeline forge <name>
+  github|gitea|forgejo` uses it.
+- `jsonl` (`river/pipeline/plugins/jsonl/`): the short example. It follows a
+  file of JSON lines that another program writes, one line for each change of
+  a run, and it writes start and stop requests to a second file.
+
+### The github plugin
+
+- **What it reads**, once a minute: the newest 10 runs of each stage's
+  workflow, their jobs (the stage's steps), the JUnit artifacts of a finished
+  run (named `junit*`, or the stage's `--junit` name), and, on GitHub, each
+  environment's deployments with a success status.
+- **What it does**: start, run again and roll back are `workflow_dispatch` of
+  the stage's workflow on the branch (`--ref`, `main` when not set) with the
+  inputs `maxpm_run` and `maxpm_rev` (the older commit of a roll back); stop
+  cancels the run.
+- **What it cannot do, and why**: a run that a push or a tag starts carries no
+  MaximizePM id, so the plugin links it to the version that waits at that
+  stage (the same commit). Gitea and Forgejo have no deployments API: a deploy
+  stage that passes records its version. Some Gitea and Forgejo versions have
+  no jobs, artifacts or cancel call: the read goes on without them, and stop
+  says to stop the run on the forge's page.
+- **Its token**: a fine-grained token with Actions read and write,
+  Deployments read and Contents read on the repository (on Gitea and Forgejo
+  a token with the repository scope), saved as a maxpm secret.
+- **Its test**: the plugin's `handle(request, fetch)` takes the HTTP function,
+  so a test passes recorded API answers instead of the network
+  (`tests/test_pipeline.py`, classes GitHub and GiteaForgejo). Test your own
+  plugin the same way.
 
 ## Write a plugin
 
@@ -235,7 +263,11 @@ stdout. Every request has `contract` and `call`. The calls:
   match the manifest. `maxpm pipeline forge` and `maxpm pipeline plugin` call
   it.
 - `poll`: read what changed in the system since the last poll, and answer with
-  `events` (a list of CDEvents objects, below) and `state`.
+  `events` (a list of CDEvents objects, below) and `state`. It can also answer
+  `reports`: the JUnit XML files of finished runs, each as `{"run_key": <the
+  system's id of the run>, "xml": <the file's text>}`; MaximizePM reads them
+  with its own parser, once for each run, before it hands the version on. And
+  `counts`: numbers for the person, such as `{"runs": 10}`.
 - `start`, `rerun`, `rollback`: start the work of one stage run. `rerun` runs
   a stage again; `rollback` puts an older version on an environment. The
   answer can have `key` (the system's id of the run), `url` and `note`.
@@ -245,7 +277,7 @@ The request of `poll` and of each action also has:
 
 - `pipeline`: its `name`, `project`, `stages` (each with `name`, `kind`,
   `pos`, `work` (the stage's `--workflow`), `env`, `transition` (the mode of
-  the arrow into it)) and `envs` (each
+  the arrow into it), `junit` (the stage's `--junit` name)) and `envs` (each
   with `name`, `target`, and the `version` that runs there).
 - `settings`: the pipeline's settings for the plugin.
 - `secrets`: the value of each secret the manifest names.

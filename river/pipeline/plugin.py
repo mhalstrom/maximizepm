@@ -46,10 +46,18 @@ MANIFEST = "plugin.json"
 LEVELS = ("report", "act", "gate")
 ACTIONS = ("start", "stop", "rerun", "rollback")  # the calls of a plugin besides describe and poll
 ALL_ACTIONS = list(ACTIONS)
-# The built-in adapters (runner.FORGES): what each one can do. Pulumi Delivery has no roll back by its API (#6133).
-BUILTIN_ACTIONS = {"github": ALL_ACTIONS, "gitlab": ALL_ACTIONS, "gitea": ALL_ACTIONS, "forgejo": ALL_ACTIONS,
-                   "pulumi": ["start", "stop", "rerun"]}
-RESERVED = set(BUILTIN_ACTIONS) | {"none", "maxpm", "here", "plugin"}
+# The adapters that are still Python modules (runner.FORGES): what each one can do. Pulumi Delivery has no roll back
+# by its API (#6133). GitHub, Gitea and Forgejo are the shipped plugin github (#6160): PLUGIN_OF names the plugin of a
+# forge name, and the events of those pipelines keep the forge's name as their source.
+BUILTIN_ACTIONS = {"gitlab": ALL_ACTIONS, "pulumi": ["start", "stop", "rerun"]}
+PLUGIN_OF = {"gitea": "github", "forgejo": "github"}
+RESERVED = set(BUILTIN_ACTIONS) | set(PLUGIN_OF) | {"none", "maxpm", "here", "plugin"}
+SHIPPED_FORGES = ("github", "gitea", "forgejo")  # pipelines that keep repo, url, ref and secret in their own columns
+
+
+def plugin_name(forge):
+    """The plugin that serves a pipeline's source (pipelines.forge)."""
+    return PLUGIN_OF.get(forge, forge)
 POLL_EVERY = 60  # seconds between two polls of one pipeline, when the manifest names no poll_every
 POLL_MIN = 10
 TIMEOUT = 30  # seconds for one call, when the manifest names no timeout
@@ -58,13 +66,12 @@ OUT_MAX = 8 * 1024 * 1024  # bytes of an answer
 ERR_KEEP = 2000  # characters of stderr kept for an error
 EVENTS_MAX = 2000  # events in one answer
 STATE_MAX = 64 * 1024  # bytes of the state a plugin keeps between calls
-TOKEN_KEEP = 600  # seconds a secret's value stays in memory (each read from the store is a line of its log)
+REPORTS_MAX = 50  # JUnit reports in one answer
 KEEP_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ")
 RUNNER = None
 DIRS = None  # tests: the folders to look in, instead of dirs()
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _CACHE = {}  # manifest path -> (mtime, manifest or error)
-_SECRETS = {}
 
 
 def dirs():
@@ -162,9 +169,9 @@ def find(name, need=True):
     return None
 
 
-def is_plugin(name):
+def is_plugin(forge):
     """Whether a pipeline's source (pipelines.forge) is a plugin that is installed and usable."""
-    return bool(name) and name not in RESERVED and find(name, need=False) is not None
+    return bool(forge) and forge not in BUILTIN_ACTIONS and find(plugin_name(forge), need=False) is not None
 
 
 def listing():
@@ -299,6 +306,12 @@ def describe(name):
 # ---------------------------------------------------------------- a pipeline that uses a plugin
 
 def _config(p):
+    """The settings and the secret names of pipeline p for its plugin. A GitHub, Gitea or Forgejo pipeline that
+    maxpm pipeline forge <p> github|gitea|forgejo set keeps them in its own columns (repo, forge_url, ref, secret)."""
+    if not p["plugin_settings"] and p["forge"] in SHIPPED_FORGES:
+        settings = {"forge": p["forge"], "repo": p["repo"], "url": p["forge_url"], "ref": p["ref"]}
+        return {"settings": {k: v for k, v in settings.items() if v}, "secrets": {"token": p["secret"]} if p["secret"]
+                else {}}
     try:
         c = json.loads(p["plugin_settings"] or "{}")
     except ValueError:
@@ -368,19 +381,13 @@ def use(conn, pipeline, name, settings=None, secrets=None, repo=None, url=None, 
 
 
 def _secret_values(conn, p, m):
+    """The values of the secrets the manifest names, from the maxpm secrets the pipeline maps to them."""
+    from . import forge
     cfg, out = _config(p), {}
     for key in m["secrets"]:
         sec = cfg["secrets"].get(key)
-        if not sec:
-            continue
-        got = _SECRETS.get(sec)
-        if got and time.monotonic() - got[1] < TOKEN_KEEP:
-            out[key] = got[0]
-            continue
-        from .. import vault
-        value = vault.get(conn, sec, use=f"pipeline {p['name']}: plugin {m['name']}").decode().strip()
-        _SECRETS[sec] = (value, time.monotonic())
-        out[key] = value
+        if sec:
+            out[key] = forge.secret(conn, sec, f"pipeline {p['name']}: plugin {m['name']}")
     return out
 
 
@@ -389,7 +396,7 @@ def _pipeline_info(conn, p):
         "SELECT e.name, e.target, v.rev FROM pipeline_envs e LEFT JOIN pipeline_versions v ON v.id=e.version_id "
         "WHERE e.pipeline_id=? AND e.removed_at IS NULL ORDER BY e.id", (p["id"],))]
     stages = [{"name": s["name"], "kind": s["kind"], "pos": s["pos"], "work": s["workflow"], "env": s["env"],
-               "transition": s["mode"] or "auto"} for s in conn.execute(
+               "transition": s["mode"] or "auto", "junit": s["junit"]} for s in conn.execute(
         "SELECT s.*, e.name env, t.mode FROM pipeline_stages s LEFT JOIN pipeline_envs e ON e.id=s.env_id "
         "LEFT JOIN pipeline_transitions t ON t.stage_id=s.id WHERE s.pipeline_id=? AND s.removed_at IS NULL "
         "ORDER BY s.pos, s.id", (p["id"],))]
@@ -414,7 +421,8 @@ def _request(conn, p, m, what):
 
 
 def _own(ev, name, pipeline):
-    """An event of the plugin: its source is the plugin, and its id is kept once for each pipeline."""
+    """An event of the plugin: its source is the pipeline's source (the plugin's name; github, gitea or forgejo for
+    the github plugin), and its id is kept once for each pipeline."""
     if not isinstance(ev, dict) or not isinstance(ev.get("context"), dict):
         return ev  # cdevents.parse refuses it with the reason
     ev = dict(ev)
@@ -426,9 +434,36 @@ def _own(ev, name, pipeline):
     return ev
 
 
+def _reports(conn, p, m, reports):
+    """The JUnit reports of an answer: [{"run_key" or "run", "xml"}]. MaximizePM reads each with its own parser
+    (junit.py: it refuses a DOCTYPE), once for each run. Returns the number read."""
+    from . import junit
+    if not isinstance(reports, list) or len(reports) > REPORTS_MAX:
+        raise core.RiverError(f"plugin {m['name']}: \"reports\" is a list of at most {REPORTS_MAX} "
+                              "{\"run_key\", \"xml\"} objects")
+    n, had = 0, set()
+    for rep in reports:
+        if not isinstance(rep, dict) or not isinstance(rep.get("xml"), str):
+            raise core.RiverError(f"plugin {m['name']}: each report is {{\"run_key\": <the run's id in its system>, "
+                                  "\"xml\": <the JUnit XML>}}")
+        row = conn.execute("SELECT id FROM stage_runs WHERE pipeline_id=? AND (key=? OR id=?)",
+                           (p["id"], str(rep.get("run_key") or ""), rep.get("run") or -1)).fetchone()
+        if row is None:
+            raise core.RiverError(f"plugin {m['name']}: a report names no run of pipeline {p['name']} "
+                                  f"({rep.get('run_key') or rep.get('run')})")
+        if row["id"] not in had and conn.execute("SELECT 1 FROM test_suites WHERE run_id=? LIMIT 1",
+                                                 (row["id"],)).fetchone():
+            continue  # its tests are read already
+        had.add(row["id"])
+        junit.ingest_junit(conn, row["id"], xml=rep["xml"].encode(), source=p["forge"])
+        n += 1
+    return n
+
+
 def _take(conn, p, m, answer):
-    """Keep what an answer brings: its events (in one transaction, all or none) and its state. A run that the
-    events end as passed hands its version on (runner.hand_on). Returns the number of new events."""
+    """Keep what an answer brings: its events (in one transaction, all or none), its JUnit reports and its state. A
+    run that the events end as passed hands its version on (runner.hand_on), after its tests are read. Returns
+    (new events, reports read)."""
     from . import runner
     events = answer.get("events") or []
     if not isinstance(events, list):
@@ -436,7 +471,8 @@ def _take(conn, p, m, answer):
     if len(events) > EVENTS_MAX:
         raise core.RiverError(f"plugin {m['name']}: more than {EVENTS_MAX} events in one answer; keep the rest for "
                               "the next poll (its state)")
-    res = store.ingest(conn, [_own(e, m["name"], p["name"]) for e in events], pipeline=p["name"]) if events else []
+    res = store.ingest(conn, [_own(e, p["forge"], p["name"]) for e in events], pipeline=p["name"]) if events else []
+    tests = _reports(conn, p, m, answer.get("reports") or [])
     if "state" in answer:
         state = json.dumps(answer["state"], separators=(",", ":"))
         if len(state) > STATE_MAX:
@@ -449,16 +485,20 @@ def _take(conn, p, m, answer):
             row = conn.execute("SELECT state FROM stage_runs WHERE id=?", (r["run"],)).fetchone()
             if row and row["state"] == "passed":
                 runner.hand_on(conn, r["run"])
-    return len(new)
+    return len(new), tests
 
 
 def poll(conn, p):
-    """Read one pipeline's system through its plugin: {'events': new events, 'seconds'}."""
-    m = find(p["forge"])
+    """Read one pipeline's system through its plugin: {'events': new events, 'tests': reports read, 'seconds'},
+    and the numbers the plugin counts itself (its answer's "counts", such as runs read)."""
+    m = find(plugin_name(p["forge"]))
     req = _request(conn, p, m, "poll")
     req["runs"] = _open_runs(conn, p)
     answer = call(m, req)
-    return {"events": _take(conn, p, m, answer), "seconds": answer["_seconds"]}
+    events, tests = _take(conn, p, m, answer)
+    counts = answer.get("counts") if isinstance(answer.get("counts"), dict) else {}
+    return {**{k: v for k, v in counts.items() if isinstance(v, int)}, "events": events, "tests": tests,
+            "seconds": answer["_seconds"]}
 
 
 def poll_due(conn):
@@ -466,15 +506,16 @@ def poll_due(conn):
     poll_every old. An error stays on its pipeline (poll_error) and does not stop the others."""
     out = {}
     now = core.now()
+    skip = sorted(set(BUILTIN_ACTIONS) | {"none"})
     for p in conn.execute("SELECT * FROM pipelines WHERE forge IS NOT NULL AND forge NOT IN (%s)"
-                          % ",".join("?" * len(RESERVED)), sorted(RESERVED)).fetchall():
-        m = find(p["forge"], need=False)
+                          % ",".join("?" * len(skip)), skip).fetchall():
+        m = find(plugin_name(p["forge"]), need=False)
         every = m["poll_every"] if m else POLL_EVERY
         if p["polled_at"] and core.parse_iso(p["polled_at"]) > now - core.timedelta(seconds=every):
             continue
         try:
             if m is None:
-                find(p["forge"])  # the reason
+                find(plugin_name(p["forge"]))  # the reason
             out[p["name"]], err = poll(conn, p), None
         except core.RiverError as e:
             out[p["name"]], err = {"error": str(e)}, str(e)[:500]
@@ -507,10 +548,10 @@ def actions(conn, p):
     if src in BUILTIN_ACTIONS:
         return {"kind": "adapter", "name": src, "actions": BUILTIN_ACTIONS[src]}
     try:
-        m = find(src)
+        m = find(plugin_name(src))
     except core.RiverError as e:
-        return {"kind": "missing", "name": src, "actions": [], "error": str(e)}
-    return {"kind": "plugin", "name": src, "version": m["version"], "level": m["level"], "actions": m["actions"]}
+        return {"kind": "missing", "name": plugin_name(src), "actions": [], "error": str(e)}
+    return {"kind": "plugin", "name": m["name"], "version": m["version"], "level": m["level"], "actions": m["actions"]}
 
 
 def need(conn, p, stage, action):
@@ -536,12 +577,12 @@ def act(conn, run_id, action):
     from .runner import _row
     r = _row(conn, run_id)
     p = conn.execute("SELECT * FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
-    m = find(p["forge"])
+    m = find(plugin_name(p["forge"]))
     if action not in m["actions"]:
         if action == "start":
             with core.tx(conn):
                 conn.execute("UPDATE stage_runs SET runner=?, gate_note=? WHERE id=?",
-                             (f"forge:{m['name']}", f"its gate opened; {m['name']} starts it in its own system "
+                             (f"forge:{p['forge']}", f"its gate opened; {m['name']} starts it in its own system "
                               "(this plugin starts no run)", run_id))
             return {"run": run_id, "plugin": m["name"], "left": True}
         raise core.RiverError(f"{action} is not available for this source: plugin {m['name']} lists only "
@@ -557,10 +598,10 @@ def act(conn, run_id, action):
         if action != "stop":
             if key is not None and not conn.execute("SELECT 1 FROM stage_runs WHERE pipeline_id=? AND key=? AND id<>?",
                                                     (r["pipeline_id"], str(key), run_id)).fetchone():
-                conn.execute("UPDATE stage_runs SET key=?, source=? WHERE id=?", (str(key), m["name"], run_id))
+                conn.execute("UPDATE stage_runs SET key=?, source=? WHERE id=?", (str(key), p["forge"], run_id))
             conn.execute("UPDATE stage_runs SET runner=?, url=COALESCE(?, url), gate_note=? WHERE id=?",
-                         (f"forge:{m['name']}", url, str(note or f"started by {m['name']}; its run shows at its "
-                                                                 "next poll")[:500], run_id))
+                         (f"forge:{p['forge']}", url, str(note or f"started by {m['name']}; its run shows at its "
+                                                                  "next poll")[:500], run_id))
     _take(conn, p, m, answer)
     return {"run": run_id, "plugin": m["name"], action: True, "note": note}
 
@@ -568,6 +609,6 @@ def act(conn, run_id, action):
 def plugin_run(conn, r):
     """Whether stage run r (runner._row) is in the hands of a plugin: started by it, or made by its events."""
     src = r["forge"]
-    if not src or src in RESERVED or not (r["workflow"] and not r["cmd"]):
+    if not src or src in BUILTIN_ACTIONS or src == "none" or not (r["workflow"] and not r["cmd"]):
         return False
     return (r["runner"] or "") == f"forge:{src}" or r["source"] == src
