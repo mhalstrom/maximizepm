@@ -248,6 +248,12 @@ button.srow-it { cursor: pointer; }
 .wblock .wgo { align-self: flex-end; }
 /* A menu's own keys (#5244): one send button for each, at the right. */
 .wkeys { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
+/* A question dialog of the terminal (#6234): its tabs (the one it shows now pressed), the answers before Submit. */
+.wtabs { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.wtab.on:disabled { opacity: 1; border-color: var(--accent); color: var(--ink); }
+.wreview { margin: 0; padding-left: var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-1); }
+.wblock .wchat { align-self: flex-start; }
+.wcmd.wpreview { white-space: pre; overflow-wrap: normal; overflow-x: auto; margin: 0; }  /* a drawing: no wrap */
 /* The card (#6002): the question or the person item on the left, its comments, history and Discuss on the right; on
    a phone the right column goes under it (phone.css). The dialog is wide while it holds a card. */
 #waitDlg.has-cards { --dlg-w: var(--w-dlg-l); }

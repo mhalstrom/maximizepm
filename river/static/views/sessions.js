@@ -655,24 +655,36 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // prompt that runs nothing (no tool, no command) is a menu: a slash command's (#5220), not a permission prompt.
   function waitLine(j) {
     const w = $("#sessWait"), all = (list.find(x => x.name === agent) || {}).waiting || [], waits = all.map(x => x.kind);
-    const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command;
-    // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253).
-    const what = menu ? "It shows a menu in its terminal."
+    const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command && !p.ask;
+    // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253; Claude
+    // Code's question dialog, #6234).
+    const what = p && p.ask ? "It asks you a question in its terminal."
+      : menu ? "It shows a menu in its terminal."
       : waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
       : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
-    w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">${menu ? "Choose" : "Answer it"}</span>` : "";
+    // The link opens something (#6234): the ! dialog when the page could read what waits, else the terminal.
+    const link = all.length ? `<span class="link" data-wait-open="1" tabindex="0" role="button">${menu ? "Choose" : "Answer it"}</span>`
+      : j.terminal ? `<span class="link" data-term="${esc(agent)}" tabindex="0" role="button">Open its terminal</span>` : "";
+    w.innerHTML = what ? esc(what) + (link ? " " + link : "") : "";
     w.classList.toggle("hidden", !what);
   }
   // What may open the dialog without a click on 'Answer it': a prompt, or a question younger than question_popup_max
   // (#5001: an old question stays on the card and behind 'Answer it', but does not pop up).
   const popsUp = (s) => (s.waiting || []).filter(w => !w.old);
-  const showWaiting = (s) => { for (const w of s.waiting || []) seenWait.add(s.name + "\x1f" + waitKey(w)); openWaiting(s, { onSent: sentTurn }); };
+  // A question dialog in the terminal (#6234): after each answer the page reads it again and opens its next question.
+  const askNext = (name) => () => {
+    for (const k of [...seenWait]) if (k.startsWith(name + "\x1f" + "p")) seenWait.delete(k);
+    refresh();
+  };
+  const showWaiting = (s) => { for (const w of s.waiting || []) seenWait.add(s.name + "\x1f" + waitKey(w)); openWaiting(s, { onSent: sentTurn, onAsk: askNext(s.name) }); };
   $("#sessWait").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-term]");
+    if (t) { openTerminal(t.dataset.term); return; }
     if (!e.target.closest("[data-wait-open]")) return;
     const s = list.find(x => x.name === agent);
     if (s && (s.waiting || []).length) showWaiting(s);
   });
-  $("#sessWait").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.closest("[data-wait-open]")) e.target.click(); });
+  $("#sessWait").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.closest("[data-wait-open], [data-term]")) e.target.click(); });
   // The open session comes to a prompt or asks a question: the ! dialog opens by itself (#4663), once for each
   // prompt (its sig) and question (its id), so Dismiss does not bring the same one back; a new one opens it again.
   // Not while the tab is hidden or another dialog is open: the next refresh after that opens it.

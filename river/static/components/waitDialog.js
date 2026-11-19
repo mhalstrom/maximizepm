@@ -6,7 +6,7 @@
 // Server: the op prompt_answer (with the page's token: typeAction) and the op answer.
 // #6002: it is also the one card dialog. A question block is the card (askCard.js); a person item gets the same card;
 // a line of Needs you or a person task in Plan > Items opens the dialog with that one card (openCard).
-import { $, esc, act, toast, typeAction, actor, getJson } from "../lib.js";
+import { $, esc, act, toast, typeAction, actor, getJson, hooks } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
@@ -18,10 +18,53 @@ import { button } from "./button.js";
 
 let queue = [], qAt = 0;  // the new cards that open by themselves, and the one shown (#6017)
 const dlg = makeDialog($("#waitDlg"), { onClose: () => { queue = []; } });  // a close ends the queue of new cards (#6017)
-let agent = null, pane = false, onSent = null;
+let agent = null, pane = false, onSent = null, onAsk = null;
 const cards = new Map();  // "kind:id" -> the card, for its side column and Discuss
 
+// The CLI's own question dialog (Claude Code's AskUserQuestion, #6234), read from its pane: one block for the
+// question that the terminal shows now, with its tabs (each question, then Submit), its options and their
+// descriptions, the CLI's own text option ('Type something'), and 'Chat about this'. A question with boxes takes its
+// ticks, then Next; every other question takes one option. The answer goes in as the CLI's keys, and the terminal
+// shows the next question: the page reads it again at once, and this dialog opens with it.
+function askBlock(w, n) {
+  const a = w.ask, opts = a.options.map((o, i) => ({ ...o, i }));
+  const plain = opts.filter(o => !o.text && !o.chat), box = opts.find(o => o.text), chat = opts.find(o => o.chat);
+  const multi = a.multi, last = a.tabs[a.tabs.length - 1].submit && a.current === a.tabs.length - 2;
+  const tabs = a.tabs.length > 1 ? `<div class="wtabs" role="group" aria-label="Questions">${a.tabs.map((t, i) =>
+    button(`${t.submit ? "✔" : t.done ? "☒" : "☐"} ${esc(t.header)}`, { cls: "wtab", pressed: i === a.current,
+      disabled: a.current == null || i === a.current, data: { wtab: i }, title: t.submit ? "Review and send" : "Show this question" })).join("")}</div>` : "";
+  const desc = (o) => o.detail ? `<div class="muted t-s">${esc(o.detail)}</div>` : "";
+  const mark = (o) => o.chosen ? ` <span class="muted t-s">(your answer)</span>` : "";
+  const sel = (opts.find(o => o.chosen) || { i: w.selected }).i;  // the answer given before, else the marked option
+  const input = (o, val) => multi
+    ? `<input type="checkbox" value="${val}"${o.checked ? " checked" : ""}>`
+    : `<input type="radio" name="pick${n}" value="${val}"${o.i === sel ? " checked" : ""}>`;
+  const list = plain.map(o => `<label class="wopt">${input(o, o.i)} <span>${esc(o.label)}${mark(o)}${desc(o)}</span></label>`).join("");
+  const own = box ? `<label class="wopt">${input(box, "text")} <span>Your own answer</span></label>
+    <textarea class="wother" placeholder="Your answer" aria-label="Your own answer">${esc(box.typed || "")}</textarea>` : "";
+  const talk = chat ? (multi ? button(esc(chat.label), { cls: "wchat", data: { wchat: chat.i }, title: "Decline and talk instead" })
+    : `<label class="wopt"><input type="radio" name="pick${n}" value="${chat.i}"${chat.i === sel ? " checked" : ""}> <span>${esc(chat.label)}<div class="muted t-s">The agent gets no answer and asks what to clarify</div></span></label>`) : "";
+  const review = (a.review || []).length ? `<ul class="wreview">${a.review.map(r =>
+    `<li><span>${esc(r.q)}</span> <b>${esc(r.a || "no answer")}</b></li>`).join("")}</ul>` : "";
+  const preview = (a.preview || []).length ? `<div class="muted t-s">The terminal shows the preview of the marked option:</div><pre class="wcmd wpreview">${esc(a.preview.join("\n"))}</pre>` : "";
+  const go = !multi || a.tabs.length < 2 ? "Send answer" : last ? "Next: review" : "Next question";
+  return `<form class="wblock" data-kind="ask" data-sig="${esc(w.sig)}" data-multi="${multi ? 1 : ""}">
+    <div class="wkind">${typeChip("decide")} Question in its terminal</div>
+    ${tabs}
+    <div class="wq">${esc(a.question || "The terminal asks a question")}</div>
+    ${review}${a.warn ? `<div class="muted t-s">${esc(a.warn)}</div>` : ""}
+    ${list}${own}${preview}${talk}
+    <details class="wlines"><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
+    ${button(go, { kind: "primary", cls: "wgo", type: "submit" })}
+  </form>`;
+}
+
+// The keys went in: read the pane again when the CLI has drawn the next question, and open it (opts.onAsk of
+// openWaiting: sessions.js), also a question that the person saw before.
+function askAgain() { const f = onAsk; setTimeout(() => f ? f() : hooks.refresh(), 300); }
+
 function promptBlock(w, n) {
+  if (w.ask) return askBlock(w, n);
   if (w.elsewhere) {
     return `<div class="wblock"><div class="wkind">Prompt</div><div class="wq">${esc(w.question)}</div>
       <div class="muted">This session runs in no tmux pane here, so the page cannot answer it: use Open session, or its terminal.</div></div>`;
@@ -81,7 +124,7 @@ export function closeWaiting() { dlg.close(); }
 
 export function openWaiting(s, opts = {}) {
   queue = [];
-  agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null;
+  agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null; onAsk = opts.onAsk || null;
   $("#waitTitle").textContent = `Waits for you: ${s.name}`;
   // With no pane, one note under the heading for every question, not the same note under each one (#5359).
   const note = !pane && s.waiting.some(w => w.kind === "question")
@@ -99,7 +142,7 @@ export function openWaiting(s, opts = {}) {
 // answer goes to the queue; the session reads it as it does today.
 export function openCard(c) { queue = []; drawCard(c); }  // a card the person opened: no queue of new cards
 function drawCard(c) {
-  agent = c.kind === "question" ? c.from : null; pane = false; onSent = null;
+  agent = c.kind === "question" ? c.from : null; pane = false; onSent = null; onAsk = null;
   $("#waitTitle").textContent = c.kind === "item" ? "Waits for you" : `Waits for you: ${c.from === "maxpm" ? "MaximizePM" : c.from}`;
   cards.clear();
   cards.set(`${c.kind}:${c.id}`, c);
@@ -162,7 +205,7 @@ function done(form) {
 
 $("#waitList").addEventListener("input", (e) => {  // a word in Other picks Other
   if (!e.target.matches(".wother")) return;
-  const other = e.target.closest("form").querySelector('input[value="other"]');
+  const other = e.target.closest("form").querySelector('input[value="other"], input[value="text"]');
   if (other && e.target.value.trim()) other.checked = true;
 });
 $("#waitList").addEventListener("submit", async (e) => {
@@ -186,6 +229,24 @@ $("#waitList").addEventListener("submit", async (e) => {
       const out = form.querySelector(".wanswer").value.trim();
       await act("done", { id: +form.dataset.id, output: out || undefined });
       toast(`#${form.dataset.id} is done`);
+    } else if (form.dataset.kind === "ask") {  // the CLI's question dialog (#6234)
+      const text = (form.querySelector(".wother") || {}).value || "";
+      const own = form.querySelector('input[value="text"]');
+      const args = { agent, sig: form.dataset.sig };
+      if (form.dataset.multi) {
+        args.picks = [...form.querySelectorAll('input[type=checkbox]:checked')].filter(x => x.value !== "text").map(x => +x.value);
+        if (own && own.checked && text.trim()) args.other = text.trim();
+      } else {
+        const pick = form.querySelector("input[type=radio]:checked");
+        if (!pick) { toast("Pick an option", true); return; }
+        if (pick.value === "text") {
+          if (!text.trim()) { toast("Write your answer first", true); return; }
+          args.other = text.trim();
+        } else args.pick = +pick.value;
+      }
+      const r = await typeAction("prompt_answer", args);
+      toast(`Sent: ${r.picked}`);
+      askAgain();
     } else {
       const pick = form.querySelector("input[type=radio]:checked");
       if (!pick) { toast("Pick an option", true); return; }
@@ -204,6 +265,18 @@ $("#waitList").addEventListener("submit", async (e) => {
 });
 $("#waitList").addEventListener("click", async (e) => {
   if (e.target.closest("[data-wnext]")) { qAt++; return showQueued(); }
+  const move = e.target.closest("[data-wtab], [data-wchat]");  // another question of the dialog, or Chat about this
+  if (move) {
+    const form = move.closest("form"), d = move.dataset;
+    try {
+      const r = await typeAction("prompt_answer", { agent, sig: form.dataset.sig,
+        ...(d.wtab != null ? { tab: +d.wtab } : { pick: +d.wchat }) });
+      if (d.wchat != null) toast(`Sent: ${r.picked}`);
+      done(form);
+      askAgain();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
   const ch = e.target.closest("[data-wchanges]");
   if (ch) {  // a release sign-off: the person says no; the review runs again after a fix with these words (#6039)
     const form = ch.closest("form"), note = form.querySelector(".wanswer").value.trim();

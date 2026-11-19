@@ -194,5 +194,6 @@ OPS = {
     "session_restart": lambda c, a, who: server.session_restart(c, a["agent"], a.get("changes"),
                                                                 bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: server.prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"),
-                                                            a.get("other"), who, a.get("key")),
+                                                            a.get("other"), who, a.get("key"), a.get("picks"),
+                                                            a.get("tab")),
 }

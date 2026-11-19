@@ -133,6 +133,9 @@ DETECT = {
     "blocked": BLOCKED,
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Claude what to do differently"
     "image_paste": "[Image #{n}]",  # an image path pasted alone becomes this in its prompt (#4618)
+    # The tab line of the AskUserQuestion dialog (#6234): one tab for each question (☐ open, ☒ answered), then
+    # '✔ Submit' between arrows; one question has its tab alone (" ☐ Pet").
+    "ask": r"^\s*(?:←\s+)?[☐☒]\s+\S.*?(?:\s+✔\s+Submit\s+→)?\s*$",
 }
 
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'); the session keeps its context.

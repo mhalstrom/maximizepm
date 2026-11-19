@@ -968,6 +968,202 @@ TRUST = """ Accessing workspace:
  Enter to confirm · Esc to cancel
 """
 
+# Claude Code 2.1.328's AskUserQuestion dialog, as its pane showed it in a scratch session (#6234). The tab that shows
+# now has a background colour; the plain text does not say which one it is.
+RULE = "─" * 110
+ASK_SINGLE = f"""❯ Ask me three questions.
+{RULE}
+←  \x1b[38;5;16m\x1b[48;5;153m ☐ Color \x1b[39m\x1b[49m ☐ Size  ☐ Extras  ✔ Submit  →
+
+Which color do you like?
+
+❯ 1. Red
+     warm
+  2. Blue
+     cool
+  3. Green
+     calm
+  4. Type something.
+{RULE}
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+ASK_BOXES = f"""{RULE}
+←  ☒ Color  ☒ Size  \x1b[48;5;153m ☐ Extras \x1b[49m ✔ Submit  →
+
+Which extras do you want?
+
+  1. [✔] Cheese
+         Add cheese
+❯ 2. [ ] Bacon
+         Add bacon
+  3. [✔] Onions
+         Add onions
+  4. [ ] Type something
+     Submit
+{RULE}
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+ASK_PREVIEW = f"""{RULE}
+←  \x1b[48;5;153m ☐ Layout \x1b[49m ☐ Deploy  ✔ Submit  →
+
+Which page layout do you prefer for the settings screen of the
+application?
+
+❯ 1. Sidebar                      ┌──────────────────────┐
+  2. Tabs                         │ | General| Name: [ ] │
+  3. Single page                  │ | Account| [Save]    │
+                                  └──────────────────────┘
+
+                                  Notes: press n to add notes
+
+{RULE}
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch
+questions · Esc to cancel
+"""
+ASK_REVIEW = f"""{RULE}
+←  ☒ Color  ☒ Size  ☒ Extras \x1b[48;5;153m ✔ Submit \x1b[49m →
+
+Review your answers
+
+ ● Which color do you like?
+   → Blue
+ ● Which size do you need?
+   → Medium please
+ ● Which extras do you want?
+   → Cheese, Onions
+
+❯ 1. Submit answers
+  2. Cancel
+"""
+ASK_ONE = f"""{RULE}
+ ☐ Pet
+
+Cat or dog?
+
+❯ 1. Cat
+     quiet
+  2. Dog
+     loud
+  3. Type something.
+{RULE}
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+
+class AskDialog(TmuxBase):
+    """#6234 (mark 2026-11-19): an expert showed Claude Code's AskUserQuestion dialog with four questions, and the
+    Sessions page said 'Answer it', but the click opened nothing: the page read no prompt from the pane. The card now
+    shows the dialog's tabs, its question, its options and their descriptions, and sends the CLI's keys."""
+
+    def setUp(self):
+        super().setUp()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+
+    def card(self, screen):
+        self.pane["screen"] = screen
+        self.pane["keys"].clear()
+        (w,) = [x for x in self.cards()[0]["waiting"] if x["kind"] == "prompt"]
+        return w
+
+    def answer(self, w, **kw):
+        return server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": w["sig"], **kw}, "mark")
+
+    def test_the_card_holds_the_tabs_the_question_and_the_options(self):
+        w = self.card(ASK_SINGLE)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["question"], a["multi"]),
+                         (["Color", "Size", "Extras", "Submit"], 0, "Which color do you like?", False))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:3]], [("Red", "warm"), ("Blue", "cool"),
+                                                                                ("Green", "calm")])
+        self.assertEqual((a["options"][3].get("text"), a["options"][4]["chat"]), (True, True))
+        self.assertEqual((w["question"], self.cards()[0]["state"]), ("Which color do you like?", "prompt"))
+        # Answered: Claude Code shows its input box again, and nothing waits.
+        self.pane["screen"] = "⏺ Answered Claude's questions:\n" + RULE + "\n❯ \n" + RULE + "\n"
+        self.assertEqual(self.cards()[0]["waiting"], [])
+        # A checklist in a reply, a numbered list under it, and the input box: no dialog.
+        self.pane["screen"] = ("⏺ The plan:\n ☐ Write the tests\n\n  1. Read the code\n  2. Fix it\n" + RULE
+                               + "\n❯ \n" + RULE + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
+        self.assertEqual(self.cards()[0]["waiting"], [])
+
+    def test_an_option_the_own_answer_and_chat_go_in_as_keys(self):
+        w = self.card(ASK_SINGLE)
+        r = self.answer(w, pick=1)
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Blue", ["Down", "Enter"]))
+        w = self.card(ASK_SINGLE)
+        r = self.answer(w, other="Purple,\nplease")
+        self.assertEqual((r["text"], self.pane["keys"]), ("Purple, please", ["Down", "Down", "Down", "Purple, please", "Enter"]))
+        w = self.card(ASK_SINGLE)
+        with self.assertRaisesRegex(core.RiverError, "write your own answer"):
+            self.answer(w, pick=3)
+        self.answer(w, pick=4)
+        self.assertEqual(self.pane["keys"], ["Down"] * 4 + ["Enter"])
+        # The question changed in the terminal since the person read it: no keys.
+        self.pane["keys"].clear()
+        self.pane["screen"] = ASK_SINGLE.replace("Which color", "Which colour")
+        with self.assertRaisesRegex(core.RiverError, "changed or is gone"):
+            self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], [])
+
+    def test_a_question_with_boxes_takes_the_ticks_then_goes_on(self):
+        w = self.card(ASK_BOXES)
+        a = w["ask"]
+        self.assertEqual(([o["checked"] for o in a["options"]], a["submit_stop"], a["at"], a["current"]),
+                         ([True, False, True, False, None], 4, 1, 2))
+        # Bacon only: Cheese off, Bacon on, Onions off (Enter turns the marked box over), then Submit.
+        self.answer(w, picks=[1])
+        self.assertEqual(self.pane["keys"], ["Up", "Enter", "Down", "Enter", "Down", "Enter", "Down", "Down", "Enter"])
+        w = self.card(ASK_BOXES)
+        r = self.answer(w, picks=[0, 2], other="Ketchup")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Ketchup", "Down", "Enter"])
+        self.assertEqual(r["picked"], "Cheese, Onions, Ketchup")
+        # Before another question the line is 'Next' (seen in the scratch session): the same place in the list.
+        w = self.card(ASK_BOXES.replace("     Submit", "     Next"))
+        self.assertEqual((w["ask"]["submit_stop"], w["ask"]["options"][3]["detail"]), (4, ""))
+
+    def test_the_tabs_move_with_the_arrows(self):
+        w = self.card(ASK_SINGLE)
+        self.answer(w, tab=3)
+        self.assertEqual(self.pane["keys"], ["Right"] * 3)
+        w = self.card(ASK_BOXES)
+        self.answer(w, tab=0)
+        self.assertEqual(self.pane["keys"], ["Left", "Left"])
+        w = self.card(ASK_SINGLE.replace("\x1b[38;5;16m\x1b[48;5;153m", "").replace("\x1b[39m\x1b[49m", ""))
+        self.assertIsNone(w["ask"]["current"])
+        with self.assertRaisesRegex(core.RiverError, "cannot tell which question"):
+            self.answer(w, tab=1)
+
+    def test_a_question_with_previews_has_no_text_and_its_chat_has_no_number(self):
+        w = self.card(ASK_PREVIEW)
+        a = w["ask"]
+        self.assertEqual(a["question"], "Which page layout do you prefer for the settings screen of the application?")
+        self.assertEqual([o["label"] for o in a["options"]], ["Sidebar", "Tabs", "Single page", "Chat about this"])
+        self.assertTrue(a["preview"][1].startswith("│ | General"))
+        with self.assertRaisesRegex(core.RiverError, "takes no text"):
+            self.answer(w, other="a wizard")
+        self.answer(w, pick=2)  # a digit only moves the marker here: the arrows, then Enter
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+
+    def test_the_review_and_a_dialog_of_one_question(self):
+        w = self.card(ASK_REVIEW)
+        a = w["ask"]
+        self.assertEqual((a["current"], a["question"], a["review"][2]),
+                         (3, "Review your answers", {"q": "Which extras do you want?", "a": "Cheese, Onions"}))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Enter"])
+        w = self.card(ASK_ONE)
+        self.assertEqual(([t["header"] for t in w["ask"]["tabs"]], w["ask"]["current"]), (["Pet"], 0))
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
 
 class Uploads(TmuxBase):
     """#4610, #4629: images attach; arbitrary files go to the session as readable paths."""

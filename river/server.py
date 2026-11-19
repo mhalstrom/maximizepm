@@ -2351,7 +2351,8 @@ def _layout(detect=None):
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
                                "behind": d["behind"] and re.compile(d["behind"]),
                                "header": d["header"] and re.compile(d["header"]),
-                               "fixed": d["fixed"] and re.compile(d["fixed"])}
+                               "fixed": d["fixed"] and re.compile(d["fixed"]),
+                               "ask": d["ask"] and re.compile(d["ask"])}
     return got
 
 
@@ -4386,6 +4387,208 @@ def turn_started(conn, agent, text=None):
 
 PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)
 
+# Claude Code's question dialog (AskUserQuestion, #6234), read from its pane: Claude Code writes the question into its
+# transcript only after the answer (2.1.328). A tab line (DETECT['ask']), the question, the numbered options with a
+# description under each, the option to type an answer ('Type something.'), a rule, and 'Chat about this'. A question
+# with more answers has '[ ]' and '[✔]' boxes and a 'Next' line after its options ('Submit' on the last question);
+# a question with previews shows
+# the box of the marked option's preview beside the options (and no text option); the last tab ('Submit') lists the
+# answers ('● question', '→ answer') over 'Submit answers' and 'Cancel'.
+_ASK_TAB = re.compile(r"([☐☒✔])\s+(.+?)(?=\s{2,}[☐☒✔]|\s*$)")
+_ASK_OPT = re.compile(r"^(\s*)(❯\s*)?(\d+)\.\s+(.*)$")
+_ASK_PREVIEW = re.compile(r"\s{2,}([│┃┌└├].*)$")  # the preview box beside an option
+_ASK_BOX = re.compile(r"^[│┃┌└├]")
+_ASK_CHECK = re.compile(r"^\[([ ✔✓xX])\]\s*(.*)$")
+_ASK_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _ask_dialog(tail, layout):
+    """The question dialog of the CLI (DETECT['ask']) that a pane's last lines (and the lines above them) show, or
+    None: {"tabs": [{"header", "done", "submit"}], "question", "options": [{"n": its number or None, "label",
+    "detail", "checked": True/False for a box (None: no box), "chosen": answered before, "text": the option to type an
+    answer, "typed": the text in it, "chat": 'Chat about this', "stop": its place in the list the arrows move in}],
+    "multi", "submit_stop": the place of a 'Submit' line, "at": the place of the marker, "preview": the lines of the
+    marked option's preview, "review": [{"q", "a"}], "warn", "start": the tab line in rows, "rows"}."""
+    rx = layout.get("ask")
+    rows = list(getattr(tail, "above", ())) + list(tail)
+    t = next((n for n in range(len(rows) - 1, -1, -1) if rx and rx.match(rows[n])), None)
+    if t is None:
+        return None
+    tabs = [{"header": m.group(2).strip(), "done": m.group(1) == "☒", "submit": m.group(1) == "✔"}
+            for m in _ASK_TAB.finditer(rows[t].replace("←", " ").replace("→", " "))]
+    question, review, warn, stops, preview, after_rule = [], [], [], [], [], False
+    for x in rows[t + 1:]:
+        st = x.strip()
+        m = _ASK_OPT.match(x)
+        if not m and (layout["hint"].search(x) or st.startswith("Notes:")):
+            continue  # the key line (wrapped in a narrow pane: its rest too), and the notes line of a preview
+        if not m and layout["rule"].match(x):
+            after_rule = True
+            continue
+        if m:
+            label, box = m.group(4), _ASK_PREVIEW.search(m.group(4))
+            if box:
+                preview.append(box.group(1).rstrip())
+                label = label[:box.start()]
+            label, check = label.strip(), _ASK_CHECK.match(label.strip())
+            checked = None
+            if check:
+                checked, label = check.group(1) != " ", check.group(2).strip()
+            chosen = label.endswith(" ✔")
+            stops.append({"n": int(m.group(3)), "label": label[:-2].rstrip() if chosen else label, "detail": "",
+                          "checked": checked, "chosen": chosen, "chat": after_rule, "marked": bool(m.group(2))})
+            continue
+        if not stops:
+            if st.startswith("●"):
+                review.append({"q": st[1:].strip(), "a": ""})
+            elif st.startswith("→") and review:
+                review[-1]["a"] = st[1:].strip()
+            elif st.startswith("⚠"):
+                warn.append(st[1:].strip())
+            elif st.startswith("❯"):
+                return None  # the input box with the person's text: no dialog on the screen now
+            else:
+                question.append(re.sub(r"^[│┃]\s*", "", st))  # a question wrapped on more lines
+            continue
+        plain = st.lstrip("❯").strip()
+        if plain in ("Submit", "Next") and not after_rule:  # 'Next' while another question follows
+            stops.append({"submit": True, "marked": st.startswith("❯")})
+        elif after_rule and plain == "Chat about this":  # with no number (a question with previews)
+            stops.append({"n": None, "label": plain, "detail": "", "checked": None, "chosen": False, "chat": True,
+                          "marked": st.startswith("❯")})
+        elif after_rule:
+            return None  # the input box and the status line under it: a '☐' line in the chat, no dialog
+        elif _ASK_BOX.match(st):
+            preview.append(st)
+        elif st.startswith("❯"):
+            return None
+        elif not stops[-1].get("submit"):
+            stops[-1]["detail"] = (stops[-1]["detail"] + " " + st).strip()  # the option's description
+    opts = [dict(s, stop=i) for i, s in enumerate(stops) if not s.get("submit")]
+    if not any(o["n"] for o in opts):
+        return None
+    if after_rule and not preview:  # the last option before the rule takes a text
+        last = next((o for o in reversed(opts) if not o["chat"]), None)
+        if last:
+            last["text"] = True
+            last["typed"] = "" if last["label"].startswith("Type something") else last["label"]
+    for o in opts:
+        o.pop("marked", None)
+    return {"tabs": tabs, "question": " ".join(question), "options": opts,
+            "multi": any(o["checked"] is not None for o in opts),
+            "submit_stop": next((i for i, s in enumerate(stops) if s.get("submit")), None),
+            "at": next((i for i, s in enumerate(stops) if s["marked"]), None), "preview": preview,
+            "review": review, "warn": " ".join(warn), "start": t, "rows": rows}
+
+
+def _ask_current(raw, ask):
+    """The tab that the dialog shows now (its place in ask['tabs']), from the pane's text with its colours (raw):
+    Claude Code draws it on a background colour, and the plain text does not say which one it is. None when it cannot
+    tell."""
+    line = next((x for x in reversed((raw or "").splitlines()) if "☐" in x or "☒" in x), None)
+    if line is None:
+        return None
+    lit, on, at = [], False, 0
+    for m in _ASK_SGR.finditer(line + "\x1b[m"):
+        if on:
+            lit.append(line[at:m.start()])
+        codes = m.group(1).split(";") if m.group(1) else ["0"]
+        if "48" in codes or "7" in codes:
+            on = True
+        elif "49" in codes or "0" in codes or "27" in codes:
+            on = False
+        at = m.end()
+    words = re.sub(r"[☐☒✔]", "", "".join(lit)).strip()
+    if words:
+        n = next((i for i, x in enumerate(ask["tabs"]) if x["header"] == words), None)
+        if n is not None:
+            return n
+    if ask["review"] or ask["question"].startswith("Review your answers"):
+        return next((i for i, x in enumerate(ask["tabs"]) if x["submit"]), None)
+    return 0 if len(ask["tabs"]) == 1 else None
+
+
+def _ask_prompt(pane, ask):
+    """The prompt of pane_prompts for a question dialog (_ask_dialog): the fields of any prompt, and 'ask'."""
+    try:
+        ask["current"] = _ask_current(_tmux("capture-pane", "-p", "-e", "-t", pane, check=False), ask)
+    except RiverError:
+        ask["current"] = None
+    rows = ask.pop("rows")
+    lines = rows[ask.pop("start"):]
+    opts = ask["options"]
+    # The same question with the same answers keeps its sig while the marker moves; a typed text or a box changes it.
+    sig = "\x1f".join([lines[0], ask["question"], *(f"{o['label']}|{o['checked']}|{o['chosen']}" for o in opts),
+                       *(f"{r['q']}|{r['a']}" for r in ask["review"])])
+    marked = next((n for n, o in enumerate(opts) if o["stop"] == ask["at"]), 0)
+    return {"question": ask["question"], "options": [o["label"] for o in opts], "fixed": False, "selected": marked,
+            "tool": None, "command": None, "why": None, "lines": lines, "sig": sig,
+            "tell": next((n for n, o in enumerate(opts) if o.get("text")), None), "row": False, "keys": [], "ask": ask}
+
+
+def _ask_answer(conn, agent, pane, p, pick=None, other=None, picks=None, tab=None, who=None):
+    """An answer to a question dialog (_ask_dialog) from the page: the keys Claude Code takes. tab: show that tab
+    (Left, Right). pick: an option (the arrows to it, then Enter; a digit would choose at once in one dialog and only
+    move the marker in a dialog with previews). other: the text of its 'Type something' option. picks: the options
+    to tick in a question with boxes (Enter on an option turns its box on or off), then 'Submit' goes to the next tab."""
+    ask, opts = p["ask"], p["ask"]["options"]
+
+    def move(a, b):
+        return [{"key": "Down" if b > a else "Up"}] * abs(b - a)
+
+    if tab is not None:
+        cur = ask.get("current")
+        if not isinstance(tab, int) or not 0 <= tab < len(ask["tabs"]):
+            raise RiverError("pick one of the dialog's tabs")
+        if cur is None:
+            raise RiverError(f"MaximizePM cannot tell which question the terminal of {agent} shows; use its terminal")
+        terminal_keys(conn, agent, [{"key": "Right" if tab > cur else "Left"}] * abs(tab - cur), who)
+        return {"agent": agent, "pane": pane, "picked": ask["tabs"][tab]["header"], "text": ""}
+    at = ask["at"]
+    if at is None:
+        raise RiverError(f"MaximizePM cannot see the marked option in the terminal of {agent}; answer it there")
+    text = " ".join(str(other or "").split())
+    if len(text) > 4000:
+        raise RiverError("text is at most 4000 characters")
+    box = next((o for o in opts if o.get("text")), None)
+    if text and box is None:
+        raise RiverError(f"this question of {agent} takes no text: pick one of its options, or 'Chat about this'")
+    chat = isinstance(pick, int) and 0 <= pick < len(opts) and opts[pick]["chat"]
+    if ask["multi"] and not chat:
+        want = {int(x) for x in (picks or []) if isinstance(x, int) or str(x).isdigit()}
+        keys, pos = [], at
+        for n, o in enumerate(opts):
+            if o["checked"] is not None and not o.get("text") and o["checked"] != (n in want):
+                keys += move(pos, o["stop"]) + [{"key": "Enter"}]
+                pos = o["stop"]
+        if text:
+            keys += move(pos, box["stop"])
+            pos = box["stop"]
+        if keys:
+            terminal_keys(conn, agent, keys, who)
+        if text:
+            time.sleep(PROMPT_PAUSE)
+            _agent_in_pane(agent, pane, "before the text")
+            terminal_keys(conn, agent, [{"text": text}], who)
+        end = ask["submit_stop"]
+        terminal_keys(conn, agent, move(pos, end) + [{"key": "Enter"}] if end is not None else [{"key": "Right"}], who)
+        picked = ", ".join([o["label"] for n, o in enumerate(opts) if n in want] + ([text] if text else []))
+        return {"agent": agent, "pane": pane, "picked": picked or "nothing", "text": text}
+    if text:
+        terminal_keys(conn, agent, move(at, box["stop"]), who)
+        time.sleep(PROMPT_PAUSE)
+        _agent_in_pane(agent, pane, "before the text")
+        terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        core.typed_to(conn, agent)
+        return {"agent": agent, "pane": pane, "picked": box["label"], "text": text}
+    if not isinstance(pick, int) or not 0 <= pick < len(opts):
+        raise RiverError("pick one of the question's options, or write your own answer")
+    o = opts[pick]
+    if o.get("text") and not o.get("typed"):
+        raise RiverError("write your own answer in the text box")
+    terminal_keys(conn, agent, move(at, o["stop"]) + [{"key": "Enter"}], who)
+    return {"agent": agent, "pane": pane, "picked": o.get("typed") or o["label"], "text": ""}
+
 
 def pane_prompts(conn, terminals):
     """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
@@ -4406,6 +4609,10 @@ def pane_prompts(conn, terminals):
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
         rx, layout, _ = _pane_rule(conn, agent, *procs.get(pane, (None, None)))
+        ask = _ask_dialog(tail, layout) if layout.get("ask") else None
+        if ask:  # the CLI's own question dialog (#6234): its card shows each part and answers with its keys
+            out[agent] = _ask_prompt(pane, ask)
+            continue
         parts = _prompt_found(tail, rx, layout)
         if not parts:
             continue
@@ -4450,19 +4657,22 @@ def _menu_keys(at, n, row=False, key="Enter"):
     return [{"key": more if n > at else less}] * abs(n - at) + [last]
 
 
-def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
+def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None, picks=None, tab=None):
     """The prompt dialog of the Sessions tab (#4607): a person's answer to the prompt that the agent's tmux pane
     shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
     tell the agent what to do instead (the option of its adapter's DETECT['tell_instead'], "No, and tell ... what to
     do", else Escape), then Enter. key: the key that chooses the pick, one of the prompt's keys (hint_keys: 's' for
     this session only), else Enter. Refused when the pane shows another prompt than the one the person read (sig),
     when the question takes only one of its options (p['fixed']) and a text came, and when no agent runs in the pane:
-    a text is typed only while the agent runs there, never into a shell (#5904)."""
+    a text is typed only while the agent runs there, never into a shell (#5904). picks, tab: a question dialog
+    (_ask_answer, #6234)."""
     pane = _typing_pane(conn, agent, who)
     p = pane_prompts(conn, {agent: pane}).get(agent)
     if not p or p["sig"] != sig:
         raise RiverError(f"the prompt in the terminal of {agent} changed or is gone; look at it again")
     _agent_in_pane(agent, pane)  # the screen can still show the question after the agent ended
+    if p.get("ask"):
+        return _ask_answer(conn, agent, pane, p, pick, other, picks, tab, who)
     opts, at = p["options"], p["selected"]
     text = " ".join(str(other or "").split())
     if text:
