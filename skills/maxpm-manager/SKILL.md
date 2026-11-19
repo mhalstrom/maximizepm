@@ -515,17 +515,20 @@ at a finished result of the project (the guide of the worker explains both value
 
 When the person asks for a release process with stages ("build, test, then beta,
 then prod after my yes"), write it as the project's pipeline. MaximizePM holds
-the order and the gates; the project's own commands do the work.
+the order and the transition into each stage; the project's own commands do
+the work. A rule of time ("no deploy to prod on Fridays", "prod by itself 30
+minutes after beta") goes on the transition, not in a script.
 
 ```
 maxpm pipeline add <name> --project <project>
 maxpm pipeline env <name> <env> [--target <target>]
 maxpm pipeline stage <name> <stage> --kind build|test|review|approve|deploy|check --run "<command>" [--env <env>]
-maxpm pipeline gate <name> <stage> auto|"auto after 30m"|manager|"person <name>"
+maxpm pipeline transition <name> <stage> --mode auto|yes|"yes <person>"|"yes manager"|"delay 30m"|release|"release every 2h"
+maxpm pipeline transition <name> <stage> --window "mon-thu 09:00-17:00 <zone>" --fault-rule on --reason "<why>"
 maxpm pipeline show|history <name>
 maxpm pipeline export <name> --file <path>             # JSON, to keep in git
-maxpm pipeline start <name> [--rev <commit>]           # maxpm serve runs each stage when its gate opens
-maxpm pipeline approve <name> <stage> [--rev <commit>] # a manager gate; a person gate takes the person's yes
+maxpm pipeline start <name> [--rev <commit>]           # maxpm serve runs each stage when its transition lets it in
+maxpm pipeline approve <name> <stage> [--rev <commit>] # the manager's yes or the release; a person's yes takes the person
 ```
 
 A test stage names its JUnit file (`--junit report.xml`); a stage's command
@@ -546,15 +549,17 @@ github|gitlab|gitea|forgejo --repo <owner/name> --secret <secret name> [--url
 <address>]` (Gitea and Forgejo need `--url`), and each stage names its workflow
 file, or on GitLab its GitLab stage (`--workflow`). Pulumi Delivery:
 `maxpm pipeline forge <name> pulumi --repo <org/project/stack> --secret <name>`
-(the pipeline stack); each stage names its Delivery stage, and the gate's yes
-continues the Delivery gate. A roll back is done on Pulumi's page. The
+(the pipeline stack); each stage names its Delivery stage, and the yes of the
+transition continues the Delivery gate. A roll back is done on Pulumi's page. The
 person saves the token first (`maxpm secret put <name>`). A stage over many
 servers: `--waves "web-1; web-2, web-3" --check "<cmd>" --rollback "<cmd>"`.
 A failed stage opens a fault item; `maxpm pipeline fix <run> [--start]` adds
 a fix task from its prompt.
 
 ```
-maxpm pipeline hold <name> [<stage>] --reason "<why>"   # unhold <name> [<stage>] ends it
+maxpm pipeline hold <name> --reason "<why>"            # every stage; unhold <name> ends it
+maxpm pipeline block <name> <stage> --reason "<why>" [--until <time> | --until-done <id>]   # unblock ends it
+maxpm pipeline delay|disable|enable|pass|freeze ...     # the controls of a transition: maxpm guide pipelines
 maxpm pipeline rerun <name> <stage> --rev <commit> | rerun-failed <run> | stop <run>
 maxpm pipeline rollback <name> <env> --rev <older commit> --reason "<why>"
 maxpm pipeline version <name> <commit>                 # the tasks it carries

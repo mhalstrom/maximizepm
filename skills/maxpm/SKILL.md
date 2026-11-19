@@ -591,8 +591,8 @@ to state a cause with a proof, and how a check script reports.
 
 ## Pipelines
 
-A project's release can be a pipeline: stages left to right, gates between
-them (`maxpm pipeline show <name>`). Before you write a stage's script, work
+A project's release can be a pipeline: stages left to right, a transition
+between each two (`maxpm pipeline show <name>`). Before you write a stage's script, work
 on a `pipeline:` fault task, or set up a pipeline, read `maxpm guide
 pipelines`.
 

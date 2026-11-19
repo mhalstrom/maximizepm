@@ -4,18 +4,20 @@ maxpm pipeline start <name> [--rev <commit>] queues the version at the first sta
 serve (serve_pass) then:
 
 - ends as failed a run that this process no longer runs (serve stopped while it ran);
-- for each queued run, looks at the gate of its stage (gate): auto opens at once; 'auto after 30m' opens 30 minutes
-  after the stage before passed, while no check of that stage's environment (its target) or of the project failed
-  since; manager waits for maxpm pipeline approve; person asks with a person's approval item (the card of
+- for each queued run, asks the transition into its stage (gate, transitions.py #6139): its controls (disabled, a
+  block, the fault rule, a freeze, the window, a delay) hold it; its mode decides the rest: auto opens at once; a
+  delay of 30m opens 30 minutes after the stage before passed, while no check of that stage's environment (its
+  target) or of the project failed since; the manager's yes and the release wait for maxpm pipeline approve (the
+  release with a cadence also opens by itself); a person's yes asks with a person's approval item (the card of
   release_approval person) and opens when a person marks it done, and cancels the run when it is dropped;
-- starts each run whose gate is open, one at a time for each stage, in a thread of its own.
+- starts each run that may enter, one at a time for each stage, in a thread of its own.
 
 A stage run runs the stage's command in the project's folder, in its own process group, with MAXPM_PIPELINE,
 MAXPM_STAGE, MAXPM_REV, MAXPM_RUN and MAXPM_ENV set, for at most stage_timeout. Its output goes to the run as it
 comes, and its '::step' lines become steps (steps.ingest_output). A test stage that names a JUnit file
 (maxpm pipeline stage ... --junit <path>) has the file read after its command. A stage that passes hands the version
 to the next stage (and a deploy stage records it in its environment); a stage that fails stops the pipeline for
-that version. A stage with no command (a review or an approval only) passes when its gate opens. A stage with a
+that version. A stage with no command (a review or an approval only) passes when it may enter. A stage with a
 forge workflow and no command is left to that forge's adapter.
 
 No session types a stage's command: serve runs it, outside every sandbox, as it runs a target's hooks.
@@ -30,7 +32,7 @@ import time
 import uuid
 
 from .. import core
-from . import cdevents, junit, steps, store
+from . import cdevents, junit, steps, store, transitions
 
 FORGES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo",
           "pulumi": "Pulumi Delivery"}  # the forges with an adapter (Pulumi Delivery: #6133)
@@ -52,9 +54,8 @@ FLUSH_LINES = 200
 
 def _row(conn, run_id):
     return conn.execute(
-        "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.gate, s.gate_rule, s.pos, s.env_id, "
-        "s.held_reason stage_hold, s.held_by stage_hold_by, p.held_reason pipe_hold, p.held_by pipe_hold_by, s.waves, "
-        "s.check_cmd, s.rollback_cmd, s.wave_wait, "
+        "SELECT r.*, s.name stage, s.kind, s.run cmd, s.workflow, s.junit, s.pos, s.env_id, "
+        "p.held_reason pipe_hold, p.held_by pipe_hold_by, s.waves, s.check_cmd, s.rollback_cmd, s.wave_wait, "
         "p.name pipeline, p.project, p.forge, v.rev FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
         "JOIN pipelines p ON p.id=r.pipeline_id LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?",
         (run_id,)).fetchone()
@@ -141,82 +142,112 @@ def _approve_cmd(r):
     return f"maxpm pipeline approve {r['pipeline']} {r['stage']} --rev {(r['rev'] or '')[:12]}"
 
 
-def gate(conn, r):
-    """(open, note): whether the queued run r may start now, and why not. A hold of the pipeline stops every start;
-    a hold of the stage's gate stops a version that the flow brings, not one sent on purpose (approve, rerun,
-    roll back)."""
-    if r["pipe_hold"]:
-        return False, f"every stage is held by {r['pipe_hold_by'] or 'a person'}: {r['pipe_hold']}"
+def _mode(conn, r, t):
+    """(open, note) of the transition's mode alone (transitions.py): auto opens; forge never (the forge starts it);
+    a yes, the release or a delay opens with an approval of the run; a delay also opens by itself after its time while
+    the checks pass; the release with a cadence after that time since the last version entered; a person's yes
+    opens when that person marks the approval item done. note 'declined': the person dropped the item."""
+    mode, arg = t["mode"], t["mode_arg"]
+    if mode == "auto":
+        return True, None
+    if mode == "forge":  # #6119: a push or a tag starts it on the forge; the adapter links its run to this one
+        return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
     if r["approved_at"]:
         return True, None
-    if r["stage_hold"]:
-        return False, f"held by {r['stage_hold_by'] or 'a person'}: {r['stage_hold']}"
-    g, rule = r["gate"], r["gate_rule"]
-    if g == "auto":
-        if not rule:
-            return True, None
+    if mode == "delay":
         prev = _previous(conn, r)
         since = (prev["ended_at"] if prev else None) or r["queued_at"] or store._now()
         bad = _failed_check(conn, r, prev, since)
         if bad:
-            return False, (f"check {bad} failed since {since}: the gate (auto after {rule}) stays closed; a person or "
-                           f"the manager lets the version in: {_approve_cmd(r)}")
-        opens = core.parse_iso(since) + core.parse_duration(rule)
+            return False, (f"check {bad} failed since {since}: the transition (a delay of {arg}) stays closed; a "
+                           f"person or the manager lets the version in: {_approve_cmd(r)}")
+        opens = core.parse_iso(since) + core.parse_duration(arg)
         if core.now() < opens:
-            return False, f"opens at {core.iso(opens)} (auto after {rule}) while the checks pass"
+            return False, f"opens at {core.iso(opens)} (a delay of {arg}) while the checks pass"
         return True, None
-    if g == "forge":  # #6119: a push or a tag starts it on the forge; the adapter links its run to this one
-        return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
-    if g == "manager":
+    if mode == "release":
+        if arg:
+            last = conn.execute("SELECT MAX(started_at) FROM stage_runs WHERE stage_id=? AND purpose IS NULL AND "
+                                "started_at IS NOT NULL", (r["stage_id"],)).fetchone()[0]
+            due = core.parse_iso(last) + core.parse_duration(arg) if last else None
+            if due is None or core.now() >= due:
+                return True, None
+            return False, (f"waits for the release: the cadence lets the next version in at {core.iso(due)}, or the "
+                           f"manager or a person releases it now: {_approve_cmd(r)}")
+        return False, f"waits for the release: the manager or a person releases it: {_approve_cmd(r)}"
+    if arg == "manager":
         return False, f"waits for the manager: {_approve_cmd(r)}"
-    # person
-    who = rule or "a person"
+    who = arg or "a person"  # a person's yes
     if r["gate_item"]:
         it = conn.execute("SELECT status FROM items WHERE id=?", (r["gate_item"],)).fetchone()
         if it and it["status"] == "done":
             by = core._done_by(conn, r["gate_item"])
-            if core._is_person(conn, by) and (not rule or by == rule):
+            if core._is_person(conn, by) and (not arg or by == arg):
                 return True, f"approved by {by} (#{r['gate_item']})"
         if it is None or it["status"] == "dropped":
             return False, "declined"
     return False, f"waits for {who}'s yes" + (f" on #{r['gate_item']}" if r["gate_item"] else "")
 
 
-def _ask(conn, r, note):
-    """Ask once for the yes of a manager or person gate: an alert to the active manager, or a person's approval
-    item in the pipeline's project. Returns the note to keep on the run."""
-    if r["gate"] == "manager":
+def gate(conn, r, ask=True):
+    """(open, note): whether the queued run r may enter its stage now, and why not. A hold of the whole pipeline
+    stops every start. Then the transition into the stage (#6139): its controls (disabled, a block, the fault rule,
+    a freeze, the window, a delay) hold every version but one let past them (maxpm pipeline pass, a run again, a roll
+    back); its mode decides the rest. ask: ask the manager or a person for the yes the mode needs, once, unless the
+    transition is disabled, blocked or frozen (then nobody is asked)."""
+    if r["pipe_hold"]:
+        return False, f"every stage is held by {r['pipe_hold_by'] or 'a person'}: {r['pipe_hold']}"
+    t = transitions.get(conn, r["stage_id"])
+    c = None if r["passed_at"] else transitions.closed(
+        conn, t, {"id": r["pipeline_id"], "name": r["pipeline"], "project": r["project"]})
+    ok, note = _mode(conn, r, t)
+    if note == "declined":
+        return False, note
+    if c is None:
+        return (True, note) if ok else (False, _ask(conn, r, t, note) if ask else note)
+    if ok:
+        said = f"; {r['approved_by']} said yes" if r["approved_at"] and t["mode"] not in ("auto", "forge") else ""
+        return False, c["text"] + said
+    if ask and c["kind"] in ("window", "delayed"):
+        note = _ask(conn, r, t, note)
+    return False, f"{c['text']}; it {note}" if note.startswith("waits") else f"{c['text']}; {note}"
+
+
+def _ask(conn, r, t, note):
+    """Ask once for the yes of the mode: an alert to the active manager (the manager's yes, the release), or a
+    person's approval item in the pipeline's project (a person's yes). Returns the note to keep on the run."""
+    if t["mode"] == "release" or (t["mode"] == "yes" and t["mode_arg"] == "manager"):
         if r["gate_note"] and "(asked " in r["gate_note"]:
-            return r["gate_note"]
+            return note + r["gate_note"][r["gate_note"].index(" (asked "):]
         mgr = core.active_manager(conn)
         if not mgr:
             return note + " (no manager runs now: asked when one starts)"
+        what = "the release" if t["mode"] == "release" else "the manager's yes"
         with core.tx(conn):
             core._send(conn, "alert", "maxpm", f"pipeline {r['pipeline']}: version {(r['rev'] or '')[:12]} waits at "
-                       f"the gate of stage {r['stage']} (manager). Let it in: {_approve_cmd(r)}", to=mgr)
+                       f"the transition into stage {r['stage']} for {what}. Let it in: {_approve_cmd(r)}", to=mgr)
         return note + f" (asked {mgr})"
-    if r["gate"] == "person" and not r["gate_item"]:
+    if t["mode"] == "yes" and not r["gate_item"]:
         if not r["project"] or not _project_id(conn, r["project"]):
             return note + f": pipeline {r['pipeline']} names no project for the card; a person runs {_approve_cmd(r)}"
-        who = r["gate_rule"] or "a person"
+        who = t["mode_arg"] or "a person"
         item = core.item_add(
             conn, r["project"], f"Approve pipeline {r['pipeline']} stage {r['stage']}: version {(r['rev'] or '')[:12]}",
             doer="human", actor="maxpm", approve_once=True,
             context=(f"Pipeline {r['pipeline']}: version {r['rev']} passed the stages before {r['stage']} and waits "
-                     f"at its gate for {who}'s yes (run #{r['id']}).\nApprove: mark this item done (only a person); "
-                     f"maxpm serve then starts stage {r['stage']}. Decline: drop it; the version stops here."))
+                     f"at the transition into it for {who}'s yes (run #{r['id']}).\nApprove: mark this item done (only "
+                     f"a person); maxpm serve then starts stage {r['stage']} when the transition's controls let it "
+                     f"(a block, a window). Decline: drop it; the version stops here."))
         with core.tx(conn):
             conn.execute("UPDATE stage_runs SET gate_item=? WHERE id=?", (item["id"], r["id"]))
         return f"waits for {who}'s yes on #{item['id']}"
     return note
 
 
-def approve(conn, pipeline, stage, rev=None, actor=None):
-    """maxpm pipeline approve: let a queued version into a stage now. A person gate takes a person (the one it
-    names); any other gate takes a person or the manager."""
-    p = store._pipeline(conn, pipeline)
+def _waiting_run(conn, p, stage, rev=None):
+    """The version that waits at the transition into a stage (the newest one; rev names one when several wait)."""
     q = ("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id LEFT JOIN pipeline_versions v "
-         "ON v.id=r.version_id WHERE r.pipeline_id=? AND s.name=? AND r.state='queued'")
+         "ON v.id=r.version_id WHERE r.pipeline_id=? AND s.name=? AND r.state='queued' AND s.removed_at IS NULL")
     args = [p["id"], stage]
     if rev:
         q, args = q + " AND (v.rev=? OR substr(v.rev,1,length(?))=?)", args + [rev, rev, rev]
@@ -226,16 +257,39 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
                               + (f" for {rev}" if rev else ""))
     if len(rows) > 1 and not rev:
         raise core.RiverError(f"{len(rows)} versions wait at stage {stage}: name one with --rev <commit>")
-    r = _row(conn, rows[0]["id"])
-    if r["gate"] == "person":
+    return _row(conn, rows[0]["id"])
+
+
+def _yes_refusal(conn, t, stage, actor):
+    """Why actor may not give the yes of the transition into stage, or None. A person's yes takes a person (the one
+    it names); the manager's yes, the release and a delay take a person or the manager."""
+    if t["mode"] == "yes" and t["mode_arg"] != "manager":
         if actor is not None and not core._is_person(conn, actor):
-            raise core.RiverError(f"the gate of stage {stage} takes a person's yes; {actor} is not a person")
-        if r["gate_rule"] and actor is not None and actor != r["gate_rule"]:
-            raise core.RiverError(f"the gate of stage {stage} takes {r['gate_rule']}'s yes")
-    else:
-        why = core._lead_refusal(conn, actor, "lets a version through a gate")
-        if why:
-            raise core.RiverError(why)
+            return f"the transition into stage {stage} takes a person's yes; {actor} is not a person"
+        if t["mode_arg"] and actor is not None and actor != t["mode_arg"]:
+            return f"the transition into stage {stage} takes {t['mode_arg']}'s yes"
+        return None
+    return core._lead_refusal(conn, actor, "lets a version through a transition")
+
+
+def _may_say_yes(conn, t, actor):
+    return _yes_refusal(conn, t, "", actor) is None
+
+
+def approve(conn, pipeline, stage, rev=None, actor=None):
+    """maxpm pipeline approve: give the yes of the transition into a stage for the version that waits there (a
+    person's yes, the manager's yes, the release, or a delay cut short). Its controls (a block, a window) still hold
+    the version; maxpm pipeline pass lets it past them."""
+    p = store._pipeline(conn, pipeline)
+    r = _waiting_run(conn, p, stage, rev)
+    t = transitions.get(conn, r["stage_id"])
+    if t["mode"] in ("auto", "forge"):
+        raise core.RiverError(f"the transition into stage {stage} is {transitions.mode_text(t['mode'], t['mode_arg'])}"
+                              f": it takes no yes. To let {(r['rev'] or '')[:12]} past its controls: maxpm pipeline "
+                              f"pass {p['name']} {stage} --rev {(r['rev'] or '')[:12]} --reason \"<why>\"")
+    why = _yes_refusal(conn, t, stage, actor)
+    if why:
+        raise core.RiverError(why)
     with core.tx(conn):
         conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, gate_note=NULL WHERE id=?",
                      (actor or "a person", store._now(), r["id"]))
@@ -437,7 +491,7 @@ def _hand_on(conn, r):
         # A newer version replaces an older one that still waits at that gate (#6119): the person approves the
         # newest, and a stage never runs a version that a newer one passed by.
         for old in conn.execute("SELECT id, gate_item FROM stage_runs WHERE stage_id=? AND state='queued' AND "
-                                "approved_at IS NULL AND runner IS NULL AND version_id IS NOT ?",
+                                "approved_at IS NULL AND passed_at IS NULL AND runner IS NULL AND version_id IS NOT ?",
                                 (nxt["id"], r["version_id"])).fetchall():
             store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
             _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
@@ -467,10 +521,10 @@ def _lead(conn, actor, what):
         raise core.RiverError(why)
 
 
-def _act(conn, pid, actor, text):
+def _act(conn, pid, actor, text, reason=None):
     """Each action is a line of the pipeline's history with its actor (inside a tx; maxpm pipeline history)."""
-    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change) VALUES (?,?,?,?)",
-                 (pid, store._now(), actor, text))
+    conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change, reason) VALUES (?,?,?,?,?)",
+                 (pid, store._now(), actor, text, reason))
 
 
 def _stage_row(conn, p, stage):
@@ -483,59 +537,56 @@ def _stage_row(conn, p, stage):
 
 def run_again(conn, pipeline, stage, rev, actor=None, purpose="rerun", note=None):
     """maxpm pipeline rerun: run one stage again for a version, an older one too. The person or the manager sends
-    it, so its gate counts as passed (a hold of the whole pipeline still stops it)."""
+    it on purpose, so it passes the transition before the stage (its yes and its controls); a hold of the whole
+    pipeline still stops it."""
     _lead(conn, actor, "runs a stage again")
     p = store._pipeline(conn, pipeline)
     _stage_row(conn, p, stage)
     run = _queue(conn, p["name"], stage, rev)
     with core.tx(conn):
-        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, purpose=? WHERE id=?",
-                     (actor or "a person", store._now(), purpose, run))
+        conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=?, passed_by=?, passed_at=?, purpose=? "
+                     "WHERE id=?", (actor or "a person", store._now(), actor or "a person", store._now(), purpose, run))
         _act(conn, p["id"], actor, note or f"run stage {stage} again for {rev} (run #{run})")
     return {"pipeline": p["name"], "stage": stage, "version": rev, "run": run}
 
 
 def hold(conn, pipeline, stage=None, reason=None, actor=None):
-    """maxpm pipeline hold: hold the gate of one stage (no new version enters it), or with no stage every stage
-    (no stage run starts). Work that runs goes on to its end. Needs the reason."""
+    """maxpm pipeline hold: with no stage, hold every stage (no stage run starts; work that runs goes on to its end).
+    With a stage, block the transition into it (transitions.block, until someone unblocks it). Needs the reason."""
+    if stage:
+        transitions.block(conn, pipeline, stage, reason, actor=actor)
+        return {"pipeline": store._pipeline(conn, pipeline)["name"], "stage": stage, "held": reason.strip()}
     _lead(conn, actor, "holds a pipeline")
     reason = (reason or "").strip()
     if not reason:
         raise core.RiverError("say why: --reason \"<why>\" (the people who look at the pipeline read it)")
     p = store._pipeline(conn, pipeline)
     with core.tx(conn):
-        if stage:
-            s = _stage_row(conn, p, stage)
-            conn.execute("UPDATE pipeline_stages SET held_reason=?, held_by=?, held_at=? WHERE id=?",
-                         (reason, actor, store._now(), s["id"]))
-        else:
-            conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=? WHERE id=?",
-                         (reason, actor, store._now(), p["id"]))
-        _act(conn, p["id"], actor, f"held {'the gate of stage ' + stage if stage else 'every stage'}: {reason}")
-    return {"pipeline": p["name"], "stage": stage, "held": reason}
+        conn.execute("UPDATE pipelines SET held_reason=?, held_by=?, held_at=? WHERE id=?",
+                     (reason, actor, store._now(), p["id"]))
+        _act(conn, p["id"], actor, f"held every stage: {reason}", reason)
+    return {"pipeline": p["name"], "stage": None, "held": reason}
 
 
 def release_hold(conn, pipeline, stage=None, actor=None):
-    """maxpm pipeline unhold: end the hold of a stage's gate, or of every stage."""
+    """maxpm pipeline unhold: end the hold of every stage, or with a stage the block of the transition into it."""
+    if stage:
+        transitions.unblock(conn, pipeline, stage, actor=actor)
+        return {"pipeline": store._pipeline(conn, pipeline)["name"], "stage": stage, "held": None}
     _lead(conn, actor, "ends a hold of a pipeline")
     p = store._pipeline(conn, pipeline)
     with core.tx(conn):
-        if stage:
-            s = _stage_row(conn, p, stage)
-            if not s["held_reason"]:
-                raise core.RiverError(f"the gate of stage {stage} is not held")
-            conn.execute("UPDATE pipeline_stages SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (s["id"],))
-        else:
-            if not p["held_reason"]:
-                raise core.RiverError(f"pipeline {p['name']} is not held")
-            conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (p["id"],))
-        _act(conn, p["id"], actor, f"ended the hold of {'the gate of stage ' + stage if stage else 'every stage'}")
-    return {"pipeline": p["name"], "stage": stage, "held": None}
+        if not p["held_reason"]:
+            raise core.RiverError(f"pipeline {p['name']} is not held")
+        conn.execute("UPDATE pipelines SET held_reason=NULL, held_by=NULL, held_at=NULL WHERE id=?", (p["id"],))
+        _act(conn, p["id"], actor, "ended the hold of every stage")
+    return {"pipeline": p["name"], "stage": None, "held": None}
 
 
 def rollback(conn, pipeline, env, rev, reason=None, actor=None):
     """maxpm pipeline rollback: put an older version on an environment again: the deploy stage of that environment
-    runs with it, and its gate holds, so the flow brings no newer version there until a person ends the hold."""
+    runs with it, and the transition into it is blocked, so the flow brings no newer version there until a person
+    unblocks it."""
     _lead(conn, actor, "rolls back an environment")
     p = store._pipeline(conn, pipeline)
     s = conn.execute("SELECT s.name FROM pipeline_stages s JOIN pipeline_envs e ON e.id=s.env_id WHERE "
@@ -544,9 +595,7 @@ def rollback(conn, pipeline, env, rev, reason=None, actor=None):
     if not s:
         raise core.RiverError(f"no stage of pipeline {p['name']} deploys to {env}")
     why = f"rolled back {env} to {rev}" + (f": {reason}" if reason else "")
-    with core.tx(conn):
-        conn.execute("UPDATE pipeline_stages SET held_reason=?, held_by=?, held_at=? WHERE pipeline_id=? AND name=?",
-                     (why, actor, store._now(), p["id"], s["name"]))
+    transitions.block(conn, p["name"], s["name"], why, actor=actor)
     out = run_again(conn, p["name"], s["name"], rev, actor, purpose="rollback", note=why)
     return {**out, "env": env, "held": why}
 
@@ -634,6 +683,7 @@ def serve_pass(conn):
     """One pass of the loop of maxpm serve: end lost runs, open the gates that may open, start what may start.
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
+    transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
     from . import github
     github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
     _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121); Gitea and Forgejo: github.poll_due (#6122)
@@ -655,14 +705,12 @@ def serve_pass(conn):
             store.run_finish(conn, r["id"], "cancelled", errors=f"the yes at the gate was declined (#{r['gate_item']})")
             continue
         if not open_:
-            if not (r["pipe_hold"] or r["stage_hold"]):  # a held gate asks nobody for a yes
-                note = _ask(conn, r, note)
             if note != r["gate_note"]:
                 with core.tx(conn):
                     conn.execute("UPDATE stage_runs SET gate_note=? WHERE id=?", (note, r["id"]))
             waiting[r["id"]] = note
             continue
-        if note:  # approved through the card
+        if note and r["gate_item"] and not r["approved_at"]:  # approved through the card
             with core.tx(conn):
                 conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
                              (core._done_by(conn, r["gate_item"]), store._now(), r["id"]))

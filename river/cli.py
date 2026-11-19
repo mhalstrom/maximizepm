@@ -1881,7 +1881,7 @@ def build_parser(only=None):
 
     # #6113: the definition of a pipeline (river/pipeline). Only a person or the manager changes one.
     pl = sub.add_parser("pipeline", help="pipelines: the stages of a project's release, its environments, and the "
-                        "gate before each stage (a person or the manager changes one)")
+                        "transition before each stage (a person or the manager changes one)")
     pls = pl.add_subparsers(dest="plcmd", required=True)
     pls.add_parser("list")
     x = pls.add_parser("add", help="a new pipeline"); x.add_argument("name")
@@ -1900,8 +1900,9 @@ def build_parser(only=None):
     x.add_argument("--run", help="the project's command that does the work ('' clears it)")
     x.add_argument("--workflow", help="or the forge workflow or job that does it ('' clears it)")
     x.add_argument("--env", help="the environment a deploy stage deploys to")
-    x.add_argument("--gate", help="auto; auto after <time>; manager; person; person <name>; forge (a push or a tag "
-                   "starts it on the forge)")
+    x.add_argument("--mode", "--gate", dest="gate", help="the mode of the transition into it: auto; yes; yes <person>; "
+                   "yes manager; delay <time>; release; release every <time>; forge (a push or a tag starts it on the "
+                   "forge)")
     x.add_argument("--pos", type=int, help="its place, 1 is the first")
     x.add_argument("--junit", help="a test stage: the JUnit XML file its command writes, in the project folder "
                    "('' clears it)")
@@ -1927,13 +1928,44 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
     x.add_argument("id", type=int)
-    x = pls.add_parser("hold", help="hold the gate of a stage (no new version enters it), or with no stage every "
-                       "stage (nothing new starts); work that runs goes on")
+    x = pls.add_parser("hold", help="hold every stage (nothing new starts; work that runs goes on); with a stage: "
+                       "block the transition into it")
     x.add_argument("name"); x.add_argument("stage", nargs="?"); x.add_argument("--reason", required=True)
-    x = pls.add_parser("unhold", help="end the hold of a stage's gate, or of every stage")
+    x = pls.add_parser("unhold", help="end the hold of every stage; with a stage: unblock the transition into it")
     x.add_argument("name"); x.add_argument("stage", nargs="?")
+    # #6139: the transition into a stage (the arrow from the stage before it) and its controls
+    x = pls.add_parser("transition", help="the transition into a stage: show it, or change its mode, its time window "
+                       "or its fault rule")
+    x.add_argument("name"); x.add_argument("stage")
+    x.add_argument("--mode", help="auto; yes; yes <person>; yes manager; delay <time>; release; release every <time>; "
+                   "forge")
+    x.add_argument("--window", help="when versions may pass: 'mon-thu 09:00-17:00 [America/Los_Angeles]' (';' "
+                   "between windows); none removes it")
+    x.add_argument("--fault-rule", choices=("on", "off"), help="on: blocked while a fault of the pipeline is open")
+    x.add_argument("--reason")
+    x = pls.add_parser("block", help="block the transition into a stage: until a time, until an item closes, or "
+                       "until someone unblocks it")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--reason", required=True)
+    x.add_argument("--until", help="a time: 2h, 'fri 17:00', 2026-11-28T08:00")
+    x.add_argument("--until-done", type=int, metavar="ID", help="until this item closes (a fault, a person's task)")
+    x = pls.add_parser("unblock", help="end the block of the transition into a stage")
+    x.add_argument("name"); x.add_argument("stage")
+    x = pls.add_parser("delay", help="no version passes the transition into a stage before a time (none ends it)")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("until", help="2h, 'mon 09:00', or none")
+    x.add_argument("--reason")
+    x = pls.add_parser("disable", help="no version passes the transition into a stage until someone enables it")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--reason", required=True)
+    x = pls.add_parser("enable", help="a disabled transition lets versions pass again")
+    x.add_argument("name"); x.add_argument("stage")
+    x = pls.add_parser("pass", help="let one waiting version past every control of the transition into a stage once")
+    x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev"); x.add_argument("--reason", required=True)
+    x = pls.add_parser("freeze", help="no version passes from --from (now) to --to; no stage: every transition")
+    x.add_argument("name"); x.add_argument("stage", nargs="?")
+    x.add_argument("--from", dest="start", help="when it starts: 'wed 18:00', 2026-11-26T00:00 (now when none)")
+    x.add_argument("--to", dest="end", help="when it ends: 'mon 08:00', 3d, 2026-11-30T08:00")
+    x.add_argument("--reason"); x.add_argument("--clear", action="store_true", help="remove the freezes")
     x = pls.add_parser("rollback", help="put an older version on an environment again: its deploy stage runs with "
-                       "it, and that gate holds until you end the hold")
+                       "it, and the transition into it is blocked until you unblock it")
     x.add_argument("name"); x.add_argument("env"); x.add_argument("--rev", required=True); x.add_argument("--reason")
     x = pls.add_parser("fix", help="add a fix task with the prompt of a failed run (--start: and start a session on "
                        "it now)")
@@ -1947,11 +1979,11 @@ def build_parser(only=None):
     x = pls.add_parser("run", help="one stage run: its steps, failed tests and last lines; --prompt: the prompt that "
                        "analyzes its failed tests")
     x.add_argument("id", type=int); x.add_argument("--prompt", action="store_true")
-    x = pls.add_parser("approve", help="let a version that waits at a stage's gate in now (a person gate takes a "
-                       "person)")
+    x = pls.add_parser("approve", help="give the yes of the transition into a stage for the version that waits there "
+                       "(a person's yes takes a person); its block or window still holds it")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev")
-    x = pls.add_parser("gate", help="the rule that lets a version into a stage: auto; auto after <time> (the checks "
-                       "of the stage before pass that long); manager; person; person <name>")
+    x = pls.add_parser("gate", help="the mode of the transition into a stage: auto; yes [<person>|manager]; delay "
+                       "<time>; release [every <time>]; forge")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("rule", nargs="+")
     x = pls.add_parser("export", help="print the pipeline as JSON, to keep in git")
     x.add_argument("name"); x.add_argument("--file", help="write it to this file")
@@ -7553,6 +7585,28 @@ def _pipeline_cmd(conn, a, actor):
     if sub == "run":
         from .pipeline import prompt
         return {"text": prompt.failure_prompt(conn, a.id)["text"] if a.prompt else prompt.run_text(conn, a.id)}
+    if sub in ("transition", "block", "unblock", "delay", "disable", "enable", "pass", "freeze"):
+        from .pipeline import transitions as tr
+        if sub == "transition":
+            if a.mode is None and a.window is None and a.fault_rule is None:
+                p = store._pipeline(conn, a.name)
+                s = tr._target(conn, a.name, a.stage)[1]
+                return dict(tr.describe(conn, s, p), pipeline=p["name"], stage=s["name"], changed=None)
+            return tr.change(conn, a.name, a.stage, a.mode, a.window,
+                             None if a.fault_rule is None else a.fault_rule == "on", a.reason, actor)
+        if sub == "block":
+            return tr.block(conn, a.name, a.stage, a.reason, a.until, a.until_done, actor)
+        if sub == "unblock":
+            return tr.unblock(conn, a.name, a.stage, actor)
+        if sub == "delay":
+            return tr.delay(conn, a.name, a.stage, a.until, a.reason, actor)
+        if sub == "disable":
+            return tr.disable(conn, a.name, a.stage, a.reason, actor)
+        if sub == "enable":
+            return tr.enable(conn, a.name, a.stage, actor)
+        if sub == "pass":
+            return tr.let_pass(conn, a.name, a.stage, a.rev, a.reason, actor)
+        return tr.freeze(conn, a.name, a.stage, a.start, a.end, a.reason, a.clear, actor)
     if sub == "gate":
         return define.gate_set(conn, a.name, a.stage, " ".join(a.rule), actor)
     if sub == "export":
@@ -7569,8 +7623,57 @@ _FORGE_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forge
                 "pulumi": "Pulumi Delivery"}
 
 
+def _transition_lines(t, indent="  "):
+    """The transition into a stage (#6139) as lines: its mode, each control with who set it and until when, the
+    state now and the versions that wait there."""
+    from .core import show_time
+    by = lambda who, at=None: f" (set by {who or 'a person'}" + (f", {show_time(at)}" if at else "") + ")"
+    out = [f"mode: {t['words']}, {t['text']}" + (by(t["mode_by"], t["mode_at"]) if t.get("mode_by") else "")]
+    w = t.get("window")
+    if w:
+        out.append(f"window: {w['text']} ({'open now' if w['open'] else 'closed now'}"
+                   + (f"; {'closes' if w['open'] else 'opens'} {show_time(w['change'])}" if w.get("change") else "")
+                   + ")" + by(w.get("by"), w.get("at")))
+    for f in t.get("freezes") or []:
+        out.append(f"freeze: {show_time(f['from'])} to {show_time(f['to'])}{' (now)' if f.get('now') else ''}: "
+                   f"{f['reason']}" + by(f.get("by")))
+    if t.get("fault_rule"):
+        out.append("fault rule: blocked while a fault of the pipeline is open"
+                   + (f" (fault #{t['fault']['id']} is open)" if t.get("fault") else " (none is open)"))
+    b = t.get("block")
+    if b:
+        out.append(f"block: {b['reason']}" + by(b["by"], b["at"]) + ", until "
+                   + (show_time(b["until"]) if b["until"] else f"#{b['item']} closes" if b["item"] else
+                      "someone unblocks it"))
+    d = t.get("delay")
+    if d:
+        out.append(f"delay: until {show_time(d['until'])}: {d['reason']}" + by(d["by"]))
+    x = t.get("disabled")
+    if x:
+        out.append(f"disabled: {x['reason']}" + by(x["by"], x["at"]) + ", until someone enables it")
+    out.append(f"now: {'open: ' + t['text'] if t['state'] == 'open' else t['state_text']}")
+    for v in t.get("waiting") or []:
+        out.append(f"waits: {(v['rev'] or '')[:12]} since {show_time(v['since'])} (run #{v['run']})"
+                   + (f", yes from {v['approved_by']}" if v.get("approved_by") else "")
+                   + (f", let pass by {v['passed_by']}" if v.get("passed_by") else ""))
+    return [indent + line for line in out]
+
+
 def render_pipeline(a, res):
     sub = a.plcmd
+    if sub in ("transition", "block", "unblock", "delay", "disable", "enable"):
+        print(f"pipeline {res['pipeline']}: the transition into stage {res['stage']}"
+              + (f": {res['changed']}" if res.get("changed") else ""))
+        print("\n".join(_transition_lines(res)))
+        return
+    if sub == "pass":
+        print(f"pipeline {res['pipeline']}: version {res['version']} passes the controls of the transition into stage "
+              f"{res['stage']} once (run #{res['run']})" + ("; it still waits for the yes of the transition: maxpm "
+                                                             "pipeline approve" if res["waits_for_yes"] else ""))
+        return
+    if sub == "freeze":
+        print(f"pipeline {res['pipeline']}: {res['changed']}")
+        return
     if sub == "list":
         if not res:
             print("no pipelines; add one: maxpm pipeline add <name> --project <project>")
@@ -7626,21 +7729,24 @@ def render_pipeline(a, res):
                   + (f"; in versions {', '.join(v[:7] for v in p['versions'])}" if p["versions"] else ""))
         return
     if sub in ("hold", "unhold"):
-        what = f"the gate of stage {res['stage']}" if res["stage"] else "every stage"
-        print(f"pipeline {res['pipeline']}: {what} " + (f"is held: {res['held']}" if res["held"] else "goes on"))
+        what = f"the transition into stage {res['stage']}" if res["stage"] else "every stage"
+        print(f"pipeline {res['pipeline']}: {what} " + ((f"is blocked: {res['held']}" if res["stage"] else
+                                                          f"is held: {res['held']}") if res["held"] else "goes on"))
         return
     if sub in ("rollback", "rerun-failed"):
         print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']})"
-              + (f"; {res['held']}: its gate holds until maxpm pipeline unhold {res['pipeline']} {res['stage']}"
-                 if res.get("held") else ""))
+              + (f"; {res['held']}: the transition into it is blocked until maxpm pipeline unblock {res['pipeline']} "
+                 f"{res['stage']}" if res.get("held") else ""))
         return
     if sub == "start":
         print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"
-              f" maxpm serve runs each stage when its gate opens. Follow it: maxpm pipeline show {res['pipeline']}")
+              f" maxpm serve runs each stage when the transition into it lets the version in. Follow it: maxpm "
+              f"pipeline show {res['pipeline']}")
         return
     if sub == "approve":
-        print(f"pipeline {res['pipeline']}: version {res['version']} may enter stage {res['stage']} (run "
-              f"#{res['run']}); maxpm serve starts it at its next pass")
+        print(f"pipeline {res['pipeline']}: version {res['version']} has the yes of the transition into stage "
+              f"{res['stage']} (run #{res['run']}); maxpm serve starts it at its next pass when no block or window "
+              f"holds it")
         return
     if sub == "add":
         print(f"pipeline {res['name']} added. Next: maxpm pipeline env {res['name']} <env>, then "
@@ -7660,8 +7766,12 @@ def render_pipeline(a, res):
         print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
     for s in res["stages"]:
         does = f"run: {s['run']}" if s["run"] else f"workflow: {s['workflow']}" if s["workflow"] else "nothing to run"
-        print(f"  {s['pos']}. {s['name']}  [{s['kind']}{', env ' + s['env'] if s['env'] else ''}]  gate {s['gate_text']}"
-              f"  {does}")
+        t = s["transition"]
+        print(f"  {s['pos']}. {s['name']}  [{s['kind']}{', env ' + s['env'] if s['env'] else ''}]  mode {t['words']}"
+              + (f", window {t['window']['text']}" if t.get("window") else "")
+              + (", fault rule" if t.get("fault_rule") else "") + f"  {does}")
+        if t["state"] != "open":
+            print(f"       transition: {t['state_text']}")
         r = s["last_run"]
         if r:
             label = f"run #{r['id']}" if "id" in r else f"item #{r['item']}" if r.get("item") else "run"
@@ -7670,7 +7780,7 @@ def render_pipeline(a, res):
                   + (f", ended {r['ended_at']}" if r["ended_at"] else "")
                   + (f": {r['errors']}" if r.get("errors") else ""))
             if r["state"] == "queued" and r.get("gate_note"):
-                print(f"       gate: {r['gate_note']}")
+                print(f"       at the transition: {r['gate_note']}")
             for x in (r.get("step_list") or [])[:12]:  # a default pipeline's steps (#6126)
                 secs = x.get("seconds")
                 print(f"         step {x['name']}" + (f" on {x['host']}" if x.get("host") else "") + f": {x['state']}"

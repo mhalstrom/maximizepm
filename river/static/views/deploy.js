@@ -1,13 +1,13 @@
 // The Deploy tab (#6136; canvas release-tracking Decision 6, mark 2026-11-18: "in the top we have sessions, Plan,
 // Deploy, Terminal tabs"; canvas deploy-tab-mockup pictures 1, 4 and 13). Every pipeline, and every deploy target as
 // its default pipeline, flows left to right (mark: "I want left to right view").
-//   Parts of Deploy (buttons at the top): Pipelines (one row for each pipeline: its stages as bars, the gates between
+//   Parts of Deploy (buttons at the top): Pipelines (one row for each pipeline: its stages as bars, the transitions between
 //   them, what runs where, where its runs come from; above them what waits for the person's yes and the tokens that
 //   fail), Agents, Runners, Where each version runs, Accounts, Audit log.
 //   A pipeline's own page: Stages and Versions (views/pipeline.js, with the release card of each target it names,
 //   views/targets.js), Triggers, Emergency and Audit log (mark 2026-11-18: emergency actions and triggers are on the
 //   pipeline's own page).
-// The red number on the tab counts what waits on the person here: a version at a person's gate, a release that waits
+// The red number on the tab counts what waits on the person here: a version that waits for a person's yes, a release that waits
 // for the person's yes, and each token that is refused or not saved. Reads: GET api/deploy (each pipeline in one
 // read, river/routes/pipeline.py) and api/pipeline-audit. The address: /deploy, /deploy/<part>,
 // /deploy/pipeline/<name>[/<tab>] (app.js writes it from D).
@@ -86,16 +86,20 @@ function drawParts() {
   const el = $("#dpParts"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
 }
 
-// The state of a stage as the list draws it: a person's gate that holds a version is the person's color.
+// The state of a stage as the list draws it: a version that waits for a person's yes is the person's color.
 function barState(p, s) {
   if (s.state === "queued" && p.waits.some(w => w.stage === s.name)) return "human";
   return s.state || "none";
 }
-// The mark of a gate between two stages: › automatic, ⏱ after a time, ✋ a yes, ⛔ held.
+// The mark of the transition between two stages (#6139): › automatic, ✋ a yes, ⏱ a delay, 📦 the release; when a
+// control holds it: ⛔ blocked (or a fault), ⏸ disabled, ❄ frozen, 🕒 outside its window, ⏱ delayed.
+const HOLD_MARK = { blocked: ["⛔", "warn"], fault: ["⛔", "warn"], disabled: ["⏸", ""], frozen: ["❄", "warn"],
+  window: ["🕒", "human"], delayed: ["⏱", ""] };
 function gateMark(s) {
-  if (s.held) return ["⛔", "warn", `Held: ${s.held}`];
-  if (s.gate === "person" || s.gate === "manager") return ["✋", "human", `Waits for a yes: ${s.gate_text}`];
-  if (s.gate_text && s.gate_text !== "auto") return ["⏱", "", s.gate_text];
+  const t = s.transition || { mode: "auto", state: "open", text: "automatic" };
+  if (t.state !== "open") return [...(HOLD_MARK[t.state] || ["⛔", "warn"]), t.state_text];
+  if (t.mode === "yes" || t.mode === "release") return [t.mode === "yes" ? "✋" : "📦", "human", `Waits for ${t.text}`];
+  if (t.mode === "delay") return ["⏱", "", t.text];
   return ["›", "", "Goes on by itself"];
 }
 function sourceChip(p) {
@@ -294,8 +298,9 @@ function triggersHtml(p) {
   ] : [
     rule("a stage fails", p.project ? `MaximizePM opens a fault task in ${esc(p.project)} with the failure and the command that runs the stage again; a later failure of the same stage joins that task.`
       : "nothing: the pipeline names no project to hold a fault task."),
-    rule("a version waits at a person's gate", "MaximizePM asks that person for a yes (a task in What waits for you)."),
-    rule("a version waits at the manager's gate", "MaximizePM alerts the manager once."),
+    rule("a version waits at a transition for a person's yes", "MaximizePM asks that person for a yes (a task in What waits for you), unless the transition is blocked, disabled or frozen."),
+    rule("a version waits at a transition for the manager's yes or the release", "MaximizePM alerts the manager once."),
+    rule("a fault of the pipeline is open", "each transition with the fault rule is blocked until the fault closes."),
   ];
   return `<div class="dp-cards">${rules.join("")}</div><div class="muted t-s">These rules are the same for every pipeline now.</div>`;
 }
@@ -320,7 +325,7 @@ function emergencyHtml(p) {
       <span class="pl-ver">${esc(short(s.version))}</span> <span class="muted t-s">${esc(s.state === "queued" ? "waits" : "runs")}</span></span>
       ${button("Stop", { kind: "warn", data: { "dp-stop": s.run }, title: "Stop this run" })}</div>`).join("") : `<div class="muted t-m">Nothing runs now.</div>`}</div>
     <div class="pl-card dp-em-card"><h3>Put an environment back</h3>${envs || `<div class="muted t-m">This pipeline has no environment.</div>`}
-      <div class="muted t-s">The deploy stage runs with that version, and its gate holds after it, so no newer version comes by itself.</div></div>
+      <div class="muted t-s">The deploy stage runs with that version, and the transition into it is blocked after it, so no newer version comes by itself.</div></div>
   </div><div class="muted t-s">A person or the manager may press these. A hold and a put back ask why; the audit log names who pressed each one.</div>`;
 }
 
@@ -350,6 +355,6 @@ $("#tab-deploy").addEventListener("click", (e) => {
   if (d.dpUnhold) return pipeAct("pipeline_unhold", { pipeline: d.dpUnhold, stage: null }, `${d.dpUnhold} goes on`);
   if (d.dpStop) return pipeAct("pipeline_stop", { pipeline: D.pipeline, run: +d.dpStop }, "Stopped");
   if (d.dpRollback) return askReason(`Put ${short(d.rev)} back on ${d.dpRollback}?`,
-    "Its deploy stage runs with this version, and that gate holds until you end the hold, so no newer version comes by itself.",
+    "Its deploy stage runs with this version, and the transition into it is blocked until you unblock it, so no newer version comes by itself.",
     "Put back", (reason) => pipeAct("pipeline_rollback", { pipeline: D.pipeline, env: d.dpRollback, rev: d.rev, reason }, `${d.dpRollback} goes back to ${short(d.rev)}`));
 });

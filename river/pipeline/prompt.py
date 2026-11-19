@@ -93,7 +93,7 @@ def run_text(conn, run_id):
     out = [f"run #{r['id']} of stage {r['stage']} ({r['kind']}), pipeline {r['pipeline']}: {r['state']}"
            + (f", version {r['version']}" if r["version"] else "") + (f": {r['errors']}" if r["errors"] else "")]
     if r.get("gate_note") and r["state"] == "queued":
-        out.append(f"  gate: {r['gate_note']}")
+        out.append(f"  at the transition: {r['gate_note']}")
     for s in r["step_list"]:
         out.append(f"  step {s['name']}" + (f" on {s['host']}" if s["host"] else "") + f": {s['state']}"
                    + (f", {s['seconds']:.0f}s" if s["seconds"] is not None else "") + (f" ({s['note']})" if s["note"] else ""))

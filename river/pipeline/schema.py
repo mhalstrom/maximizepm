@@ -53,8 +53,6 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   run          TEXT,                     -- the project's command that does the work
   workflow     TEXT,                     -- or the forge workflow or job that does it
   env_id       INTEGER,                  -- a deploy stage's environment
-  gate         TEXT NOT NULL DEFAULT 'auto',  -- who lets a version in: auto, manager, person
-  gate_rule    TEXT,                     -- auto: how long the checks before it must pass (30m); person: the name
   created_by   TEXT,                     -- 'event' when an event named a stage the pipeline did not have
   created_at   TEXT NOT NULL,
   removed_at   TEXT,                     -- a removed stage keeps its runs; adding its name again brings it back
@@ -63,10 +61,41 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   check_cmd    TEXT,                     -- ... the check of one server after its deploy (MAXPM_HOST)
   rollback_cmd TEXT,                     -- ... puts the version before back on one server (MAXPM_HOST, MAXPM_PREV_REV)
   wave_wait    TEXT,                     -- ... how long the checks of a wave must hold before the next wave
-  held_reason  TEXT,                     -- a hold of its gate: no new version enters (one sent on purpose does, #6117)
-  held_by      TEXT,
-  held_at      TEXT,
   UNIQUE (pipeline_id, name)
+);
+
+-- The transition into each stage (#6139): the arrow from the stage before it, which controls only the flow (the
+-- tests and checks run inside the stages). A stage with no row has an automatic arrow with no controls. Each change
+-- is a line of pipeline_changes. Readers: the runner (may a waiting version enter: transitions.check), the view and
+-- maxpm pipeline show (the arrow: transitions.describe), the export.
+CREATE TABLE IF NOT EXISTS pipeline_transitions (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  stage_id     INTEGER NOT NULL UNIQUE,  -- the stage it lets versions into
+  mode         TEXT NOT NULL DEFAULT 'auto',  -- auto, yes, delay, release, forge
+  mode_arg     TEXT,                     -- yes: whose (a person's name, or manager; none: any person); delay: the time;
+                                         -- release: the cadence (2h), or none
+  mode_by      TEXT,
+  mode_at      TEXT,
+  time_window  TEXT,                     -- when a version may pass: 'mon-thu 09:00-17:00 America/Los_Angeles' (';' between)
+  window_by    TEXT,
+  window_at    TEXT,
+  freezes      TEXT,                     -- JSON [{"from", "to", "reason", "by", "at"}]: no version passes in them
+  fault_rule   INTEGER NOT NULL DEFAULT 0,  -- 1: blocked while a fault of the pipeline is open (its own, or ops checks)
+  rule_by      TEXT,
+  rule_at      TEXT,
+  block_reason TEXT,                     -- a block by a person or the manager
+  block_by     TEXT,
+  block_at     TEXT,
+  block_until  TEXT,                     -- ... until this time; none: until someone unblocks it
+  block_item   INTEGER,                  -- ... or until this item of the queue is closed
+  delay_until  TEXT,                     -- a delay: no version passes before this time
+  delay_by     TEXT,
+  delay_at     TEXT,
+  delay_reason TEXT,
+  disabled_reason TEXT,                  -- disabled: no version passes until a person or the manager enables it
+  disabled_by  TEXT,
+  disabled_at  TEXT
 );
 
 -- The '::step' lines of a deploy target's hook run (#6126): its parts with their times, as the hook prints them.
@@ -93,8 +122,10 @@ CREATE TABLE IF NOT EXISTS pipeline_changes (
   pipeline_id  INTEGER NOT NULL,
   at           TEXT NOT NULL,
   actor        TEXT,
-  change       TEXT NOT NULL,            -- in words: 'stage prod added: kind deploy, env prod, gate person mark'
-  detail       TEXT                      -- the stage or environment after the change, as JSON
+  change       TEXT NOT NULL,            -- in words: 'stage prod added: kind deploy, env prod, mode yes mark'
+  detail       TEXT,                     -- the stage or environment after the change, as JSON
+  reason       TEXT,                     -- why, as the actor said it (#6139)
+  until_at     TEXT                      -- a block, delay or freeze: until when
 );
 CREATE INDEX IF NOT EXISTS pipeline_changes_pipeline ON pipeline_changes(pipeline_id, id);
 
@@ -129,8 +160,10 @@ CREATE TABLE IF NOT EXISTS stage_runs (
   output       TEXT,                     -- the last lines of the stage's output
   gate_note    TEXT,                     -- a queued run: why its gate is closed now (the runner, #6114)
   gate_item    INTEGER,                  -- a person gate: the approval item of MaximizePM that asks for the yes
-  approved_by  TEXT,                     -- who let this version in at a manager or person gate
+  approved_by  TEXT,                     -- who gave the yes of the transition's mode (a yes, the release, a delay cut short)
   approved_at  TEXT,
+  passed_by    TEXT,                     -- who let this version pass every control of the transition once (#6139)
+  passed_at    TEXT,
   runner       TEXT,                     -- <pid>:<token> of the maxpm serve process that runs its command
   purpose      TEXT,                     -- rerun, rollback, or failed:<run id> (its failed tests again); none: the flow
   fault_item   INTEGER,                  -- the fault item of MaximizePM that a failed run opened or joined (#6118)
@@ -231,13 +264,44 @@ def migrate(conn):
               "forge_url"):
         if c not in cols:  # #6119, #6117, #6121
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
-    for c in ("removed_at", "junit", "held_reason", "held_by", "held_at", "waves", "check_cmd", "rollback_cmd",
-              "wave_wait"):  # #6113, #6114, #6117, #6120
-        if c not in cols:
+    stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
+    for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait"):  # #6113, #6114, #6120
+        if c not in stage_cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}
     for c, t in (("gate_note", "TEXT"), ("gate_item", "INTEGER"), ("approved_by", "TEXT"), ("approved_at", "TEXT"),
-                 ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER")):  # #6114, #6117, #6118
+                 ("runner", "TEXT"), ("purpose", "TEXT"), ("fault_item", "INTEGER"), ("passed_by", "TEXT"),
+                 ("passed_at", "TEXT")):  # #6114, #6117, #6118, #6139
         if c not in cols:
             conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {c} {t}")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_changes)")}
+    for c in ("reason", "until_at"):  # #6139
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipeline_changes ADD COLUMN {c} TEXT")
+    _gates_to_transitions(conn, stage_cols)
+
+
+_OLD_MODES = {"manager": ("yes", "manager"), "forge": ("forge", None)}
+
+
+def _gates_to_transitions(conn, stage_cols):
+    """#6139, once: before the transitions, a stage had a gate (pipeline_stages.gate and gate_rule: auto, auto after
+    30m, manager, person [name], forge) and a hold (held_reason, held_by, held_at). Each becomes the transition into
+    that stage: auto after 30m a delay of 30m, manager the manager's yes, person a person's yes, a hold a block with no
+    end. The old columns stay in a queue made before (SQLite keeps them); no code reads them after this."""
+    if conn.execute("SELECT 1 FROM meta WHERE key='pipeline_transitions_6139'").fetchone():
+        return
+    if "gate" in stage_cols:
+        held = "held_reason" in stage_cols
+        for s in conn.execute("SELECT * FROM pipeline_stages").fetchall():
+            gate, rule = s["gate"] or "auto", s["gate_rule"]
+            mode, arg = ("delay", rule) if gate == "auto" and rule else ("yes", rule) if gate == "person" else \
+                _OLD_MODES.get(gate, ("auto", None))
+            block = s["held_reason"] if held else None
+            if mode == "auto" and not block:
+                continue
+            conn.execute("INSERT OR IGNORE INTO pipeline_transitions(pipeline_id, stage_id, mode, mode_arg, mode_by, "
+                         "mode_at, block_reason, block_by, block_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (s["pipeline_id"], s["id"], mode, arg, s["created_by"], s["created_at"], block,
+                          s["held_by"] if block else None, s["held_at"] if block else None))
+    conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('pipeline_transitions_6139', datetime('now'))")

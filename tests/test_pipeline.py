@@ -49,7 +49,7 @@ class Definitions(Base):
         p = store.show(self.c, "toolscaled")
         self.assertEqual([s["name"] for s in p["stages"]], ["build", "test", "review", "beta", "prod"])
         prod = p["stages"][-1]
-        self.assertEqual((prod["env"], prod["gate"], prod["kind"]), ("prod", "person", "deploy"))
+        self.assertEqual((prod["env"], prod["transition"]["mode"], prod["kind"]), ("prod", "yes", "deploy"))
         self.assertEqual([e["name"] for e in p["envs"]], ["beta", "prod"])
         self.assertEqual(p["envs"][1]["target"], "toolscaled-prod")
 
@@ -95,7 +95,7 @@ class Commands(Base):
             code, out = self.cli("pipeline", *words)
             self.assertEqual(code, 0, out)
         code, out = self.cli("pipeline", "show", "toolscaled")
-        self.assertIn("5. prod  [deploy, env prod]  gate auto after 30m  run: make prod-release", out)
+        self.assertIn("5. prod  [deploy, env prod]  mode delay 30m  run: make prod-release", out)
         self.assertIn("env prod: no version yet  (target toolscaled-prod)", out)
         path = os.path.join(self.dir.name, "toolscaled-pipeline.json")
         self.cli("pipeline", "export", "toolscaled", "--file", path)
@@ -103,14 +103,15 @@ class Commands(Base):
             exp = json.load(f)
         self.assertEqual([s["name"] for s in exp["stages"]], ["build", "test", "review", "beta", "prod"])
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
-                                             "workflow": None, "env": "prod", "gate": "auto after 30m",
-                                             "junit": None, "waves": None, "check": None, "rollback": None,
-                                             "wave_wait": None})
+                                             "workflow": None, "env": "prod", "junit": None, "waves": None,
+                                             "check": None, "rollback": None, "wave_wait": None,
+                                             "transition": {"mode": "delay 30m", "window": None, "freezes": [],
+                                                            "fault_rule": False}})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
         code, out = self.cli("pipeline", "history", "toolscaled")
         lines = out.strip().split("\n")
         self.assertEqual(len(lines), 9)
-        self.assertIn("mark: stage prod changed: gate person mark -> auto after 30m", lines[0])
+        self.assertIn("mark: stage prod changed: mode yes mark -> delay 30m", lines[0])
         self.assertIn("mark: pipeline toolscaled added for project toolscaled", lines[-1])
 
     def test_an_agent_may_not_change_a_pipeline(self):
@@ -150,13 +151,19 @@ class Commands(Base):
         define.env_set(self.c, "toolscaled", "prod", url="https://toolscaled.com", actor="mark")
         self.assertEqual(store.show(self.c, "toolscaled")["envs"][1]["url"], "https://toolscaled.com")
 
-    def test_gate_rules(self):
-        self.assertEqual([define.parse_gate(t) for t in ("auto", "auto after 30m", "manager", "person", "person mark")],
-                         [("auto", None), ("auto", "30m"), ("manager", None), ("person", None), ("person", "mark")])
-        for bad in ("", "auto after", "auto after soon", "anyone", "person a b", "manager mark"):
+    def test_modes_of_a_transition_and_the_words_of_the_old_gates(self):
+        from river.pipeline import transitions as tr
+        self.assertEqual([tr.parse_mode(t) for t in ("auto", "auto after 30m", "manager", "person", "person mark",
+                                                     "yes", "yes mark", "yes manager", "delay 10m", "release",
+                                                     "release every 2h", "forge")],
+                         [("auto", None), ("delay", "30m"), ("yes", "manager"), ("yes", None), ("yes", "mark"),
+                          ("yes", None), ("yes", "mark"), ("yes", "manager"), ("delay", "10m"), ("release", None),
+                          ("release", "2h"), ("forge", None)])
+        for bad in ("", "auto after", "auto after soon", "anyone", "person a b", "manager mark", "delay", "release 2h"):
             with self.assertRaises(RiverError):
-                define.parse_gate(bad)
-        self.assertEqual(store.gate_text("auto", "30m"), "auto after 30m")
+                tr.parse_mode(bad)
+        self.assertEqual([tr.mode_words(*m) for m in (("delay", "30m"), ("release", "2h"), ("yes", "mark"))],
+                         ["delay 30m", "release every 2h", "yes mark"])
 
 
 class Events(Base):
@@ -522,7 +529,7 @@ class Runner(RunnerBase):
         self.passes(2)
         test = self.runs()["test"]
         self.assertEqual(test["state"], "queued")
-        self.assertIn("(auto after 30m) while the checks pass", test["gate_note"])
+        self.assertIn("(a delay of 30m) while the checks pass", test["gate_note"])
         # A failed check of the project since the build keeps it closed.
         cid = self.c.execute("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
                              "recover_after, timeout, severity, created_at) VALUES ('project','app','up','http','{}',"
@@ -577,22 +584,25 @@ class Runner(RunnerBase):
             cli.run(["--as", "mark", "pipeline", "show", "app"])
         text = out.getvalue()
         self.assertIn("version cli0001 waits at stage build", text)
-        self.assertIn("gate: waits for mark's yes on #", text)
+        self.assertIn("at the transition: waits for mark's yes on #", text)
 
 
 class Actions(RunnerBase):
     """Hold, end a hold, roll back, run the failed tests again (#6117); approve, run again and stop are in Runner."""
 
-    def test_a_hold_of_a_gate_and_of_every_stage(self):
+    def test_a_hold_of_a_stage_blocks_its_transition_and_a_hold_of_every_stage(self):
         self.runner.hold(self.c, "app", "beta", "the payment provider has an outage", actor="mark")
         self.runner.start(self.c, "app", rev="hold001")
         out = self.passes(4)
         beta = self.runs()["beta"]
         self.assertEqual(beta["state"], "queued")
-        self.assertIn("held by mark: the payment provider has an outage", out[-1]["waiting"][beta["id"]])
-        # A version sent on purpose passes a held gate; a hold of every stage stops even that.
+        self.assertIn("blocked by mark: the payment provider has an outage", out[-1]["waiting"][beta["id"]])
+        # A version let pass on purpose passes the block; a hold of every stage stops even that.
         self.runner.hold(self.c, "app", None, "release freeze", actor="mark")
-        self.runner.approve(self.c, "app", "beta", actor="mark")
+        with self.assertRaises(RiverError):  # an automatic transition takes no yes: pass is the way
+            self.runner.approve(self.c, "app", "beta", actor="mark")
+        from river.pipeline import transitions as tr
+        tr.let_pass(self.c, "app", "beta", reason="the outage does not touch beta", actor="mark")
         out = self.passes(1)
         self.assertIn("every stage is held by mark: release freeze", out[-1]["waiting"][beta["id"]])
         self.runner.release_hold(self.c, "app", None, actor="mark")
@@ -600,14 +610,15 @@ class Actions(RunnerBase):
         self.assertEqual(self.runs()["beta"]["state"], "passed")
         self.runner.release_hold(self.c, "app", "beta", actor="mark")
         with self.assertRaises(RiverError):
-            self.runner.release_hold(self.c, "app", "beta", actor="mark")  # not held
+            self.runner.release_hold(self.c, "app", "beta", actor="mark")  # not blocked
         with self.assertRaises(RiverError):
             self.runner.hold(self.c, "app", "beta", "  ", actor="mark")  # no reason
         with self.assertRaises(RiverError):
             self.runner.hold(self.c, "app", "beta", "x", actor="w1")  # an agent
-        changes = [h["change"] for h in define.history(self.c, "app")[:6]]
+        changes = [h["change"] for h in define.history(self.c, "app")[:8]]
         self.assertIn("held every stage: release freeze", changes)
-        self.assertIn("ended the hold of the gate of stage beta", changes)
+        self.assertIn("unblocked the transition test -> beta", changes)
+        self.assertIn("let version hold001 pass the transition test -> beta once (run #3)", changes)
 
     def test_roll_back_an_environment(self):
         for rev in ("old0001", "new0002"):
@@ -648,6 +659,214 @@ class Actions(RunnerBase):
         with self.assertRaises(RiverError):
             self.runner.rerun_failed(self.c, self.runs()["build"]["id"], actor="mark")  # no failed test
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], build_runs)
+
+
+class Transitions(RunnerBase):
+    """The transition into each stage (#6139): its mode, its time (a window, freezes), a block, the fault rule, a
+    delay, disabled, approve and let one version pass; each change a line of the audit log with its reason."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import transitions
+        self.tr = transitions
+
+    def waits_at_beta(self, rev):
+        self.runner.start(self.c, "app", rev=rev)
+        out = self.passes(4)
+        beta = self.runs()["beta"]
+        self.assertEqual(beta["state"], "queued")
+        return out[-1]["waiting"][beta["id"]]
+
+    def span(self, a, b):
+        """A daily window from now + a hours to now + b hours, in UTC."""
+        t = core.now()
+        return f"{(t + core.timedelta(hours=a)):%H:%M}-{(t + core.timedelta(hours=b)):%H:%M} UTC"
+
+    def test_a_time_window_lets_versions_pass_only_inside_it(self):
+        self.tr.change(self.c, "app", "beta", window=self.span(2, 3), reason="beta deploys by day", actor="mark")
+        note = self.waits_at_beta("win0001")
+        self.assertIn(f"outside its window ({self.span(2, 3)}): opens", note)
+        arrow = store.show(self.c, "app")["stages"][2]["transition"]
+        self.assertEqual((arrow["state"], arrow["window"]["open"], arrow["set_by"]), ("window", False, "mark"))
+        self.assertEqual([w["rev"] for w in arrow["waiting"]], ["win0001"])
+        self.tr.change(self.c, "app", "beta", window=self.span(-1, 1), actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        with self.assertRaises(RiverError):
+            self.tr.change(self.c, "app", "beta", window="fri 9-17", actor="mark")  # no time span
+        with self.assertRaises(RiverError):
+            self.tr.change(self.c, "app", "beta", window="someday 09:00-17:00", actor="mark")
+        self.tr.change(self.c, "app", "beta", window="none", actor="mark")
+        self.assertIsNone(self.tr.get(self.c, store.show(self.c, "app")["stages"][2]["id"])["time_window"])
+
+    def test_windows_by_day_and_over_midnight(self):
+        from datetime import datetime, timezone
+        w = self.tr.parse_window("mon-thu 09:00-17:00 UTC; sat 22:00-04:00 UTC")
+        at = lambda *a: datetime(*a, tzinfo=timezone.utc)
+        self.assertEqual(self.tr.window_state(w, at(2026, 11, 16, 10, 0)), (True, at(2026, 11, 16, 17, 0)))  # Mon
+        self.assertEqual(self.tr.window_state(w, at(2026, 11, 20, 10, 0)), (False, at(2026, 11, 21, 22, 0)))  # Fri
+        self.assertEqual(self.tr.window_state(w, at(2026, 11, 22, 3, 0)), (True, at(2026, 11, 22, 4, 0)))  # Sun 03:00
+        self.assertEqual(self.tr.parse_window("weekdays 08:00-18:00")[0]["days"], [0, 1, 2, 3, 4])
+        self.assertEqual(self.tr.parse_window("fri-mon 08:00-18:00")[0]["days"], [0, 4, 5, 6])
+
+    def test_a_freeze_of_every_transition_and_its_end(self):
+        r = self.tr.freeze(self.c, "app", None, end="2h", reason="the holidays", actor="mark")
+        self.assertIn("froze every transition from", r["changed"])
+        self.runner.start(self.c, "app", rev="frz0001")
+        out = self.passes(1)
+        self.assertIn("frozen until", out[-1]["waiting"][self.runs()["build"]["id"]])
+        self.tr.freeze(self.c, "app", clear=True, actor="mark")
+        self.passes(4)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        with self.assertRaises(RiverError):  # nothing left to remove
+            self.tr.freeze(self.c, "app", clear=True, actor="mark")
+        with self.assertRaises(RiverError):  # no reason
+            self.tr.freeze(self.c, "app", "beta", end="2h", actor="mark")
+
+    def test_a_block_until_a_time_or_an_item_ends_by_itself(self):
+        self.tr.block(self.c, "app", "beta", "the payment provider is down", until="1h", actor="mark")
+        self.assertIn("blocked by mark: the payment provider is down (until", self.waits_at_beta("blk0001"))
+        sid = self.runs()["beta"]["stage_id"]
+        self.c.execute("UPDATE pipeline_transitions SET block_until=? WHERE stage_id=?",
+                       (core.iso(core.now() - core.timedelta(minutes=1)), sid))
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        self.assertIsNone(self.tr.get(self.c, sid)["block_reason"])
+        self.assertIn("transition test -> beta: the block of mark ended (its time came)",
+                      [h["change"] for h in define.history(self.c, "app")])
+        # Until an item closes: a fault, a person's task.
+        item = core.item_add(self.c, "app", "Find out why sign-in fails")["id"]
+        self.tr.block(self.c, "app", "beta", "sign-in fails", until_done=item, actor="mark")
+        self.assertIn(f"(until #{item} closes)", self.waits_at_beta("blk0002"))
+        core.done(self.c, item, actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        line = self.c.execute("SELECT reason, until_at FROM pipeline_changes WHERE change LIKE 'blocked%' ORDER BY id "
+                              "DESC").fetchone()
+        self.assertEqual(tuple(line), ("sign-in fails", f"#{item}"))
+
+    def test_the_fault_rule_blocks_while_a_fault_of_the_pipeline_is_open(self):
+        self.tr.change(self.c, "app", "beta", fault_rule=True, actor="mark")
+        fault = core.item_add(self.c, "app", "pipeline:app:watch failed for old0001: 1 of 8 checks fails",
+                              kind="operational", doer="ai")["id"]
+        self.assertIn(f"blocked while fault #{fault} is open", self.waits_at_beta("flt0001"))
+        arrow = store.show(self.c, "app")["stages"][2]["transition"]
+        self.assertEqual((arrow["state"], arrow["fault"]["id"], arrow["until"]), ("fault", fault, f"#{fault}"))
+        core.drop(self.c, fault, "mark", note="a false alarm")
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+
+    def test_disable_and_a_delay_hold_until_someone_ends_them(self):
+        self.tr.disable(self.c, "app", "beta", "the new runner is not ready", actor="mark")
+        self.assertIn("disabled by mark: the new runner is not ready", self.waits_at_beta("dis0001"))
+        self.tr.delay(self.c, "app", "beta", "2h", reason="wait for the database copy", actor="mark")
+        self.tr.enable(self.c, "app", "beta", actor="mark")
+        out = self.passes(1)
+        self.assertIn("delayed until", out[-1]["waiting"][self.runs()["beta"]["id"]])
+        self.tr.delay(self.c, "app", "beta", "none", actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        for call in (lambda: self.tr.enable(self.c, "app", "beta", actor="mark"),  # not disabled
+                     lambda: self.tr.disable(self.c, "app", "beta", "", actor="mark"),  # no reason
+                     lambda: self.tr.disable(self.c, "app", "beta", "x", actor="w1"),  # an agent
+                     lambda: self.tr.block(self.c, "app", "nope", "x", actor="mark")):  # no such stage
+            with self.assertRaises(RiverError):
+                call()
+
+    def test_a_yes_while_blocked_waits_and_a_blocked_transition_asks_nobody(self):
+        self.tr.block(self.c, "app", "prod", "fault #6141: backend errors", actor="mark")
+        self.runner.start(self.c, "app", rev="yes0001")
+        self.passes(5)
+        prod = self.runs()["prod"]
+        self.assertIsNone(prod["gate_item"])  # nobody is asked while it is blocked
+        self.runner.approve(self.c, "app", "prod", actor="mark")
+        out = self.passes(1)
+        self.assertIn("blocked by mark: fault #6141: backend errors (until someone unblocks it); mark said yes",
+                      out[-1]["waiting"][prod["id"]])
+        self.tr.unblock(self.c, "app", "prod", actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["prod"]["state"], "passed")
+
+    def test_let_one_version_pass_a_block_but_not_a_named_person_s_yes(self):
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.tr.block(self.c, "app", "prod", "release freeze", actor="mark")
+        self.runner.start(self.c, "app", rev="pas0001")
+        self.passes(5)
+        r = self.tr.let_pass(self.c, "app", "prod", reason="the hotfix for checkout", actor="boss")
+        self.assertTrue(r["waits_for_yes"])  # the transition takes mark's yes; the manager passes only the block
+        self.passes(1)
+        prod = self.runs()["prod"]
+        self.assertEqual((prod["state"], prod["passed_by"]), ("queued", "boss"))
+        self.assertIn("waits for mark's yes on #", prod["gate_note"])  # asked now: the block no longer holds it
+        core.done(self.c, prod["gate_item"], actor="mark")
+        self.passes(1)
+        self.assertEqual(self.runs()["prod"]["state"], "passed")
+        with self.assertRaises(RiverError):  # nothing waits there now
+            self.tr.let_pass(self.c, "app", "prod", reason="again", actor="mark")
+
+    def test_the_release_with_a_cadence(self):
+        self.tr.change(self.c, "app", "beta", mode="release every 2h", actor="mark")
+        self.runner.start(self.c, "app", rev="rel0001")
+        self.passes(4)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")  # the first version: no release before it
+        self.runner.start(self.c, "app", rev="rel0002")
+        out = self.passes(4)
+        beta = self.runs()["beta"]
+        self.assertIn("waits for the release: the cadence lets the next version in at", out[-1]["waiting"][beta["id"]])
+        self.runner.approve(self.c, "app", "beta", actor="mark")  # the manager or a person releases it now
+        self.passes(1)
+        self.assertEqual(self.runs()["beta"]["state"], "passed")
+        with self.assertRaises(RiverError):
+            self.tr.change(self.c, "app", "beta", mode="release every 2h", actor="mark")  # the same already
+
+    def test_the_cli_shows_and_changes_a_transition(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            for words in (("transition", "app", "prod", "--window", "mon-thu 09:00-17:00 America/Los_Angeles",
+                           "--fault-rule", "on", "--reason", "mark: no prod deploys on Fridays"),
+                          ("block", "app", "prod", "--reason", "fault #6141", "--until", "2h"),
+                          ("freeze", "app", "prod", "--from", "2026-11-26T00:00", "--to", "2026-11-28T23:00",
+                           "--reason", "Thanksgiving"),
+                          ("transition", "app", "prod"), ("show", "app")):
+                self.assertEqual(cli.run(["--as", "mark", "pipeline", *words]), 0)
+        text = out.getvalue()
+        self.assertIn("pipeline app: the transition into stage prod: window none -> mon-thu 09:00-17:00 "
+                      "America/Los_Angeles; blocked while a fault of the pipeline is open", text)
+        self.assertIn("  mode: yes mark, mark's yes", text)
+        self.assertIn("  block: fault #6141 (set by mark", text)
+        self.assertIn(": Thanksgiving (set by mark)", text)
+        self.assertIn("  now: blocked by mark: fault #6141 (until", text)
+        self.assertIn("4. prod  [deploy, env prod]  mode yes mark, window mon-thu 09:00-17:00 America/Los_Angeles, "
+                      "fault rule  run: echo prod", text)
+        exp = define.export(self.c, "app")["stages"][-1]["transition"]
+        self.assertEqual((exp["mode"], exp["fault_rule"], [f["reason"] for f in exp["freezes"]]),
+                         ("yes mark", True, ["Thanksgiving"]))
+
+    def test_the_gates_and_holds_before_become_transitions(self):
+        """A queue made before #6139: pipeline_stages had gate, gate_rule and held_*; the migration makes them the
+        transition into each stage, once."""
+        from river.pipeline import schema
+        for c in ("gate TEXT NOT NULL DEFAULT 'auto'", "gate_rule TEXT", "held_reason TEXT", "held_by TEXT",
+                  "held_at TEXT"):
+            self.c.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c}")
+        ids = {s["name"]: s["id"] for s in store.show(self.c, "app")["stages"]}
+        self.c.execute("DELETE FROM pipeline_transitions")
+        self.c.execute("UPDATE pipeline_stages SET gate='auto', gate_rule='30m' WHERE name='test'")
+        self.c.execute("UPDATE pipeline_stages SET held_reason='an outage', held_by='mark' WHERE name='beta'")
+        self.c.execute("UPDATE pipeline_stages SET gate='person', gate_rule='mark' WHERE name='prod'")
+        self.c.execute("UPDATE pipeline_stages SET gate='manager' WHERE name='build'")
+        self.c.execute("DELETE FROM meta WHERE key='pipeline_transitions_6139'")
+        schema.migrate(self.c)
+        got = {n: self.tr.get(self.c, i) for n, i in ids.items()}
+        self.assertEqual({n: (t["mode"], t["mode_arg"], t["block_reason"]) for n, t in got.items()},
+                         {"build": ("yes", "manager", None), "test": ("delay", "30m", None),
+                          "beta": ("auto", None, "an outage"), "prod": ("yes", "mark", None)})
+        self.c.execute("UPDATE pipeline_stages SET gate='forge'")
+        schema.migrate(self.c)  # once only
+        self.assertEqual(self.tr.get(self.c, ids["build"])["mode"], "yes")
 
 
 class Waves(RunnerBase):
@@ -877,7 +1096,7 @@ class DefaultPipelines(Base):
         self.assertEqual(names, ["cut", "review", "approval", "deploy", "watch"])
         approval = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
                         if s["name"] == "approval")
-        self.assertEqual(approval["gate"], "person")
+        self.assertEqual(approval["transition"]["mode"], "yes")
 
     def test_list_and_show_and_a_target_that_a_pipeline_covers(self):
         from river import cli

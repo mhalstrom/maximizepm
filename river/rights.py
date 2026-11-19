@@ -35,7 +35,9 @@ COMMANDS = {
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
                  "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "rerun": LEAD,
                  "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD,
-                 "fix": ANY, "version": ANY, "item": ANY},  # #6113, #6114, #6116
+                 "fix": ANY, "version": ANY, "item": ANY,  # #6113, #6114, #6116
+                 "transition": LEAD, "block": LEAD, "unblock": LEAD, "delay": LEAD, "disable": LEAD,
+                 "enable": LEAD, "pass": LEAD, "freeze": LEAD},  # #6139
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -89,7 +91,8 @@ OPS.update({op: LEAD for op in (
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
     "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",
     "resume", "pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
-    "pipeline_rollback", "pipeline_stop")})
+    "pipeline_rollback", "pipeline_stop", "pipeline_transition", "pipeline_block", "pipeline_unblock",
+    "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze")})
 OPS.update({op: ONLY_PERSON for op in (
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
     "relay_disconnect", "release_changes", "release_download", "release_now", "release_update", "rqs_connect", "session_interrupt",

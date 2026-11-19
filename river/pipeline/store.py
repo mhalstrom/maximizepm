@@ -3,7 +3,8 @@
 Every change of a run, a step, a test or an environment comes from an event (ingest): an adapter's CDEvents, the
 '::step' lines of a stage's output (steps.py), a JUnit report (junit.py), or a call of the runner (run_start,
 run_finish), which makes its own event. ingest keeps each event in pipeline_events and applies it to the records.
-The definitions of a pipeline (its stages, environments and gates) are in define.py, with their history.
+The definitions of a pipeline (its stages and environments) are in define.py, the transitions into its stages in
+transitions.py, each with its history.
 
 The reads (pipelines, show, versions, run_show, tests, events) are what the view, the runner and the MaximizePM
 connection read; each stays under 100 ms (policy p147) on indexed columns.
@@ -18,7 +19,6 @@ from .. import core
 from . import cdevents
 
 STAGE_KINDS = ("build", "test", "review", "approve", "deploy", "check", "other")
-GATES = ("auto", "manager", "person", "forge")
 RUN_STATES = ("queued", "running", "passed", "failed", "cancelled", "skipped")
 FINAL = ("passed", "failed", "cancelled", "skipped")
 OUTPUT_LINES = 60  # a run keeps its last lines
@@ -61,11 +61,6 @@ def _pipeline(conn, name):
     if not row:
         raise core.RiverError(f"no pipeline named {name!r}; a person or the manager adds it first")
     return row
-
-
-def gate_text(gate, rule):
-    """A gate as the words of maxpm pipeline gate: auto, auto after 30m, manager, person, person mark."""
-    return f"{gate} after {rule}" if gate == "auto" and rule else f"{gate} {rule}" if rule else gate
 
 
 # ---------------------------------------------------------------- records an event names (inside a tx)
@@ -427,9 +422,11 @@ def _run_dict(conn, r):
 
 
 def show(conn, name):
-    """A pipeline for the view: its stages left to right, each with its last run, and its environments with the
-    version that runs there now and their last deploys."""
+    """A pipeline for the view: its stages left to right, each with its last run and the transition into it (the
+    arrow before it, #6139), and its environments with the version that runs there now and their last deploys."""
+    from . import transitions
     p = dict(_pipeline(conn, name))
+    cache = {}  # one read of the pipeline's open faults for all its arrows
     envs = {}
     for e in conn.execute("SELECT e.*, v.rev FROM pipeline_envs e LEFT JOIN pipeline_versions v ON v.id=e.version_id "
                           "WHERE e.pipeline_id=? AND e.removed_at IS NULL ORDER BY e.id", (p["id"],)):
@@ -442,7 +439,7 @@ def show(conn, name):
     for s in conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
                           (p["id"],)):
         d = dict(s)
-        d["gate_text"] = gate_text(s["gate"], s["gate_rule"])
+        d["transition"] = transitions.describe(conn, s, p, cache)
         d["env"] = envs[s["env_id"]]["name"] if s["env_id"] in envs else None
         d["last_run"] = _run_dict(conn, conn.execute(
             "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())

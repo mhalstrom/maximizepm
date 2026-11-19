@@ -136,6 +136,53 @@ try {
         self.assertEqual(r["over"], [], r)
         self.assertLessEqual(r["scroll"], r["client"], r)
 
+    def test_the_arrows_of_a_pipeline_show_their_transitions_and_open_their_controls(self):
+        """#6139: each arrow between two stages shows its mode or the control that holds it, who set it and the
+        version that waits there; a click opens its controls with their buttons. At 1280 and at 390 px."""
+        from river.pipeline import define, runner, transitions
+        define.pipeline_add(self.c, "app", project="site")
+        define.env_set(self.c, "app", "prod")
+        define.stage_set(self.c, "app", "build", "build")
+        define.stage_set(self.c, "app", "test", "test")
+        define.stage_set(self.c, "app", "beta", "test")
+        define.stage_set(self.c, "app", "prod", "deploy", env="prod", gate="yes mark")
+        transitions.block(self.c, "app", "test", "the test database is down", until="2h", actor="mark")
+        t = core.now()
+        transitions.change(self.c, "app", "beta", window=f"{t + core.timedelta(hours=2):%H:%M}-"
+                           f"{t + core.timedelta(hours=3):%H:%M} UTC", actor="mark")
+        runner._queue(self.c, "app", "test", "abc1234")
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="app"]'), "Deploy: the pipeline app");
+  check(q('#dpList').textContent.includes("⛔"), "the list marks the blocked transition");
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('#plRow [data-pl-arrow="prod"]'), "the arrows of app");
+  const arrow = n => q(`#plRow [data-pl-arrow="${n}"]`).textContent.replace(/\s+/g, " ").trim();
+  const out = { test: arrow("test"), beta: arrow("beta"), prod: arrow("prod"), first: !!q('#plRow [data-pl-arrow="build"]') };
+  q('#plRow [data-pl-arrow="test"]').click();
+  await until(() => q("#plDetail").textContent.includes("The transition build → test"), "the controls of build → test");
+  out.detail = q("#plDetail").textContent.replace(/\s+/g, " ");
+  out.buttons = [...q("#plDetail").querySelectorAll("button")].map(b => b.textContent.trim());
+  out.over = [...q("#plDetail").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5
+    && !e.closest(".pl-table")).map(e => e.tagName + "." + e.className).slice(0, 5);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1280,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertIn("⛔ blocked", r["test"], r)
+            self.assertIn("abc1234 waits", r["test"], r)
+            self.assertIn("🕒 closed", r["beta"], r)
+            self.assertIn("✋ mark's yes", r["prod"], r)
+            self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
+            self.assertIn("the test database is down", r["detail"], r)
+            self.assertIn("abc1234 waits since", r["detail"], r)
+            for b in ("Unblock", "Delay…", "Disable…", "Let abc1234 pass once…", "Freeze…",
+                      "Change the mode or the window…"):
+                self.assertIn(b, r["buttons"], r)
+            self.assertEqual(r["over"], [], r)
+
     def test_every_view_draws_and_its_controls_answer(self):
         """#4656: each tab of the page is a module of its own (views/*.js); each one draws with the queue's data, and
         its controls (and the frame's) still answer a click, with no error on the page."""

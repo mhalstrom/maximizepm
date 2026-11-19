@@ -85,7 +85,28 @@ OPS = {
     "pipeline_stop": lambda c, a, who: _runner().stop(c, int(a["run"]), who),
     # #6118: the prompt of a failed run as a fix task, and with start a session on it
     "pipeline_fix": lambda c, a, who: _links().fix_task(c, int(a["run"]), who, bool(a.get("start"))),
+    # #6139: the controls of a transition (the arrow into a stage)
+    "pipeline_transition": lambda c, a, who: _transitions().change(
+        c, a["pipeline"], a["stage"], a.get("mode"), a.get("window"),
+        None if a.get("fault_rule") is None else bool(a["fault_rule"]), a.get("reason"), who),
+    "pipeline_block": lambda c, a, who: _transitions().block(c, a["pipeline"], a["stage"], a.get("reason"),
+                                                             a.get("until") or None, a.get("until_done") or None, who),
+    "pipeline_unblock": lambda c, a, who: _transitions().unblock(c, a["pipeline"], a["stage"], who),
+    "pipeline_delay": lambda c, a, who: _transitions().delay(c, a["pipeline"], a["stage"], a.get("until"),
+                                                             a.get("reason"), who),
+    "pipeline_disable": lambda c, a, who: _transitions().disable(c, a["pipeline"], a["stage"], a.get("reason"), who),
+    "pipeline_enable": lambda c, a, who: _transitions().enable(c, a["pipeline"], a["stage"], who),
+    "pipeline_pass": lambda c, a, who: _transitions().let_pass(c, a["pipeline"], a["stage"], a.get("rev"),
+                                                               a.get("reason"), who),
+    "pipeline_freeze": lambda c, a, who: _transitions().freeze(c, a["pipeline"], a.get("stage") or None,
+                                                               a.get("from") or None, a.get("to"), a.get("reason"),
+                                                               bool(a.get("clear")), who),
 }
+
+
+def _transitions():
+    from ..pipeline import transitions
+    return transitions
 
 
 def _links():
@@ -138,21 +159,25 @@ def _strip(stages):
     out = []
     for s in stages:
         r = s.get("last_run") or {}
-        out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "gate": s.get("gate") or "auto",
-                    "gate_text": s.get("gate_text") or "auto", "held": s.get("held_reason"),
+        t = s.get("transition") or {}
+        out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"),
+                    "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
+                                                         "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
                     "run": r.get("id")})
     return out
 
 
 def _person_waits(conn, pipeline_id):
-    """The versions that wait at a person's gate of a pipeline: not approved, not held."""
+    """The versions that wait at a transition for a person's yes: not approved, and the transition not disabled or
+    blocked (#6139)."""
     return [{"stage": r["stage"], "rev": r["rev"], "run": r["id"], "item": r["gate_item"], "since": r["queued_at"],
              "note": r["gate_note"]} for r in conn.execute(
         "SELECT r.id, r.gate_note, r.gate_item, r.queued_at, s.name stage, v.rev FROM stage_runs r "
-        "JOIN pipeline_stages s ON s.id=r.stage_id LEFT JOIN pipeline_versions v ON v.id=r.version_id "
-        "WHERE r.pipeline_id=? AND r.state='queued' AND s.gate='person' AND r.approved_at IS NULL "
-        "AND s.removed_at IS NULL AND s.held_reason IS NULL ORDER BY r.id", (pipeline_id,))]
+        "JOIN pipeline_stages s ON s.id=r.stage_id JOIN pipeline_transitions t ON t.stage_id=s.id "
+        "LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.pipeline_id=? AND r.state='queued' AND "
+        "t.mode='yes' AND COALESCE(t.mode_arg, '')<>'manager' AND r.approved_at IS NULL AND s.removed_at IS NULL "
+        "AND t.block_reason IS NULL AND t.disabled_at IS NULL ORDER BY r.id", (pipeline_id,))]
 
 
 def deploy(conn, path):
@@ -191,7 +216,8 @@ def audit(conn, path):
     from urllib.parse import parse_qs, urlsplit
     q = parse_qs(urlsplit(path).query)
     name = (q.get("pipeline") or [None])[0]
-    sql = ("SELECT c.id, c.at, c.actor, c.change, p.name pipeline FROM pipeline_changes c JOIN pipelines p "
+    sql = ("SELECT c.id, c.at, c.actor, c.change, c.reason, c.until_at, p.name pipeline FROM pipeline_changes c "
+           "JOIN pipelines p "
            "ON p.id=c.pipeline_id")
     args = []
     if name:

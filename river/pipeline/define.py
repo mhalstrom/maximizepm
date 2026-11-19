@@ -1,25 +1,22 @@
-"""The definition of a pipeline: its stages, environments and gates, changed by the maxpm pipeline commands (#6113).
+"""The definition of a pipeline: its stages and environments, changed by the maxpm pipeline commands (#6113).
 
 mark 2026-11-18 (Decision 5 of canvas release-tracking): a pipeline is kept in MaximizePM and changed by commands, as
 the hooks of a target are; maxpm pipeline export prints it as a JSON file to keep in git. Only a person or the
-manager changes a pipeline, since its stages run commands and its gates decide what reaches production. Each change
-is a row of pipeline_changes with its actor (maxpm pipeline history).
+manager changes a pipeline, since its stages run commands and its transitions decide what reaches production. Each
+change is a row of pipeline_changes with its actor (maxpm pipeline history).
 
-Gate rules, in the words of maxpm pipeline gate:
-    auto                 the stage starts by itself when the one before it passed
-    auto after <time>    ... and the checks of the stage before it passed for that long (30m)
-    manager              the manager lets each version in
-    person [<name>]      a person lets each version in (that person, when named)
-    forge                the forge starts the stage's workflow by itself (a push, a tag); MaximizePM only reads it
+The arrow into each stage is a transition (transitions.py, #6139). maxpm pipeline stage --gate (also --mode) and
+maxpm pipeline gate set its mode: auto, yes [<name>|manager], delay <time>, release [every <time>], forge; the words of
+the gates before it (auto after 30m, manager, person [<name>]) still work.
 """
 
 import json
 import re
 
 from .. import core
-from . import store
+from . import store, transitions
 
-_FIELDS = ("kind", "run", "workflow", "env", "gate", "junit", "waves", "check", "rollback", "wave_wait")
+_FIELDS = ("kind", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback", "wave_wait")
 
 
 def parse_waves(text):
@@ -44,28 +41,6 @@ def _may(conn, actor):
 def _change(conn, pid, actor, text, detail=None):
     conn.execute("INSERT INTO pipeline_changes(pipeline_id, at, actor, change, detail) VALUES (?,?,?,?,?)",
                  (pid, store._now(), actor, text, json.dumps(detail, separators=(",", ":")) if detail else None))
-
-
-def parse_gate(text):
-    """(gate, rule) from the words of a gate rule; refuses other words."""
-    words = str(text or "").split()
-    if words[:1] == ["auto"] and len(words) == 1:
-        return "auto", None
-    if words[:2] == ["auto", "after"] and len(words) == 3:
-        try:
-            core.parse_duration(words[2])
-        except (core.RiverError, ValueError):
-            words = []
-        else:
-            return "auto", words[2]
-    if words == ["manager"]:
-        return "manager", None
-    if words == ["forge"]:  # #6119: the forge starts it by itself (a push, a tag); MaximizePM reads its runs
-        return "forge", None
-    if words[:1] == ["person"] and len(words) <= 2:
-        return "person", words[1] if len(words) == 2 else None
-    raise core.RiverError(f"the gate rule {text!r} is not one of: auto; auto after <time> (30m); manager; "
-                          "person; person <name>; forge")
 
 
 def pipeline_add(conn, name, project=None, notes=None, actor=None):
@@ -141,8 +116,9 @@ def _place(conn, pid, stage_id, pos):
 
 def _stage_detail(conn, s):
     env = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (s["env_id"],)).fetchone() if s["env_id"] else None
+    t = transitions.get(conn, s["id"])
     return {"name": s["name"], "pos": s["pos"], "kind": s["kind"], "run": s["run"], "workflow": s["workflow"],
-            "env": env["name"] if env else None, "gate": store.gate_text(s["gate"], s["gate_rule"]),
+            "env": env["name"] if env else None, "mode": transitions.mode_words(t["mode"], t["mode_arg"]),
             "junit": s["junit"],
             "waves": "; ".join(", ".join(w) for w in json.loads(s["waves"])) if s["waves"] else None,
             "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"]}
@@ -158,11 +134,12 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
         raise core.RiverError(f"the stage kind {kind!r} is not one of {', '.join(store.STAGE_KINDS)}")
     if run and workflow:
         raise core.RiverError("a stage runs a command (--run) or a forge workflow (--workflow), not both")
-    rule = parse_gate(gate) if gate is not None else None
+    rule = transitions.parse_mode(gate) if gate is not None else None
     with core.tx(conn):
         _may(conn, actor)
         p = store._pipeline(conn, pipeline)
         pid, row = p["id"], _stage_row(conn, p["id"], name)
+        old = _stage_detail(conn, row) if row is not None else None  # before the mode changes below
         if remove:
             if row is None or row["removed_at"]:
                 raise core.RiverError(f"pipeline {p['name']} has no stage {name}")
@@ -190,8 +167,6 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
                     raise core.RiverError(f"pipeline {p['name']} has no environment {env}; add it first: "
                                           f"maxpm pipeline env {p['name']} {env}")
                 sets["env_id"] = e["id"]
-        if rule is not None:
-            sets["gate"], sets["gate_rule"] = rule
         if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
             sets["junit"] = junit.strip() or None
         if waves is not None:  # a stage over many servers (#6120)
@@ -214,7 +189,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
         else:
             sid = row["id"]
             changed = "added again" if row["removed_at"] else "changed"
-            if changed == "changed" and not sets and pos is None:
+            if changed == "changed" and not sets and pos is None and rule is None:
                 raise core.RiverError(f"stage {name} exists; give what to change: --kind, --run, --workflow, --env, "
                                       "--gate or --pos")
             if row["removed_at"]:
@@ -222,6 +197,10 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
         if sets:
             conn.execute("UPDATE pipeline_stages SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE id=?",
                          list(sets.values()) + [sid])
+        if rule is not None:  # the mode of the transition into the stage (#6139)
+            t = transitions.get(conn, sid)
+            if rule != (t["mode"], t["mode_arg"]):
+                transitions.set_mode(conn, pid, sid, *rule, actor)
         new = _stage_row(conn, pid, name)
         if new["kind"] == "deploy" and not new["env_id"]:
             raise core.RiverError(f"a deploy stage names its environment: maxpm pipeline stage {p['name']} {name} "
@@ -230,11 +209,10 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             _place(conn, pid, sid, pos)
         detail = _stage_detail(conn, _stage_row(conn, pid, name))
         if changed == "changed":
-            old = _stage_detail(conn, row)
             parts = [f"{k} {old[k] or 'none'} -> {detail[k] or 'none'}" for k in ("pos",) + _FIELDS
                      if old[k] != detail[k]]
         else:
-            parts = [f"{k} {detail[k]}" for k in _FIELDS + ("pos",) if detail[k]]
+            parts = [f"{k} {detail[k]}" for k in _FIELDS + ("pos",) if detail[k] and (k, detail[k]) != ("mode", "auto")]
         _change(conn, pid, actor, f"stage {name} {changed}" + (": " + ", ".join(parts) if parts else ""), detail)
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 
@@ -280,7 +258,7 @@ def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=Non
 
 
 def gate_set(conn, pipeline, stage, rule, actor=None):
-    """maxpm pipeline gate: the rule that lets a version into a stage."""
+    """maxpm pipeline gate: the mode of the transition into a stage (the words of transitions.parse_mode)."""
     return stage_set(conn, pipeline, stage, gate=rule, actor=actor)
 
 
@@ -294,6 +272,8 @@ def export(conn, name):
                           (p["id"],)):
         d = _stage_detail(conn, s)
         d.pop("pos")
+        d.pop("mode")
+        d["transition"] = transitions.export(conn, s["id"])  # the arrow into the stage (#6139)
         stages.append(d)
     return {"pipeline": p["name"], "project": p["project"], "notes": p["notes"],
             "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"],

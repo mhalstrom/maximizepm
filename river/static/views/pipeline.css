@@ -18,13 +18,22 @@
 .pl-name { font-weight: 600; }
 .pl-ver { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); }
 .pl-meta { font-size: var(--fs-s); color: var(--muted); }
-.pl-gate { flex: 0 0 calc(var(--w-bar) + var(--sp-4)); display: flex; align-items: center; justify-content: center; position: relative; }
+.pl-gate { flex: 0 0 auto; min-width: calc(var(--w-bar) + var(--sp-4)); padding: 0 var(--sp-2); display: flex;
+  align-items: center; justify-content: center; position: relative; }
 .pl-gate::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: var(--hair-2) solid var(--line); }
 .pl-gate .chip { position: relative; background: var(--panel); white-space: nowrap; }
+/* The transition on the arrow (#6139): a button over the line, with its mark, who set it, until when, and the
+   version that waits there. */
+button.pl-arrow { position: relative; display: flex; flex-direction: column; align-items: center; gap: var(--sp-0);
+  width: auto; text-align: center; padding: var(--sp-1); border-radius: var(--r-m); background: var(--panel);
+  color: var(--ink); max-width: 100%; }
+button.pl-arrow.on { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
+.pl-anote { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: var(--w-input-s); }
+.pl-ctl td:first-child, .pl-ctl th:first-child { white-space: nowrap; }
 .pl-compact .pl-stage { flex-basis: calc(var(--w-col) - var(--w-input-s) + var(--sp-7)); padding: var(--sp-3); }
 .pl-compact .pl-more-line { display: none; }
-.pl-compact .pl-gate { flex-basis: var(--sp-7); }
-.pl-compact .pl-gate .pl-long { display: none; }
+.pl-compact .pl-gate { min-width: var(--sp-7); padding: 0 var(--sp-1); }
 
 /* States: a dot and a word in the state colors. */
 .pl-st { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-s); padding: 0 var(--sp-3);

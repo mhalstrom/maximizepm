@@ -20,6 +20,7 @@ with "default": true.
 from datetime import timedelta
 
 from .. import core
+from . import transitions
 
 RELEASES = 10  # the newest releases a read covers
 WATCH_DEFAULT = timedelta(hours=24)
@@ -188,7 +189,7 @@ def default_pipeline(conn, name):
         releases.append({"deploy": d["id"], "status": d["status"],
                          "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, checks)})
     shape = [("cut", "build", None, "auto"), ("build", "build", hook.get("release-cut"), "auto"),
-             ("review", "review", None, "auto"), ("approval", "approve", None, "person"),
+             ("review", "review", None, "auto"), ("approval", "approve", None, "yes"),
              ("deploy", "deploy", hook.get("deploy"), "auto"), ("watch", "check", None, "auto")]
     stages = []
     for stage, kind, cmd, gate in shape:
@@ -200,8 +201,8 @@ def default_pipeline(conn, name):
             continue
         last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
         stages.append({"name": stage, "pos": len(stages) + 1, "kind": kind, "run": cmd, "workflow": None,
-                       "env": name if stage == "deploy" else None, "gate": gate, "gate_rule": None,
-                       "gate_text": gate, "junit": None, "last_run": last})
+                       "env": name if stage == "deploy" else None, "transition": transitions.plain(gate),
+                       "junit": None, "last_run": last})
     live = done[0] if done else None
     env = {"name": name, "target": name, "url": None, "notes": t["description"],
            "rev": (live["cut_rev"] or f"deploy #{live['id']}") if live else None,

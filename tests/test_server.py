@@ -4195,14 +4195,33 @@ class PipelineRoutes(unittest.TestCase):
         define.pipeline_add(self.c, "web", project=None)
         define.stage_set(self.c, "web", "build", "build")
         ops = ("pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
-               "pipeline_rollback", "pipeline_stop")
+               "pipeline_rollback", "pipeline_stop", "pipeline_transition", "pipeline_block", "pipeline_unblock",
+               "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze")
         for op in ops:
             self.assertIn(op, server.OPS)
             self.assertEqual(rights.OPS[op], rights.LEAD)
+        block = lambda: self.c.execute("SELECT block_reason FROM pipeline_transitions").fetchone()[0]
         server.OPS["pipeline_hold"](self.c, {"pipeline": "web", "stage": "build", "reason": "a freeze"}, "mark")
-        self.assertEqual(self.c.execute("SELECT held_reason FROM pipeline_stages").fetchone()[0], "a freeze")
+        self.assertEqual(block(), "a freeze")
         server.OPS["pipeline_unhold"](self.c, {"pipeline": "web", "stage": "build"}, "mark")
-        self.assertIsNone(self.c.execute("SELECT held_reason FROM pipeline_stages").fetchone()[0])
+        self.assertIsNone(block())
+        # #6139: the controls of the arrow into a stage, each with its reason in the audit log.
+        server.OPS["pipeline_block"](self.c, {"pipeline": "web", "stage": "build", "reason": "fault #1",
+                                              "until": "2h"}, "mark")
+        self.assertEqual(block(), "fault #1")
+        server.OPS["pipeline_unblock"](self.c, {"pipeline": "web", "stage": "build"}, "mark")
+        t = server.OPS["pipeline_transition"](self.c, {"pipeline": "web", "stage": "build", "mode": "yes mark",
+                                                       "window": "mon-fri 09:00-17:00 UTC", "fault_rule": True}, "mark")
+        self.assertEqual((t["words"], t["window"]["text"], t["fault_rule"]), ("yes mark", "mon-fri 09:00-17:00 UTC",
+                                                                              True))
+        server.OPS["pipeline_disable"](self.c, {"pipeline": "web", "stage": "build", "reason": "new runner"}, "mark")
+        server.OPS["pipeline_enable"](self.c, {"pipeline": "web", "stage": "build"}, "mark")
+        server.OPS["pipeline_delay"](self.c, {"pipeline": "web", "stage": "build", "until": "1h", "reason": "wait"}, "mark")
+        server.OPS["pipeline_freeze"](self.c, {"pipeline": "web", "to": "3d", "reason": "holidays"}, "mark")
+        reasons = [r[0] for r in self.c.execute("SELECT reason FROM pipeline_changes WHERE reason IS NOT NULL")]
+        self.assertEqual(reasons, ["a freeze", "fault #1", "new runner", "wait", "holidays"])
+        with self.assertRaises(RiverError):  # no version waits there
+            server.OPS["pipeline_pass"](self.c, {"pipeline": "web", "stage": "build", "reason": "x"}, "mark")
 
     def test_the_deploy_tab_reads_every_pipeline_and_counts_what_waits_on_the_person(self):
         """#6136: api/deploy gives each pipeline (and each target's default pipeline) as a row of stages, where its
@@ -4222,7 +4241,8 @@ class PipelineRoutes(unittest.TestCase):
         d = self.get("/api/deploy")["body"]
         P = {p["name"]: p for p in d["pipelines"]}
         self.assertEqual(set(P), {"app", "gh", "site"})
-        self.assertEqual([(s["name"], s["gate"]) for s in P["app"]["stages"]], [("build", "auto"), ("prod", "person")])
+        self.assertEqual([(s["name"], s["transition"]["mode"], s["transition"]["arg"]) for s in P["app"]["stages"]],
+                         [("build", "auto", None), ("prod", "yes", "mark")])
         self.assertEqual([(w["stage"], w["rev"]) for w in P["app"]["waits"]], [("prod", "abc1234")])
         self.assertEqual(P["app"]["source"]["state"], "local")
         self.assertEqual((P["gh"]["source"]["state"], P["gh"]["source"]["secret"]), ("missing", "github-o"))
