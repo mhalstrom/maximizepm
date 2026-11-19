@@ -1707,8 +1707,11 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIsNotNone(r["pid_start"])
         # The session's own commands (this test's process is below that shell) run as the token's agent.
         from river import cli
-        who = core.token_session(self.c, tok, cli._caller_chain())
-        self.assertEqual((who["agent"], who["role"], who["checked"]), (t["session_name"], "manager", True))
+        chain = cli._caller_chain()
+        who = core.token_session(self.c, tok, chain)
+        # #6191: in an agent's sandbox the kernel gives no process chain (None): the token is then not checked against
+        # the pane's shell, and the session is unchecked. The test asserts the case of the machine it runs on.
+        self.assertEqual((who["agent"], who["role"], who["checked"]), (t["session_name"], "manager", chain is not None))
         # A person's Start (no item) gets a token too, with no role and no scope.
         t2 = server.start_session(self.c, self.dir.name)
         who = core.token_session(self.c, self._token_of(), None)
