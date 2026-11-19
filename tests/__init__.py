@@ -83,6 +83,8 @@ def person_env(env=None):
 server.CLAUDE_JSON = os.devnull  # Claude Code's settings of the person who runs the tests say nothing here (#5892)
 from river import review as _review  # noqa: E402
 _review.COUNT_AGAIN = float("inf")  # the page state starts no git count of the sessions' folders (#5855)
+from river.pipeline import targets as _targets  # noqa: E402
+_targets.SYNC_HOLD["on"] = True  # holding is read in the test's own thread, never after its database is gone (#6140)
 core.LOGIN_PATH_RUNNER = lambda: None  # a test never starts the person's login shell (#5611); a test sets its own
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
 from river import tailnet as _tailnet  # noqa: E402

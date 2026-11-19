@@ -111,7 +111,7 @@ class Accounts(Base):
         app = next(p for p in d["pipelines"] if p["name"] == "app")
         self.assertEqual(app["source"]["state"], "bad")
         self.assertEqual(app["source"]["error"], "GitHub answered 401: Bad credentials")
-        self.assertTrue(app["stages"][0]["no_news"])
+        self.assertTrue(app["stages"][1]["no_news"])  # [0] is holding (#6140)
         self.assertEqual(d["count"], 1)  # one token fails, whatever the number of its pipelines
         page = routes.pipeline(self.c, "/api/pipeline/app")
         self.assertEqual(page["account"]["state"], "refused")
@@ -120,7 +120,7 @@ class Accounts(Base):
         self.age(2)
         accounts.serve_pass(self.c)
         self.assertEqual(accounts.listing(self.c)[0]["state"], "ok")
-        self.assertFalse(routes.deploy(self.c, "/api/deploy")["pipelines"][0]["stages"][0]["no_news"])
+        self.assertFalse(routes.deploy(self.c, "/api/deploy")["pipelines"][0]["stages"][1]["no_news"])
         self.api.routes[("api.github.com", "/user")] = (401, {}, {"message": "Bad credentials"})
         self.age(2)
         accounts.serve_pass(self.c)
@@ -158,7 +158,7 @@ class Accounts(Base):
         self.assertIn("site names the token github-other, but nobody saved it yet", other["error"])
         self.assertNotIn("Bearer value-of-github-other", [c[2] for c in self.api.calls])
         self.assertTrue(next(p for p in routes.deploy(self.c, "/api/deploy")["pipelines"]
-                             if p["name"] == "site")["stages"][0]["no_news"])
+                             if p["name"] == "site")["stages"][1]["no_news"])
 
     def test_gitlab_says_the_end_date_and_scopes_of_its_token(self):
         define.pipeline_add(self.c, "docs")

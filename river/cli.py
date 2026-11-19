@@ -2036,6 +2036,13 @@ def build_parser(only=None):
     x.add_argument("--runs-on", dest="runner", help="where the agent runs (this computer)")
     x.add_argument("--keys", help="credential sets its task gets, comma-separated ('' for none)")
     x.add_argument("--reason", help="off: why")
+    x = pls.add_parser("holding", help="the first stage: the commits that wait for the next release, each with its "
+                       "tasks, the session that wrote it, its changes and its review")
+    x.add_argument("name")
+    x = pls.add_parser("release", help="release from holding: the reviewed commits in order up to the first one not "
+                       "reviewed (a pipeline: its first stage starts; a target: its release is cut, pinned there)")
+    x.add_argument("name"); x.add_argument("--rev", help="release up to this commit")
+    x.add_argument("--all", action="store_true", help="release every commit in holding (a review after it checks them)")
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
@@ -7701,6 +7708,10 @@ def _pipeline_cmd(conn, a, actor):
             path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
             return {"file": str(path), "export": out}
         return out
+    if sub == "holding":  # #6140
+        return targets.holding(conn, a.name, fresh=True)
+    if sub == "release":
+        return targets.release(conn, a.name, a.rev, a.all, actor)
     if sub in ("audit", "correct"):  # #6144
         from .pipeline import audit
         if sub == "correct":
@@ -7797,6 +7808,28 @@ def render_pipeline(a, res):
         return
     if sub == "correct":
         print(f"line {res['line']} corrects line {res['corrects']}")
+        return
+    if sub == "holding":
+        c, rel = res["counts"], res["release"]
+        if not res["folder"]:
+            print(f"holding of {res['pipeline']}: its project has no git folder, so no commits show "
+                  f"(maxpm project path <project> <folder>)")
+        else:
+            print(f"holding of {res['pipeline']}: {len(res['commits'])} commit(s) since {res['base_label'] or 'the start'}"
+                  f" · {c['reviewed']} reviewed, {c['in_review']} in review, {c['not_reviewed']} not reviewed"
+                  f" · +{res['added']} -{res['removed']}")
+        for x in res["commits"]:
+            tasks = " ".join(f"#{t['id']}" for t in x["tasks"])
+            print(f"  {x['sha'][:8]}  {x['subject'][:70]}  {tasks}  by {x['session']}  +{x['added']} -{x['removed']}"
+                  f"  [{x['review']['text']}]")
+        print(f"the release: {rel['text']}" + (f"; {rel['why']}" if rel.get("why") else "")
+              + (f"; release the reviewed commits: maxpm pipeline release {res['pipeline']}" if res["upto"] else "")
+              + (f"; or all: maxpm pipeline release {res['pipeline']} --all" if res["commits"] else ""))
+        return
+    if sub == "release":
+        print(f"released {res['released']} commit(s) of {res['pipeline']} up to {res['rev'][:12]}"
+              + (f": release #{res['release']} is cut" if res.get("release") else f": run #{res['run']} at stage "
+                                                                                 f"{res['stage']}"))
         return
     if sub == "run":
         print(res["text"])

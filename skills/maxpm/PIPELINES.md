@@ -35,8 +35,10 @@ Deploy tab of the page.
   minute with a token, and starts a stage's workflow when its transition lets
   the version in.
 - **Default pipeline**: each deploy target that no pipeline names shows as a
-  pipeline of its own, computed from its releases: cut, build (the
+  pipeline of its own, computed from its releases: holding, build (the
   release-cut hook), review, approval, deploy, watch. It needs no setup.
+- **Holding**: the first stage of every pipeline. It holds the commits that
+  wait for the next release (section "Holding and the release").
 
 ## Set up a pipeline for a project
 
@@ -515,6 +517,36 @@ set, or the manager names one that the person lets the manager grant. When
 you work on a task that a rule added, its context names the rule and the
 event; do what the instructions say, and close the task as any other.
 
+## Holding and the release
+
+Holding is the first stage of every pipeline. MaximizePM computes it from the
+project's git folder (`maxpm project path`): the commits on the main branch
+since the last version that left holding (for a pipeline: the newest version
+that reached its first stage; for a deploy target: the pin of its last done
+release, else the last version tag). It lists them oldest first, each with:
+
+- its tasks (the `#<id>` in its message) and the session that wrote it (its
+  Claude-Session line; else git's author);
+- its changes (added and removed lines; Diff shows the commit);
+- its review: passed in, or in, the review of a cut release that covers it;
+  approved, or changes requested, in the Changes view of its task; else not
+  reviewed.
+
+```
+maxpm pipeline holding <name>                 # the commits, their review, and what the release takes
+maxpm pipeline release <name>                 # the reviewed commits, oldest first, up to the first one not reviewed
+maxpm pipeline release <name> --all           # every commit (a review stage after the release checks them)
+maxpm pipeline release <name> --rev <commit>  # up to that commit
+```
+
+The release is the arrow after holding; only a person or the manager makes
+it. For a pipeline, the version (the last commit it takes) starts at the first
+stage. For a deploy target, its collected release is cut, pinned at that
+commit, as `maxpm target cut <target> --rev <commit>` does; the target's
+cadence and its earlier release still decide when it may go. On the page the
+word is release, never cut. Name your task in each commit message
+(`(#<id>)`), so holding links the commit to it.
+
 ## Actions on a running pipeline
 
 A person or the manager does these; each one goes in the audit log with who
@@ -614,6 +646,6 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: manual
-starts, the holding stage, branches, operators and the override,
+starts, branches, operators and the override,
 and runners that start agents with no person's computer (a rule then names
 one of them).

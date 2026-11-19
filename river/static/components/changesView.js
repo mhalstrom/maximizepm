@@ -19,7 +19,7 @@ const ctxs = {};  // key -> {base, comments, sel}: kept while the page lives, so
 const phone = () => matchMedia("(max-width: 759px)").matches;
 
 function ctxOf(src) {
-  const key = src.session ? "s:" + src.session : (src.range ? "r:" : "i:") + src.item;
+  const key = src.session ? "s:" + src.session : src.holding ? `h:${src.holding}:${src.sha || ""}` : (src.range ? "r:" : "i:") + src.item;
   return ctxs[key] || (ctxs[key] = { base: "origin", comments: [], sel: null, data: null, rows: [] });
 }
 
@@ -27,7 +27,9 @@ export async function renderChanges(box, src) {
   const ctx = ctxOf(src);
   box.classList.add("chg-host");
   box.innerHTML = `<div class="chg muted t-m">Reading the changes…</div>`;
-  const q = src.session ? `session=${encodeURIComponent(src.session)}&base=${ctx.base}` : `item=${src.item}${src.range ? "&range=1" : ""}`;
+  const q = src.session ? `session=${encodeURIComponent(src.session)}&base=${ctx.base}`
+    : src.holding ? `holding=${encodeURIComponent(src.holding)}${src.sha ? "&sha=" + encodeURIComponent(src.sha) : ""}`
+    : `item=${src.item}${src.range ? "&range=1" : ""}`;
   try { ctx.data = await getJson("api/diff?" + q); }
   catch (e) { box.innerHTML = `<div class="chg muted">${esc(e.message)}</div>`; return; }
   draw(box, src, ctx);
@@ -125,14 +127,16 @@ function draw(box, src, ctx) {
         button(t, { cls: "chg-base", pressed: ctx.base === k, data: { "chg-base": k } })).join("")}</div>
        <div class="t-m muted">Against ${esc(d.against || "")}. ${d.commits_ahead != null ? `${d.commits_ahead} commit${d.commits_ahead === 1 ? "" : "s"} not on GitHub.` : ""}</div>
        ${(d.shared || []).length ? `<div class="t-m chg-shared">This folder is shared with ${d.shared.map(esc).join(", ")}: the diff holds every session's changes here. The workspace setting gives each session its own folder and its own diff (#5856).</div>` : ""}`
+    : src.holding ? `<div class="t-m"><b>${esc(d.title)}</b></div>
+       <div class="t-m muted">In holding of ${esc(src.holding)}: ${src.sha ? "one commit" : "every commit that waits for the release"}.</div>`
     : `<div class="t-m"><b>#${d.item}</b> ${esc(d.title)}</div>
        <div class="t-m muted">${d.range ? `Release #${d.item}: all its code, ${esc(d.commits[0]?.subject || "")}.` : d.kind === "deploy" ? `What release #${d.item} ships: the commits of ${d.items.length} item${d.items.length === 1 ? "" : "s"}.` : "The commits whose message names #" + d.item + ", also after the push."}</div>
        ${d.waits ? `<div class="t-m chg-shared">This release waits for your Approve.</div>` : ""}`;
   const n = ctx.comments.length;
   const actions = `<div class="chg-acts">
-    ${n ? button(`Send to agent (${n})`, { kind: "primary", data: { "chg-send": 1 }, title: "Send as one message" }) : ""}
-    ${button("Request changes", { data: { "chg-mark": "changes" }, title: "Send comments, hold push" })}
-    ${button("Approve", { data: { "chg-mark": "approved" }, title: gate ? "The push or release waits for this" : "Mark these changes approved" })}
+    ${n && !src.holding ? button(`Send to agent (${n})`, { kind: "primary", data: { "chg-send": 1 }, title: "Send as one message" }) : ""}
+    ${src.holding ? "" : button("Request changes", { data: { "chg-mark": "changes" }, title: "Send comments, hold push" })}
+    ${src.holding ? "" : button("Approve", { data: { "chg-mark": "approved" }, title: gate ? "The push or release waits for this" : "Mark these changes approved" })}
     ${src.session ? button("Reviewed", { data: { "chg-mark": "reviewed" }, title: "Mark as last review" }) : ""}
     <span class="spacer"></span>
     ${phone() ? "" : `<span class="chg-bar" role="group" aria-label="Layout">${button("Side by side", { cls: "chg-lay", pressed: split, data: { "chg-lay": "split" } })}${button("One column", { cls: "chg-lay", pressed: !split, data: { "chg-lay": "unified" } })}</span>`}
@@ -140,7 +144,7 @@ function draw(box, src, ctx) {
   box.innerHTML = `<div class="chg">${head}
     <div class="chg-sum t-m">${files.length} file${files.length === 1 ? "" : "s"} <span class="chg-plus">+${add}</span> <span class="chg-minus">−${del}</span> ${state} ${gate ? `<span class="muted">${esc(gate)}</span>` : ""}</div>
     ${actions}
-    ${files.length ? `<div class="chg-list" role="list" aria-label="Changed files">${list}</div>` : `<div class="muted chg-note">No changes ${src.session ? "against " + esc(d.against || "this base") : "named #" + d.item + " in a commit yet"}.</div>`}
+    ${files.length ? `<div class="chg-list" role="list" aria-label="Changed files">${list}</div>` : `<div class="muted chg-note">No changes ${src.session ? "against " + esc(d.against || "this base") : src.holding ? "in holding" : "named #" + d.item + " in a commit yet"}.</div>`}
     ${d.cut ? `<div class="t-m muted chg-note">The diff is long: some lines are not shown.</div>` : ""}
     ${d.untracked_more ? `<div class="t-m muted chg-note">And ${d.untracked_more.count} more new files that git does not know: ${
       d.untracked_more.folders.map(([f, k]) => `<span class="chg-path">${esc(f)}</span> ${k}`).join(", ")}. Add them to .gitignore if they are not work.</div>` : ""}
@@ -215,7 +219,12 @@ async function send(box, src, ctx, request) {
 
 // An item's or a release's changes in a large dialog (the item drawer's Changes button).
 let dlg = null;
-export function openItemChanges(id) {
+export function openItemChanges(id) { return openChanges({ item: id }); }
+
+// The commits in holding of a pipeline, or one of them (views/holding.js, #6140): read only, no Approve.
+export function openHoldingChanges(name, sha) { return openChanges({ holding: name, sha: sha || null }); }
+
+function openChanges(src) {
   let el = document.getElementById("changesDlg");
   if (!el) {
     el = document.createElement("div");
@@ -230,5 +239,5 @@ export function openItemChanges(id) {
   const body = el.querySelector(".chg-dbody");
   const fresh = body.cloneNode(false);  // a new body: its listeners are for this item only
   body.replaceWith(fresh);
-  return renderChanges(fresh, { item: id });
+  return renderChanges(fresh, src);
 }

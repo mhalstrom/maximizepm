@@ -55,9 +55,27 @@ def pipeline(conn, path):
         p = targets.default_pipeline(conn, name)
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
         p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
+    _with_holding(conn, name, p["stages"])
     for s in p["stages"]:  # the faults and agents under each stage card (#6149)
         s["work"] = work.get(s["name"]) or {"faults": [], "agents": []}
     return p
+
+
+def _with_holding(conn, name, stages):
+    """Holding as the first stage (#6140): in front of a pipeline's stages, or in the place of the holding stage of a
+    target's default pipeline (whose arrow after it is the release already). The list changes in place."""
+    hs = targets.holding_stage(targets.holding_soon(conn, name))  # the last read at once, a new one in a thread
+    if stages and stages[0]["name"] == "holding":
+        stages[0] = dict(stages[0], holding=hs["holding"], last_run=hs["last_run"], kind="holding")
+    else:
+        stages.insert(0, hs)
+    return stages
+
+
+def holding(conn, path):
+    """GET /api/pipeline-holding/<name>: the commits that wait in holding, with their tasks, sessions, changes and
+    review, and the release after it (#6140)."""
+    return targets.holding(conn, unquote(path.split("/api/pipeline-holding/", 1)[1]))
 
 
 def run(conn, path):
@@ -72,6 +90,7 @@ def run(conn, path):
 GET = [
     (lambda path: path == "/api/pipelines", _with(pipelines)),
     (lambda path: path.startswith("/api/pipeline-run/"), _with(run)),
+    (lambda path: path.startswith("/api/pipeline-holding/"), _with(holding)),
     (lambda path: path.startswith("/api/pipeline/"), _with(pipeline)),
 ]
 
@@ -124,6 +143,9 @@ OPS = {
     # #6150: a trigger rule: {pipeline, action add|edit|off|on|remove, rule, event, stage, tier, does, runner, keys,
     # reason}, as maxpm pipeline trigger
     "pipeline_trigger": lambda c, a, who: trigger_op(c, a, who),
+    # #6140: the release after holding: the reviewed commits, all of them, or up to one commit
+    "pipeline_release": lambda c, a, who: targets.release(c, a["pipeline"], a.get("upto") or None, bool(a.get("all")),
+                                                          who),
 }
 
 
@@ -249,6 +271,7 @@ def _strip(stages, no_news=False, work=None):
                     "run": r.get("id"), "by_source": bool(s.get("workflow") and not s.get("run")),
                     # its data comes from a forge whose token fails: what it shows is old (#6147)
                     "no_news": bool(no_news and s.get("workflow") and not s.get("run")),
+                    "holding": s.get("holding"),  # the first stage: what waits for the release (#6140)
                     "work": (work or {}).get(s["name"]) or {"faults": [], "agents": []}})
     return out
 
@@ -283,7 +306,8 @@ def deploy(conn, path):
         src["actions"] = d["source"]["actions"]
         out.append({"name": p["name"], "project": p["project"], "default": False, "source": src,
                     "held": p.get("held_reason"), "held_by": p.get("held_by"),
-                    "stages": _strip(d["stages"], src["state"] in ("bad", "missing"), work.get(p["name"])),
+                    "stages": _strip(_with_holding(conn, p["name"], d["stages"]), src["state"] in ("bad", "missing"),
+                                     work.get(p["name"])),
                     "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits})
@@ -296,7 +320,7 @@ def deploy(conn, path):
                  if r.get("state") == "queued" and r.get("item") else [])
         out.append({"name": t["name"], "project": d["project"], "default": True, "source": {"forge": None,
                     "label": "deploy target", "state": "local"}, "held": None, "held_by": None,
-                    "stages": _strip(d["stages"], work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
+                    "stages": _strip(_with_holding(conn, t["name"], d["stages"]), work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [t["name"]], "waits": waits})
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}

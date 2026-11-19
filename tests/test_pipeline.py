@@ -1247,14 +1247,15 @@ class DefaultPipelines(Base):
         d2 = self.release("bbbbbbb", "Second change")
         p = self.targets.default_pipeline(self.c, "web-prod")
         self.assertTrue(p["default"])
-        self.assertEqual([s["name"] for s in p["stages"]], ["cut", "build", "deploy", "watch"])
+        self.assertEqual([s["name"] for s in p["stages"]], ["holding", "build", "deploy", "watch"])
+        self.assertEqual(p["stages"][1]["transition"]["mode"], "release")  # #6140: the arrow after holding
         self.assertEqual(p["stages"][2]["env"], "web-prod")
         self.assertEqual(p["stages"][2]["run"], None)  # no deploy hook set now: the runs keep their command
         self.assertEqual([r["version"] for r in p["releases"]], ["bbbbbbb", "aaaaaaa"])
-        self.assertEqual(p["releases"][0]["stages"], {"cut": {"state": "passed", "item": d2},
+        self.assertEqual(p["releases"][0]["stages"], {"holding": {"state": "passed", "item": d2},
                                                       "deploy": {"state": "queued", "item": d2}})
         first = {k: v["state"] for k, v in p["releases"][1]["stages"].items()}
-        self.assertEqual(first, {"cut": "passed", "build": "passed", "deploy": "passed", "watch": "passed"})
+        self.assertEqual(first, {"holding": "passed", "build": "passed", "deploy": "passed", "watch": "passed"})
         deploy = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
         self.assertEqual(deploy["state"], "queued")  # the newest release's
         env = p["envs"][0]
@@ -1323,7 +1324,7 @@ class DefaultPipelines(Base):
         core.config_set(self.c, "release_approval", "person", project="web")
         self.release("ccccccc", "A change")
         names = [s["name"] for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]]
-        self.assertEqual(names, ["cut", "review", "approval", "deploy", "watch"])
+        self.assertEqual(names, ["holding", "review", "approval", "deploy", "watch"])
         approval = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
                         if s["name"] == "approval")
         self.assertEqual(approval["transition"]["mode"], "yes")
@@ -2028,6 +2029,80 @@ class Speed(Base):
             t = time.monotonic()
             read()
             self.assertLess(time.monotonic() - t, timing.limit(0.1))
+
+
+class Holding(RunnerBase):
+    """#6140: holding, the first stage: the commits since the last version that left it, their review, the release."""
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import targets
+        self.targets = targets
+        targets._HOLD.clear()
+        self.addCleanup(targets._HOLD.clear)
+        self.git("init", "-q", "-b", "main")
+
+    def git(self, *a):
+        import subprocess
+        return subprocess.run(["git", "-C", self.folder, *a], capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, msg, name="f.txt"):
+        with open(os.path.join(self.folder, name), "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+        self.git("add", name)
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def test_holding_lists_the_commits_since_the_last_version_and_releases_the_reviewed_ones(self):
+        from river import review
+        base = self.commit("Start")
+        self.runner.start(self.c, "app", rev=base, actor="mark")  # a version left holding
+        t1 = core.item_add(self.c, "app", "Round the total", actor="mark")["id"]
+        t2 = core.item_add(self.c, "app", "Cache the prices", actor="mark")["id"]
+        self.c.execute("UPDATE agents SET session_url='https://claude.ai/code/session_ABC' WHERE name='w1'")
+        a = self.commit(f"Round the total (#{t1})\n\nClaude-Session: https://claude.ai/code/session_ABC")
+        b = self.commit(f"Cache the prices (#{t2})")
+        h = self.targets.holding(self.c, "app", fresh=True)
+        self.assertEqual((h["base"], h["base_label"]), (base, "the last version that left holding"))
+        self.assertEqual([c["sha"] for c in h["commits"]], [a, b])  # the oldest first
+        self.assertEqual(([t["id"] for t in h["commits"][0]["tasks"]], h["commits"][0]["session"]), ([t1], "w1"))
+        self.assertEqual((h["commits"][1]["session"], h["commits"][1]["by_session"]), ("t", False))  # git's author
+        self.assertEqual((h["added"], h["counts"]["not_reviewed"], h["upto"]), (4, 2, None))  # 3 lines, then 1
+        self.assertTrue(h["release"]["text"].startswith("a person or the manager releases"))
+        with self.assertRaises(RiverError):  # nothing reviewed: name the commits
+            self.targets.release(self.c, "app", actor="mark")
+        review.mark(self.c, "approved", item=t1, actor="mark")
+        h = self.targets.holding(self.c, "app", fresh=True)
+        self.assertEqual((h["commits"][0]["review"]["text"], h["upto"]), ("approved in Changes", a))
+        with self.assertRaises(RiverError):
+            self.targets.release(self.c, "app", actor="w1")  # an agent: only a person or the manager releases
+        out = self.targets.release(self.c, "app", actor="mark")
+        self.assertEqual((out["rev"], out["released"], out["stage"]), (a, 1, "build"))
+        h = self.targets.holding(self.c, "app", fresh=True)
+        self.assertEqual(([c["sha"] for c in h["commits"]], h["base"]), ([b], a))
+        d = self.targets.holding_diff(self.c, "app", b[:8])
+        self.assertEqual(d["commits"][0]["files"][0]["path"], "f.txt")
+        self.assertIn("all 1 commits", self.targets.holding_diff(self.c, "app")["commits"][0]["subject"])
+
+    def test_a_target_holds_its_shipped_work_and_its_release_is_the_cut(self):
+        core.target_add(self.c, "site", "", None)
+        core.project_add(self.c, "web", path=self.folder, target="site")
+        self.commit("Start")
+        t = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        sha = self.commit(f"A change (#{t})")
+        h = self.targets.holding(self.c, "site", fresh=True)
+        self.assertEqual(([c["sha"] for c in h["commits"]][-1], h["default"]), (sha, True))
+        self.assertFalse(h["release"]["can"])  # nothing is collected yet
+        core.claim(self.c, t, "w1")
+        core.done(self.c, t, output="done", actor="w1", ship_it=True, force="test")
+        self.assertTrue(self.targets.holding(self.c, "site", fresh=True)["release"]["can"])
+        out = self.targets.release(self.c, "site", everything=True, actor="mark")
+        dep = core.item_show(self.c, out["release"])
+        self.assertEqual((dep["cut_rev"], out["rev"]), (sha, sha))
+        stages = self.targets.default_pipeline(self.c, "site")["stages"]
+        self.assertEqual((stages[0]["name"], stages[0]["last_run"]["state"]), ("holding", "passed"))
+        h = self.targets.holding(self.c, "site", fresh=True)
+        self.assertEqual(h["commits"][-1]["review"]["text"], f"in release #{out['release']}, which has no review")
 
 
 class AgentsOnStages(RunnerBase):

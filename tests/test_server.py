@@ -4172,7 +4172,8 @@ class PipelineRoutes(unittest.TestCase):
         self.assertEqual((names["web-app"]["default"], names["web-prod"]["default"]), (False, True))
         self.assertEqual(names["web-prod"]["projects"], ["shop"])
         p = self.get("/api/pipeline/web-app")["body"]
-        self.assertEqual((p["stages"][0]["last_run"]["id"], p["versions"][0]["rev"]), (run, "abc1234"))
+        self.assertEqual(p["stages"][0]["name"], "holding")  # #6140: holding comes first, computed
+        self.assertEqual((p["stages"][1]["last_run"]["id"], p["versions"][0]["rev"]), (run, "abc1234"))
         r = self.get(f"/api/pipeline-run/{run}")["body"]
         self.assertEqual([t["name"] for t in r["test_list"]], ["bad", "ok"])  # failed first
         self.assertIn("1. u.bad: 2 != 3. new test: no earlier run.", r["prompt"])
@@ -4187,7 +4188,7 @@ class PipelineRoutes(unittest.TestCase):
         self.assertIn("no project folder", v["body"]["error"])
         self.assertIn("no item #999", self.get("/api/pipeline-item/999")["body"]["error"])
         # #6141: Versions in <stage>.
-        sr = self.get(f"/api/pipeline-stage?pipeline=web-app&stage={p['stages'][0]['name']}")["body"]
+        sr = self.get(f"/api/pipeline-stage?pipeline=web-app&stage={p['stages'][1]['name']}")["body"]
         self.assertEqual([(r["run"], r["rev"], r["state"]) for r in sr["runs"]], [(run, "abc1234", "failed")])
         self.assertEqual(self.get("/api/pipeline-stage?pipeline=web-app")["code"], 404)
 
@@ -4247,7 +4248,7 @@ class PipelineRoutes(unittest.TestCase):
         P = {p["name"]: p for p in d["pipelines"]}
         self.assertEqual(set(P), {"app", "gh", "site"})
         self.assertEqual([(s["name"], s["transition"]["mode"], s["transition"]["arg"]) for s in P["app"]["stages"]],
-                         [("build", "auto", None), ("prod", "yes", "mark")])
+                         [("holding", None, None), ("build", "auto", None), ("prod", "yes", "mark")])
         self.assertEqual([(w["stage"], w["rev"]) for w in P["app"]["waits"]], [("prod", "abc1234")])
         self.assertEqual(P["app"]["source"]["state"], "local")
         self.assertEqual((P["gh"]["source"]["state"], P["gh"]["source"]["secret"]), ("missing", "github-o"))
@@ -4283,7 +4284,7 @@ class PipelineRoutes(unittest.TestCase):
                          ([fault], ["w9"]))
         self.assertEqual(P["site"]["stages"][0]["work"], {"faults": [], "agents": []})
         page = self.get("/api/pipeline/app")["body"]
-        self.assertEqual([a["name"] for a in page["stages"][0]["work"]["agents"]], ["w9"])
+        self.assertEqual([a["name"] for a in page["stages"][1]["work"]["agents"]], ["w9"])  # [0] is holding
         # The page has an address for each part of Deploy and each pipeline's page.
         for path in ("/deploy", "/deploy/accounts", "/deploy/pipeline/app/emergency"):
             self.assertIn(b'id="tab-deploy"', server.page_html(path))

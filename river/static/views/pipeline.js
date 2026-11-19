@@ -16,6 +16,7 @@ import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
 import { runsOut } from "./accounts.js";
 import { stageMarks } from "./agents.js";
+import { holdingCardHtml, holdingDetail } from "./holding.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
 let sig = "", runSig = "";
@@ -54,7 +55,7 @@ export async function renderPipeline(force) {
   if (V.name !== name || !V.shown) return;  // another pipeline or tab while the read ran
   V.data = D;
   if (!V.data.stages.some(s => s.name === V.stage)) V.stage = (V.data.stages.find(s => s.last_run && s.last_run.state === "failed")
-    || V.data.stages.find(s => s.last_run) || V.data.stages[0] || {}).name || null;
+    || V.data.stages.find(s => s.last_run && !s.holding) || V.data.stages[0] || {}).name || null;
   if (!V.data.stages.some(s => s.name === V.arrow)) V.arrow = null;
   const s = JSON.stringify([V.name, V.data, V.stage, V.arrow, V.tab, V.filter]);
   if (s === sig && !force) return refreshRun(force);
@@ -90,6 +91,10 @@ function tierBadge(s) {
 
 function stageCard(s) {
   const D = V.data;
+  if (s.holding) {  // the first stage: the commits that wait for the release (#6140, views/holding.js)
+    return button(`<span class="pl-in">${holdingCardHtml(s.holding)}</span>`, { kind: "card", cls: "pl-stage pl-hold",
+      pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name }, title: "Commits before the release" });
+  }
   if (tokenFails(D) && s.workflow && !s.run) {
     const r = s.last_run, read = D.account.read_at;
     return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
@@ -226,7 +231,7 @@ let srSig = "";
 async function refreshStageRuns(force) {
   const s = chosen(), box = $("#plStageRuns");
   if (!box) return;
-  if (!s || V.data.default || V.arrow) { box.innerHTML = ""; srSig = ""; return; }
+  if (!s || V.data.default || V.arrow || s.holding) { box.innerHTML = ""; srSig = ""; return; }
   let SR;
   try { SR = await getJson(`api/pipeline-stage?pipeline=${encodeURIComponent(V.name)}&stage=${encodeURIComponent(s.name)}`); }
   catch (e) { return; }
@@ -338,6 +343,7 @@ function detail() {
   const a = V.arrow && V.data && V.data.stages.find(s => s.name === V.arrow);
   if (a) return arrowDetail(a);
   const s = chosen(); if (!s) return "";
+  if (s.holding) return holdingDetail(V.name);
   const r = V.run && (V.run.id == null || (s.last_run && V.run.id === s.last_run.id)) ? V.run : s.last_run;
   const head = `<h3>${esc(s.name)}${r && r.version ? ` · <span class="pl-ver">${esc(short(r.version))}</span>` : ""}</h3>`;
   if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>`;

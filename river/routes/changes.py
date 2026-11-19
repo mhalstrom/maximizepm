@@ -1,7 +1,8 @@
 """The Changes view (#5855): a session's diff, an item's or a release's commits, and the person's answer (comments to
 the agent, Reviewed, Approve, Request changes). The work is in river/review.py.
 
-GET /api/diff?session=<name>&base=origin|uncommitted|review, or ?item=<id>. OPS: review_send, review_mark."""
+GET /api/diff?session=<name>&base=origin|uncommitted|review, or ?item=<id>, or ?holding=<pipeline>[&sha=<commit>].
+OPS: review_send, review_mark."""
 
 from .. import core, review
 from ..core import RiverError
@@ -12,6 +13,9 @@ def diff(h, path):
     q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
     conn = core.connect()
     try:
+        if q.get("holding"):  # the commits in holding of a pipeline, or one of them (#6140)
+            from .pipeline import targets
+            return h._send(200, targets.holding_diff(conn, q["holding"], q.get("sha") or None))
         if q.get("item", "").isdigit() and q.get("range"):  # the whole release of a deploy item (#6038)
             return h._send(200, review.range_diff(conn, int(q["item"])))
         if q.get("item", "").isdigit():
