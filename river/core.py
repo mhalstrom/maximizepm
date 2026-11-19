@@ -2706,6 +2706,16 @@ HTTP_CHAT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_ht
 PLANNER: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_planner", default=None)
 
 
+def planner_name(actor):
+    """The writer's name of a canvas version: <person>@<client> while a planner chat app writes it (#6221), so the
+    versions say which app wrote them and the overwrite guard counts the app apart from the person's own edits; else
+    the actor."""
+    via = EVENT_VIA.get()
+    if PLANNER.get() and via and actor and not actor.endswith(f"@{via}"):
+        return f"{actor}@{via}"
+    return actor
+
+
 def set_via(conn, name, via):
     """Record how a chat session reaches MaximizePM (HTTP_CHAT); the page and maxpm who show it."""
     with tx(conn):
@@ -4377,7 +4387,24 @@ def goal_show(conn, name):
     d["items"] = [{k: v for k, v in ann[i].items() if k != "sort_key"}
                   for i in sorted(d["items_open"] + d["items_backlog"] + d["items_done"] + d["items_dropped"],
                                   key=lambda i: (ann[i]["status"] in CLOSED_STATES, ann[i]["sort_key"]))]
+    d["docs"] = goal_docs(conn, g, d["items_open"] + d["items_backlog"] + d["items_done"] + d["items_dropped"])
     return d
+
+
+def goal_doc_name(goal):
+    """The canvas that holds the design document of a goal (#6221): a canvas row has an item, not a goal, so a goal's
+    doc is the canvas of this name in the goal's project."""
+    return ("goal-" + re.sub(r"[^a-z0-9._-]", "-", str(goal).lower()))[:64].rstrip("-.")
+
+
+def goal_docs(conn, g, item_ids=()):
+    """The canvases of a goal (#6221): its design document (goal_doc_name) and the canvases of its tasks."""
+    ids = [int(i) for i in item_ids]
+    rows = conn.execute(f"SELECT * FROM canvases WHERE deleted_at IS NULL AND project_id=? AND (name=? OR item_id IN "
+                        f"({','.join('?' * len(ids)) or 'NULL'})) ORDER BY updated_at DESC, id DESC",
+                        [g["project_id"], goal_doc_name(g["name"])] + ids).fetchall()
+    return [{k: x[k] for k in ("name", "title", "kind", "item_id", "agent", "version", "open_comments", "updated_at")}
+            for x in (_canvas_info(conn, c) for c in rows)]
 
 
 def goal_rank(conn, name, rank, actor=None):
@@ -19326,6 +19353,7 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
     if body is None or not str(body).strip():
         raise RiverError("the canvas is empty: put the page's text (a file, stdin, or --text)")
     body = str(body)
+    author = planner_name(actor)
     with tx(conn):
         it = _item(conn, item) if item is not None else None
         if it is not None:
@@ -19359,12 +19387,12 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
         if c is None:
             cid = conn.execute("INSERT INTO canvases (project_id, name, title, kind, item_id, agent, created_at, "
                                "updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                               (pid, name, title, kind, it["id"] if it else None, actor, t, t)).lastrowid
+                               (pid, name, title, kind, it["id"] if it else None, author, t, t)).lastrowid
         else:
             cid = c["id"]
             last = _canvas_latest(conn, cid)
             if guard and not c["deleted_at"]:
-                _canvas_guard(conn, c, actor, base)
+                _canvas_guard(conn, c, author, base)
             if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
                 if item is not None and it["id"] != c["item_id"]:
                     # The same text for another item: no new version, but the canvas moves to it (#4841).
@@ -19372,14 +19400,14 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
                     _event(conn, it["id"], actor, f"canvas {name} moved here from "
                            f"{'#' + str(c['item_id']) if c['item_id'] else 'no item'}")
                 return dict(canvas_show(conn, cid), unchanged=True)
-            writer = c["agent"] if _is_person(conn, actor) and c["agent"] else actor  # a person's edit (#4769)
+            writer = c["agent"] if author == actor and _is_person(conn, actor) and c["agent"] else author  # #4769
             conn.execute("UPDATE canvases SET title=COALESCE(?, title), kind=?, item_id=?, agent=?, updated_at=?, "
                          "deleted_at=NULL WHERE id=?", (title, kind, it["id"] if it else c["item_id"], writer, t, cid))
         n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM canvas_versions WHERE canvas_id=?", (cid,)).fetchone()[0]
         conn.execute("INSERT INTO canvas_versions (canvas_id, version, body, author, note, created_at) VALUES (?,?,?,?,?,?)",
-                     (cid, n, body, actor, (note or "").strip() or None, t))
+                     (cid, n, body, author, (note or "").strip() or None, t))
         if guard:  # a whole page: its writer knows this version (#5986). A section merge does not tell it the page.
-            canvas_seen(conn, cid, actor, n)
+            canvas_seen(conn, cid, author, n)
         keep = int(setting(conn, "canvas_versions", project_id=pid))
         conn.execute("DELETE FROM canvas_versions WHERE canvas_id=? AND version>1 AND version<=? ",
                      (cid, n - max(keep, 2) + 1))
@@ -19565,6 +19593,17 @@ def _canvas_writer(conn, c):
     return who if r and r["kind"] == "ai" else None
 
 
+def _canvas_planner(conn, c):
+    """The planner chat app (<person>@<client>, planner_name) that wrote the newest version of a canvas, not counting
+    a person's own edits; else None (a session wrote it)."""
+    r = conn.execute("SELECT author FROM canvas_versions WHERE canvas_id=? AND author NOT IN "
+                     "(SELECT name FROM agents WHERE kind='human') ORDER BY version DESC LIMIT 1", (c["id"],)).fetchone()
+    who = r["author"] if r else None
+    if not who or "@" not in who or conn.execute("SELECT 1 FROM agents WHERE name=?", (who,)).fetchone():
+        return None
+    return who if _is_person(conn, who.split("@", 1)[0]) else None
+
+
 def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
     """Send the drafts of a canvas (all of the actor's, or the ones named) as one message to the session that
     wrote it, or to the holder (or next holder) of its item. The message names the canvas, the version, each
@@ -19582,6 +19621,14 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
                             "AND author=? ORDER BY id", (c["id"], actor)).fetchall()
     if not rows:
         raise RiverError(f"no draft comments on canvas {c['name']} to send; write one on the page first")
+    app = _canvas_planner(conn, c)
+    if app:  # a planner chat app wrote it last (#6221): it reads them with doc_comments; no session gets a message
+        with tx(conn):
+            t = iso(now())
+            for r in rows:
+                conn.execute("UPDATE canvas_comments SET state='sent', sent_at=? WHERE id=?", (t, r["id"]))
+        return {"canvas": c["name"], "sent": [r["id"] for r in rows], "message": None, "item": c["item_id"],
+                "to": f"the chat app {app} (it reads them in the talk)"}
     to = _canvas_writer(conn, c)
     if to is None and not c["item_id"]:
         raise RiverError(f"the session that wrote canvas {c['name']} has ended and the canvas has no item, so nobody "
@@ -19986,7 +20033,7 @@ def canvas_section(conn, ref, heading, body=None, actor=None, project=None, note
     res = canvas_put(conn, c["name"], "\n".join(new).rstrip("\n") + "\n", actor,
                      project=_project_name(conn, c["project_id"]), item=c["item_id"],
                      note=note or (f"section {heading}" + (" (pending)" if pending is not None else "")))
-    if _is_person(conn, actor) and not res.get("unchanged"):
+    if _is_person(conn, actor) and not PLANNER.get() and not res.get("unchanged"):  # a planner writes its own doc
         to = _canvas_writer(conn, c)
         if to or c["item_id"]:
             send(conn, "note", f"{actor} changed the section '{heading}' of doc {c['name']} in the page: version "

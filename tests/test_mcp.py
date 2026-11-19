@@ -449,6 +449,71 @@ class Planner(unittest.TestCase):
         self.assertIn("## Writing tasks", call("planning_guide")[0])
         c.close()
 
+    def test_design_doc_over_http(self):
+        """#6221: the planner keeps a design document as an expert does: it starts it for a goal or a task (it opens in
+        the page), writes its parts, reads it, its comments and answered decisions, and links its plan to tasks."""
+        from river import cli, server
+        opened = []
+        real_ask = cli.ask_server
+        cli.ask_server = lambda conn, op, args, actor=None, **k: opened.append((op, args, actor)) or {"opened": True}
+        self.addCleanup(setattr, cli, "ask_server", real_ask)
+        _, sid, call = self.session()
+        self.assertFalse(call("add_project", name="shop", description="The online shop")[1])
+        self.assertFalse(call("add_goal", project="shop", name="checkout", outcome="People pay in one step")[1])
+        self.assertFalse(call("add_task", project="shop", title="Build the payment form", goal=["checkout"])[1])
+        c = core.connect()
+        self.addCleanup(c.close)
+        task = c.execute("SELECT id FROM items WHERE title='Build the payment form'").fetchone()["id"]
+        core.goal_handoff(c, "checkout", "The provider is Stripe; the form is left", "mark")
+        self.assertIn("needs the task (task) or the goal", call("start_doc", title="x")[0])
+        text, bad = call("start_doc", goal="checkout", title="Checkout")
+        self.assertFalse(bad, text)
+        self.assertIn("goal-checkout", text)
+        self.assertIn("opened in the side panel", text)
+        doc = core.canvas_show(c, "goal-checkout")
+        self.assertEqual(doc["project"], "shop")
+        self.assertEqual([v["author"] for v in doc["versions"]], ["mark@claude-ai"])  # the app wrote it, as mark
+        self.assertEqual(opened, [("canvas_open", {"name": str(doc["id"])}, "mark")])
+        decision = ("Decision 1 of 1: Provider\nWhat you decide: which provider takes the payments (A or B).\n"
+                    "My recommendation: A.\nYour answer: \"A\"")
+        text, bad = call("write_section", doc="goal-checkout", heading="Decisions", text=decision)
+        self.assertFalse(bad, text)
+        text, bad = call("write_section", doc="goal-checkout", heading="Plan", text=f"### The form\n\n- #{task}")
+        self.assertFalse(bad, text)
+        # The person comments in the page; the planner reads it, answers, and records an answer from the chat.
+        com = core.canvas_comment(c, "goal-checkout", "Say why A", "mark", send_now=True)
+        text, bad = call("doc_comments", doc="goal-checkout", open=True)
+        self.assertFalse(bad, text)
+        self.assertIn("Say why A", text)
+        self.assertFalse(call("reply_comment", comment=f"c{com['id']}", text="A has the lower fee")[1])
+        self.assertFalse(call("reply_comment", comment=f"c{com['id']}", resolve=True, text="v4 says why")[1])
+        self.assertEqual(core._canvas_comment(c, com["id"])["state"], "resolved")
+        text, bad = call("answer_decision", doc="goal-checkout", decision=1, answer="A")
+        self.assertFalse(bad, text)
+        self.assertIn("Answer to decision 1 of 1 (Provider): A", call("doc_comments", doc="goal-checkout")[0])
+        text, bad = call("read_doc", doc="goal-checkout")
+        self.assertFalse(bad, text)
+        self.assertIn("Decision 1 of 1: Provider", text)
+        text, bad = call("read_doc", doc="goal-checkout", plan=True)
+        self.assertFalse(bad, text)
+        self.assertIn(f"#{task}", text)
+        self.assertEqual({v["author"] for v in core.canvas_show(c, "goal-checkout")["versions"]}, {"mark@claude-ai"})
+        self.assertIn("goal-checkout", call("show_task", id=task)[0])  # the task links to its part of the plan
+        text = call("show_goal", name="checkout")[0]
+        self.assertIn("canvas goal-checkout", text)  # the goal's doc
+        self.assertIn("The provider is Stripe", text)  # and its handoff
+        self.assertIn("goal-checkout", call("list_docs", project="shop")[0])
+        # A task's doc: it belongs to the task, and needs a name.
+        self.assertIn("needs the document's name", call("start_doc", task=task)[0])
+        self.assertFalse(call("start_doc", task=task, name="form-design")[1])
+        self.assertEqual(core.canvas_show(c, "form-design")["item_id"], task)
+        self.assertIn("form-design", call("show_task", id=task)[0])
+        self.assertFalse(call("read_notes")[1])
+        actors = {r["actor"] for r in c.execute("SELECT actor FROM events WHERE change LIKE 'canvas %'")}
+        self.assertEqual(actors, {"mark@claude-ai"})
+        # A person has no session of their own: the page opens the doc in the side panel it shows now.
+        self.assertEqual(server.canvas_open(c, {"name": "goal-checkout"}, "mark")["session"], "")
+
     def test_agent_tools_are_refused(self):
         _, sid, call = self.session()
         for name, args in (("go", {}), ("done", {"id": 1, "output": "x"}), ("maxpm", {"args": ["claim", "1"]}),

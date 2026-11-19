@@ -5421,6 +5421,8 @@ def canvas_open(conn, args, who):
     the asker's own session), and shows it when the Sessions tab shows that session; else it offers a button."""
     c = core.canvas_show(conn, args["name"], args.get("project"))
     session = (args.get("session") or who or "").strip()
+    if not args.get("session") and session and core._is_person(conn, session):
+        session = ""  # a person has no session of its own (#6221): the page opens it in the side panel it shows now
     if session and not conn.execute("SELECT 1 FROM agents WHERE name=?", (session,)).fetchone():
         raise RiverError(f"no agent {session}: name the session whose side panel shows the canvas (maxpm who)")
     with _canvas_open_lock:

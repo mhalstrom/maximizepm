@@ -162,6 +162,9 @@ _PRIORITY = {"type": "integer", "minimum": 0, "maximum": 4,
 _TIER = {"type": "string", "enum": ["normal", "expert"],
          "description": "expert: a task the person talks through with an expert session over hours or days; normal: "
                         "any worker (the default)"}
+_DOC = {"type": "string", "description": "the document's name, as start_doc or list_docs shows it (or its id, c12)"}
+_DOC_NEW = {"type": "string", "description": "a short name: a-z, 0-9 and -, for example checkout-design (a task's doc "
+                                             "needs one; a goal's is goal-<goal>)"}
 PLAN_TOOLS = [
     {"name": "list_projects",
      "description": "The projects: what each one covers, its open and ready tasks, and its goals.",
@@ -268,17 +271,93 @@ PLAN_TOOLS = [
      "description": "Drop a task that is no longer needed.",
      "inputSchema": {"type": "object", "required": ["id", "reason"], "properties": {
          "id": _TASK, "reason": {"type": "string"}}}},
+    {"name": "start_doc",
+     "description": "Start the design document of a topic: a Markdown page that MaximizePM keeps with each version, "
+                    "with the parts Brief, Discovery, Decisions, Plan and Risks, each shown as being written. It "
+                    "belongs to a task or a goal, and it opens in the MaximizePM page, where the person reads it, "
+                    "edits it and comments on it. Fill each part with write_section.",
+     "inputSchema": {"type": "object", "properties": {
+         "task": {"type": "integer", "description": "the task it belongs to (give task or goal)"},
+         "goal": {"type": "string", "description": "the goal it belongs to: the doc is then named goal-<goal>"},
+         "name": _DOC_NEW, "title": {"type": "string", "description": "the heading of the page"}}}},
+    {"name": "write_section",
+     "description": "Write one part of a document: it replaces the part with that heading, or adds it at the end. "
+                    "Write each decision for the person in the decision form of planning_guide: the page shows it as "
+                    "a card that the person answers in place. In Plan, name each task as #<id>: the task then links "
+                    "to its part of the plan.",
+     "inputSchema": {"type": "object", "required": ["doc", "heading"], "properties": {
+         "doc": _DOC, "heading": {"type": "string", "description": "the part, for example Decisions"},
+         "text": {"type": "string", "description": "the part's Markdown text, without its heading"},
+         "pending": {"type": "string", "description": "instead of text: what the part will say (shown as being "
+                                                      "written)"},
+         "note": {"type": "string", "description": "what changed, for the version list"}, "project": _PROJECT}}},
+    {"name": "read_doc",
+     "description": "A document: its text (the latest version, or one version), its versions with who wrote each, "
+                    "its comments, and the tasks that name it. plan: the versions of its Plan part and the state of "
+                    "each task it names instead. Read it again before you write: the person may have edited it.",
+     "inputSchema": {"type": "object", "required": ["doc"], "properties": {
+         "doc": _DOC, "version": {"type": "integer"}, "plan": {"type": "boolean"}, "project": _PROJECT}}},
+    {"name": "list_docs",
+     "description": "The documents and other pages (canvases) that people and sessions made, newest change first.",
+     "inputSchema": {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}}},
+    {"name": "doc_comments",
+     "description": "The person's comments on a document, with their replies, and the answers to its decisions.",
+     "inputSchema": {"type": "object", "required": ["doc"], "properties": {
+         "doc": _DOC, "open": {"type": "boolean", "description": "only the ones that wait for an answer"},
+         "project": _PROJECT}}},
+    {"name": "reply_comment",
+     "description": "Answer a comment on a document: a reply, and resolve when the document now does what it asks.",
+     "inputSchema": {"type": "object", "required": ["comment"], "properties": {
+         "comment": {"type": "string", "description": "the comment's id, for example c12"},
+         "text": {"type": "string", "description": "the reply"},
+         "resolve": {"type": "boolean", "description": "close it; text then says what changed, or why nothing does"}}}},
+    {"name": "answer_decision",
+     "description": "Record the person's answer to a decision of a document, when the person gives it in this chat.",
+     "inputSchema": {"type": "object", "required": ["doc", "decision", "answer"], "properties": {
+         "doc": _DOC, "decision": {"type": "integer", "description": "its number (Decision <n> of <m>)"},
+         "answer": {"type": "string"}, "project": _PROJECT}}},
+    {"name": "read_notes",
+     "description": "The notes of an expert session (its topic, what it learned, its decisions, what is open); with "
+                    "no expert, the list of experts. A goal's handoff is in show_goal.",
+     "inputSchema": {"type": "object", "properties": {"expert": {"type": "string", "description": "its name"}}}},
     {"name": "planning_guide",
-     "description": "How to write good tasks: one outcome each, the context, the waits, the priorities, the goals, "
-                    "and the backlog. Read it once before you add tasks.",
+     "description": "How to plan here: the design document of a topic, the decision form, and how to write good "
+                    "tasks (one outcome each, the context, the waits, the priorities, the goals, the backlog). Read "
+                    "it once before you start.",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 PLAN_NAMES = frozenset(t["name"] for t in PLAN_TOOLS)
 PLAN_INSTRUCTIONS = ("MaximizePM is the person's project management system: projects, goals, and tasks with the order "
                      "between them, which AI agents and people work through while a manager agent runs them. In this "
                      "connection you plan with the person: you read and change projects, goals, tasks and their "
-                     "links, and you act as the person. You do no task yourself. Call planning_guide once, search "
-                     "before you add a task, and tell the person the numbers of the tasks you added.")
+                     "links, and you act as the person. You do no task yourself. Call planning_guide once, keep the "
+                     "talk's decisions in a design document (start_doc), search before you add a task, and tell the "
+                     "person the numbers of the tasks you added.")
+# What planning_guide says before the section Writing tasks of the manager guide (#6221): the planner plans a topic as
+# an expert does, in one design document that the person sees, edits and answers in the MaximizePM page.
+PLAN_GUIDE = """## Plan a topic in a design document
+
+Keep what you and the person decide in a design document, not only in this chat: the sessions that do the tasks read
+it, and the person reads it, edits it and comments on it in the MaximizePM page.
+
+1. Read first: show_goal (the goal's handoff: what the last owner knew), show_task, list_docs and read_doc (the
+   documents made before), read_notes (an expert's notes on the topic).
+2. start_doc with the task or the goal that the topic belongs to (add_goal or add_task first when there is none). It
+   puts the parts Brief, Discovery, Decisions, Plan and Risks, each shown as being written, and opens it in the page.
+3. Fill each part with write_section as the talk goes on. Read the document again before each write (read_doc): the
+   person may have edited it, and you keep the person's words.
+4. Write each decision in this form, one decision at a time; the page shows it as a card that the person answers in
+   place. Read the answers and comments with doc_comments, answer each comment (reply_comment), and record an answer
+   that the person gives in this chat with answer_decision.
+
+{decisions}
+
+5. At the end, write the tasks (as Writing tasks below says), then put the plan in the part Plan: each task as #<id>
+   under the heading of the part of the plan it does. show_task then links each task to its part, and read_doc with
+   plan shows the plan's versions and the state of its tasks.
+
+You do no task yourself: you write tasks, and the manager starts the sessions that do them.
+"""
 
 
 def _words(flag, value):
@@ -362,6 +441,42 @@ def plan_argv(name, a):
         return [["activate", task()] + opt("--note", "reason")]
     if name == "drop_task":
         return [["drop", task(), f"--note={need('reason')}"]]
+    # The documents (#6221): the canvas commands of an expert's design document, with no publish, browser or open of
+    # another canvas. A doc belongs to a task or a goal, and it opens in the page for the person when it is made.
+    if name == "start_doc":
+        if a.get("task") in (None, "") and not a.get("goal"):
+            raise RiverError("start_doc needs the task (task) or the goal (goal) that the document belongs to")
+        if a.get("task") not in (None, "") and a.get("goal"):
+            raise RiverError("start_doc: give the task or the goal, not both")
+        if a.get("task") not in (None, "") and not a.get("name"):
+            raise RiverError("start_doc needs the document's name (name) for a task's document")
+        return [["canvas", "design", "--open"] + opt("--item", "task") + opt("--goal", "goal") + opt("--title", "title")
+                + (["--", str(a["name"])] if a.get("name") else [])]
+    if name == "write_section":
+        body = [f"--pending={a['pending']}"] if a.get("pending") not in (None, "") else \
+            [f"--text={need('text')}"]
+        return [["canvas", "section"] + body + opt("--note", "note") + opt("--project", "project")
+                + ["--", need("doc"), need("heading")]]
+    if name == "read_doc":
+        if a.get("plan"):
+            return [["canvas", "plan"] + opt("--version", "version") + opt("--project", "project") + ["--", need("doc")]]
+        return [["canvas", "show"] + opt("--version", "version") + opt("--project", "project") + ["--", need("doc")]]
+    if name == "list_docs":
+        return [["canvas", "list"] + opt("--project", "project") + opt("--item", "task")]
+    if name == "doc_comments":
+        return [["canvas", "comments"] + (["--open"] if a.get("open") else []) + opt("--project", "project")
+                + ["--", need("doc")]]
+    if name == "reply_comment":
+        c = str(need("comment"))
+        if not a.get("text") and not a.get("resolve"):
+            raise RiverError("reply_comment needs the reply (text), or resolve")
+        out = [["canvas", "reply", "--", c, a["text"]]] if a.get("text") and not a.get("resolve") else []
+        return out + ([["canvas", "resolve"] + opt("--note", "text") + ["--", c]] if a.get("resolve") else [])
+    if name == "answer_decision":
+        return [["canvas", "answer"] + opt("--project", "project")
+                + ["--", need("doc"), str(int(need("decision"))), need("answer")]]
+    if name == "read_notes":
+        return [["expert", "notes", "--", a["expert"]]] if a.get("expert") else [["expert", "list"]]
     if name == "planning_guide":
         return [["guide", "manager"]]
     raise RiverError(f"{name} is not a planner tool: this connection plans projects, goals and tasks "
@@ -619,7 +734,9 @@ class Server:
                 for var, tok in zip((core.HTTP_CHAT, core.PLANNER, core.EVENT_VIA), tokens):
                     var.reset(tok)
         text = "\n\n".join(texts)
-        return (writing_tasks(text) if name == "planning_guide" and not bad else text), bad
+        if name == "planning_guide" and not bad:
+            text = PLAN_GUIDE.format(decisions=core.DECISION_FORMAT.strip()) + "\n" + writing_tasks(text)
+        return text, bad
 
     def call(self, name, a):
         """Run one river command in-process; return (text, is_error)."""

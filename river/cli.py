@@ -1353,9 +1353,13 @@ def build_parser(only=None):
     x.add_argument("--note"); x.add_argument("--project")
     x = cvs.add_parser("design", help="a new design document (#5989): a doc with the outline brief, discovery, "
                        "decisions, plan, risks, each part pending; fill each with maxpm canvas section")
-    x.add_argument("name"); x.add_argument("--title")
+    x.add_argument("name", nargs="?", help="the canvas (with --goal: goal-<goal>)"); x.add_argument("--title")
     x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
+    x.add_argument("--goal", help="the goal it belongs to: the doc is the canvas goal-<goal> in the goal's project, "
+                   "and maxpm goal show lists it")
     x.add_argument("--project", help="default: the item's project, or this folder's")
+    x.add_argument("--open", action="store_true", help="put it in front of the person: the page opens it in its side "
+                   "panel (maxpm serve must run)")
     x = cvs.add_parser("plan", help="the plan of a design document: each version of its Plan section, the tasks it "
                        "names (#<id>) and their state, and what each version added and removed")
     x.add_argument("name"); x.add_argument("--version", type=int, help="print the text of this plan version")
@@ -6817,9 +6821,10 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_list(conn, a.project, a.item, actor if a.mine else None, a.deleted)
     if v == "show":
         res = core.canvas_show(conn, a.name, a.project, a.version)
-        if actor and not core._is_person(conn, actor) and res.get("shown"):  # what this session read (#5986)
+        reader = core.planner_name(actor)  # a planner chat app reads as <person>@<client> (#6221)
+        if reader and (reader != actor or not core._is_person(conn, actor)) and res.get("shown"):  # #5986
             with core.unless_readonly(), core.tx(conn):
-                core.canvas_seen(conn, res["id"], actor, res["shown"]["version"])
+                core.canvas_seen(conn, res["id"], reader, res["shown"]["version"])
         return res
     if v == "comments":
         return core.canvas_comments(conn, a.name, actor, a.open, a.project)
@@ -6851,11 +6856,28 @@ def _canvas_dispatch(conn, a, actor):
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         return core.canvas_section(conn, a.name, a.heading, body, actor, a.project, a.note, a.pending)
     if v == "design":
-        project = a.project
+        name, project = a.name, a.project
+        if a.goal:  # a goal's doc (#6221): a canvas has an item, not a goal, so the name links it
+            g = core._goal(conn, a.goal)
+            name, gp = core.goal_doc_name(g["name"]), core._project_name(conn, g["project_id"])
+            if a.name and a.name.strip().lower() != name:
+                raise RiverError(f"the design document of goal {g['name']} is the canvas {name}; leave out the name")
+            if project and project != gp:
+                raise RiverError(f"goal {g['name']} is in project {gp}, not {project}")
+            project = gp
+        if not name:
+            raise RiverError("name the design document: maxpm canvas design <name> (or --goal <goal>)")
         if not project and a.item is None and not core._held_item(conn, actor):
             names = core.projects_for_dir(conn, os.getcwd())
             project = names[0] if len(names) == 1 else None
-        return core.design_doc(conn, a.name, actor, a.title, a.item, project)
+        res = core.design_doc(conn, name, actor, a.title, a.item, project)
+        if a.open:  # the person sees it at once; a doc that cannot open now is still made
+            try:
+                ask_server(conn, "canvas_open", {"name": str(res["id"])}, actor=actor)
+                res = dict(res, opened=True)
+            except RiverError as e:
+                res = dict(res, opened=False, open_error=str(e))
+        return res
     if v == "plan":
         res = core.plan_versions(conn, a.name, a.project)
         if a.version is not None and not any(p["plan_version"] == a.version for p in res["plans"]):
@@ -7227,6 +7249,10 @@ def render_canvas(a, res):
         print(f"  design document with the parts {', '.join(res['sections'])}, each pending. Fill each one: maxpm "
               f"canvas section {res['name']} <part> <file>. In Plan, name each task as #<id>: maxpm show <id> then "
               f"links it to its part, and maxpm canvas plan {res['name']} shows the plan's versions.")
+        if res.get("opened"):
+            print("  opened in the side panel of the MaximizePM page")
+        elif "opened" in res:
+            print(f"  the page cannot open it now ({res['open_error']}); the person sees it in Sessions > Artifacts")
         return
     if v == "plan":
         plans = res["plans"]
@@ -8804,6 +8830,10 @@ def render(a, res):
                     print("\n".join([f"  parent goal {g['parent']}: {first.strip()}"] + rest))
                 print("\n".join(_handoff_lines(g["name"], g.get("handoff") and dict(
                     g["handoff"], text=g.get("handoff_text")), g.get("handoff_due"))))
+                for d in g.get("docs") or []:  # its design document and its tasks' canvases (#6221)
+                    print(f"  canvas {d['name']} v{d['version']} {d['kind']}" + (f" #{d['item_id']}" if d["item_id"] else "")
+                          + (f" \"{d['title']}\"" if d["title"] else "") + f" by {d['agent'] or '?'}"
+                          + (f" [{d['open_comments']} open comment(s)]" if d["open_comments"] else ""))
                 for it in g.get("items", []):
                     print("  " + _fmt_item(it, show_reason=False))
                 if not g.get("items"):
