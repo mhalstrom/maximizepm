@@ -21,6 +21,21 @@ SERVE_PORT = {"port": None}  # set by maxpm serve, so links point at the page th
 LOOP = {"started": None, "last_pass": None}
 # The loop runs in a process of its own (river/loop.py, #5569): on; and it ended to ask serve for a restart.
 CHILD = {"on": False, "restart": False}
+# The errors of the loop's steps whose traceback serve.log has already: each distinct error gets it once (#6227: seven
+# passes logged 'Object of type PosixPath is not JSON serializable' with no line that said where).
+TRACED = set()
+TRACED_MAX = 200
+
+
+def _trace(key):
+    """Print the traceback of the error being handled, the first time this process sees key."""
+    import traceback
+    if key in TRACED:
+        return
+    if len(TRACED) >= TRACED_MAX:
+        TRACED.clear()
+    TRACED.add(key)
+    _say(traceback.format_exc().rstrip())
 
 
 def register_channel(name, make):
@@ -593,6 +608,7 @@ def loop(stop, interval_s=None):
                     name = "notify" if name == "<lambda>" else name
                     failed.append(f"{name}: {type(e).__name__}: {e}")
                     _say(f"maxpm notify: {name}: {e}")
+                    _trace(f"{name}: {type(e).__name__}: {e}")
                     try:
                         conn.rollback()  # a step that failed inside a tx leaves no open transaction for the next
                     except Exception:
@@ -615,6 +631,7 @@ def loop(stop, interval_s=None):
         except Exception as e:  # keep the loop alive; the next pass retries
             error = f"{type(e).__name__}: {e}"
             _say(f"maxpm notify: {e}")
+            _trace(error)
         t = core.iso(core.now())
         if not error:
             LOOP["last_pass"] = t

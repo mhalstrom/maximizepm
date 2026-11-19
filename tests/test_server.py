@@ -3631,6 +3631,49 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(core.DEFAULT_SETTINGS["fresh_min"], "70k")
         self.assertEqual(core.DEFAULT_SETTINGS["question_wait_end"], "55m")
 
+    def test_the_chat_record_of_an_asker_is_json_with_the_log_path_as_text(self):
+        """#6227: the adapters give the chat log as a Path, and end_for_answer stores the record as JSON: 'Object of
+        type PosixPath is not JSON serializable' failed every pass of fresh_sessions while an asker sat at its prompt."""
+        from pathlib import Path
+        from unittest import mock
+        from river import sessions
+        log = Path(self.dir.name) / "chat.jsonl"
+        log.write_text("{}\n", encoding="utf-8")
+        core.register(self.c, "asker")
+        with mock.patch.object(sessions, "transcript", lambda conn, agent: ("claude", log)), \
+                mock.patch.object(sessions, "session_ref", lambda *a, **k: "s-1"), \
+                mock.patch.object(sessions, "entries", lambda *a, **k: {"cwd": self.dir.name}), \
+                mock.patch.object(sessions, "cache_state", lambda *a, **k: {"context": 30_000}):
+            rec = server._chat_of(self.c, "asker")
+        self.assertEqual((rec["path"], rec["sid"], rec["context"]), (str(log), "s-1", 30_000))
+        self.assertEqual(json.loads(json.dumps(rec))["path"], str(log))
+
+    def test_the_loop_logs_the_traceback_of_each_distinct_step_error_once(self):
+        """#6227: serve.log held seven 'maxpm notify: fresh_sessions: ...' lines and no line that said where."""
+        import io
+        import threading
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from river import notify
+        stop, passes = threading.Event(), []
+
+        def broken(conn):
+            passes.append(1)
+            if len(passes) == 3:
+                stop.set()
+            raise TypeError("Object of type PosixPath is not JSON serializable")
+        self.addCleanup(notify.TRACED.clear)
+        out = io.StringIO()
+        with mock.patch.object(server, "watch_prompts", lambda c: None), \
+                mock.patch.object(server, "fresh_sessions", broken), \
+                mock.patch.object(stop, "wait", lambda t: None), redirect_stdout(out):
+            notify.loop(stop, interval_s=1)
+        text = out.getvalue()
+        self.assertEqual(passes, [1, 1, 1])
+        self.assertEqual(text.count("maxpm notify: broken: Object of type PosixPath"), 3)
+        self.assertEqual(text.count("Traceback (most recent call last)"), 1)
+        self.assertIn("in broken", text)
+
     def test_a_session_that_waits_at_its_prompt_for_an_answer_ends_and_the_answer_starts_a_fresh_one(self):
         """#5776 (mark 2026-11-13, policy p154): four sessions waited 6h to 7.5h at their prompts for mark's 'deploy'
         or 'push', and each answer read the whole context again at the cache write price. The ask tells the worker to

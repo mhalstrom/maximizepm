@@ -3335,7 +3335,9 @@ def _chat_of(conn, agent):
         return None
     if not sid:
         return None
-    return {"agent": agent, "kind": kind, "path": path, "sid": sid, "cwd": cwd, "context": cs.get("context"),
+    # The path as text: end_for_answer stores the record as JSON, and a Path failed every pass of fresh_sessions while
+    # an agent that waited on an answer sat at its prompt (#6227).
+    return {"agent": agent, "kind": kind, "path": str(path), "sid": sid, "cwd": cwd, "context": cs.get("context"),
             "model": a["model"], "session": a["session"]}
 
 
