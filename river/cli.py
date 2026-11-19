@@ -2080,6 +2080,16 @@ def build_parser(only=None):
     x.add_argument("--runs-on", dest="runner", help="where the agent runs (this computer)")
     x.add_argument("--keys", help="credential sets its task gets, comma-separated ('' for none)")
     x.add_argument("--reason", help="off: why")
+    x = pls.add_parser("permissions", help="what a pipeline's agents do at once, ask first (a card, never a prompt) "
+                       "and never do, and their recent asks")
+    x.add_argument("name")
+    x = pls.add_parser("permit", help="change what a pipeline's agents may do with no prompt: rules in Claude Code's "
+                       "form, such as Read or Bash(git push:*)")
+    x.add_argument("name")
+    for part, words in (("allow", "they do at once"), ("ask", "they ask first: a card"), ("never", "they never do"),
+                        ("remove", "take a rule off its list")):
+        x.add_argument(f"--{part}", action="append", default=[], metavar="RULE", help=f"a rule {words} (repeat it)")
+    x.add_argument("--default", action="store_true", help="back to the default list")
     x = pls.add_parser("keys", help="the keys each stage may read (credential sets granted to it or its tier), the "
                        "names that the deployment system keeps, and the keys of its rules and runners; --kept-in "
                        "names a stage's outside keys")
@@ -7879,6 +7889,14 @@ def _pipeline_cmd(conn, a, actor):
         if sub == "pass":
             return tr.let_pass(conn, a.name, a.stage, a.rev, a.reason, actor)
         return tr.freeze(conn, a.name, a.stage, a.start, a.end, a.reason, a.clear, actor)
+    if sub in ("permissions", "permit"):  # #6154
+        from .pipeline import permissions
+        if sub == "permissions":
+            return permissions.show(conn, a.name)
+        if not (a.allow or a.ask or a.never or a.remove or a.default):
+            raise RiverError(f"say what changes: maxpm pipeline permit {a.name} --allow|--ask|--never|--remove "
+                             "\"<rule>\" (or --default)")
+        return permissions.change(conn, a.name, a.allow, a.ask, a.never, a.remove, a.default, actor)
     if sub == "keys":  # #6153
         from .pipeline import keys
         if a.kept_in is not None or a.names is not None:
@@ -8161,6 +8179,15 @@ def render_pipeline(a, res):
     if sub == "forge" and res.get("plugin"):
         print(f"pipeline {res['pipeline']}: its runs come from plugin {res['forge']} {res['version']} "
               f"({res['level']}; actions: {', '.join(res['actions']) or 'none'}); maxpm serve polls it")
+        return
+    if sub in ("permissions", "permit"):
+        print(f"pipeline {res['pipeline']}: what its agents may do with no prompt"
+              + (" (the default list)" if res["default"] else ""))
+        for part, words in (("allow", "at once"), ("ask", "ask first (a card)"), ("never", "never")):
+            print(f"  {words}: {', '.join(res[part]) or 'nothing'}")
+        for x in res.get("asks") or []:
+            print(f"  asked {x['asked_at']}: {x['rule']} for task #{x['item']} (card #{x['card']}): {x['state']}"
+                  + (f" by {x['decided_by']}" if x["decided_by"] else ""))
         return
     if sub == "keys" and "kept_in" in res:
         print(f"pipeline {res['pipeline']}, stage {res['stage']}: {res['kept_in']} keeps "

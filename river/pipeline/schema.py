@@ -32,7 +32,9 @@ CREATE TABLE IF NOT EXISTS pipelines (
   agents_operate  INTEGER,               -- 1: agent sessions on the operator list may press the emergency actions
   runners     TEXT,                      -- JSON list of the runners its trigger rules may use (#6151)
   intake_secret   TEXT,                  -- events in over HTTP (#6163): the maxpm secret whose value a sender shows
-  plugin_pin      TEXT                   -- the kept version of its plugin that it runs (#6166); NULL: the plugin's folder
+  plugin_pin      TEXT,                  -- the kept version of its plugin that it runs (#6166); NULL: the plugin's folder
+  permissions     TEXT                   -- #6154: JSON {allow, ask, never} of its agents' permission rules; NULL: the
+                                         -- default (permissions.DEFAULT)
 );
 
 -- The numbered versions of a pipeline's definition (#6143): each change of it makes version n+1 with the whole
@@ -488,6 +490,25 @@ CREATE TABLE IF NOT EXISTS pipeline_keys (
   revoke_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS pipeline_keys_place ON pipeline_keys(pipeline_id, scope, value);
+-- A step that a run refused with no prompt (#6154, river/pipeline/permissions.py): the card that asks for it, and the
+-- answer. A yes allows that one step (rule) for that task in its next runs. Readers: maxpm serve (permissions.
+-- serve_pass: a card done or dropped), runners.py (a run's allowed steps), the Triggers tab, maxpm pipeline permissions.
+CREATE TABLE IF NOT EXISTS pipeline_permit_asks (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER,
+  item         INTEGER NOT NULL,         -- the task of the run
+  run_id       INTEGER,                  -- the runner run that refused it
+  runner       TEXT,
+  rule         TEXT NOT NULL,            -- the one step, as a permission rule: Bash(./deploy.sh prod)
+  listed       TEXT,                     -- the ask rule that it matched; NULL: on no list
+  card         INTEGER,                  -- the person's item that asks
+  state        TEXT NOT NULL,            -- asked, yes, no
+  asked_at     TEXT NOT NULL,
+  decided_by   TEXT,
+  decided_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS pipeline_permit_asks_item ON pipeline_permit_asks(item, state);
+
 -- The names of the keys that the deployment system keeps for a stage itself (GitHub environment secrets, a Pulumi
 -- ESC environment), never a value: from a plugin's answer ("secrets") or a person (maxpm pipeline keys --kept-in).
 -- Readers: the stage cards and maxpm pipeline keys.
@@ -514,9 +535,10 @@ def migrate(conn):
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
     for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
-              "forge_url", "plugin_settings", "plugin_state", "runners", "intake_secret", "plugin_pin"):
+              "forge_url", "plugin_settings", "plugin_state", "runners", "intake_secret", "plugin_pin", "permissions"):
         if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use; #6163;
             # #6166: plugin_pin, the kept version of its plugin (plugin_versions.key) that it runs; NULL: the plugin's folder
+            # #6154: permissions, the JSON list of what its agents may do with no prompt
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     for c in ("stop_runs", "agents_operate"):  # #6145
         if c not in cols:

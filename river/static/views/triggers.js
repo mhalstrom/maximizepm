@@ -58,6 +58,48 @@ function firedHtml(d) {
       <td class="t-m">${esc(f.result || "acting")}</td></tr>`).join("")}</table></div>`;
 }
 
+// What the pipeline's agents may do with no permission prompt (#6154): at once, ask first (a card), never; and the
+// steps that runs asked for lately, each with its card.
+const ASK_STATE = { asked: ["c-human", "waits for a yes"], yes: ["c-ready", "yes"], no: ["c-waiting", "no"] };
+function permissionsHtml(d) {
+  const P = d.permissions;
+  if (!P) return "";
+  const col = (xs) => xs.length ? xs.map(x => `<div class="mono t-s">${esc(x)}</div>`).join("") : `<span class="muted t-s">nothing</span>`;
+  const asks = (P.asks || []).map(a => {
+    const [cls, word] = ASK_STATE[a.state] || ["c-waiting", a.state];
+    return `<tr><td class="mono t-s" data-label="Step">${esc(a.rule)}</td>
+      <td data-label="Task">${button("#" + a.item, { cls: "plain", data: { "dp-card": a.item }, title: "Open the task" })}</td>
+      <td data-label="Card">${a.card ? button("#" + a.card, { cls: "plain", data: { "dp-card": a.card }, title: "Open the card" }) : ""}</td>
+      <td data-label="Answer">${chip(cls, word)}${a.decided_by ? ` <span class="muted t-s">${esc(a.decided_by)}</span>` : ""}</td></tr>`;
+  }).join("");
+  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Does it at once</th><th>Asks first (a card, not a prompt)</th><th>Never</th></tr>
+      <tr><td data-label="At once">${col(P.allow)}</td><td data-label="Asks first">${col(P.ask)}</td><td data-label="Never">${col(P.never)}</td></tr></table></div>
+    <div class="pl-bar">${button("Edit the list", { data: { "tg-perms": 1 }, title: "Change the list" })}
+      ${P.default ? `<span class="muted t-s">the default list</span>` : ""}</div>
+    <div class="t-s muted">A step outside the list is refused with no prompt. After the run, a refused step of Asks first, or of no list,
+      becomes a card for the manager or a person; a yes runs the task again with that one step allowed. Rules in Claude Code's form: Read, Bash(git push:*).</div>
+    ${asks ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Asked for</th><th>Task</th><th>Card</th><th>Answer</th></tr>${asks}</table></div>` : ""}`;
+}
+
+// The dialog of the list: one rule a line in each part (op pipeline_trigger, action permit).
+function openPerms() {
+  if (!T || !T.permissions) return;
+  const P = T.permissions;
+  ensureDialog();
+  const area = (id, xs, ph) => textarea({ id, rows: 4, placeholder: ph }, xs.join("\n"));
+  dlgBox.innerHTML = `<div class="dlg-head"><h2>What its agents may do · ${esc(T.pipeline)}</h2>
+      ${iconButton("✕", "Close", { data: { "tg-close": 1 } })}</div>
+    <div class="form">
+      ${field("Does it at once", area("tgAllow", P.allow, "Read\nBash(npm test:*)"))}
+      ${field("Asks first (a card)", area("tgAsk", P.ask, "Bash(./deploy.sh:*)"))}
+      ${field("Never", area("tgNever", P.never, "Bash(rm:*)"))}
+    </div>
+    <div class="muted t-s">One rule a line, as Claude Code writes them. Bash(maxpm:*) stays allowed: the agent reports through it.</div>
+    ${actions(button("Cancel", { data: { "tg-close": 1 } }) + button("Save", { kind: "primary", data: { "tg-perms-save": 1 } }))}`;
+  dlg.open();
+  dlgBox.querySelector("#tgAllow").focus();
+}
+
 function viewHtml(d) {
   const rules = d.rules.map(ruleHtml).join("") || empty("No rule: nothing in this pipeline starts an agent.");
   return `<div class="dp-cards">${rules}</div>
@@ -67,6 +109,7 @@ function viewHtml(d) {
       A person or the manager changes the rules; the audit log names who, and each rule that acted.</div>
     <h3 class="tg-h">Runners it may use</h3>${ticksHtml(d)}
     <div class="t-s muted">A runner is a server where the agent works with no person, terminal or prompt (Deploy › Runners). This computer is always a choice.</div>
+    <h3 class="tg-h">What its agents may do, with no permission prompt</h3>${permissionsHtml(d)}
     <h3 class="tg-h">What the rules did lately</h3>${firedHtml(d)}`;
 }
 
@@ -86,9 +129,7 @@ function stageChoices(d) {
   return out;
 }
 
-function openRule(r) {
-  if (!T) return;
-  editing = r;
+function ensureDialog() {
   if (!dlg) {
     const el = document.createElement("div");
     el.id = "tgDlg"; el.className = "hidden";
@@ -98,6 +139,12 @@ function openRule(r) {
     dlg = makeDialog(el);
     dlgBox.addEventListener("click", onDialogClick);
   }
+}
+
+function openRule(r) {
+  if (!T) return;
+  editing = r;
+  ensureDialog();
   const where = r ? (r.stage ? "stage:" + r.stage : r.tier ? "tier:" + r.tier : "") : "";
   dlgBox.innerHTML = `<div class="dlg-head"><h2>${r ? `Rule ${esc(r.name)}` : "A new rule"} · ${esc(T.pipeline)}</h2>
       ${iconButton("✕", "Close", { data: { "tg-close": 1 } })}</div>
@@ -117,6 +164,12 @@ function openRule(r) {
 
 async function onDialogClick(e) {
   if (e.target.closest("[data-tg-close]")) return dlg.close();
+  if (e.target.closest("[data-tg-perms-save]")) {
+    const lines = (id) => dlgBox.querySelector("#" + id).value.split("\n").map(x => x.trim()).filter(Boolean);
+    const ok = await change({ action: "permit", allow: lines("tgAllow"), ask: lines("tgAsk"), never: lines("tgNever") }, "List saved");
+    if (ok) dlg.close();
+    return;
+  }
   const rm = e.target.closest("[data-tg-remove]");
   if (rm) {
     dlg.close();
@@ -143,9 +196,10 @@ async function change(args, done) {
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-tg-add],[data-tg-edit],[data-tg-off],[data-tg-on],[data-rn-tick]");
+  const t = e.target.closest("[data-tg-add],[data-tg-edit],[data-tg-off],[data-tg-on],[data-rn-tick],[data-tg-perms]");
   if (!t || !T) return;
   const d = t.dataset, rule = (name) => T.rules.find(r => r.name === name);
+  if (d.tgPerms) return openPerms();
   if (d.rnTick) return tick(T.pipeline, d.rnTick, !!d.on, () => { const host = $("#dpPage"); if (host) drawTriggers(T.pipeline, host, true); });
   if (d.tgAdd) return openRule(null);
   if (d.tgEdit) return openRule(rule(d.tgEdit));

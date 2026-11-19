@@ -256,7 +256,10 @@ def trigger_op(conn, a, who):
         return triggers.rule_remove(conn, a["pipeline"], a["rule"], who)
     if act in ("on", "off"):
         return triggers.rule_switch(conn, a["pipeline"], a["rule"], act == "on", a.get("reason"), who)
-    raise RiverError("the action of a trigger rule is add, edit, off, on or remove")
+    if act == "permit":  # #6154: the whole list from the Triggers tab's dialog
+        from ..pipeline import permissions
+        return permissions.set_whole(conn, a["pipeline"], {k: a.get(k) or [] for k in permissions.PARTS}, who)
+    raise RiverError("the action of a trigger rule is add, edit, off, on, remove or permit")
 
 
 def trigger_rules(conn, path):

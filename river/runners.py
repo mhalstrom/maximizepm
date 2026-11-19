@@ -31,8 +31,10 @@ state and proof back (river/pipeline/agent_job.py, #6152; runner 'github'). The 
 own (a key in its environment, or the CLI's own sign-in there), or a set granted to the runner (#6153: maxpm secret
 grant <set> --runner <name>; its secret carries the variable the CLI reads, maxpm secret level <name> --var
 ANTHROPIC_API_KEY). The run also gets the sets that its rule granted to its task (pipeline/keys.run_env), in the script
-on stdin; the transcript masks them. The list of what an agent may do with no prompt per pipeline comes with #6154
-(until then: ALLOW, or the runner's allow).
+on stdin; the transcript masks them. What an agent may do with no prompt is its pipeline's list (#6154,
+pipeline/permissions.py: allow, ask first, never), as the run's own flags; a pipeline with no list uses the runner's
+allow, else ALLOW. A refused step becomes a card after the run, and a yes runs the task again here with that step
+allowed.
 
 Standard library only."""
 
@@ -54,8 +56,9 @@ from .core import RiverError
 THIS = "this computer"
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 FOLDER = "~/maxpm-runner"  # where the projects are cloned on a runner
-# What a Claude Code agent may use on a runner with no prompt, until each pipeline has its own list (#6154): maxpm
-# and git, and reading and changing files. Any other tool is refused, never asked (permission mode dontAsk).
+# What a Claude Code agent may use on a runner with no prompt when neither its pipeline (#6154) nor the runner names a
+# list: maxpm and git, and reading and changing files. Any other tool is refused, never asked (permission mode
+# dontAsk). The same list is permissions.DEFAULT.
 ALLOW = "Bash(maxpm:*) Bash(git:*) Read Edit Write Glob Grep"
 # The agent CLIs that run with no terminal and no prompt (their own --help, read 2026-11-19: Claude Code 2.1.328,
 # codex-cli 0.159.1). key: what the CLI needs on the runner to call its model.
@@ -405,7 +408,13 @@ def _origin(folder):
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
-def prompt_for(run, item_id, runner_name):
+def prompt_for(run, item_id, runner_name, perm=None, cli="claude"):
+    """The run's prompt. perm (#6154, pipeline/permissions.for_run): what it may do, ask first, never do."""
+    from .pipeline import permissions
+    return _prompt(run, item_id, runner_name) + (permissions.prompt_text(perm, cli) if perm else "")
+
+
+def _prompt(run, item_id, runner_name):
     return (f"You are a MaximizePM agent on the runner {runner_name}, with no person, no terminal and no permission "
             f"prompt. Run `maxpm go`: it gives you task #{item_id}. Do it as its briefing says, in this folder (a "
             f"worktree of the project on the runner). Nobody answers at a prompt: a question for a person goes to the "
@@ -416,18 +425,33 @@ def prompt_for(run, item_id, runner_name):
             f"left>\"`. Report each step with `maxpm now \"<about 10 words>\"`. Then stop: do not run maxpm wait.")
 
 
-def _cli_line(r, run, model):
-    """The agent CLI command with no terminal: its prompt is in $MAXPM_PROMPT."""
+def _cli_line(r, run, model, perm=None):
+    """The agent CLI command with no terminal: its prompt is in $MAXPM_PROMPT. perm (#6154): the pipeline's list as
+    the run's own flags: --allowedTools (allow) and --disallowedTools (ask and never), never a file in the CLI's home."""
     if (run["cli"] or r["cli"]) == "codex":
         return ('codex exec --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true '
                 '--skip-git-repo-check "$MAXPM_PROMPT"')
-    allow = " ".join(shlex.quote(t) for t in (r["allow"] or ALLOW).split())
+    rules = perm["allow"] if perm else (r["allow"] or ALLOW).split()
+    allow = " ".join(shlex.quote(t) for t in rules)
+    deny = " ".join(shlex.quote(t) for t in (perm or {}).get("deny") or [])
     return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
             f'--max-budget-usd {float(r["max_cost"]):g} ' + (f"--model {shlex.quote(model)} " if model else "")
-            + f"--allowedTools {allow}")
+            + f"--allowedTools {allow}" + (f" --disallowedTools {deny}" if deny else ""))
 
 
-def script_for(r, run, origin, project, port, key, token, model=None, keys_env=None):
+def permissions_for(conn, r, run):
+    """The run's list (#6154): its pipeline's; when the pipeline has none, the runner's own allow (maxpm runner set
+    --allow) or the default. A yes for one step of the task adds that step."""
+    from .pipeline import permissions
+    perm = permissions.for_run(conn, run)
+    p = conn.execute("SELECT permissions FROM pipelines WHERE name=?", (run["pipeline"],)).fetchone() \
+        if run["pipeline"] else None
+    if not (p and p["permissions"]) and r["allow"]:
+        perm["allow"] = list(dict.fromkeys(r["allow"].split() + perm["approved"]))
+    return perm
+
+
+def script_for(r, run, origin, project, port, key, token, model=None, keys_env=None, perm=None):
     """The shell script that a run sends on stdin (keys stay out of every command line). keys_env: the variables of
     the runner's and the task's credential sets (#6153, pipeline/keys.run_env)."""
     folder = r["folder"] or FOLDER
@@ -441,7 +465,7 @@ def script_for(r, run, origin, project, port, key, token, model=None, keys_env=N
            "MAXPM_RUNNER_PORT": str(port), "MAXPM_RUNNER_KEY": key, core.TOKEN_ENV: token, "MAXPM_AGENT": run["agent"],
            "MAXPM_FOCUS": f"item:{run['item']}", "MAXPM_RUNNER": r["name"],
            "MAXPM_AGENT_TYPE": CLIS[run["cli"] or r["cli"]]["type"]}
-    prompt = prompt_for(run["id"], run["item"], r["name"])
+    prompt = prompt_for(run["id"], run["item"], r["name"], perm, run["cli"] or r["cli"])
     return "\n".join([
         "set -e",
         'export PATH="$HOME/.local/bin:$PATH"',
@@ -457,7 +481,7 @@ def script_for(r, run, origin, project, port, key, token, model=None, keys_env=N
         "MAXPM_PROMPT=$(cat <<'MAXPM_PROMPT_END'", prompt, "MAXPM_PROMPT_END", ")",
         "export MAXPM_PROMPT",
         f'echo "maxpm: run {run["id"]} of task #{run["item"]} starts in $work at $start"',
-        "exec " + _cli_line(r, run, model) + " </dev/null",
+        "exec " + _cli_line(r, run, model, perm) + " </dev/null",
         ""])
 
 
@@ -487,7 +511,8 @@ def _start(conn, run):
     # #6153: the runner's keys (the model key) and the keys its rule granted to the task, never a person's sign-in
     from .pipeline import keys
     keys_env, forms, given, left = keys.run_env(conn, run, run["cli"] or r["cli"])
-    script = script_for(r, dict(run), origin, row["project"], rport, key, token, model, keys_env)
+    perm = permissions_for(conn, r, run)  # #6154: what it may do with no prompt
+    script = script_for(r, dict(run), origin, row["project"], rport, key, token, model, keys_env, perm)
     path = Path(core.river_dir()) / "runners" / f"run{run['id']}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ExitOnForwardFailure=yes",
@@ -647,6 +672,11 @@ def _end(conn, run, state, code, why=None):
                                                  f"the task closed: {result[:300]}", actor=run["agent"])
         except RiverError:
             pass
+    from .pipeline import permissions  # #6154: each step it refused with no prompt becomes a card (or an audit line)
+    try:
+        result += permissions.outcome(conn, run)
+    except RiverError as e:
+        result += f"; its refused steps were not read: {e}"
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET state=?, ended_at=?, exit_code=?, cost=?, result=? WHERE id=?",
                      (state, _now(), code if isinstance(code, int) else None, cost, result[:4000], run["id"]))
@@ -699,6 +729,8 @@ def serve_pass(conn):
         state = "ended" if code == 0 else "failed"
         out["ended"].append(_end(conn, run, state, code, "maxpm serve lost the connection (a restart)" if code == "lost"
                                  else None))
+    from .pipeline import permissions  # #6154: a yes on a card queues the task again here, with the step allowed
+    out["permits"] = permissions.serve_pass(conn)
     for run in conn.execute(f"SELECT * FROM runner_runs WHERE state='queued' AND runner NOT IN "
                             f"({','.join('?' * len(forges))}) ORDER BY id", forges).fetchall():
         r = conn.execute("SELECT * FROM runners WHERE name=?", (run["runner"],)).fetchone()

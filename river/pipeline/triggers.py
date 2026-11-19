@@ -237,7 +237,9 @@ def rules(conn, pipeline, fired=20):
     every = [{"name": r["name"], "ssh": r["ssh"], "state": r["state"], "cli": r["cli"], "ticked": r["name"] in ticks}
              for r in conn.execute("SELECT name, ssh, state, cli FROM runners ORDER BY name")]
     from . import keys as stage_keys
+    from . import permissions
     return {"pipeline": p["name"], "project": p["project"],
+            "permissions": permissions.show(conn, p["name"]),  # #6154: what its agents may do with no prompt
             # key_list (#6153): each set with the stages that may read it (None: any), then the runner's sets
             "rules": [dict(_info(r), key_list=stage_keys.rule_keys(conn, p["id"], _keys(r["keys"] or ""), r["runner"]))
                       for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id",

@@ -34,6 +34,11 @@ def parse_waves(text):
     return waves
 
 
+def _permissions():
+    from . import permissions  # it imports this module
+    return permissions
+
+
 def _may(conn, actor):
     why = core._lead_refusal(conn, actor, "changes a pipeline, because its stages run commands and its gates decide "
                                           "what reaches production")
@@ -332,6 +337,7 @@ def export(conn, name):
                                                 if p["plugin_settings"] else {})} if p["forge"] else None,
             "environments": envs, "stages": stages, "triggers": triggers.export(conn, p["id"]),
             "runners": json.loads(p["runners"] or "[]"),  # the runners its rules may use (#6151)
+            "permissions": _permissions().export(p),  # #6154: what its agents may do with no prompt (None: default)
             # #6153: the credential sets its stages and tiers may read (names only)
             "keys": [{"set": k["set_name"], k["scope"]: k["value"]} for k in conn.execute(
                 "SELECT set_name, scope, value FROM pipeline_keys WHERE pipeline_id=? AND revoked_at IS NULL "

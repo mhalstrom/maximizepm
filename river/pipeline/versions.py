@@ -216,6 +216,14 @@ def _apply(conn, p, old, n, reason, actor):
         runners_mod.allow_pipeline(conn, name, r, True, actor=actor)
     for r in sorted(have - set(old.get("runners") or [])):
         runners_mod.allow_pipeline(conn, name, r, False, actor=actor)
+    # #6154: what its agents may do with no prompt (None: the default list)
+    if (old.get("permissions") or None) != (now.get("permissions") or None):
+        from . import permissions
+        want = old.get("permissions")
+        if want:
+            permissions.set_whole(conn, name, want, actor)
+        else:
+            permissions.change(conn, name, reset=True, actor=actor)
 
 
 def _form_pos(conn, p, stage):

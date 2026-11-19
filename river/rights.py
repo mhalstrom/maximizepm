@@ -49,6 +49,7 @@ COMMANDS = {
                  "versions": ANY,  # #6143: --back checks a person or the manager (versions.restore)
                  "triggers": ANY, "trigger": LEAD,  # #6150
                  "keys": ANY,  # #6153: names only; --kept-in takes a person or the manager (keys.kept)
+                 "permissions": ANY, "permit": LEAD,  # #6154
                  # #6145: operators.change takes a person, operators.check the pipeline's operators
                  "operators": ANY, "emergency": ANY,
                  "event": LEAD, "report": LEAD, "intake": LEAD},  # #6163: events in from any system
@@ -88,7 +89,7 @@ READS = {"plugin list", "plugin show", "project show", "project list","canvas li
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
-         "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding", "pipeline keys",
+         "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding", "pipeline keys", "pipeline permissions",
          "runner list", "runner runs", "runner log"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of

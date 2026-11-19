@@ -906,9 +906,10 @@ What the server needs:
 | Codex (`--cli codex`) | `codex exec --json` in its workspace-write sandbox, with network on, so maxpm reaches the queue | a secret with the variable `CODEX_API_KEY` in a set granted to the runner, else `codex login` there or `CODEX_API_KEY` | none in the CLI: the time limit stops it |
 
 `maxpm serve` stops each run after the runner's max minutes (60 when not set).
-The tools that a Claude Code agent may use there with no prompt are maxpm,
-git, and reading and changing files, until each pipeline has its own list;
-`maxpm runner set <name> --allow "<tools>"` changes them.
+What a Claude Code agent may do there with no prompt is its pipeline's list
+(section "What agents may do with no prompt"). A pipeline with no list of
+its own uses the runner's (`maxpm runner set <name> --allow "<tools>"`), else
+maxpm, git, and reading and changing files.
 
 What a run does:
 
@@ -1060,6 +1061,56 @@ What MaximizePM does with it:
 Note: GitHub does not run your workflows on a pull request that the job's own
 token opened. The proof is the job's own `--test` run; the session that
 merges runs the tests again.
+
+## What agents may do with no prompt
+
+An agent on a runner has nobody at a terminal to answer a permission prompt.
+Each pipeline has one list in three parts: what its agents do at once, what
+they ask first (a card, never a prompt), and what they never do. Each entry
+is a permission rule as Claude Code writes it: a tool (`Read`, `Edit`,
+`Write`, `Glob`, `Grep`, `WebFetch`), or a tool with what it acts on:
+`Bash(git push:*)` is each command that starts with `git push`,
+`Bash(make deploy)` only that command.
+
+```
+maxpm pipeline permissions shop                          # the list, and the steps that runs asked for lately
+maxpm pipeline permit shop --allow "Bash(npm test:*)"    # at once
+maxpm pipeline permit shop --ask "Bash(./deploy.sh:*)"   # a card first
+maxpm pipeline permit shop --never "Bash(rm:*)"          # never
+maxpm pipeline permit shop --remove "Bash(rm:*)"         # off its list
+maxpm pipeline permit shop --default                     # back to the default list
+```
+
+A rule is on one list only: naming it again moves it. `Bash(maxpm:*)` stays
+allowed, because the agent reports through maxpm. A pipeline with no list
+has the default one: maxpm, git, and reading and changing files.
+
+How a run uses it (Claude Code): the list becomes the run's own flags,
+`--allowedTools` (at once) and `--disallowedTools` (ask first and never),
+with `--permission-mode dontAsk`. MaximizePM writes nothing into the CLI's
+home. A step outside the list is refused at once, never asked, and the
+run's prompt names the three parts. After the run, MaximizePM reads the
+refused steps from Claude Code's result line:
+
+- a step of never: one line of the audit log, nothing more;
+- a step of ask first, or a step on no list: a card (a person's item that
+  the task waits on; the manager sees it first, as every person item). A yes
+  (the card done) runs the task again on the same runner with that one step
+  allowed for that task only. A no (the card dropped) ends there.
+
+Codex has no list of tools: its run gets the list in its prompt only, and
+keeps to it by itself.
+
+When you are the agent on a runner and a step is refused: do the parts you
+can without it, release the task with a note that names the step, and stop.
+The card comes by itself; do not ask again in a prompt.
+
+The Triggers tab shows the list (Edit the list changes it) and the steps
+that runs asked for, each with its card and answer. Only a person or the
+manager changes the list. Each change is a line of the audit log and a
+version of the definition; going back to a version brings its list back.
+The agent job in GitHub Actions (previous section) is not a run of this
+list: its tools are the `--allow` of `maxpm runner github`.
 
 ## Actions on a running pipeline
 
@@ -1246,5 +1297,4 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: the agent
-job in GitLab CI and Pulumi Delivery, and each pipeline's list of what its
-agents may do with no prompt.
+job in GitLab CI and Pulumi Delivery.
