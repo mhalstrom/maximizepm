@@ -25,7 +25,8 @@ import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
 import { showRows, wireRows } from "../views/artifacts.js";
-import { makeComments, pathIn } from "./canvasComments.js";
+import { makeComments, pathIn, markList } from "./canvasComments.js";
+import { marksDraw, marksOpen, markRect, markAt, markOwner } from "./commentMarks.js";
 import { decorateDoc, updateAnswers } from "./canvasDoc.js";
 import { findMark, findClear, findGo } from "./findText.js";
 import { queueHtml } from "./agentActions.js";
@@ -262,7 +263,13 @@ async function showCanvas(t, box, note) {
   drawBar(t, meta);
   const side = document.createElement("div"); side.className = "sp-cside";
   t.side = side;
-  t.comments = makeComments(side, { id, ref: "c" + id, reload: () => loadComments(t), show: (path) => showPart(t, path) });
+  // The thread of a comment beside its mark in the text (#6134): placed by placeThread, over the page.
+  t.inline = document.createElement("div"); t.inline.className = "cv-inline"; t.inline.hidden = true;
+  t.inline.setAttribute("role", "group"); t.inline.setAttribute("aria-label", "Comment thread");
+  t.frameAt = null; t.marksSig = null;
+  t.comments = makeComments(side, { id, ref: "c" + id, reload: () => loadComments(t), show: (path, cid) => showPart(t, path, cid),
+    inline: t.inline, onThread: (cid) => threadShown(t, cid) });
+  t.cmeta = meta;
   t.comments.render(meta);
   t.frame = null; t.md = null; t.next = null;
   if (meta.kind === "md") {
@@ -272,11 +279,17 @@ async function showCanvas(t, box, note) {
     t.md = d;
     drawDiagrams(d);  // ```mermaid blocks as pictures (#4983)
     // Comment mode on a drawn Markdown canvas: this page finds the part itself (the helper script does it in a frame).
-    d.addEventListener("mouseover", (e) => { if (t.commenting) markPart(d, e.target === d ? null : e.target); });
+    // A part's own element, never the mark or sign of a comment on it (#6134).
+    d.addEventListener("mouseover", (e) => { if (t.commenting) markPart(d, e.target === d ? null : markOwner(e.target)); });
     d.addEventListener("click", (e) => {
-      if (!t.commenting) return;
+      if (!t.commenting) {  // a comment's mark or sign: its thread beside the part (#6134); again: it closes
+        const cid = markAt(e.target);
+        if (cid) { e.preventDefault(); t.comments.openThread(cid === t.comments.thread() ? 0 : cid); }
+        return;
+      }
       e.preventDefault(); e.stopPropagation();
-      const el = e.target === d ? null : e.target.closest(".doc-edit, .doc-answer") ? e.target.closest(".doc-decision, h2, h3, h4, h5, h6") : e.target;
+      const own = markOwner(e.target);
+      const el = own === d || !own ? null : own.closest(".doc-edit, .doc-answer") ? own.closest(".doc-decision, h2, h3, h4, h5, h6") : own;
       markPart(d, null); setCommenting(t, false);
       // The part's own words, without the doc's controls (an edit link, a decision's answer bar).
       const words = el ? el.cloneNode(true) : null;
@@ -303,7 +316,8 @@ async function showCanvas(t, box, note) {
       const h = t.md && t.md.querySelector("#" + CSS.escape(a.dataset.docPart));
       if (h) h.scrollIntoView({ block: "start", behavior: "smooth" });
     });
-    box.append(t.outline, t.planBox, d, side);
+    box.append(t.outline, t.planBox, d, side, t.inline);
+    drawMarks(t, true);
     drawOutline(t);
     box.scrollTop = (t.scroll && t.scroll.y) || 0;
     box.onscroll = () => { if (on === t.id) t.scroll = { x: 0, y: box.scrollTop }; };
@@ -315,8 +329,50 @@ async function showCanvas(t, box, note) {
   }
   box.onscroll = null;
   t.frame = canvasFrame(meta.title || meta.name, src);
-  box.append(t.frame, side);
+  box.append(t.frame, side, t.inline);
 }
+
+// The marks of the comments in the text (#6134, components/commentMarks.js): drawn here in a Markdown canvas, by the
+// helper script in the frame of an HTML canvas (win: a frame that just said "ready"). force: the text is new.
+function drawMarks(t, force, win) {
+  if (!t.comments || !t.cmeta) return;
+  const list = markList(t.cmeta), open = t.comments.thread(), s = JSON.stringify([list, open]);
+  if (win) return win.postMessage({ maxpmCanvas: "marks", list, open }, "*");
+  if (s === t.marksSig && !force) return;
+  t.marksSig = s;
+  if (t.md && t.md.isConnected) { marksDraw(t.md, list, open); placeThread(t); }
+  else if (t.frame && t.frame.contentWindow) t.frame.contentWindow.postMessage({ maxpmCanvas: "marks", list, open }, "*");
+}
+// A thread opened (cid) or closed (0): its marks stand out, and it goes beside them.
+function threadShown(t, cid) {
+  t.marksSig = null;
+  if (t.md && t.md.isConnected) marksOpen(t.md, cid);
+  if (t.frame && t.frame.contentWindow) { t.frameAt = null; t.frame.contentWindow.postMessage({ maxpmCanvas: "open", id: cid }, "*"); }
+  if (cid) placeThread(t);
+}
+// The thread goes under the last line of its marks, over the text after them: in the coordinates of the panel's body,
+// so that it scrolls with a Markdown canvas; in an HTML canvas it follows the place that the helper script says
+// (t.frameAt, in the frame), inside the frame's box. A comment with no mark in this version closes its thread.
+function placeThread(t) {
+  const inl = t.inline, cid = t.comments && t.comments.thread(), box = $("#spBody");
+  if (!inl || !cid || !inl.isConnected || !box.contains(inl)) return;
+  const b = box.getBoundingClientRect();
+  let top = null;
+  if (t.md && t.md.isConnected) {
+    const r = markRect(t.md, cid);
+    if (!r) return t.comments.closeThread();
+    top = r.bottom - b.top + box.scrollTop;
+  } else if (t.frame && t.frame.isConnected) {
+    if (!t.frameAt || t.frameAt.id !== cid) { inl.style.visibility = "hidden"; return; }
+    const f = t.frame.getBoundingClientRect(), room = Math.max(0, f.height - inl.offsetHeight / 2);
+    top = f.top - b.top + box.scrollTop + Math.max(0, Math.min(t.frameAt.bottom, room));
+  } else return t.comments.closeThread();
+  inl.style.top = `${Math.round(top) + 4}px`;
+  inl.style.visibility = "";
+  const r = inl.getBoundingClientRect();  // t.still: the page scrolls to the part already (showPart)
+  if (!t.still && (r.bottom > b.bottom || r.top < b.top)) inl.scrollIntoView({ block: "nearest" });
+}
+addEventListener("resize", () => { const t = tabs.find(x => x.id === on); if (t && t.md) placeThread(t); });
 
 // The bar of a canvas tab: drawn again only when what it shows changed, so an open version menu stays open.
 function drawBar(t, meta) {
@@ -493,6 +549,7 @@ async function updateCanvas(t) {
     const r = await fetch(`canvas/${id}/meta?${sig}`), meta = await r.json();
     if (!r.ok || on !== t.id || !box.contains(t.bar)) return;
     drawBar(t, meta);
+    t.cmeta = meta;
     t.comments.render(meta);
     if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
     const changed = !t.pin && meta.version !== t.shown;
@@ -502,13 +559,14 @@ async function updateCanvas(t) {
         const rt = await fetch(`canvas/${id}/latest?${sig}`);
         if (!rt.ok || on !== t.id || !t.md.isConnected) return;
         patchDoc(t, box, await rt.text(), meta);
+        drawMarks(t, true);
         drawOutline(t);
         t.shown = meta.version;
-      } else { updateAnswers(t.md, meta); drawOutline(t); }
+      } else { updateAnswers(t.md, meta); drawMarks(t); drawOutline(t); }
     } else if (changed && t.frame) {
       swapFrame(t, `canvas/${id}/latest?${sig}`);
       t.shown = meta.version;
-    }
+    } else drawMarks(t);
   } catch (e) { /* the next state asks again */ } finally {
     t.updating = false;
     if (t.again) { t.again = false; updateCanvas(t); }
@@ -527,16 +585,22 @@ function markPart(root, el) {
   root.querySelectorAll(".maxpm-hi").forEach(x => x.classList.remove("maxpm-hi"));
   if (el) el.classList.add("maxpm-hi");
 }
-// Show: scroll the page to the part of a comment, and mark it for a moment.
-function showPart(t, path) {
+// Show: scroll the page to the part of a comment, and mark it for a moment. cid: that comment, whose thread then opens
+// beside its mark too (#6134; a comment with no mark in this version opens none).
+function showPart(t, path, cid) {
   const dec = /^decision:(\d+)$/.exec(path || "");  // an answer to a decision of a doc (#4708): its card
   if (dec) path = "#decision-" + dec[1];
-  if (t.frame && t.frame.contentWindow) return t.frame.contentWindow.postMessage({ maxpmCanvas: "show", path }, "*");
+  if (t.frame && t.frame.contentWindow) {
+    t.frame.contentWindow.postMessage({ maxpmCanvas: "show", path }, "*");
+    if (cid && !dec) t.comments.openThread(cid);
+    return;
+  }
   let el = null;
   try { el = t.md && path ? t.md.querySelector(path) : null; } catch (e) { el = null; }
   if (!el) return toast("That part is not in this version of the page", true);
   el.scrollIntoView({ block: "center", behavior: "smooth" });
   el.classList.add("maxpm-flash"); setTimeout(() => el.classList.remove("maxpm-flash"), 1600);
+  if (cid && !dec && markRect(t.md, cid)) { t.still = true; t.comments.openThread(cid); t.still = false; }
 }
 // The comments again (after an action, and with each state of the page), without a reload of the page; and the
 // answers of a doc's decisions (#4844).
@@ -547,8 +611,10 @@ async function loadComments(t) {
     if (!r.ok || on !== t.id) return;
     const meta = await r.json();
     if (t.bar && t.bar.isConnected) drawBar(t, meta);  // the realquicksite line follows its publish (#5789)
+    t.cmeta = meta;
     t.comments.render(meta);
     if (t.md && t.md.isConnected && !t.pin) { updateAnswers(t.md, meta); drawOutline(t); }
+    drawMarks(t);
     if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
   } catch (e) { /* the next state asks again */ }
 }
@@ -724,10 +790,22 @@ addEventListener("message", (e) => {
   if (t && t.next && e.source === t.next.contentWindow && d.maxpmCanvas === "ready") {  // a new version, out of sight
     if (t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
     findReady(e.source);
+    drawMarks(t, true, e.source);
     return setTimeout(t.next.swap, 60);
   }
   if (!t || !t.frame || e.source !== t.frame.contentWindow || typeof d.maxpmCanvas !== "string") return;
   if (d.maxpmCanvas === "scroll") t.scroll = { x: +d.x || 0, y: +d.y || 0 };
+  if (d.maxpmCanvas === "ready") drawMarks(t, true, e.source);
+  // A comment's mark in the frame (#6134): a click opens its thread (again: closes it); else where it is now, or that
+  // this version has none. Numbers only: the frame is a page that a session wrote.
+  if (d.maxpmCanvas === "at" && t.comments) {
+    const cid = Math.trunc(+d.id) || 0;
+    if (d.click) { if (cid) t.comments.openThread(cid === t.comments.thread() ? 0 : cid); }
+    else if (cid && cid === t.comments.thread()) {
+      if (!d.found) { t.comments.closeThread(); toast("That comment has no mark in this version of the page", true); }
+      else { t.frameAt = { id: cid, bottom: Number.isFinite(+d.bottom) ? +d.bottom : 0 }; placeThread(t); }
+    }
+  }
   if (d.maxpmCanvas === "ready" && t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
   if (d.maxpmCanvas === "ready" && t.commenting) e.source.postMessage({ maxpmCanvas: "mode", on: true }, "*");
   if (d.maxpmCanvas === "ready") findReady(e.source);

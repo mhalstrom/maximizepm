@@ -510,6 +510,22 @@ button.srow-it { cursor: pointer; }
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: var(--hair-2) solid var(--accent); outline-offset: var(--sp-0); }
 .sp-canvas .maxpm-flash { outline: calc(var(--sp-0) + var(--hair)) solid var(--flash); outline-offset: calc(var(--sp-0) + var(--hair)); }
+/* The marks of comments in the text (#6134, components/commentMarks.js): the quote, or the part, and a comment sign; a
+   resolved one dim; the one whose thread shows stands out. The thread goes over the text under its mark. */
+.sp-canvas mark.maxpm-cmt { background: var(--prog-bg); color: inherit; border-bottom: var(--hair-2) solid var(--prog); cursor: pointer; }
+.sp-canvas .maxpm-cmt-part { background: var(--prog-bg); border-radius: var(--r-xs); }
+.sp-canvas mark.maxpm-cmt.maxpm-cmt-on, .sp-canvas .maxpm-cmt-part.maxpm-cmt-on { background: var(--find); color: var(--find-ink); }
+.sp-canvas mark.maxpm-cmt.maxpm-cmt-done { background: none; border-bottom: var(--hair) dashed var(--muted); }
+.sp-canvas .maxpm-cmt-part.maxpm-cmt-done { background: none; }
+.sp-canvas .maxpm-cmt-pin { display: inline-flex; align-items: center; vertical-align: text-top; margin: 0 var(--sp-0); padding: var(--hair) var(--sp-1);
+  font-size: var(--fs-m); line-height: 1; color: var(--prog); background: var(--prog-bg); border: 0; border-radius: var(--r-xs); cursor: pointer; }
+.sp-canvas .maxpm-cmt-pin.maxpm-cmt-on { background: var(--prog); color: var(--panel); }
+.sp-canvas .maxpm-cmt-pin.maxpm-cmt-done { background: none; color: var(--muted); }
+.sp-body:has(> .cv-inline) { position: relative; }
+.cv-inline { position: absolute; left: var(--sp-5); right: var(--sp-5); z-index: 2; max-width: var(--w-dlg-m); background: var(--panel);
+  border: var(--hair) solid var(--prog); border-radius: var(--r-m); box-shadow: var(--shadow-pop); padding: var(--sp-2);
+  font-size: calc(var(--fs-s) + var(--hair) / 2); }
+.cv-inline .cv-c { border: 0; padding: 0; }
 /* Docs (#4708): a pending section, a decision card answered in place, Edit of a section. */
 .doc-pending { color: var(--muted); font-style: italic; }
 .doc-dots { display: inline-block; width: 1.4em; }

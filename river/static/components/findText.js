@@ -13,7 +13,8 @@ export function findClear(root) {
   for (var k = 0; k < marks.length; k++) {
     var m = marks[k], p = m.parentNode;
     if (!p) continue;
-    p.replaceChild(m.ownerDocument.createTextNode(m.textContent), m);
+    while (m.firstChild) p.insertBefore(m.firstChild, m);  // a comment's mark inside stays (commentMarks.js, #6134)
+    p.removeChild(m);
     if (parents.indexOf(p) < 0) parents.push(p);
   }
   for (var j = 0; j < parents.length; j++) parents[j].normalize();

@@ -382,6 +382,155 @@ try {
         self.assertEqual(got["pressed"], "false", "a pick ends the comment mode")
 
 
+MARKS_MD = r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag", "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__md");
+  await until(() => q(".sp-canvas mark.maxpm-cmt") && q(".sp-canvas .maxpm-cmt-part"), "the marks in the text");
+  const marks = () => [...document.querySelectorAll(".sp-canvas mark.maxpm-cmt")];
+  const box = () => q(".cv-inline");
+  const h2 = q(".sp-canvas h2").cloneNode(true); h2.querySelectorAll(".doc-edit").forEach(x => x.remove());
+  const out = { marks: marks().map(m => [m.textContent, m.classList.contains("maxpm-cmt-done")]),
+    pins: document.querySelectorAll(".sp-canvas .maxpm-cmt-pin").length, part: q(".sp-canvas .maxpm-cmt-part").tagName,
+    hidden: box().hidden, h2: h2.textContent.trim() };
+  const m = marks().find(x => !x.classList.contains("maxpm-cmt-done"));
+  m.click();
+  await until(() => !box().hidden && q(".cv-inline .cv-b"), "the thread in the text");
+  const r = box().getBoundingClientRect(), mr = m.getBoundingClientRect();
+  out.body = q(".cv-inline .cv-b").textContent;
+  out.below = r.top >= mr.bottom - 1 && r.top - mr.bottom < 24;
+  out.inside = r.left >= 0 && r.right <= innerWidth && r.width > 200;
+  out.on = m.classList.contains("maxpm-cmt-on");
+  out.buttons = [...box().querySelectorAll("button")].map(b => b.getAttribute("aria-label") || b.textContent.trim());
+  q(".cv-inline [data-cv-reply-text]").value = "Which plan?";
+  q(".cv-inline [data-cv-reply]").click();
+  await until(() => q(".cv-inline .cv-r"), "the reply in the thread");
+  out.reply = q(".cv-inline .cv-r").textContent.replace(/\s+/g, " ").trim();
+  q(".cv-inline [data-cv-resolve]").click();
+  await until(() => { const x = q(".sp-canvas mark.maxpm-cmt-on"); return x && x.classList.contains("maxpm-cmt-done"); }, "the mark dim");
+  out.resolved = q(".cv-inline .cv-st").textContent;
+  q(".cv-inline [data-cv-close]").click();
+  out.closed = box().hidden && !q(".sp-canvas .maxpm-cmt-on");
+  // The sign of a part opens its thread; Esc closes it.
+  q(".sp-canvas .maxpm-cmt-part .maxpm-cmt-pin").click();
+  await until(() => !box().hidden, "the part's thread");
+  out.part_body = q(".cv-inline .cv-b").textContent;
+  q(".cv-inline [data-cv-reply-text]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  out.esc = box().hidden;
+  // The list's link to the part opens the thread in the text too.
+  q(".sp-cside [data-cv-show='h2:nth-of-type(1)']").click();
+  await until(() => !box().hidden, "the thread from the list");
+  out.from_list = q(".cv-inline .cv-b").textContent;
+  q(".cv-inline [data-cv-close]").click();
+  // Comment mode on a marked quote picks the page's own part, not the mark.
+  q("[data-cv-mode]").click();
+  marks()[0].click();
+  await until(() => q(".cv-compose"), "the comment box");
+  out.pick = q(".cv-compose code").textContent;
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+
+
+class PanelMarks(ChromePanel):
+    """#6134, mark 2026-11-18: 'comments should have an indication in line which you can click on to view in line', and
+    'comments should be resolvable from the inline view'. Each comment on a part has a mark in the text (its quote, or
+    the part, and a comment sign); a click opens its thread beside the part with Reply, Resolve, Accept and Reject."""
+
+    def md(self):
+        def run():
+            c = core.connect()
+            try:
+                core.canvas_put(c, "notes", "# Notes\n\n## Dates\n\nSoon we ship the plan.\n\nOther words stay.", "ag",
+                                kind="md", title="Notes")
+                core.canvas_comment(c, "notes", "Name the plan", "mark", send_now=True,
+                                    anchor={"path": "p:nth-of-type(1)", "text": "Soon we ship the plan.", "quote": "ship the plan"})
+                core.canvas_comment(c, "notes", "Add a date", "mark", send_now=True,
+                                    anchor={"path": "h2:nth-of-type(1)", "text": "Dates"})
+                done = core.canvas_comment(c, "notes", "Fine", "mark", send_now=True,
+                                           anchor={"path": "p:nth-of-type(2)", "text": "Other words stay.", "quote": "Other  words"})
+                core.canvas_resolve(c, done["id"], "ag", note="v1")
+                return {}
+            finally:
+                c.close()
+        return run
+
+    def check_md(self, got):
+        self.assertEqual(got["marks"], [["ship the plan", False], ["Other words", True]],
+                         "the quotes are marked; a resolved one is dim (spaces do not count in a quote)")
+        self.assertEqual((got["pins"], got["part"], got["hidden"], got["h2"]), (3, "H2", True, "Dates"),
+                         "a sign after each mark; a comment with no quote marks its part; the sign adds no text")
+        self.assertEqual(got["body"], "Name the plan")
+        self.assertTrue(got["below"], "the thread opens right under its mark")
+        self.assertTrue(got["inside"], "the thread fits the panel")
+        self.assertTrue(got["on"], "the open thread's mark stands out")
+        self.assertEqual(got["buttons"], ["Close", "Reply", "Resolve"])
+        self.assertIn("Which plan?", got["reply"])
+        self.assertEqual(got["resolved"], "resolved")
+        self.assertTrue(got["closed"])
+        self.assertEqual(got["part_body"], "Add a date")
+        self.assertTrue(got["esc"])
+        self.assertEqual(got["from_list"], "Add a date")
+        self.assertEqual(got["pick"], "p:nth-of-type(1)", "a new comment names the page's part, not the mark")
+        c = self.base.c
+        top = [x for x in core.canvas_show(c, "notes")["comments"] if x["body"] == "Name the plan"][0]
+        self.assertEqual(top["state"], "resolved")
+        self.assertEqual([r["body"] for r in top["replies"]], ["Which plan?"])
+
+    def test_marks_and_the_thread_in_a_markdown_canvas(self):
+        self.check_md(self.tvs.drive_page(self.base, self.tvs.DRIVE_HEAD + MARKS_MD, routes={"/__md": self.md()}))
+
+    def test_marks_and_the_thread_on_a_phone(self):
+        self.check_md(self.tvs.drive_page(self.base, self.tvs.DRIVE_HEAD + MARKS_MD, routes={"/__md": self.md()},
+                                          size="390,844"))
+
+    def test_the_helper_script_marks_an_html_canvas(self):
+        def put():
+            c = core.connect()
+            try:
+                core.canvas_put(c, "plan", "<body><h1>One</h1><p>Two words here</p></body>", "ag", kind="html", title="Plan")
+                return {"id": core.canvas_comment(c, "plan", "Which words?", "mark", send_now=True,
+                                                  anchor={"path": "p:nth-of-type(1)", "text": "Two words here",
+                                                          "quote": "words"})["id"]}
+            finally:
+                c.close()
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag", "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  const cid = (await (await fetch("/__put")).json()).id;
+  await until(() => q("iframe.sp-canvas") && q(".sp-cside .cv-c"), "the canvas and its comment");
+  const f = q("iframe.sp-canvas"), said = [];
+  addEventListener("message", (e) => { if (e.source === f.contentWindow && e.data && e.data.maxpmCanvas === "at") said.push(e.data); });
+  // The panel sent the marks when the frame was ready; the frame says where the comment's mark is.
+  await until(() => { f.contentWindow.postMessage({ maxpmCanvas: "open", id: cid }, "*"); return said.some(d => d.found); }, "the mark in the frame");
+  const out = { at: said.find(d => d.found), none: null };
+  f.contentWindow.postMessage({ maxpmCanvas: "open", id: cid + 99 }, "*");
+  await until(() => said.some(d => d.id === cid + 99), "no mark of another comment");
+  out.none = said.find(d => d.id === cid + 99).found;
+  f.contentWindow.postMessage({ maxpmCanvas: "open", id: 0 }, "*");
+  // A click on the mark in the frame: the helper script says "at" with click; the thread opens over the frame.
+  window.dispatchEvent(new MessageEvent("message", { source: f.contentWindow, data: { maxpmCanvas: "at", id: cid, click: true } }));
+  await until(() => !q(".cv-inline").hidden && q(".cv-inline").style.visibility !== "hidden" && q(".cv-inline .cv-b"), "the thread over the frame");
+  const r = q(".cv-inline").getBoundingClientRect(), fr = f.getBoundingClientRect();
+  out.body = q(".cv-inline .cv-b").textContent;
+  out.over = r.top >= fr.top && r.top <= fr.bottom;
+  q(".cv-inline [data-cv-resolve]").click();
+  await until(() => q(".cv-inline .cv-st") && q(".cv-inline .cv-st").textContent === "resolved", "resolved in place");
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, routes={"/__put": put})
+        self.assertGreater(got["at"]["bottom"], got["at"]["top"], got)
+        self.assertFalse(got["none"])
+        self.assertEqual(got["body"], "Which words?")
+        self.assertTrue(got["over"], got)
+        self.assertEqual(core.canvas_show(self.base.c, "plan")["comments"][0]["state"], "resolved")
+
+
 class PanelFind(ChromePanel):
     """#4877: Find in the side panel marks the words in a Markdown canvas (in this page) and in an HTML canvas (through
     its helper script, in a frame of its own origin), with n of m, Enter, Shift+Enter, Esc and Cmd+F."""

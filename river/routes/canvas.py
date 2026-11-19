@@ -34,17 +34,37 @@ PATH = re.compile(r"^/canvas/c?(\d+)/(latest|meta|\d+)$")
 #   static/components/findText.js, put inline here), goes to the next or previous one, and says "n of m"; after the
 #   panel says it finds ("finder"), Cmd+F or Ctrl+F in the canvas opens the panel's find box (in /view the browser's
 #   own find stays).
-FIND_JS = re.sub(r"^export ", "", (Path(__file__).resolve().parent.parent / "static" / "components" / "findText.js")
-                 .read_text(encoding="utf-8"), flags=re.M)
-HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () {
+# - comment marks (#6134): the panel sends the comments on parts ("marks": path, quote, resolved or not); the code of
+#   static/components/commentMarks.js, put inline here, highlights each quote (or part) with a comment sign after it.
+#   A click on a mark says "at" with click; the panel opens the thread over the frame and asks where the mark is
+#   ("open"); the script says it again after each scroll, so that the thread stays beside the part.
+COMPONENTS = Path(__file__).resolve().parent.parent / "static" / "components"
+FIND_JS = re.sub(r"^export ", "", (COMPONENTS / "findText.js").read_text(encoding="utf-8"), flags=re.M)
+MARKS_JS = re.sub(r"^export ", "", (COMPONENTS / "commentMarks.js").read_text(encoding="utf-8"), flags=re.M)
+HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877, #6134) */(function () {
   var t, P = window.parent, mode = false, hi = null, finder = false, fq = "", fm = [], fi = 0, edit = false, box = null;
+  var openC = 0;
   if (!P || P === window) return;
-""" + FIND_JS + """
+""" + FIND_JS + MARKS_JS + """
   var css = document.createElement("style");
   css.textContent = ".maxpm-hi{outline:2px solid #1f6feb!important;outline-offset:2px!important;cursor:crosshair!important}"
     + ".maxpm-flash{outline:3px solid #d29922!important;outline-offset:3px!important}"
     + "mark.maxpm-find{background:#ffe066!important;color:#000!important;border-radius:2px}"
-    + "mark.maxpm-find-on{background:#ff9632!important;outline:2px solid #ff9632!important}";
+    + "mark.maxpm-find-on{background:#ff9632!important;outline:2px solid #ff9632!important}"
+    + "mark.maxpm-cmt{background:#f3ead6;color:inherit;border-bottom:2px solid #c99a2e;cursor:pointer;border-radius:0}"
+    + ".maxpm-cmt-part{background:#f3ead6!important;border-radius:4px}"
+    + "mark.maxpm-cmt.maxpm-cmt-on,.maxpm-cmt-part.maxpm-cmt-on{background:#ffe066!important;color:#000}"
+    + "mark.maxpm-cmt.maxpm-cmt-done{background:none;border-bottom:1px dashed #9a968e}"
+    + ".maxpm-cmt-part.maxpm-cmt-done{background:none!important}"
+    + ".maxpm-cmt-pin{all:initial;display:inline-block;vertical-align:text-top;margin:0 2px;padding:1px 3px;line-height:1;"
+    + "font-size:13px;color:#7f5f13;background:#f3ead6;border-radius:4px;cursor:pointer}"
+    + ".maxpm-cmt-pin.maxpm-cmt-on{background:#7f5f13;color:#fff}"
+    + ".maxpm-cmt-pin.maxpm-cmt-done{color:#9a968e;background:none}"
+    + ".maxpm-cmt-pin svg{display:block;width:1em;height:1em}";
+  function cmtAt(click, id) {
+    var r = markRect(document.body, id);
+    P.postMessage({ maxpmCanvas: "at", id: id, click: !!click, found: !!r, top: r ? r.top : 0, bottom: r ? r.bottom : 0 }, "*");
+  }
   (document.head || document.documentElement).appendChild(css);
   function path(el) {
     var parts = [];
@@ -58,9 +78,11 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () 
     return parts.join(" > ") || "body";
   }
   function mark(el) { if (hi) hi.classList.remove("maxpm-hi"); hi = el; if (el) el.classList.add("maxpm-hi"); }
-  addEventListener("scroll", function () { clearTimeout(t); t = setTimeout(function () {
+  addEventListener("scroll", function () {
+    if (openC) cmtAt(false, openC);
+    clearTimeout(t); t = setTimeout(function () {
     P.postMessage({ maxpmCanvas: "scroll", x: scrollX, y: scrollY }, "*"); }, 120); }, { passive: true });
-  addEventListener("mouseover", function (e) { if (mode || (edit && !(box && box.contains(e.target)))) mark(e.target); }, true);
+  addEventListener("mouseover", function (e) { if (mode || (edit && !(box && box.contains(e.target)))) mark(markOwner(e.target)); }, true);
   // Edit (#6015): a click on a text opens a box for its words; a click on a picture asks the panel for a new one.
   // Each change goes to the panel as the text the page had first (old) and the new text; the panel saves them.
   function textAt(x, y) {
@@ -107,9 +129,13 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () 
       if (n && n.nodeType === 3 && n.data.trim() && !(up && up.closest("script,style,template,textarea,noscript"))) editText(n);
       return;
     }
-    if (!mode) return;
+    if (!mode) {
+      var cid = markAt(e.target);
+      if (cid) { e.preventDefault(); e.stopPropagation(); cmtAt(true, cid); }
+      return;
+    }
     e.preventDefault(); e.stopPropagation();
-    var el = e.target, quote = String(getSelection() || "").trim();
+    var el = markOwner(e.target), quote = String(getSelection() || "").trim();
     mark(null);
     P.postMessage({ maxpmCanvas: "pick", path: path(el), text: (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 200),
                     quote: quote.slice(0, 500) }, "*");
@@ -135,6 +161,12 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () 
         setTimeout(function () { el.classList.remove("maxpm-flash"); }, 1600); }
       P.postMessage({ maxpmCanvas: "shown", found: !!el }, "*");
     }
+    if (d.maxpmCanvas === "marks" && Object.prototype.toString.call(d.list) === "[object Array]") {
+      openC = +d.open || 0;
+      marksDraw(document.body, d.list.slice(0, 500), openC);
+      if (openC) cmtAt(false, openC);
+    }
+    if (d.maxpmCanvas === "open") { openC = +d.id || 0; marksOpen(document.body, openC); if (openC) cmtAt(false, openC); }
     if (d.maxpmCanvas === "finder") finder = true;
     if (d.maxpmCanvas === "find") {
       // step 0: mark again (new words go to the first place; again: the same words after a change, no scroll).

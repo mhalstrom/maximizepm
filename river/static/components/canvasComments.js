@@ -7,7 +7,11 @@
 //   wrote the canvas; when that session has ended, a fresh session takes the canvas's item (core.canvas_send).
 // - The threads: each comment with its part (Show scrolls there), its state (draft, sent, read, answered,
 //   resolved), its replies, and Reply and Resolve.
+// - In the text (#6134): each comment on a part has a mark there (components/commentMarks.js); a click on it opens the
+//   same thread beside the part (the element `inline`, which sidePanel.js places), with Reply, Resolve, Accept and
+//   Reject, so a person never goes to the list to answer or close a comment.
 import { esc, ago, clip, store, toast, act, actor } from "../lib.js";
+import { iconButton } from "./button.js";
 
 const KEEP = "river.canvas.draft.";
 
@@ -35,10 +39,41 @@ const partText = (a) => !a || !(a.quote || a.text || a.path) ? "the whole page"
 // A comment or suggestion that came from the canvas's shared page (#6012, core.rqs_read_responses).
 export const fromPage = (c) => !!(c.anchor && c.anchor.page);
 
+// The comments that have a mark in the text (#6134): the ones on a part, that the person sees (a draft only its
+// author's). An answer to a decision of a doc (the path decision:<n>) has none: its card shows the answer already.
+export function markList(meta, me = actor()) {
+  return ((meta && meta.comments) || []).filter(c => c.anchor && c.anchor.path && !/^decision:/.test(c.anchor.path)
+      && (c.state !== "draft" || c.author === me))
+    .map(c => ({ id: c.id, path: c.anchor.path, quote: c.anchor.quote || "",
+                 done: c.state === "resolved", draft: c.state === "draft" }));
+}
+
+// One thread: the comment, its part, its replies and its buttons. inl: it shows beside its part in the text (a close
+// button in place of the link that shows the part).
+function threadHtml(c, inl) {
+  const st = stateOf(c);
+  return `<div class="cv-c cv-${st}" data-cid="${c.id}">
+          <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>${fromPage(c) ? ` <span class="chip cv-page">on the shared page</span>` : ""}
+            ${inl ? `<span class="cv-sp"></span>${iconButton("✕", "Close", { data: { "cv-close": "" } })}`
+              : c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" data-cv-at="${c.id}" title="Show this part">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
+          ${c.anchor && c.anchor.suggest != null ? `<div class="cv-sugg"><del>${esc(clip(c.anchor.quote, 400))}</del> <ins>${esc(clip(c.anchor.suggest, 400)) || "(deleted)"}</ins></div>` : ""}
+          <div class="cv-b">${esc(c.body)}</div>
+          ${(c.replies || []).map(r => `<div class="cv-r"><b>${esc(r.author || "")}</b> <span class="muted">${ago(r.created_at)}</span>: ${esc(r.body)}</div>`).join("")}
+          ${c.state === "resolved" ? `<div class="muted cv-r">resolved by ${esc(c.resolved_by || "")}${c.resolve_note ? ": " + esc(c.resolve_note) : ""}</div>` : ""}
+          <div class="cv-acts">${c.state === "draft"
+            ? `<button class="btn primary" type="button" data-cv-send="${c.id}">Send</button><button class="btn" type="button" data-cv-discard="${c.id}">Discard</button>`
+            : c.state === "resolved" ? "" : `${c.anchor && c.anchor.suggest != null ? `<button class="btn primary" type="button" data-cv-accept="${c.id}" title="Use the new words">Accept</button><button class="btn" type="button" data-cv-reject="${c.id}">Reject</button>` : ""}<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
+              <button class="btn" type="button" data-cv-reply="${c.id}">Reply</button><button class="btn" type="button" data-cv-resolve="${c.id}">Resolve</button>`}</div>
+        </div>`;
+}
+
 // box: the element that holds the threads. ref: "c<id>". reload(): fetch the canvas's meta again and render.
-// show(path): scroll the page to a part. Returns { render(meta), pick(anchor), compose(anchor) }.
-export function makeComments(box, { id, ref, reload, show }) {
-  let meta = null, sig = "";
+// show(path, cid): scroll the page to a part. inline: the element of the thread in the text; onThread(cid) (0: none)
+// says which one shows, so that the caller places it beside its mark. Returns { render(meta), pick(anchor),
+// compose(anchor), openThread(cid), closeThread(), thread() }.
+export function makeComments(box, { id, ref, reload, show, inline, onThread }) {
+  let meta = null, sig = "", shown = 0;  // shown: the comment whose thread shows in the text (#6134)
+  const roots = () => inline ? [box, inline] : [box];
   const kept = () => { try { return JSON.parse(store(KEEP + id) || "null"); } catch (e) { return null; } };
   const keep = (v) => store(KEEP + id, v ? JSON.stringify(v) : "");
 
@@ -58,14 +93,23 @@ export function makeComments(box, { id, ref, reload, show }) {
     const drafts = list.filter(c => c.state === "draft");
     const open = list.filter(c => ["sent", "read"].includes(c.state));
     const k = kept();
-    const s = JSON.stringify([list, k, me]);
+    const one = shown ? list.find(c => c.id === shown) : null;
+    if (shown && !one) { shown = 0; if (inline) { inline.hidden = true; inline.replaceChildren(); } if (onThread) onThread(0); }
+    const s = JSON.stringify([list, k, me, shown]);
     if (s === sig) return;
     // Not while the person types in a reply: the next poll draws it.
-    if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea") && sig) return;
+    if (roots().some(r => r.contains(document.activeElement)) && document.activeElement.matches("input, textarea") && sig) return;
     sig = s;
     // #4844: a reply that the person began to another comment stays when the list draws again.
-    const replies = {};
+    const replies = {}, inReply = {};
     for (const inp of box.querySelectorAll("[data-cv-reply-text]")) if (inp.value) replies[inp.dataset.cvReplyText] = inp.value;
+    if (inline) for (const inp of inline.querySelectorAll("[data-cv-reply-text]")) if (inp.value) inReply[inp.dataset.cvReplyText] = inp.value;
+    if (inline && one) {
+      inline.innerHTML = threadHtml(one, true);
+      for (const [cid, v] of Object.entries(inReply)) {
+        const inp = inline.querySelector(`[data-cv-reply-text="${cid}"]`); if (inp) inp.value = v;
+      }
+    }
     const shared = open.filter(fromPage).length;
     box.innerHTML = `<div class="cv-head"><b>Comments</b> <span class="muted">${open.length} open${drafts.length ? ` · ${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : ""}</span>${shared ? ` <span class="chip cv-page">${shared} new from the shared page</span>` : ""}
         <span class="cv-sp"></span>${drafts.length ? `<button class="btn primary" type="button" data-cv-sendall>Send ${drafts.length === 1 ? "the draft" : `all ${drafts.length} drafts`} to the session</button>` : ""}</div>
@@ -77,19 +121,7 @@ export function makeComments(box, { id, ref, reload, show }) {
         <div class="cv-acts"><button class="btn primary" type="button" data-cv-now>Send now</button>
           <button class="btn" type="button" data-cv-draft>Save as draft</button>
           <button class="btn" type="button" data-cv-cancel>Cancel</button></div></div>` : ""}
-      ${list.map(c => { const st = stateOf(c);
-        return `<div class="cv-c cv-${st}" data-cid="${c.id}">
-          <div class="cv-h"><span class="chip cv-st">${st}</span> <b>c${c.id}</b> <span class="muted">${esc(c.author || "")} · ${ago(c.created_at)} · v${c.version}</span>${fromPage(c) ? ` <span class="chip cv-page">on the shared page</span>` : ""}
-            ${c.anchor && c.anchor.path ? `<span class="link" data-cv-show="${esc(c.anchor.path)}" title="Show this part">on ${esc(partText(c.anchor))}</span>` : `<span class="muted">on ${esc(partText(c.anchor))}</span>`}</div>
-          ${c.anchor && c.anchor.suggest != null ? `<div class="cv-sugg"><del>${esc(clip(c.anchor.quote, 400))}</del> <ins>${esc(clip(c.anchor.suggest, 400)) || "(deleted)"}</ins></div>` : ""}
-          <div class="cv-b">${esc(c.body)}</div>
-          ${(c.replies || []).map(r => `<div class="cv-r"><b>${esc(r.author || "")}</b> <span class="muted">${ago(r.created_at)}</span>: ${esc(r.body)}</div>`).join("")}
-          ${c.state === "resolved" ? `<div class="muted cv-r">resolved by ${esc(c.resolved_by || "")}${c.resolve_note ? ": " + esc(c.resolve_note) : ""}</div>` : ""}
-          <div class="cv-acts">${c.state === "draft"
-            ? `<button class="btn primary" type="button" data-cv-send="${c.id}">Send</button><button class="btn" type="button" data-cv-discard="${c.id}">Discard</button>`
-            : c.state === "resolved" ? "" : `${c.anchor && c.anchor.suggest != null ? `<button class="btn primary" type="button" data-cv-accept="${c.id}" title="Use the new words">Accept</button><button class="btn" type="button" data-cv-reject="${c.id}">Reject</button>` : ""}<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
-              <button class="btn" type="button" data-cv-reply="${c.id}">Reply</button><button class="btn" type="button" data-cv-resolve="${c.id}">Resolve</button>`}</div>
-        </div>`; }).join("") || (k ? "" : `<div class="muted cv-none">No comments yet. Comment picks a part of the page; Comment on the page takes the whole page.</div>`)}`;
+      ${list.map(c => threadHtml(c, false)).join("") || (k ? "" : `<div class="muted cv-none">No comments yet. Comment picks a part of the page; Comment on the page takes the whole page.</div>`)}`;
     for (const [cid, v] of Object.entries(replies)) {
       const inp = box.querySelector(`[data-cv-reply-text="${cid}"]`); if (inp) inp.value = v;
     }
@@ -102,7 +134,7 @@ export function makeComments(box, { id, ref, reload, show }) {
     if (!actor()) return toast("Choose your name in 'You are' first", true);
     if (busy) return;
     busy = true;
-    const ctl = [...box.querySelectorAll("button")], label = btn ? btn.textContent : "";
+    const ctl = roots().flatMap(r => [...r.querySelectorAll("button")]), label = btn ? btn.textContent : "";
     ctl.forEach(x => { x.disabled = true; });
     if (btn) btn.textContent = "Sending…";
     try { const r = await act(op, args); if (done) done(r); } catch (e) { return; /* toast shown */ } finally {
@@ -113,19 +145,34 @@ export function makeComments(box, { id, ref, reload, show }) {
     sig = ""; await reload();
   }
 
+  // The thread of cid beside its part (#6134); 0 closes it.
+  function openThread(cid) {
+    if (!inline) return;
+    shown = +cid || 0;
+    if (!shown) { inline.hidden = true; inline.replaceChildren(); }
+    const c = shown && meta ? (meta.comments || []).find(x => x.id === shown) : null;
+    if (shown && !c) { shown = 0; inline.hidden = true; }
+    if (c) inline.innerHTML = threadHtml(c, true);
+    sig = ""; draw();
+    if (shown) inline.hidden = false;
+    if (onThread) onThread(shown);
+  }
+
   box.addEventListener("input", (e) => {
     if (e.target.matches(".cv-compose .cv-text")) { const k = kept(); if (k) keep({ ...k, text: e.target.value }); }
     if (e.target.matches(".cv-compose .cv-sug")) { const k = kept(); if (k) keep({ ...k, suggest: e.target.value }); }
   });
-  box.addEventListener("keydown", (e) => {
-    const r = e.target.closest && e.target.closest("[data-cv-reply-text]");
-    if (r && e.key === "Enter") { e.preventDefault(); box.querySelector(`[data-cv-reply="${r.dataset.cvReplyText}"]`).click(); }
-  });
-  box.addEventListener("click", (e) => {
-    const t = e.target.closest("button, [data-cv-show]"); if (!t) return;
+  function onKey(e) {
+    const root = e.currentTarget, r = e.target.closest && e.target.closest("[data-cv-reply-text]");
+    if (r && e.key === "Enter") { e.preventDefault(); root.querySelector(`[data-cv-reply="${r.dataset.cvReplyText}"]`).click(); }
+    if (root === inline && e.key === "Escape") { e.preventDefault(); openThread(0); }
+  }
+  function onClick(e) {
+    const root = e.currentTarget, t = e.target.closest("button, [data-cv-show]"); if (!t) return;
     if (busy && t.matches("button")) return;
     const k = kept();
-    if (t.dataset.cvShow) return show(t.dataset.cvShow);
+    if (t.dataset.cvShow) return show(t.dataset.cvShow, +t.dataset.cvAt || 0);
+    if (t.hasAttribute("data-cv-close")) return openThread(0);
     if (t.hasAttribute("data-cv-cancel")) { keep(null); sig = ""; return draw(); }
     if (t.hasAttribute("data-cv-now") || t.hasAttribute("data-cv-draft")) {
       let text = (box.querySelector(".cv-compose .cv-text").value || "").trim();
@@ -149,15 +196,19 @@ export function makeComments(box, { id, ref, reload, show }) {
     }
     if (t.dataset.cvResolve) return run("canvas_resolve", { comment: +t.dataset.cvResolve, note: "resolved in the page" }, null, t);
     if (t.dataset.cvReply) {
-      const inp = box.querySelector(`[data-cv-reply-text="${t.dataset.cvReply}"]`), text = (inp && inp.value || "").trim();
+      const inp = root.querySelector(`[data-cv-reply-text="${t.dataset.cvReply}"]`), text = (inp && inp.value || "").trim();
       if (!text) return toast("Write the reply first", true);
       return run("canvas_reply", { comment: +t.dataset.cvReply, text }, () => { if (inp) inp.value = ""; }, t);
     }
-  });
+  }
+  for (const r of roots()) { r.addEventListener("keydown", onKey); r.addEventListener("click", onClick); }
 
   return {
     render(m) { meta = m; draw(); },
     pick(anchor) { compose(anchor); },
     compose,
+    openThread,
+    closeThread: () => openThread(0),
+    thread: () => shown,
   };
 }
