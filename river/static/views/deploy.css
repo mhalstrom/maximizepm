@@ -126,6 +126,16 @@ button.cardbtn.em-pick.on { border-color: var(--warn); background: var(--warn-bg
 
 /* A phone: the row stacks (name, stages, what runs where), and the stages scroll sideways. */
 @media (max-width: 759px) {
+  /* The part buttons and a pipeline's tabs: one row that scrolls sideways, not three rows above every page (#6188);
+     deploy.js brings the chosen one into view and fades each edge while more are past it (dp-before, dp-more). */
+  #dpParts, #plTabs { flex: 1 1 100%; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    --dp-l: var(--ink); --dp-r: var(--ink);
+    -webkit-mask-image: linear-gradient(to right, var(--dp-l), var(--ink) var(--fade), var(--ink) calc(100% - var(--fade)), var(--dp-r));
+    mask-image: linear-gradient(to right, var(--dp-l), var(--ink) var(--fade), var(--ink) calc(100% - var(--fade)), var(--dp-r)); }
+  #dpParts::-webkit-scrollbar, #plTabs::-webkit-scrollbar { display: none; }
+  #dpParts > .btn, #plTabs > .btn { flex: none; }
+  #dpParts.dp-before, #plTabs.dp-before { --dp-l: transparent; }
+  #dpParts.dp-more, #plTabs.dp-more { --dp-r: transparent; }
   .dp-strip { grid-row: auto; }
   .dp-live { text-align: left; }
   .dp-row { grid-template-columns: minmax(0, 1fr); }

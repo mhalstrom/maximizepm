@@ -90,8 +90,27 @@ function drawBadge() {
 function drawParts() {
   const html = PARTS.map(([k, name]) => button(esc(name), { cls: "plan-vbtn", pressed: !D.pipeline && D.part === k,
     data: { "dp-part": k }, attrs: `role="tab" aria-selected="${!D.pipeline && D.part === k}"` })).join("");
-  const el = $("#dpParts"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
+  const el = $("#dpParts"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; strip(el); }
 }
+
+// On a phone the part buttons and a pipeline's tabs are one row that scrolls sideways (deploy.css, #6188): the chosen
+// one comes into view, and the edge fades while more buttons are past it.
+function strip(el) {
+  const on = el.querySelector(".on");
+  if (on && el.scrollWidth > el.clientWidth) {
+    const r = on.getBoundingClientRect(), b = el.getBoundingClientRect();
+    const pad = parseFloat(getComputedStyle(el).getPropertyValue("--fade")) || 0;  // clear of the faded edge
+    if (r.left < b.left + pad) el.scrollLeft -= b.left + pad - r.left;
+    else if (r.right > b.right - pad) el.scrollLeft += r.right - b.right + pad;
+  }
+  fadeStrip(el);
+}
+function fadeStrip(el) {
+  el.classList.toggle("dp-more", el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  el.classList.toggle("dp-before", el.scrollLeft > 1);
+}
+for (const id of ["#dpParts", "#plTabs"]) $(id).addEventListener("scroll", () => fadeStrip($(id)), { passive: true });
+window.addEventListener("resize", () => { if (tab === "deploy") ["#dpParts", "#plTabs"].forEach(id => fadeStrip($(id))); });
 
 // The state of a stage as the list draws it: a version that waits for a person's yes is the person's color.
 function barState(p, s) {
@@ -234,7 +253,7 @@ function drawPage(force) {
   if ($("#dpHead").dataset.sig !== head) { $("#dpHead").innerHTML = head; $("#dpHead").dataset.sig = head; }
   const tabs = PAGE_TABS.map(([k, n]) => button(n, { cls: "plan-vbtn" + (k === "emergency" ? " dp-em" : ""), pressed: D.tab === k,
     data: { "dp-tab": k }, attrs: `role="tab" aria-selected="${D.tab === k}"` })).join("");
-  if ($("#plTabs").dataset.sig !== tabs) { $("#plTabs").innerHTML = tabs; $("#plTabs").dataset.sig = tabs; }
+  if ($("#plTabs").dataset.sig !== tabs) { $("#plTabs").innerHTML = tabs; $("#plTabs").dataset.sig = tabs; strip($("#plTabs")); }
   const stages = ["stages", "versions"].includes(D.tab);
   $("#dpStages").classList.toggle("hidden", !stages);
   $("#dpPage").classList.toggle("hidden", stages);
