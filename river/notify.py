@@ -541,7 +541,7 @@ def loop(stop, interval_s=None):
             # Inside the try: a queue that is busy or cannot open fails this pass, not the thread (#1663).
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
-            from . import cost, server, space, vault
+            from . import cost, runners, server, space, vault
             from .pipeline import runner as pipeline_runner
             from .routes import canvas as canvas_routes
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
@@ -573,6 +573,7 @@ def loop(stop, interval_s=None):
                 space.serve_pass,  # over db_max_size or folder_max_size: the oldest removable data goes (#5711)
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 pipeline_runner.serve_pass,  # pipeline stages whose gate opened, each in a thread of its own (#6114)
+                runners.serve_pass,  # agents on runners: start the queued runs, end and time out the others (#6151)
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
                 ops_pages,  # a fault of a check of severity page reaches the person by ops_page (#5434)
                 canvas_routes.rqs_responses,  # comments and votes of realquicksite pages, to the canvas's session (#5790)

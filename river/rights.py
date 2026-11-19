@@ -47,6 +47,9 @@ COMMANDS = {
                  "triggers": ANY, "trigger": LEAD,  # #6150
                  # #6145: operators.change takes a person, operators.check the pipeline's operators
                  "operators": ANY, "emergency": ANY},
+    # #6151: a runner runs agents with the queue's rights: a person or the manager adds, changes and stops them
+    "runner": {"list": ANY, "runs": ANY, "log": ANY, "add": LEAD, "check": LEAD, "set": LEAD, "remove": LEAD,
+               "allow": LEAD, "deny": LEAD, "stop": LEAD},
     "add": ANY, "artifacts": ANY, "search": ANY, "duplicates": ANY, "merge": ANY, "edit": ANY, "list": ANY,
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
@@ -78,7 +81,8 @@ READS = {"project show", "project list", "canvas list", "canvas show", "canvas c
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
-         "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding"}
+         "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding",
+         "runner list", "runner runs", "runner log"}
 
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
@@ -104,7 +108,8 @@ OPS.update({op: LEAD for op in (
     "resume", "pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",
     "pipeline_rollback", "pipeline_stop", "pipeline_release", "pipeline_transition", "pipeline_block", "pipeline_unblock",
     "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze",
-    "pipeline_account_check", "pipeline_move_back", "pipeline_trigger")})
+    "pipeline_account_check", "pipeline_move_back", "pipeline_trigger",
+    "runner_add", "runner_check", "runner_allow", "runner_stop")})
 OPS.update({op: ONLY_PERSON for op in (
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",

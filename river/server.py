@@ -6151,6 +6151,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _runner_run(self):
+        """POST /api/runner-run (#6151): the connection comes from this serve's own ssh -R tunnel, so it arrives on
+        127.0.0.1 with no process of a session above it. The run's key (X-Maxpm-Runner) and the session's token in the
+        request say who it is; runners.request_for makes it a command of this computer, which runs as /api/run's do."""
+        if self.headers.get("Origin"):
+            return self._send(403, {"error": "a maxpm command of a runner only"})
+        try:
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "a bad request"})
+        if not isinstance(req, dict) or not isinstance(req.get("argv"), list):
+            return self._send(400, {"error": "a bad request"})
+        from . import runners
+        conn = core.connect()
+        try:
+            req = runners.request_for(conn, self.headers.get("X-Maxpm-Runner") or "", req)
+        except RiverError as e:
+            return self._send(403, {"error": str(e)})
+        finally:
+            conn.close()
+        ans = run_command(req)
+        if ans.get("busy"):
+            return self._send(503, {"error": "every runner is busy"})
+        if ans.get("refused"):
+            return self._send(409, {"error": ans["refused"]})
+        if ans.get("error"):
+            return self._send(500, ans)
+        return self._send(200, ans)
+
     def do_DELETE(self):
         if self.path.split("?")[0] == "/mcp":
             return self._mcp("DELETE")
@@ -6161,6 +6190,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp("POST")
         if self._refuse():
             return
+        if self.path == "/api/runner-run":  # a maxpm command of an agent on a runner (#6151), through its ssh tunnel
+            return self._runner_run()
         if self.path == "/api/run":  # a maxpm command (river/client.py, #5501)
             if self.headers.get("Origin") or not hmac.compare_digest(self.headers.get("X-Maxpm-Token") or "", RUN_TOKEN):
                 return self._send(403, {"error": "a maxpm command with the token of the serve file only"})

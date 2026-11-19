@@ -16,8 +16,8 @@ target or of the pipeline's project.
     run-ended          a stage run ended (passed, failed or stopped)
 
 A rule names the event, the stage it watches (a stage, any stage of a tier, or any stage), what the agent does (the
-instructions of its task), where the agent runs (today only this computer: runners on other machines come with
-#6151), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
+instructions of its task), where the agent runs (this computer, or a runner that the pipeline ticks, #6151: a server
+where the agent runs with no terminal and no prompt, river/runners.py), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
 manager adds, changes, turns off and removes rules; a rule that is off acts on nothing until it is on again, and then
 only on what happens after that.
 
@@ -39,7 +39,7 @@ EVENTS = {  # the generic events, in the words of the page and the briefing
     "run-started": "a run started",
     "run-ended": "a run ended",
 }
-RUNNERS = ("this computer",)  # where an agent runs; runners on other machines come with #6151
+THIS = "this computer"  # a rule's agent runs here, in a terminal, unless the rule names a runner (#6151)
 WITHIN = 86400  # seconds: an event older than this when maxpm serve first sees it starts nothing
 WATCH = 86400   # seconds: a check that fails this long after a deploy no longer counts as "after a deploy"
 DEFAULT_DOES = DEFAULT_RULE[1]
@@ -102,9 +102,14 @@ def _check_fields(conn, p, event, stage, tier, runner, keys, actor):
                                                          "IS NOT NULL AND removed_at IS NULL", (p["id"],))})
         raise core.RiverError(f"no stage of pipeline {p['name']} has the tier {tier!r}; its tiers: "
                               f"{', '.join(tiers) or 'none yet (maxpm pipeline stage <name> <stage> --tier <tier>)'}")
-    if runner not in RUNNERS:
-        raise core.RiverError(f"no runner {runner!r}: an agent runs on {', '.join(RUNNERS)} (runners on other "
-                              "machines come later)")
+    from .. import runners
+    may = runners.choices(conn, p)
+    if runner not in may:
+        known = conn.execute("SELECT 1 FROM runners WHERE name=?", (runner,)).fetchone()
+        raise core.RiverError(
+            f"pipeline {p['name']} may not use runner {runner!r}: tick it first (maxpm runner allow {runner} "
+            f"{p['name']})" if known else
+            f"no runner {runner!r}: this pipeline's agents run on {', '.join(may)} (maxpm runner list)")
     from .. import vault
     for k in keys:
         vault._may_grant(conn, actor, vault._set(conn, k), "grant")  # the rule grants the set to each task later
@@ -118,7 +123,7 @@ def _keys(text):
 
 def rule_add(conn, pipeline, event, does=None, stage=None, tier=None, runner=None, keys=None, actor=None):
     """maxpm pipeline trigger <pipeline> add: a new rule, on from now."""
-    runner = runner or RUNNERS[0]
+    runner = runner or THIS
     keys = _keys(keys) or []
     does = (does or "").strip() or {"stage-failed": DEFAULT_DOES, "check-failed": CHECK_DOES}.get(event)
     if event in EVENTS and not does:
@@ -219,15 +224,20 @@ def add_default(conn, pid, actor=None):
 
 def rules(conn, pipeline, fired=20):
     """The rules of a pipeline, what they did lately, and the choices of a rule's fields (the Triggers tab)."""
+    from .. import runners
     p = store._pipeline(conn, pipeline)
     stages = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
                           (p["id"],)).fetchall()
+    ticks = runners.ticked(p)
+    every = [{"name": r["name"], "ssh": r["ssh"], "state": r["state"], "cli": r["cli"], "ticked": r["name"] in ticks}
+             for r in conn.execute("SELECT name, ssh, state, cli FROM runners ORDER BY name")]
     return {"pipeline": p["name"], "project": p["project"],
             "rules": [_info(r) for r in conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? ORDER BY id",
                                                       (p["id"],))],
             "fired": [dict(f, rule=f"t{f['trigger_id']}") for f in conn.execute(
                 "SELECT * FROM pipeline_trigger_fires WHERE pipeline_id=? ORDER BY id DESC LIMIT ?", (p["id"], fired))],
-            "events": EVENTS, "runners": list(RUNNERS), "stages": [s["name"] for s in stages],
+            "events": EVENTS, "runners": runners.choices(conn, p), "all_runners": every,
+            "stages": [s["name"] for s in stages],
             "tiers": sorted({s["tier"] for s in stages if s["tier"]})}
 
 
@@ -367,6 +377,12 @@ def _fire(conn, p, r, ev):
         item, result = None, f"did nothing: {e}"
     if item and r["keys"]:
         result += _grant(conn, r, item)
+    if item and r["runner"] and r["runner"] != THIS:  # #6151: the task goes to a runner, not to a session here
+        from .. import runners
+        try:
+            result += runners.queue(conn, r["runner"], item, p["name"], f"t{r['id']}", ev.get("rev"))
+        except core.RiverError as e:
+            result += f"; not on runner {r['runner']}: {e}"
     with core.tx(conn):
         conn.execute("UPDATE pipeline_trigger_fires SET item=?, result=? WHERE id=?", (item, result, fid))
         from . import audit

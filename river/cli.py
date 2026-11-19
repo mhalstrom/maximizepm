@@ -2634,6 +2634,34 @@ def build_parser(only=None):
     x.add_argument("target", help="the SSH target of the host")
     x.add_argument("agent", choices=["claude", "codex"])
     x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    ru = sub.add_parser("runner", help="runners: servers where a trigger rule's agent works with no person, terminal "
+                        "or prompt (Deploy > Runners)")
+    rus = ru.add_subparsers(dest="rucmd", required=True)
+    rus.add_parser("list", help="each runner, what uses it, its load and its last runs")
+    x = rus.add_parser("add", help="check a server over SSH, install this computer's maxpm there, and add it")
+    x.add_argument("name", help="a short name, such as ci-1"); x.add_argument("--ssh", required=True,
+                                                                          help="its SSH target: ci-1, ci@server")
+    x.add_argument("--cli", choices=["claude", "codex"], help="the agent CLI that runs the tasks (default: claude)")
+    x.add_argument("--slots", type=int); x.add_argument("--max-minutes", type=int); x.add_argument("--max-cost", type=float)
+    x = rus.add_parser("check", help="ask the server again what it has (its maxpm, its agent CLIs)")
+    x.add_argument("name")
+    x = rus.add_parser("set", help="change a runner: its agent CLI, slots, limits, the tools allowed with no prompt")
+    x.add_argument("name"); x.add_argument("--cli", choices=["claude", "codex"])
+    x.add_argument("--slots", type=int, help="runs at the same time")
+    x.add_argument("--max-minutes", type=int, help="maxpm serve stops a run after this")
+    x.add_argument("--max-cost", type=float, help="dollars for one run (Claude Code stops there)")
+    x.add_argument("--allow", help="the tools of Claude Code allowed with no prompt, as for --allowedTools")
+    x.add_argument("--folder", help="where the projects are cloned on the server (default ~/maxpm-runner)")
+    x = rus.add_parser("remove", help="take a runner off the list"); x.add_argument("name")
+    for word, what in (("allow", "let a pipeline's trigger rules run their agents on a runner"),
+                       ("deny", "take a runner away from a pipeline")):
+        x = rus.add_parser(word, help=what); x.add_argument("name"); x.add_argument("pipeline")
+    x = rus.add_parser("runs", help="the agent runs, newest first"); x.add_argument("name", nargs="?")
+    x.add_argument("-n", type=int, default=30)
+    x = rus.add_parser("log", help="what the agent of a run printed, in words"); x.add_argument("run", type=int)
+    x.add_argument("-n", type=int, default=200)
+    x = rus.add_parser("stop", help="stop the agent of a run"); x.add_argument("run", type=int)
+    x.add_argument("--reason")
     x = sub.add_parser("agent-login", help="sign an agent CLI in on a computer with no browser (a host)")
     x.add_argument("agent", choices=["claude", "codex"])
     x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
@@ -4688,6 +4716,8 @@ def dispatch(conn, a, actor):
         return core.queue_move(conn, a.agent, a.id, a.before, a.after, actor)
     if c == "pipeline":
         return _pipeline_cmd(conn, a, actor)
+    if c == "runner":
+        return _runner_cmd(conn, a, actor)
     if c == "target":
         if a.tcmd == "add":
             return core.target_add(conn, a.name, a.description, actor)
@@ -8102,10 +8132,91 @@ def render_pipeline(a, res):
               + (f"  (target {e['target']})" if e["target"] else ""))
 
 
+def _runner_cmd(conn, a, actor):
+    """maxpm runner (#6151): river/runners.py."""
+    from . import runners
+    s = a.rucmd
+    if s == "list":
+        return runners.listing(conn)
+    if s == "add":
+        return runners.add(conn, a.name, a.ssh, a.cli, a.slots, a.max_minutes, a.max_cost, actor)
+    if s == "check":
+        return {"runner": runners.check(conn, a.name, actor), "steps": []}
+    if s == "set":
+        return {"runner": runners.change(conn, a.name, a.cli, a.slots, a.max_minutes, a.max_cost, a.allow, a.folder,
+                                         actor), "steps": []}
+    if s == "remove":
+        return runners.remove(conn, a.name, actor)
+    if s in ("allow", "deny"):
+        return runners.allow_pipeline(conn, a.pipeline, a.name, s == "allow", actor)
+    if s == "runs":
+        return runners.runs(conn, a.name, a.n)
+    if s == "log":
+        return runners.log(conn, a.run, a.n)
+    return runners.stop(conn, a.run, actor, a.reason)
+
+
+def _runner_line(r):
+    return (f"#{r['id']} {r['state']:<8} {r['runner']} #{r['item']} {r['agent']}"
+            + (f" ({r['pipeline']} {r['rule']})" if r.get("pipeline") else "")
+            + (f" ${r['cost']:.2f}" if r.get("cost") else "") + (f": {r['result']}" if r.get("result") else ""))
+
+
+def render_runner(a, res):
+    s = a.rucmd
+    if s == "list":
+        if not res["runners"]:
+            print("No runner yet. Add a server: maxpm runner add <name> --ssh <target>")
+        for r in res["runners"]:
+            clis = ", ".join(f"{k} {v}" for k, v in r["clis"].items()) or "no agent CLI"
+            print(f"{r['name']}  {r['ssh']}  {r['state']}{': ' + r['error'] if r['error'] else ''}  "
+                  f"({r['system'] or '?'}; {r['version'] or 'no maxpm'}; {clis}; runs {r['cli']})")
+            print(f"  load {r['busy']} of {r['slots']}" + (f", {r['waiting']} waiting" if r["waiting"] else "")
+                  + f"; at most {r['max_minutes']}m and ${r['max_cost']:g} a run"
+                  + f"; used by {', '.join(r['used_by']) or 'no pipeline'}"
+                  + (f"; rules {', '.join(x['pipeline'] + ' ' + x['rule'] for x in r['rules'])}" if r["rules"] else ""))
+            for x in r["runs"][:3]:
+                print("  " + _runner_line(x))
+        rules = res["this"]["rules"]
+        print("This computer: maxpm serve here, in a terminal"
+              + (f"; rules {', '.join(x['pipeline'] + ' ' + x['rule'] for x in rules)}" if rules else ""))
+        return
+    if s in ("add", "check", "set"):
+        r = res["runner"]
+        for step in res["steps"]:
+            print(f"  - {step}")
+        print(f"runner {r['name']} ({r['ssh']}): {r['state']}" + (f": {r['error']}" if r.get("error") else "")
+              + f"; runs {r['cli']}, {r['slots']} at a time, at most {r['max_minutes']}m and ${r['max_cost']:g} a run")
+        if s == "add":
+            print(f"Let a pipeline use it: maxpm runner allow {r['name']} <pipeline>; then a trigger rule: "
+                  f"maxpm pipeline trigger <pipeline> add --when stage-failed --runs-on {r['name']}")
+        return
+    if s == "remove":
+        print(f"runner {res['removed']} removed")
+        return
+    if s in ("allow", "deny"):
+        print(f"{res['pipeline']} may use: {', '.join(res['runners']) or 'no runner (only this computer)'}")
+        return
+    if s == "runs":
+        for r in res["runs"]:
+            print(_runner_line(r))
+        if not res["runs"]:
+            print("No run yet.")
+        return
+    if s == "log":
+        print(_runner_line(res["run"]))
+        for x in res["lines"]:
+            print(f"  [{x['kind']}] {x['text']}")
+        return
+    print(f"run #{res['run']}: stopping ({res['reason']})" if res.get("stopping") else f"run #{res['run']}: {res['state']}")
+
+
 def render(a, res):
     c = a.cmd
     if c == "pipeline":
         return render_pipeline(a, res)
+    if c == "runner":
+        return render_runner(a, res)
     if c == "schedule":
         return render_schedule(a, res)
     if c == "ops":

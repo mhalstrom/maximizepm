@@ -207,11 +207,17 @@ def code_stamp(root=None):
     return best
 
 
+# Where a command goes: /api/run with the serve file's token; on a runner (#6151) /api/runner-run with the run's key,
+# through the port of the ssh tunnel that maxpm serve opened (MAXPM_RUNNER_PORT, MAXPM_RUNNER_KEY).
+ROUTE = {"path": "/api/run", "header": "X-Maxpm-Token"}
+RUNNER_LOCAL = (None, "guide", "skills")  # what maxpm runs on a runner itself: help, the version, the guides
+
+
 def _post(port, body, token, timeout):
     """(status, answer) of POST /api/run on this computer: directly, else through the sandbox's HTTP proxy
     (an agent sandbox permits no direct connection; its proxy passes a host that the sandbox allows)."""
-    req = (f"POST /api/run HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
-           f"X-Maxpm-Token: {token}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n")
+    req = (f"POST {ROUTE['path']} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+           f"{ROUTE['header']}: {token}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n")
     s = None
     try:
         s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -230,7 +236,7 @@ def _post(port, body, token, timeout):
             s = socket.create_connection((p.hostname, p.port or 80), timeout=2)
         except OSError:
             return None, None
-        head = req.replace("POST /api/run", f"POST http://127.0.0.1:{port}/api/run", 1)
+        head = req.replace(f"POST {ROUTE['path']}", f"POST http://127.0.0.1:{port}{ROUTE['path']}", 1)
         if p.username:
             import binascii
             cred = binascii.b2a_base64(f"{unquote(p.username)}:{unquote(p.password or '')}".encode(), newline=False)
@@ -269,7 +275,8 @@ def _post(port, body, token, timeout):
 def run_remote(words, env=None, cwd=None):
     """Run the command in maxpm serve; its exit status, or None when it must run here (see the module text)."""
     env = dict(os.environ if env is None else env)
-    if env.get("MAXPM_LOCAL"):
+    runner = env.get("MAXPM_RUNNER_PORT")
+    if env.get("MAXPM_LOCAL") and not runner:
         return None
     cmd = _command(words)
     files = FILE_WORDS
@@ -292,12 +299,19 @@ def run_remote(words, env=None, cwd=None):
         return None
     if cmd == "canvas" and _sub(words, _at(words)) in CANVAS_LOCAL:
         return None
-    try:
-        with open(serve_file(env), encoding="utf-8") as f:
-            info = _loads(f.read())
-        port, token = int(info["port"]), str(info["token"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+    if runner:
+        try:
+            port, token = int(runner), env.get("MAXPM_RUNNER_KEY") or ""
+        except ValueError:
+            return None
+        ROUTE.update(path="/api/runner-run", header="X-Maxpm-Runner")
+    else:
+        try:
+            with open(serve_file(env), encoding="utf-8") as f:
+                info = _loads(f.read())
+            port, token = int(info["port"]), str(info["token"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
     try:
         cwd = cwd or os.getcwd()
     except OSError:
@@ -310,6 +324,21 @@ def run_remote(words, env=None, cwd=None):
     if poll:
         return _poll_loop(port, token, req)
     status, answer = _post_fresh(port, _dumps(req).encode(), token)
+    if runner and status == 503:  # every command runner of serve is busy: a runner has no queue to run it on
+        import time
+        for _ in range(10):
+            time.sleep(1)
+            status, answer = _post_fresh(port, _dumps(req).encode(), token)
+            if status != 503:
+                break
+    if runner and (status is None or 400 <= status < 500 or status == 503):
+        try:
+            why = _loads(answer or b"{}").get("error")
+        except (ValueError, AttributeError):
+            why = None
+        sys.stderr.write(f"maxpm: maxpm serve did not take the command ({why or status or 'no connection'}); "
+                         f"this runner has no queue of its own\n")
+        return 2
     if status is None or 400 <= status < 500 or status == 503:
         # No connection, a proxy or serve that refused it (403, an older serve: 404), older code or another queue
         # (409), every runner busy (503): serve did not run it, so it runs here.
@@ -414,6 +443,14 @@ WSL_ONLY = ("MaximizePM runs on Windows only inside WSL 2. Install WSL 2, then i
             "terminal: https://github.com/mhalstrom/maximizepm#windows")
 
 
+def runner_refusal(words):
+    """The error of a command that an agent on a runner cannot run (#6151): it would need the queue's computer (a wait
+    in this process, a file it writes, the review command), and the runner has no queue."""
+    return (f"maxpm: maxpm {_command(words) or ''} runs only on the computer of the queue, and this is runner "
+            f"{os.environ.get('MAXPM_RUNNER') or '?'}. Do the task here and close it with maxpm done or maxpm release; "
+            f"say what you need in a note (maxpm send note \"...\" --item <id>)\n")
+
+
 def refuse_native_windows():
     """Stop at the start on native Windows, with the one line that says what to do."""
     if os.name == "nt":
@@ -428,5 +465,8 @@ def main():
     code = run_remote(sys.argv[1:])
     if code is not None:
         sys.exit(code)
+    if os.environ.get("MAXPM_RUNNER_PORT") and _command(sys.argv[1:]) not in RUNNER_LOCAL:
+        sys.stderr.write(runner_refusal(sys.argv[1:]))
+        sys.exit(2)
     from .cli import main as local
     local()

@@ -13,7 +13,6 @@
 // /deploy/pipeline/<name>[/<tab>] (app.js writes it from D).
 import { $, esc, getJson, ago, act, toast } from "../lib.js";
 import { button } from "../components/button.js";
-import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { tab, nav } from "../page.js";
 import { showPipeline, hidePipeline, renderPipeline } from "./pipeline.js";
@@ -23,6 +22,7 @@ import { accountsHtml as accountsView } from "./accounts.js";
 import { agentsHtml, stageMarks } from "./agents.js";
 import { drawTriggers, defaultTriggersHtml } from "./triggers.js";
 import { drawEmergency } from "./emergency.js";
+import { runnersHtml, runnerClick } from "./runners.js";
 
 export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
   ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
@@ -189,7 +189,7 @@ function drawPart(force) {
   // Agents (#6149): drawn again only when its data changed, so a button under the pointer stays in its place.
   if (s === sig && (!force || D.part === "agents")) return;
   sig = s;
-  const html = D.part === "where" ? whereHtml() : D.part === "accounts" ? accountsHtml() : D.part === "runners" ? runnersHtml()
+  const html = D.part === "where" ? whereHtml() : D.part === "accounts" ? accountsHtml() : D.part === "runners" ? runnersHtml(data)
     : agentsHtml(data);
   $("#dpPart").dataset.of = "";
   $("#dpPart").innerHTML = html;
@@ -207,16 +207,6 @@ function whereHtml() {
 
 // The accounts: views/accounts.js (#6147).
 function accountsHtml() { return `<div class="dp-cards">${accountsView(data)}</div>`; }
-
-function runnersHtml() {
-  const local = data.pipelines.filter(p => !p.default && p.source.state === "local");
-  const running = data.pipelines.flatMap(p => p.stages.filter(s => s.state === "running").map(s => `${p.name} › ${s.name}`));
-  return `<div class="dp-cards"><div class="pl-card"><h3>This computer ${chip("c-ready", "maxpm serve")}</h3>
-    <div class="t-m">Runs the stages of the pipelines with no forge${local.length ? ": " + local.map(p => esc(p.name)).join(", ") : ""}.</div>
-    <div class="t-m">${running.length ? "Runs now: " + running.map(esc).join(", ") : `<span class="muted">Runs no stage now.</span>`}</div></div></div>
-    <div class="muted t-s">A forge runs the stages of its own pipelines on its own runners.</div>`;
-}
-
 
 
 // ---- a pipeline's own page
@@ -264,9 +254,12 @@ async function pipeAct(op, args, done) {
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-check]");
+  const r = e.target.closest("[data-rn-add],[data-rn-watch],[data-rn-check],[data-rn-stop]");
+  if (r) return runnerClick(r, () => renderDeploy(true));  // Deploy > Runners (#6151)
+  const t = e.target.closest("[data-dp-part],[data-dp-open],[data-dp-tab],[data-dp-approve],[data-dp-card],[data-dp-check],[data-dp-triggers]");
   if (!t) return;
   const d = t.dataset;
+  if (d.dpTriggers) return go({ part: null, pipeline: d.dpTriggers, tab: "triggers" });
   if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the forge");
   if (d.dpPart) return go({ part: d.dpPart, pipeline: null, tab: "stages" });
   if (d.dpOpen) return go({ part: null, pipeline: d.dpOpen, tab: "stages" });

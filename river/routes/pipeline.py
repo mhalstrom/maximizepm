@@ -157,7 +157,18 @@ OPS = {
                                                                   a.get("url"), who),
     "pipeline_token_make": lambda c, a, who: _accounts().make_token(c, a.get("forge"), a.get("name"), a.get("url"),
                                                                     a.get("project"), who),
+    # #6151: runners (Deploy > Runners, and the ticks on a pipeline's Triggers tab)
+    "runner_add": lambda c, a, who: _runners().add(c, a["name"], a["ssh"], a.get("cli") or None, None, None, None, who),
+    "runner_check": lambda c, a, who: _runners().check(c, a["name"], who),
+    "runner_allow": lambda c, a, who: _runners().allow_pipeline(c, a["pipeline"], a["name"], bool(a.get("on", True)),
+                                                                who),
+    "runner_stop": lambda c, a, who: _runners().stop(c, int(a["run"]), who, a.get("reason")),
 }
+
+
+def _runners():
+    from .. import runners
+    return runners
 
 
 def _transitions():
@@ -366,7 +377,13 @@ def deploy(conn, path):
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [t["name"]], "waits": waits})
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}
-    return {"pipelines": out, "accounts": account_list, "count": sum(len(x["waits"]) for x in out) + len(bad)}
+    return {"pipelines": out, "accounts": account_list, "runners": _runners().listing(conn),  # #6151
+            "count": sum(len(x["waits"]) for x in out) + len(bad)}
+
+
+def runner_log(conn, path):
+    """GET /api/runner-log/<run>: what the agent of a runner run printed, in words (#6151)."""
+    return _runners().log(conn, int(path.rsplit("/", 1)[1]))
 
 
 def audit(conn, path):
@@ -384,5 +401,6 @@ def audit(conn, path):
 
 GET += [
     (lambda path: path == "/api/deploy", _with(deploy)),
+    (lambda path: path.startswith("/api/runner-log/"), _with(runner_log)),
     (lambda path: path == "/api/pipeline-audit", _with(audit, query=True)),
 ]

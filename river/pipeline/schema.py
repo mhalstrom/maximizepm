@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS pipelines (
   plugin_state    TEXT,                  -- the JSON state the plugin's last answer kept (a cursor), sent back to it
   stop_runs       INTEGER,               -- 1: an operator stopped the pipeline (#6145): with the hold above, a running
                                          -- stage stops after its present step
-  agents_operate  INTEGER                -- 1: agent sessions on the operator list may press the emergency actions
+  agents_operate  INTEGER,               -- 1: agent sessions on the operator list may press the emergency actions
+  runners     TEXT                       -- JSON list of the runners its trigger rules may use (#6151)
 );
 
 -- The operators of a pipeline (#6145; Decision 7, mark 2026-11-18: "operators can, we audit who does them"): the
@@ -357,6 +358,59 @@ CREATE TABLE IF NOT EXISTS pipeline_trigger_fires (
   UNIQUE (trigger_id, key)
 );
 CREATE INDEX IF NOT EXISTS pipeline_trigger_fires_pipeline ON pipeline_trigger_fires(pipeline_id, id);
+
+-- Runners (#6151, river/runners.py): servers where an agent runs a trigger rule's task with no person, no terminal
+-- and no prompt. One list that every pipeline shares; each pipeline ticks the ones it may use (pipelines.runners).
+-- Readers: maxpm serve (runners.serve_pass starts and ends the runs), maxpm runner, Deploy > Runners, the Triggers tab
+-- (the choices of a rule's runner).
+CREATE TABLE IF NOT EXISTS runners (
+  name         TEXT PRIMARY KEY,
+  ssh          TEXT NOT NULL,            -- the SSH target (Tailscale SSH or a key; never a password prompt)
+  system       TEXT,                     -- uname -sm of the server
+  version      TEXT,                     -- the maxpm there ('maxpm 1.2.0')
+  tailnet      TEXT,                     -- its Tailscale address, when Tailscale runs there
+  clis         TEXT,                     -- JSON {"claude": "2.1.3 (Claude Code)", "codex": "codex-cli 0.15"}: found there
+  cli          TEXT NOT NULL DEFAULT 'claude',  -- the agent CLI that runs the tasks (runners.CLIS)
+  slots        INTEGER NOT NULL DEFAULT 1,      -- runs at the same time
+  max_minutes  INTEGER NOT NULL DEFAULT 60,     -- maxpm serve stops a run after this
+  max_cost     REAL NOT NULL DEFAULT 5,         -- dollars for one run (Claude Code's --max-budget-usd)
+  allow        TEXT,                     -- the tools an agent may use there with no prompt; NULL: runners.ALLOW
+  folder       TEXT,                     -- where the projects are cloned there; NULL: runners.FOLDER
+  state        TEXT NOT NULL DEFAULT 'new',     -- ok, or bad (error says why)
+  error        TEXT,
+  checked_at   TEXT,
+  added_by     TEXT,
+  added_at     TEXT NOT NULL
+);
+
+-- Each agent run on a runner: queued when a rule gives it a task, running while its ssh connection lives, then
+-- ended, failed or stopped. Readers: maxpm serve, maxpm runner runs and log, Deploy > Runners and Agents, and the
+-- command endpoint (POST /api/runner-run: key_hash and agent say which session a command of the runner is).
+CREATE TABLE IF NOT EXISTS runner_runs (
+  id           INTEGER PRIMARY KEY,
+  runner       TEXT NOT NULL,
+  item         INTEGER NOT NULL,         -- the task the agent works on
+  agent        TEXT NOT NULL,            -- its session record (agents.name)
+  pipeline     TEXT,                     -- what started it: the pipeline and its rule
+  rule         TEXT,
+  rev          TEXT,                     -- the version it starts from (the failed run's), else origin's HEAD
+  state        TEXT NOT NULL,            -- queued, running, ended, failed, stopped
+  cli          TEXT,
+  queued_at    TEXT NOT NULL,
+  started_at   TEXT,
+  ended_at     TEXT,
+  exit_code    INTEGER,
+  pid          INTEGER,                  -- the ssh process on this computer
+  port         INTEGER,                  -- the port on the runner that leads back to maxpm serve
+  key_hash     TEXT,                     -- sha256 of the key that this run's commands carry
+  transcript   TEXT,                     -- the file on this computer that holds what the agent printed
+  cost         REAL,                     -- dollars, from the transcript (Claude Code's result line)
+  result       TEXT,                     -- the agent's last words, or why the run failed
+  stopped_by   TEXT,
+  stop_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS runner_runs_state ON runner_runs(state, runner);
+CREATE INDEX IF NOT EXISTS runner_runs_key ON runner_runs(key_hash);
 """
 
 # The rule each pipeline starts with (#6150): what MaximizePM did for every pipeline before rules (#6118). The
@@ -370,8 +424,8 @@ def migrate(conn):
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
     for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
-              "forge_url", "plugin_settings", "plugin_state"):
-        if c not in cols:  # #6119, #6117, #6121, #6159
+              "forge_url", "plugin_settings", "plugin_state", "runners"):
+        if c not in cols:  # #6119, #6117, #6121, #6159; #6151: runners, a JSON list of the runners it may use
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     for c in ("stop_runs", "agents_operate"):  # #6145
         if c not in cols:

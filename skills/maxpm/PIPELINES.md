@@ -530,12 +530,13 @@ for a forge.
 
 Each rule also names the stages it watches (one stage, or any stage), what the
 agent does (the instructions of its task), where the agent runs (this
-computer: `maxpm serve` starts a new session), and the keys its task gets
-(credential sets, granted to that task alone until it closes).
+computer: `maxpm serve` starts a new session; or a runner that the pipeline
+ticks: the next section), and the keys its task gets (credential sets,
+granted to that task alone until it closes).
 
 ```
 maxpm pipeline triggers <name>                           # the rules, and what they did lately
-maxpm pipeline trigger <name> add --when <event> [--stage <stage>] --does "<instructions>" [--keys <set>,<set>]
+maxpm pipeline trigger <name> add --when <event> [--stage <stage>] --does "<instructions>" [--runs-on <runner>] [--keys <set>,<set>]
 maxpm pipeline trigger <name> edit t<n> [--when ...] [--stage ""] [--does ...] [--keys ""]
 maxpm pipeline trigger <name> off t<n> --reason "<why>"  # on t<n>: it acts again on what happens from then
 maxpm pipeline trigger <name> remove t<n>
@@ -589,6 +590,67 @@ commit, as `maxpm target cut <target> --rev <commit>` does; the target's
 cadence and its earlier release still decide when it may go. On the page the
 word is release, never cut. Name your task in each commit message
 (`(#<id>)`), so holding links the commit to it.
+
+## Runners: agents with no person
+
+A runner is a server where a rule's agent works with no person, no terminal
+and no permission prompt. The list is shared by every pipeline; each pipeline
+ticks the runners its rules may use, and a rule names one with `--runs-on`.
+A rule that names no runner runs its agent on this computer, as before.
+
+```
+maxpm runner add ci-1 --ssh ci@ci-1      # check the server, install this computer's maxpm there, find its agent CLIs
+maxpm runner allow ci-1 <pipeline>       # the pipeline's rules may use ci-1 (deny takes it away)
+maxpm pipeline trigger <pipeline> edit t<n> --runs-on ci-1
+maxpm runner list                        # each runner: what uses it, its load, its last runs
+maxpm runner set ci-1 --cli codex --slots 2 --max-minutes 90 --max-cost 10
+maxpm runner runs [ci-1]                 # the agent runs, newest first
+maxpm runner log <run>                   # what the agent printed, in words
+maxpm runner stop <run> --reason "<why>"
+```
+
+What the server needs:
+
+- SSH from this computer with no prompt: Tailscale SSH (`tailscale set --ssh`
+  on the server) or your key. `maxpm runner add` refuses a server that asks.
+- Linux or macOS, git, and access to the project's origin (the runner clones
+  the project from the origin of its folder here).
+- The agent CLI, signed in with a key of its own. Each CLI runs with no
+  terminal:
+
+| CLI | How it runs there | Its model key on the runner | The cost limit |
+|---|---|---|---|
+| Claude Code (`--cli claude`, the default) | `claude -p` with `--output-format stream-json`, `--permission-mode dontAsk` and `--allowedTools`: a tool outside the list is refused, never asked | `ANTHROPIC_API_KEY` in its environment, or a token of `claude setup-token` | `--max-budget-usd`, the runner's max cost (5 dollars when not set) |
+| Codex (`--cli codex`) | `codex exec --json` in its workspace-write sandbox, with network on, so maxpm reaches the queue | `codex login` there, or `CODEX_API_KEY` | none in the CLI: the time limit stops it |
+
+`maxpm serve` stops each run after the runner's max minutes (60 when not set).
+The tools that a Claude Code agent may use there with no prompt are maxpm,
+git, and reading and changing files, until each pipeline has its own list;
+`maxpm runner set <name> --allow "<tools>"` changes them.
+
+What a run does:
+
+1. A rule acts and names a runner: its task is reserved for a new session
+   `<runner>-r<run>`, so no session here takes it.
+2. When the runner has a free slot, `maxpm serve` opens one SSH connection
+   with a reverse tunnel: a port on the runner's 127.0.0.1 leads back to
+   `maxpm serve` here. The script goes on the connection's input, so no key
+   stands in a command line. It makes a worktree of the project at the failed
+   version (else at the origin's head) and starts the agent CLI there.
+3. The agent runs `maxpm go`, `maxpm now`, `maxpm done` as any session does.
+   maxpm on the runner sends each command through the tunnel, with the run's
+   key and the session's token; serve runs it here, on this queue. Nothing
+   listens on the tailnet for it, and the runner has no queue of its own: a
+   command that only runs on the queue's computer (`maxpm wait`, `review pass`)
+   is refused there.
+4. The agent's output comes back on the connection: the run's transcript.
+   When the CLI exits, the run keeps its cost and its last words; a task that
+   is still open goes back to the queue, and the manager gets an alert.
+
+When you are the agent on a runner: nobody answers at a prompt. Ask in the
+queue (`maxpm ask`, or a person item that blocks your task), then release the
+task and stop. Push your branch to origin, because the queue's computer does
+not see your folder, and name the commit in `maxpm done <id> --commit <sha>`.
 
 ## Actions on a running pipeline
 
@@ -703,8 +765,10 @@ The person follows all of this on the page's Deploy tab:
   for each token that fails.
 - **Where each version runs**, **Accounts** (each forge token and its state),
   **Audit log** (every line of every pipeline, with filters by pipeline,
-  actor and time, a search, Correct on each line, and Export as a CSV file), and the page
-  **Runners**.
+  actor and time, a search, Correct on each line, and Export as a CSV file), and
+  **Runners** (each runner, what it is, its agent CLIs, its load, the
+  pipelines that use it; Add a runner and Check; below them the agents on
+  runners with Watch, their transcript in words, and Stop).
 - **Agents**: each pipeline that has work now, left to right. Under each stage
   stand its faults and the sessions that work on them: the session on a
   fault task, on a fix task found during it, or on a release's review or
@@ -715,9 +779,10 @@ The person follows all of this on the page's Deploy tab:
   (⚠ a fault, 🤖 a session).
 - **A pipeline's own page**: Stages (each stage's runs, steps, tests and the
   failure prompt; a target's release card), Versions, Triggers (its trigger
-  rules: add, edit, turn off or on; what they did lately), Emergency (its
-  operators; stop the pipeline, stop its agents, move a stage back, revoke a
-  key, each with what it acts on first) and its Audit log.
+  rules: add, edit, turn off or on; the runners it may use; what they did
+  lately), Emergency (its operators; stop the pipeline, stop its agents, move
+  a stage back, revoke a key, each with what it acts on first) and its Audit
+  log.
 - The red number on the tab counts what waits on the person there.
 
 When you tell the person about a release, name the pipeline and the stage:
@@ -732,6 +797,6 @@ comes back to you as an answer to the question.
 ## Later
 
 Each Deploy tab task adds its part to this guide when it is built: manual
-starts, branches, the override,
-and runners that start agents with no person's computer (a rule then names
-one of them).
+starts, branches, the override, an agent inside a forge's own CI job, keys
+granted per stage to a runner's agent, and each pipeline's list of what its
+agents may do with no prompt.

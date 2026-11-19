@@ -12,6 +12,7 @@ import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
 import { askReason } from "./pipeline.js";
+import { ticksHtml, tick } from "./runners.js";
 
 let T = null, sig = "", dlg = null, dlgBox = null, editing = null;
 
@@ -58,6 +59,8 @@ function viewHtml(d) {
     <div class="t-s muted">A rule names what happens in the pipeline, not an event of GitHub, GitLab or Pulumi: every source
       reports its runs the same way. Each rule's agent works on a task that maxpm serve starts on ${esc(d.runners.join(", "))}.
       A person or the manager changes the rules; the audit log names who, and each rule that acted.</div>
+    <h3 class="tg-h">Runners it may use</h3>${ticksHtml(d)}
+    <div class="t-s muted">A runner is a server where the agent works with no person, terminal or prompt (Deploy › Runners). This computer is always a choice.</div>
     <h3 class="tg-h">What the rules did lately</h3>${firedHtml(d)}`;
 }
 
@@ -134,9 +137,10 @@ async function change(args, done) {
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-tg-add],[data-tg-edit],[data-tg-off],[data-tg-on]");
+  const t = e.target.closest("[data-tg-add],[data-tg-edit],[data-tg-off],[data-tg-on],[data-rn-tick]");
   if (!t || !T) return;
   const d = t.dataset, rule = (name) => T.rules.find(r => r.name === name);
+  if (d.rnTick) return tick(T.pipeline, d.rnTick, !!d.on, () => { const host = $("#dpPage"); if (host) drawTriggers(T.pipeline, host, true); });
   if (d.tgAdd) return openRule(null);
   if (d.tgEdit) return openRule(rule(d.tgEdit));
   if (d.tgOn) return change({ action: "on", rule: d.tgOn }, `Rule ${d.tgOn} is on`);

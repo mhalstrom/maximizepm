@@ -304,7 +304,8 @@ def export(conn, name):
             "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"],
                       "url": p["forge_url"], **({"plugin": json.loads(p["plugin_settings"])}
                                                 if p["plugin_settings"] else {})} if p["forge"] else None,
-            "environments": envs, "stages": stages, "triggers": triggers.export(conn, p["id"])}
+            "environments": envs, "stages": stages, "triggers": triggers.export(conn, p["id"]),
+            "runners": json.loads(p["runners"] or "[]")}  # the runners its rules may use (#6151)
 
 
 def history(conn, name, limit=50):

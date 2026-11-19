@@ -3737,8 +3737,8 @@ def outside_tmux(env):
     """True when a command runs in an agent CLI (agent_type_from_env) that is not inside a tmux pane. TMUX alone does
     not say it: a Terminal app started from a tmux pane passes TMUX to every tab it opens. tmux sets TERM_PROGRAM
     to tmux in its panes, so another TERM_PROGRAM there (Apple_Terminal, iTerm.app, vscode) means outside (#4599)."""
-    if not agent_type_from_env(env) or env.get("MAXPM_CHAT"):
-        return False
+    if not agent_type_from_env(env) or env.get("MAXPM_CHAT") or env.get("MAXPM_RUNNER"):
+        return False  # a chat, or an agent on a runner (#6151): no terminal at all
     return not env.get("TMUX") or env.get("TERM_PROGRAM", "tmux") != "tmux"
 
 
@@ -23171,7 +23171,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                                        f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
             else:
                 r = "reviewer" if item["kind"] == "review" else "worker"
-                brief.update(role=r, item=item, why=f"the page started this session for #{f['id']}")
+                brief.update(role=r, item=item, why=f"runner {os.environ['MAXPM_RUNNER']} started this session for "
+                             f"#{f['id']}" if os.environ.get("MAXPM_RUNNER") else
+                             f"the page started this session for #{f['id']}")
                 _set_role_note(conn, actor, r, item["id"])
                 return brief
         if f["status"] in OPEN_STATES and kind == "unblock":

@@ -94,6 +94,18 @@ button.cardbtn.em-pick.on { border-color: var(--warn); background: var(--warn-bg
 .au-table td { vertical-align: top; }
 .au-table tr.au-fixed td { color: var(--muted); }
 .au-corr { color: var(--warn); }
+/* Deploy > Runners (#6151, views/runners.js): the runners, the agents on them, and Watch (what an agent printed). */
+#rnDlg { --dlg-w: var(--w-dlg-m); }
+.rn-log { max-height: var(--h-pre); overflow: auto; font-size: var(--fs-s); padding: var(--sp-3);
+  border: var(--hair) solid var(--line); border-radius: var(--r-s); margin: var(--sp-3) 0; }
+.rn-line { white-space: pre-wrap; word-break: break-word; padding: var(--sp-0) 0; }
+.rn-line.rn-say { color: var(--ink); }
+.rn-line.rn-tool, .rn-line.rn-out { color: var(--muted); }
+.rn-line.rn-end { color: var(--done); }
+.rn-result { max-width: var(--w-l); overflow-wrap: anywhere; }
+.rn-acts { white-space: nowrap; }
+.rn-cmds { overflow-x: auto; font-size: var(--fs-s); padding: var(--sp-3); border-radius: var(--r-s);
+  background: var(--panel); margin: var(--sp-4) 0 0; }
 
 /* A phone: the row stacks (name, stages, what runs where), and the stages scroll sideways. */
 @media (max-width: 759px) {
