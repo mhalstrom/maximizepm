@@ -2591,7 +2591,7 @@ def build_parser(only=None):
     x.add_argument("--no-browser", action="store_true", help="print the link instead of opening the browser")
     x = sub.add_parser("guide", help="how to use MaximizePM: worker loop, manager (and writing tasks), or agent setup")
     x.add_argument("which", nargs="?", default="worker",
-                   choices=["worker", "manager", "setup", "decisions", "ops"])
+                   choices=["worker", "manager", "setup", "decisions", "ops", "pipelines"])
     x = sub.add_parser("setup-agent", help="print (or append) the instructions block for AGENTS.md")
     x.add_argument("--append", metavar="FILE", help="append the block to this file if it is not there yet")
     x.add_argument("--claude-desktop", action="store_true",
@@ -2971,8 +2971,8 @@ def _run_words(words, rec):
             print(SETUP)
         elif args.which == "decisions":
             print(core.DECISION_FORMAT)
-        elif args.which == "ops":  # the operations guide (#5439), a file beside the worker guide
-            print((GUIDES / "maxpm" / "OPS.md").read_text(encoding="utf-8").strip())
+        elif args.which in ("ops", "pipelines"):  # files beside the worker guide: operations (#5439), pipelines (#6158)
+            print((GUIDES / "maxpm" / (args.which.upper() + ".md")).read_text(encoding="utf-8").strip())
         else:
             name = {"manager": "maxpm-manager"}.get(args.which, "maxpm")
             text = (GUIDES / name / "SKILL.md").read_text(encoding="utf-8")

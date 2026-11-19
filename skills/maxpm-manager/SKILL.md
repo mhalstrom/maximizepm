@@ -532,6 +532,15 @@ A test stage names its JUnit file (`--junit report.xml`); a stage's command
 prints `::step start <name>` and `::step end <name> passed|failed` lines to
 show its parts.
 
+A new deploy target shows on the Deploy tab as its default pipeline at once.
+When the person asks for its stages, write its pipeline as above and name the
+target on its production environment (`maxpm pipeline env <name> prod
+--target <target>`): the pipeline then takes the target's place, with the
+target's release card on its page. Send one version through (`maxpm pipeline
+start <name>`) and read `maxpm pipeline show <name>` until it passes. The
+details for you and for the sessions that write the scripts: `maxpm guide
+pipelines`.
+
 The work can run on a forge instead: `maxpm pipeline forge <name>
 github|gitlab|gitea|forgejo --repo <owner/name> --secret <secret name> [--url
 <address>]` (Gitea and Forgejo need `--url`), and each stage names its workflow

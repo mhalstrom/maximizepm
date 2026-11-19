@@ -1784,6 +1784,21 @@ class Plan(Base):
             self.assertIn(part, text)
         self.assertIn("`maxpm guide ops`", (cli.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8"))
 
+    def test_guide_pipelines_prints_the_pipelines_guide_that_both_skills_name(self):
+        # #6158: the pipelines guide is a file beside the worker guide; the worker and manager guides name it.
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["guide", "pipelines"]), 0)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("# MaximizePM pipelines"), text[:80])
+        for part in ("## Set up a pipeline for a project", "## Write a stage's script", "::step start", "MAXPM_REV",
+                     "--junit", "## What happens when a stage fails", "## The Deploy tab"):
+            self.assertIn(part, text)
+        for skill in ("maxpm", "maxpm-manager"):
+            self.assertIn("maxpm guide\npipelines", (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")
+                          .replace("maxpm guide pipelines", "maxpm guide\npipelines"))
+
 
 
 class DueDates(Base):

@@ -589,6 +589,13 @@ and starts a new session for it. Before you take such an item, add a check, or
 write a check script, read `maxpm guide ops`: the parts, who may do what, how
 to state a cause with a proof, and how a check script reports.
 
+## Pipelines
+
+A project's release can be a pipeline: stages left to right, gates between
+them (`maxpm pipeline show <name>`). Before you write a stage's script, work
+on a `pipeline:` fault task, or set up a pipeline, read `maxpm guide
+pipelines`.
+
 ## Blocked on another agent's item
 
 `maxpm blockers <id>` shows who holds what. Then:
