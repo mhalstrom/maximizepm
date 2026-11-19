@@ -1916,9 +1916,11 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--rev")
     x = pls.add_parser("forge", help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
                        "minute and starts a gated workflow after the gate), or none (the stages run here)")
-    x.add_argument("name"); x.add_argument("forge", choices=("github", "none"))
-    x.add_argument("--repo", help="owner/name"); x.add_argument("--secret", help="the maxpm secret with the API token")
+    x.add_argument("name"); x.add_argument("forge", choices=("github", "gitlab", "none"))
+    x.add_argument("--repo", help="owner/name (GitLab: group/project)")
+    x.add_argument("--secret", help="the maxpm secret with the API token")
     x.add_argument("--ref", help="the branch a started workflow runs on (main)")
+    x.add_argument("--url", help="a self-hosted GitLab: https://gitlab.example.com")
     x = pls.add_parser("rerun", help="run one stage again for a version, an older one too (a roll back)")
     x.add_argument("name"); x.add_argument("stage"); x.add_argument("--rev", required=True)
     x = pls.add_parser("stop", help="stop a stage run: its command, its run on the forge, or its wait at the gate")
@@ -7523,7 +7525,7 @@ def _pipeline_cmd(conn, a, actor):
         from .pipeline import runner
         return runner.approve(conn, a.name, a.stage, a.rev, actor)
     if sub == "forge":
-        return define.forge_set(conn, a.name, a.forge, a.repo, a.secret, a.ref, actor)
+        return define.forge_set(conn, a.name, a.forge, a.repo, a.secret, a.ref, actor, a.url)
     if sub == "rerun":
         from .pipeline import runner
         return runner.run_again(conn, a.name, a.stage, a.rev, actor)
@@ -7587,7 +7589,8 @@ def render_pipeline(a, res):
         return
     if sub == "forge":
         print(f"pipeline {res['pipeline']}: " + ("its stages run here" if res["forge"] == "none" else
-              f"its workflows run on GitHub ({res['repo']}); maxpm serve reads them every minute"))
+              f"its workflows run on {'GitHub' if res['forge'] == 'github' else 'GitLab'} ({res['repo']}); maxpm serve "
+              f"reads them every minute"))
         return
     if sub == "rerun":
         print(f"pipeline {res['pipeline']}: stage {res['stage']} runs again for {res['version']} (run #{res['run']}) "

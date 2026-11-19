@@ -1153,6 +1153,124 @@ class JUnitRunner(unittest.TestCase):
         self.assertEqual((tests["test_ok"]["state"], tests["test_skip"]["state"]), ("passed", "skipped"))
 
 
+class FakeGitLab(FakeGitHub):
+    def __call__(self, method, url, headers, body):
+        assert headers["PRIVATE-TOKEN"] == "test-token"
+        return super().__call__(method, url.replace("https://gitlab.com/api/v4", "https://api.github.com"), headers,
+                                body)
+
+
+def gl_job(n, name, stage, status, at="2026-11-18T10:00:00Z"):
+    done = status in ("success", "failed", "canceled")
+    return {"id": n, "name": name, "stage": stage, "status": status, "allow_failure": False, "web_url": f"u/{n}",
+            "created_at": at, "started_at": at if status not in ("manual", "created", "pending") else None,
+            "finished_at": at.replace("10:00", "10:05") if done else None}
+
+
+class GitLab(Base):
+    """The GitLab adapter (#6121): a MaximizePM stage is a GitLab stage; its jobs, the test report and the
+    environments become events; a gated stage plays its manual jobs; a roll back retries the jobs of an older pipeline."""
+
+    P = "/projects/grp%2Fshop"
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import github, gitlab, runner
+        self.gl, self.runner = gitlab, runner
+        self.api = FakeGitLab()
+        old = (gitlab.FETCH, github._token)
+        gitlab.FETCH, github._token = self.api, lambda conn, p: "test-token"
+        self.addCleanup(lambda: setattr(gitlab, "FETCH", old[0]) or setattr(github, "_token", old[1]))
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        define.pipeline_add(self.c, "shop", project="shop")
+        define.env_set(self.c, "shop", "production")
+        define.stage_set(self.c, "shop", "test", "test", workflow="test", gate="forge")
+        define.stage_set(self.c, "shop", "deploy", "deploy", env="production", workflow="deploy", gate="person mark")
+        define.forge_set(self.c, "shop", "gitlab", repo="grp/shop", secret="gl-token")
+        self.jobs = {}
+        self.api.routes[("GET", f"{self.P}/pipelines?per_page")] = lambda path, body: (200, self.pls)
+        self.api.routes[("GET", f"{self.P}/environments")] = (200, [])
+        self.pls = []
+
+    def pipeline(self, n, sha, jobs, report=None):
+        self.pls.insert(0, {"id": n, "sha": sha, "ref": "main", "status": "running", "web_url": f"p/{n}"})
+        self.jobs[n] = jobs
+        self.api.routes[("GET", f"{self.P}/pipelines/{n}/jobs")] = lambda path, body: (200, self.jobs[n])
+        self.api.routes[("GET", f"{self.P}/pipelines?sha={sha}")] = (200, [self.pls[0]])
+        self.api.routes[("GET", f"{self.P}/pipelines/{n}/test_report")] = (200, report or {"test_suites": []})
+
+    def poll(self):
+        self.gl.poll(self.c, self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone())
+
+    def runs(self):
+        return {r["stage"]: r for r in self.c.execute(
+            "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+    def test_jobs_tests_a_manual_deploy_after_the_gate_and_the_environment(self):
+        self.pipeline(501, "a" * 40, [gl_job(1, "unit", "test", "success"), gl_job(2, "release", "deploy", "manual")],
+                      {"test_suites": [{"name": "unit", "total_time": 3.5, "failed_count": 1, "test_cases": [
+                          {"name": "test_ok", "classname": "shop.Cart", "status": "success", "execution_time": 0.1},
+                          {"name": "test_tax", "classname": "shop.Cart", "status": "failed", "execution_time": 0.2,
+                           "system_output": "AssertionError: 19 != 20\n  at cart.py:9"}]}]})
+        self.pls[0]["status"] = "success"
+        self.poll()
+        runs = self.runs()
+        self.assertEqual((runs["test"]["key"], runs["test"]["state"]), ("gl-501-test", "passed"))
+        self.assertEqual((runs["deploy"]["key"], runs["deploy"]["state"]), ("gl-501-deploy", "queued"))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM stage_runs").fetchone()[0], 2)  # one deploy run, not two
+        tests = store.tests(self.c, runs["test"]["id"])
+        self.assertEqual([(t["suite"], t["name"], t["state"]) for t in tests],
+                         [("shop.Cart", "test_tax", "failed"), ("shop.Cart", "test_ok", "passed")])
+        self.assertEqual(tests[0]["message"], "AssertionError: 19 != 20")
+        # The person's yes plays the manual job.
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
+        self.runner.serve_pass(self.c)
+        core.done(self.c, self.runs()["deploy"]["gate_item"], actor="mark")
+        self.api.routes[("POST", "/projects/grp%2Fshop/jobs/2/play")] = (200, {})
+        self.runner.serve_pass(self.c)
+        self.assertEqual(self.api.calls[-1][:2], ("POST", f"{self.P}/jobs/2/play"))
+        self.assertEqual(self.runs()["deploy"]["runner"], "forge:gitlab")
+        self.jobs[501][1] = gl_job(2, "release", "deploy", "success")
+        self.api.routes[("GET", f"{self.P}/environments")] = (200, [{"name": "production", "last_deployment": {
+            "id": 77, "status": "success", "sha": "a" * 40, "created_at": "2026-11-18T10:06:00Z"}}])
+        self.poll()
+        self.assertEqual(self.runs()["deploy"]["state"], "passed")
+        self.assertEqual(store.show(self.c, "shop")["envs"][0]["rev"], "a" * 40)
+
+    def test_roll_back_retries_the_jobs_of_the_older_pipeline_and_cancel(self):
+        self.pipeline(501, "a" * 40, [gl_job(1, "unit", "test", "success"), gl_job(2, "release", "deploy", "success")])
+        self.pls[0]["status"] = "success"
+        self.poll()
+        old_deploy = self.runs()["deploy"]["id"]
+        self.api.routes[("POST", f"{self.P}/jobs/2/retry")] = (201, {})
+        r = self.runner.rollback(self.c, "shop", "production", "a" * 40, reason="b breaks", actor="mark")
+        self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
+        self.runner.serve_pass(self.c)
+        self.assertEqual(self.api.calls[-1][:2], ("POST", f"{self.P}/jobs/2/retry"))
+        keys = dict(self.c.execute("SELECT id, key FROM stage_runs WHERE id IN (?, ?)", (old_deploy, r["run"])).fetchall())
+        self.assertEqual(keys[r["run"]], "gl-501-deploy")  # the retried jobs belong to the roll back's run
+        self.assertEqual(keys[old_deploy], f"gl-501-deploy~{old_deploy}")
+        self.jobs[501][1] = gl_job(3, "release", "deploy", "running", at="2026-11-18T11:00:00Z")
+        self.poll()
+        self.assertEqual(self.c.execute("SELECT state FROM stage_runs WHERE id=?", (r["run"],)).fetchone()[0], "running")
+        self.api.routes[("POST", f"{self.P}/jobs/3/cancel")] = (201, {})
+        self.assertEqual(self.runner.stop(self.c, r["run"], actor="mark")["stopped"], "on GitLab")
+        self.assertEqual(self.api.calls[-1][:2], ("POST", f"{self.P}/jobs/3/cancel"))
+
+    def test_the_forge_command_for_gitlab(self):
+        define.forge_set(self.c, "shop", "gitlab", repo="grp/sub/shop", secret="x", url="https://git.example.com",
+                         actor="mark")
+        p = self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
+        self.assertEqual(self.gl._base(p) + "/projects/" + self.gl._pid(p),
+                         "https://git.example.com/api/v4/projects/grp%2Fsub%2Fshop")
+        for bad in ({"repo": "shop"}, {"repo": "g/s", "url": "http://plain"}):
+            with self.assertRaises(RiverError):
+                define.forge_set(self.c, "shop", "gitlab", secret="x", **{"repo": None, **bad})
+
+
 class Speed(Base):
     def test_each_read_under_100_ms(self):
         """Policy p147: a pipeline with 400 runs, 2000 steps and 10800 test results reads fast."""

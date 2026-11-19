@@ -32,6 +32,14 @@ import uuid
 from .. import core
 from . import cdevents, junit, steps, store
 
+FORGES = {"github": "GitHub", "gitlab": "GitLab"}  # the forges with an adapter: river/pipeline/<forge>.py
+
+
+def _adapter(forge):
+    import importlib
+    return importlib.import_module(f"{__package__}.{forge}")
+
+
 RUNNING = {}  # run id -> the thread of this process that runs it; server.restart_blocked waits for them
 LOCK = threading.Lock()
 SYNC = {"on": False}  # tests: the pass runs a stage itself, not in a thread
@@ -430,6 +438,9 @@ def _hand_on(conn, r):
                                 (nxt["id"], r["version_id"])).fetchall():
             store.run_finish(conn, old["id"], "cancelled", errors=f"a newer version came: {r['rev']}")
             _drop_card(conn, old["gate_item"], f"a newer version came to stage {nxt['name']}: {r['rev']}")
+        if conn.execute("SELECT 1 FROM stage_runs WHERE stage_id=? AND version_id IS ? AND (state IN ('queued','running') "
+                        "OR key LIKE 'gl-%' OR key LIKE 'gh-run-%')", (nxt["id"], r["version_id"])).fetchone():
+            return  # it waits or ran there already (a forge made the run: GitLab's jobs of that stage, #6121)
         _queue(conn, r["pipeline"], nxt["name"], r["rev"])
 
 
@@ -564,10 +575,11 @@ def stop(conn, run_id, actor=None):
         raise core.RiverError(f"run #{run_id} is {r['state']} already")
     with core.tx(conn):
         _act(conn, r["pipeline_id"], actor, f"stopped run #{run_id} of stage {r['stage']} ({r['state']})")
-    if (r["runner"] or "") == "forge:github" or (r["key"] or "").startswith("gh-run-"):
-        from . import github
-        github.cancel(conn, run_id)  # the next read of GitHub records its end
-        return {"run": run_id, "stopped": "on GitHub"}
+    forge = "github" if (r["runner"] or "") == "forge:github" or (r["key"] or "").startswith("gh-run-") else \
+        "gitlab" if (r["runner"] or "") == "forge:gitlab" or (r["key"] or "").startswith("gl-") else None
+    if forge:
+        _adapter(forge).cancel(conn, run_id)  # the next read of the forge records its end
+        return {"run": run_id, "stopped": f"on {FORGES[forge]}"}
     p = PROCS.get(run_id)
     if p is not None:
         core._stop_group(p)  # the run's thread records the end
@@ -619,13 +631,14 @@ def serve_pass(conn):
     _lost(conn)
     from . import github
     github.poll_due(conn)  # the GitHub pipelines, once a minute each (#6119)
+    _adapter("gitlab").poll_due(conn)  # and the GitLab ones (#6121)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
     for row in rows:
         r = _row(conn, row["id"])
         forge = r["workflow"] and not r["cmd"]
-        if forge and (r["runner"] or r["forge"] != "github"):
+        if forge and (r["runner"] or r["forge"] not in FORGES):
             continue  # started on the forge already (its adapter reads the run), or a forge with no adapter here
         busy = conn.execute("SELECT id FROM stage_runs WHERE stage_id=? AND state='running'", (r["stage_id"],)).fetchone()
         if busy or any(_row(conn, s)["stage_id"] == r["stage_id"] for s in started):
@@ -648,12 +661,11 @@ def serve_pass(conn):
                 conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
                              (core._done_by(conn, r["gate_item"]), store._now(), r["id"]))
         started.append(r["id"])
-        if forge:  # the gate opened: GitHub runs it (#6119)
-            from . import github
+        if forge:  # the gate opened: the forge runs it (#6119, #6121)
             try:
-                github.dispatch(conn, r["id"])
+                _adapter(r["forge"]).dispatch(conn, r["id"])
             except core.RiverError as e:
-                store.run_finish(conn, r["id"], "failed", errors=f"GitHub did not start it: {e}")
+                store.run_finish(conn, r["id"], "failed", errors=f"{FORGES[r['forge']]} did not start it: {e}")
         elif SYNC["on"]:
             _execute(conn, r["id"])
         else:

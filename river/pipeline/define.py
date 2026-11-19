@@ -239,30 +239,36 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
     return {"pipeline": p["name"], "stage": name, "changed": changed, "detail": detail}
 
 
-FORGES = ("github", "none")
+FORGES = ("github", "gitlab", "none")
 
 
-def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None):
-    """maxpm pipeline forge: where the pipeline's workflows run (#6119). github needs the repository (owner/name)
-    and the name of the maxpm secret that holds the API token; none: the stages run here (their --run commands)."""
+def forge_set(conn, pipeline, forge, repo=None, secret=None, ref=None, actor=None, url=None):
+    """maxpm pipeline forge: where the pipeline's workflows run (#6119, #6121). github and gitlab need the repository
+    (owner/name; on GitLab group/subgroup/project) and the name of the maxpm secret that holds the API token; url: a
+    self-hosted GitLab's address; none: the stages run here (their --run commands)."""
     if forge not in FORGES:
         raise core.RiverError(f"the forge {forge!r} is not one of {', '.join(FORGES)}")
-    if forge == "github":
-        if not repo or not re.match(r"^[\w.-]+/[\w.-]+$", repo):
-            raise core.RiverError("name the repository: --repo owner/name")
+    if forge != "none":
+        shape = r"^[\w.-]+/[\w.-]+$" if forge == "github" else r"^[\w.-]+(/[\w.-]+)+$"
+        if not repo or not re.match(shape, repo):
+            raise core.RiverError("name the repository: --repo " + ("owner/name" if forge == "github"
+                                                                     else "group/project"))
         if not secret:
-            raise core.RiverError("name the maxpm secret that holds the GitHub token: --secret <name> (a person saves "
-                                  "it: maxpm secret put <name>)")
+            raise core.RiverError(f"name the maxpm secret that holds the {forge} token: --secret <name> (a person "
+                                  "saves it: maxpm secret put <name>)")
+        if url and not re.match(r"^https://[\w.-]+(:\d+)?(/[\w.-]+)*/?$", url):
+            raise core.RiverError("the forge's address is https://<host>[/<path>]")
     with core.tx(conn):
         _may(conn, actor)
         p = store._pipeline(conn, pipeline)
-        vals = (None, None, None, None) if forge == "none" else (forge, repo, secret, ref)
-        conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, polled_at=NULL, poll_error=NULL "
-                     "WHERE id=?", (*vals, p["id"]))
+        vals = (None,) * 5 if forge == "none" else (forge, repo, secret, ref, url)
+        conn.execute("UPDATE pipelines SET forge=?, repo=?, secret=?, ref=?, forge_url=?, polled_at=NULL, "
+                     "poll_error=NULL WHERE id=?", (*vals, p["id"]))
         text = "forge none: the stages run here" if forge == "none" else (
-            f"forge github: repository {repo}, token from secret {secret}, branch {ref or 'main'}")
+            f"forge {forge}: repository {repo}" + (f" at {url}" if url else "") + f", token from secret {secret}"
+            + (f", branch {ref or 'main'}" if forge == "github" else ""))
         _change(conn, p["id"], actor, text)
-    return {"pipeline": p["name"], "forge": forge, "repo": repo, "secret": secret, "ref": ref}
+    return {"pipeline": p["name"], "forge": forge, "repo": repo, "secret": secret, "ref": ref, "url": url}
 
 
 def gate_set(conn, pipeline, stage, rule, actor=None):
@@ -282,7 +288,8 @@ def export(conn, name):
         d.pop("pos")
         stages.append(d)
     return {"pipeline": p["name"], "project": p["project"], "notes": p["notes"],
-            "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"]} if p["forge"] else None,
+            "forge": {"name": p["forge"], "repo": p["repo"], "secret": p["secret"], "ref": p["ref"],
+                      "url": p["forge_url"]} if p["forge"] else None,
             "environments": envs, "stages": stages}
 
 

@@ -94,8 +94,12 @@ def _stages(conn, p):
                         "NULL ORDER BY pos", (p["id"],)).fetchall()
 
 
+def _seen_by(conn, source, event_id):
+    return conn.execute("SELECT 1 FROM pipeline_events WHERE source=? AND event_id=?", (source, event_id)).fetchone()
+
+
 def _seen(conn, event_id):
-    return conn.execute("SELECT 1 FROM pipeline_events WHERE source='github' AND event_id=?", (event_id,)).fetchone()
+    return _seen_by(conn, "github", event_id)
 
 
 def _waiting(conn, p, s, run):

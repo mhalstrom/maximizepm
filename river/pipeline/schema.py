@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS pipelines (
   repo        TEXT,                      -- owner/name on the forge
   secret      TEXT,                      -- the name of the maxpm secret that holds the forge's API token
   ref         TEXT,                      -- the branch that a started workflow runs on (main when none)
+  forge_url   TEXT,                      -- a self-hosted forge's address (GitLab: https://gitlab.com when none, #6121)
   polled_at   TEXT,                      -- the last read of the forge (the adapter reads it every minute)
   poll_error  TEXT,                      -- what the last read said when it failed
   held_reason TEXT,                      -- a hold of every stage: no stage run starts (#6117)
@@ -226,8 +227,9 @@ def migrate(conn):
     """Add the columns that a queue made by an older version of these tables lacks. core._migrate calls it, inside
     its tx; core.schema_print counts this function, so a change here runs again."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipelines)")}
-    for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at"):
-        if c not in cols:  # #6119, #6117
+    for c in ("forge", "repo", "secret", "ref", "polled_at", "poll_error", "held_reason", "held_by", "held_at",
+              "forge_url"):
+        if c not in cols:  # #6119, #6117, #6121
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
     for c in ("removed_at", "junit", "held_reason", "held_by", "held_at", "waves", "check_cmd", "rollback_cmd",

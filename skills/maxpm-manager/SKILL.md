@@ -531,6 +531,22 @@ A test stage names its JUnit file (`--junit report.xml`); a stage's command
 prints `::step start <name>` and `::step end <name> passed|failed` lines to
 show its parts.
 
+The work can run on a forge instead: `maxpm pipeline forge <name> github|gitlab
+--repo <owner/name> --secret <secret name> [--url <self-hosted GitLab>]`, and
+each stage names its workflow (GitHub) or its GitLab stage (`--workflow`). The
+person saves the token first (`maxpm secret put <name>`). A stage over many
+servers: `--waves "web-1; web-2, web-3" --check "<cmd>" --rollback "<cmd>"`.
+A failed stage opens a fault item; `maxpm pipeline fix <run> [--start]` adds
+a fix task from its prompt.
+
+```
+maxpm pipeline hold <name> [<stage>] --reason "<why>"   # unhold <name> [<stage>] ends it
+maxpm pipeline rerun <name> <stage> --rev <commit> | rerun-failed <run> | stop <run>
+maxpm pipeline rollback <name> <env> --rev <older commit> --reason "<why>"
+maxpm pipeline version <name> <commit>                 # the tasks it carries
+maxpm pipeline item <id>                               # where a task runs
+```
+
 ### The commands
 
 ```
