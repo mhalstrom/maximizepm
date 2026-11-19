@@ -111,3 +111,96 @@ GET += [
     (lambda path: path == "/api/pipeline-version", _with(version, query=True)),
     (lambda path: path.startswith("/api/pipeline-item/"), _with(item)),
 ]
+
+
+# ---------------------------------------------------------------- the Deploy tab (#6136)
+
+SOURCES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea", "forgejo": "Forgejo", "pulumi": "Pulumi Delivery"}
+AUDIT_MAX = 500  # the lines of the audit log one read sends
+
+
+def _source(p, saved):
+    """Where a pipeline's runs come from, and the state of the token it reads them with: local (this computer),
+    missing (no secret named, or the named one is not saved), bad (the forge refused the last read), new (not read
+    yet), ok."""
+    if not p.get("forge"):
+        return {"forge": None, "label": "this computer", "state": "local"}
+    secret = p.get("secret")
+    state = ("missing" if not secret or secret not in saved else "bad" if p.get("poll_error")
+             else "ok" if p.get("polled_at") else "new")
+    return {"forge": p["forge"], "label": SOURCES.get(p["forge"], p["forge"]), "repo": p.get("repo"),
+            "url": p.get("forge_url"), "secret": secret, "state": state, "error": p.get("poll_error"),
+            "read_at": p.get("polled_at")}
+
+
+def _strip(stages):
+    """The stages of a pipeline as the Deploy list draws them: a bar for each, the state of its last run."""
+    out = []
+    for s in stages:
+        r = s.get("last_run") or {}
+        out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "gate": s.get("gate") or "auto",
+                    "gate_text": s.get("gate_text") or "auto", "held": s.get("held_reason"),
+                    "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),
+                    "run": r.get("id")})
+    return out
+
+
+def _person_waits(conn, pipeline_id):
+    """The versions that wait at a person's gate of a pipeline: not approved, not held."""
+    return [{"stage": r["stage"], "rev": r["rev"], "run": r["id"], "item": r["gate_item"], "since": r["queued_at"],
+             "note": r["gate_note"]} for r in conn.execute(
+        "SELECT r.id, r.gate_note, r.gate_item, r.queued_at, s.name stage, v.rev FROM stage_runs r "
+        "JOIN pipeline_stages s ON s.id=r.stage_id LEFT JOIN pipeline_versions v ON v.id=r.version_id "
+        "WHERE r.pipeline_id=? AND r.state='queued' AND s.gate='person' AND r.approved_at IS NULL "
+        "AND s.removed_at IS NULL AND s.held_reason IS NULL ORDER BY r.id", (pipeline_id,))]
+
+
+def deploy(conn, path):
+    """GET /api/deploy: every pipeline and every target's default pipeline in one read, for the Deploy tab: its
+    stages as a row, its environments, where its runs come from (and that token's state), and the versions that wait
+    on a person's yes. `count` is the red number of the tab: those waits plus the tokens that fail."""
+    saved = {r["name"] for r in conn.execute("SELECT name FROM secrets")}
+    out = []
+    for p in store.pipelines(conn):
+        d = store.show(conn, p["name"])
+        waits = [] if p.get("held_reason") else _person_waits(conn, p["id"])
+        out.append({"name": p["name"], "project": p["project"], "default": False, "source": _source(p, saved),
+                    "held": p.get("held_reason"), "held_by": p.get("held_by"), "stages": _strip(d["stages"]),
+                    "envs": [{"name": e["name"], "target": e.get("target"), "rev": e.get("rev"), "since": e.get("since"),
+                              "history": e.get("history") or []} for e in d["envs"]],
+                    "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits})
+    for t in targets.default_list(conn):
+        d = targets.default_pipeline(conn, t["name"])
+        approval = next((s for s in d["stages"] if s["name"] == "approval"), None)
+        r = (approval or {}).get("last_run") or {}
+        waits = ([{"stage": "approval", "rev": r.get("version"), "run": None, "item": r.get("item"),
+                   "since": r.get("started_at"), "note": "the release waits for a person's yes"}]
+                 if r.get("state") == "queued" and r.get("item") else [])
+        out.append({"name": t["name"], "project": d["project"], "default": True, "source": {"forge": None,
+                    "label": "deploy target", "state": "local"}, "held": None, "held_by": None,
+                    "stages": _strip(d["stages"]), "envs": [{"name": e["name"], "target": e.get("target"),
+                    "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
+                    "targets": [t["name"]], "waits": waits})
+    bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}
+    return {"pipelines": out, "count": sum(len(x["waits"]) for x in out) + len(bad)}
+
+
+def audit(conn, path):
+    """GET /api/pipeline-audit[?pipeline=<name>]: the changes of every pipeline (or of one), newest first: the
+    definition and each action (hold, approve, roll back, run again, stop), with who did it (pipeline_changes)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(path).query)
+    name = (q.get("pipeline") or [None])[0]
+    sql = ("SELECT c.id, c.at, c.actor, c.change, p.name pipeline FROM pipeline_changes c JOIN pipelines p "
+           "ON p.id=c.pipeline_id")
+    args = []
+    if name:
+        sql, args = sql + " WHERE p.name=?", [name]
+    return {"lines": [dict(r) for r in conn.execute(sql + " ORDER BY c.id DESC LIMIT ?", args + [AUDIT_MAX])],
+            "max": AUDIT_MAX}
+
+
+GET += [
+    (lambda path: path == "/api/deploy", _with(deploy)),
+    (lambda path: path == "/api/pipeline-audit", _with(audit, query=True)),
+]

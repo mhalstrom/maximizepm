@@ -1840,7 +1840,7 @@ def build_parser(only=None):
     x.add_argument("--reason", help="whose decision it is, and when")
     x = tgs.add_parser("report", help="the review report of a release: the summary and numbers, the groups (risks "
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
-                       "Plan > Releases")
+                       "the target's pipeline in Deploy")
     x.add_argument("id", type=int, help="the release's deploy item, or its review")
     x = tgs.add_parser("summary", help="the person or the manager: write the paragraph at the top of a release's "
                        "report, risks first; the first one sends the person a Read card")
@@ -5627,7 +5627,7 @@ def render_release_report(r):
                     print(f"      asked {d['to']}: {d['body'][:100]}"
                           + (f" -> {d['answer']['body'][:80]}" if d["answer"] else " (no answer)"))
     print()
-    print(f"The page: Plan > Releases, Report of #{rel['id']}. The code of a task: maxpm show <id>, or its Code tab there.")
+    print(f"The page: Deploy, the target's pipeline, Report of #{rel['id']}. The code of a task: maxpm show <id>, or its Code tab there.")
 
 
 def render_go(b):

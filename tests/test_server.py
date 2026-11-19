@@ -4204,6 +4204,43 @@ class PipelineRoutes(unittest.TestCase):
         server.OPS["pipeline_unhold"](self.c, {"pipeline": "web", "stage": "build"}, "mark")
         self.assertIsNone(self.c.execute("SELECT held_reason FROM pipeline_stages").fetchone()[0])
 
+    def test_the_deploy_tab_reads_every_pipeline_and_counts_what_waits_on_the_person(self):
+        """#6136: api/deploy gives each pipeline (and each target's default pipeline) as a row of stages, where its
+        runs come from with the state of its token, and the versions at a person's gate; count is the tab's red
+        number. api/pipeline-audit lists the changes of every pipeline, or of one, newest first."""
+        from river.pipeline import define, runner
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "site", "", None)
+        core.project_add(self.c, "shop", target="site")
+        define.pipeline_add(self.c, "app", project="shop", actor="mark")
+        define.stage_set(self.c, "app", "build", "build", actor="mark")
+        define.env_set(self.c, "app", "prod", actor="mark")
+        define.stage_set(self.c, "app", "prod", "deploy", env="prod", gate="person mark", actor="mark")
+        runner._queue(self.c, "app", "prod", "abc1234")
+        define.pipeline_add(self.c, "gh", actor="mark")
+        define.forge_set(self.c, "gh", "github", repo="o/r", secret="github-o", actor="mark")
+        d = self.get("/api/deploy")["body"]
+        P = {p["name"]: p for p in d["pipelines"]}
+        self.assertEqual(set(P), {"app", "gh", "site"})
+        self.assertEqual([(s["name"], s["gate"]) for s in P["app"]["stages"]], [("build", "auto"), ("prod", "person")])
+        self.assertEqual([(w["stage"], w["rev"]) for w in P["app"]["waits"]], [("prod", "abc1234")])
+        self.assertEqual(P["app"]["source"]["state"], "local")
+        self.assertEqual((P["gh"]["source"]["state"], P["gh"]["source"]["secret"]), ("missing", "github-o"))
+        self.assertTrue(P["site"]["default"])
+        self.assertEqual(P["site"]["targets"], ["site"])
+        self.assertEqual(d["count"], 2)  # one version at a person's gate, one token not saved
+        # A hold of every stage: nothing waits for the person there any more.
+        runner.hold(self.c, "app", None, "a freeze", "mark")
+        self.assertEqual(self.get("/api/deploy")["body"]["count"], 1)
+        lines = self.get("/api/pipeline-audit")["body"]["lines"]
+        self.assertEqual({l["pipeline"] for l in lines}, {"app", "gh"})
+        self.assertEqual(lines[0]["actor"], "mark")
+        self.assertIn("a freeze", lines[0]["change"])
+        self.assertEqual({l["pipeline"] for l in self.get("/api/pipeline-audit?pipeline=gh")["body"]["lines"]}, {"gh"})
+        # The page has an address for each part of Deploy and each pipeline's page.
+        for path in ("/deploy", "/deploy/accounts", "/deploy/pipeline/app/emergency"):
+            self.assertIn(b'id="tab-deploy"', server.page_html(path))
+
 
 if __name__ == "__main__":
     unittest.main()

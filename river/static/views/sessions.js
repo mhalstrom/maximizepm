@@ -138,7 +138,9 @@ function planLinks(s) {
   }
   for (const g of ((S && S.goals) || []).filter(x => x.owner === s.name && x.status === "open"))
     out.push(link("goals", g.project, g.name, "Plan: owns goal " + g.name, `The goal ${g.name} in Plan: this session owns it`));
-  for (const tg of ownNames(s)) out.push(link("releases", "", "", "Plan: owns target " + tg, `The releases in Plan: this session owns the target ${tg}`));
+  // A target it owns: its pipeline's page in Deploy (#6136; Plan > Releases until then).
+  for (const tg of ownNames(s)) out.push(button(esc("Deploy: owns target " + tg), { cls: MI, data: { "deploy-target": tg },
+    title: "Open its releases" }));
   return out.join("");
 }
 // The item in the head: a link to it in the side panel, only when the session holds one (#5115: no 'No item').

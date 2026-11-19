@@ -15,7 +15,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Toggle (pin, filter) | `button(..., {pressed})` | `aria-pressed` and the class `on` |
 | Chip, badge | `chip.js`: `chip`, `statusChip`, `prioChip`, `dueChip`, `doerChip`, ... | colors from `.c-*` classes |
 | Status of a session | `.dot.active|away|gone` (app.css); `cacheBadge.js` for an expert's cache | |
-| Page tabs | the header `nav` of `index.html` (app.js) | one per area (Sessions, Plan, Terminal); Settings opens from the header ⋯ (`#settingsBtn`, #5116) |
+| Page tabs | the header `nav` of `index.html` (app.js) | one per area (Sessions, Plan, Deploy, Terminal); Settings opens from the header ⋯ (`#settingsBtn`, #5116). A count on a tab (Deploy's red number, #6136) is a `.wbadge` after the tab's word |
 | List row of an item | `itemRow.js` | the one order of items too |
 | Card | `card.js`: `nyCard`, `goalCard`, project cards | |
 | A row that a click opens | `rowOpen.js`: the class `clickrow` on the row and `OPEN_MARK` at its right end; a table with `onRow` gets both from `makeTable` (`tbl-click`, `openColumn`) | #6016: one look for every clickable row: pointer, hover background, the title in the link color, and the › mark, visible without hover, also on a phone |

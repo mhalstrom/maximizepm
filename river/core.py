@@ -1599,6 +1599,9 @@ CREATE TABLE IF NOT EXISTS ops_events (
   note        TEXT
 );
 CREATE INDEX IF NOT EXISTS ops_runs_check ON ops_runs(check_id, id);
+-- The watch of a release reads a check's runs between two times (pipeline/targets._watch): without this index one
+-- target's default pipeline took 90 ms on a queue of 50,000 runs, 20 ms with it (#6136).
+CREATE INDEX IF NOT EXISTS ops_runs_check_time ON ops_runs(check_id, started_at);
 CREATE INDEX IF NOT EXISTS ops_events_key ON ops_events(key, id);
 
 -- A check that an agent proposes (maxpm ops propose, #5437): a new check or a change of one. It never runs; a person

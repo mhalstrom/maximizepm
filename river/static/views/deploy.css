@@ -1,0 +1,56 @@
+/* The Deploy tab (#6136, views/deploy.js). Prefix dp-; a pipeline's Stages and Versions keep pipeline.css (pl-).
+   Tokens only (components/README.md). */
+#tab-deploy .dp-view.hidden, #tab-deploy .hidden { display: none; }
+#deployBadge { margin-left: var(--sp-1); vertical-align: var(--hair); }
+
+/* What waits on the person, and the tokens that fail: a line each above the pipelines. */
+.dp-banners { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-4); }
+.dp-banner { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--r-m); font-size: var(--fs-m); }
+.dp-banner .spacer { flex: 1; }
+.dp-human { background: var(--human-bg); color: var(--human); }
+.dp-warn { background: var(--warn-bg); color: var(--warn); }
+
+/* One row for each pipeline: its name and source, its stages left to right as small bars, what runs where. */
+.dp-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.dp-pipe { width: 100%; text-align: left; padding: var(--sp-4) var(--sp-5); border: var(--hair) solid var(--line);
+  border-radius: var(--r-l); background: var(--panel); color: var(--ink); }
+.dp-pipe:hover { border-color: var(--muted); }
+.dp-row { display: grid; grid-template-columns: minmax(var(--w-m), var(--w-l)) minmax(0, 1fr) minmax(var(--w-m), var(--w-l));
+  gap: var(--sp-4) var(--sp-6); align-items: center; }
+.dp-head { display: flex; flex-direction: column; gap: var(--sp-0); min-width: 0; }
+.dp-pname { font-size: var(--fs-base); overflow-wrap: anywhere; }
+.dp-src { color: var(--muted); }
+.dp-src.dp-bad { color: var(--warn); }
+.dp-strip { display: flex; align-items: flex-start; gap: var(--sp-1); overflow-x: auto; min-width: 0; padding-bottom: var(--sp-0); }
+.dp-mini { flex: 1 0 var(--w-xs); max-width: var(--w-m); display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.dp-mn { font-size: var(--fs-s); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dp-fault { font-size: var(--fs-xs); color: var(--warn); white-space: nowrap; }
+.dp-arrow { flex: none; align-self: flex-start; color: var(--muted); font-size: var(--fs-m); line-height: var(--sp-3); }
+.dp-arrow.dp-human { color: var(--human); }
+.dp-arrow.dp-warn { color: var(--warn); }
+.dp-bar { display: block; height: var(--sp-3); border-radius: var(--r-pill); background: var(--wait-bg); border: var(--hair) solid var(--wait); }
+.dp-bar.passed { background: var(--ready); border-color: var(--ready); }
+.dp-bar.running { background: var(--prog); border-color: var(--prog); }
+.dp-bar.failed { background: var(--warn); border-color: var(--warn); }
+.dp-bar.human { background: var(--human); border-color: var(--human); }
+.dp-live { display: flex; flex-direction: column; gap: var(--sp-0); min-width: 0; }
+.dp-env { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The parts and a pipeline's own tabs: cards of accounts, rules and emergency actions; the audit log. */
+.dp-cards { display: flex; flex-direction: column; gap: var(--sp-4); margin-bottom: var(--sp-4); }
+.dp-rule { border: var(--hair) solid var(--line); border-radius: var(--r-l); padding: var(--sp-4) var(--sp-5);
+  display: flex; flex-direction: column; gap: var(--sp-1); }
+.dp-envrow { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-1) 0;
+  border-top: var(--hair) solid var(--line); }
+.dp-envrow:first-of-type { border-top: 0; }
+.dp-em-card { border-color: var(--warn-bg); }
+.plan-vbtn.dp-em { color: var(--warn); }
+.dp-audit .dp-q { min-width: 0; flex: 1 1 var(--w-l); max-width: calc(var(--w-l) + var(--w-l)); }
+
+/* A phone: the row stacks (name, stages, what runs where), and the stages scroll sideways. */
+@media (max-width: 759px) {
+  .dp-row { grid-template-columns: minmax(0, 1fr); }
+  .dp-mini { flex: 1 1 0; min-width: var(--w-tool); }
+  .dp-pipe { padding: var(--sp-4); }
+}

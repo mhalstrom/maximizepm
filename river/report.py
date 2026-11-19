@@ -9,7 +9,7 @@ stuff is good'). What a cut release ships, for the person to read before the dep
 4. the decisions on the task: its questions and their answers, and the notes between sessions;
 5. the code: the Changes view of the task (GET /api/diff?item=<id>, #5855).
 
-It opens from Plan > Releases, from the release's deploy item and from its review. When a release is cut, the manager
+It opens from the target's pipeline in Deploy (Plan > Releases until #6136), from the release's deploy item and from its review. When a release is cut, the manager
 gets a notice that offers it (core._release_cut); the manager's summary sends the person one Read card."""
 
 import re
@@ -30,7 +30,7 @@ def release_of(conn, item_id):
         dep = core._review_deploy(conn, it["id"])
         if dep:
             return core._item(conn, dep)
-    raise RiverError(f"#{item_id} is no release: name its deploy item or its review (Plan > Releases lists them)")
+    raise RiverError(f"#{item_id} is no release: name its deploy item or its review (the target's pipeline in Deploy lists them)")
 
 
 def _review(conn, dep_id):

@@ -1,5 +1,6 @@
-// The Releases view of Plan (the Targets tab's until #5102 step 6): one card for each deploy target of the scope's
-// projects (#6033, mark 2026-11-16 'this UI is really bad'). The head names the target, its owner and its projects;
+// The release card of a deploy target (#6033, mark 2026-11-16 'this UI is really bad'): the Targets tab until #5102
+// step 6, then Plan > Releases, and since #6136 the Stages tab of the pipeline in Deploy that names the target (its
+// default pipeline, or a pipeline whose environment names it). The head names the target, its owner and its projects;
 // each open release is one state line in plain words, the button Open report (the review report, #6003: the main
 // action here), and its tasks as item rows grouped like the report (goal, then project), folded after a few. Release
 // now is a plain button that opens a small dialog for the reason; Deploy now, the hooks and the past deploys stay.
@@ -12,7 +13,7 @@ import { field, textarea, actions } from "../components/form.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { hooksHtml } from "../components/targetHooks.js";
-import { S, scope } from "../page.js";
+import { S } from "../page.js";
 
 const FOLD = 5;                 // the tasks a release shows before Show all
 const shown = new Set();        // the releases whose whole list is open (by deploy id), over a refresh
@@ -130,11 +131,18 @@ function cardHtml(t) {
       <div class="rel-fold">${hooksHtml(t, S.hook_events)}${historyHtml(t)}</div></article>`;
 }
 
+// The targets whose cards show: those of the pipeline on screen (views/deploy.js sets them; none: no card).
+let shownTargets = [];
+export function showTargets(names) { shownTargets = names || []; renderTargets(); }
+
 export function renderTargets() {
-  const T = (S.targets || []).filter(t => !scope.project || (t.project_names || []).includes(scope.project));
   const box = $("#targets");
+  if (!S || !box) return;
+  const T = (S.targets || []).filter(t => shownTargets.includes(t.name));
   const open = new Set([...box.querySelectorAll("details[open]")].map(d => d.dataset.keep));  // a fold stays open over a refresh
-  box.innerHTML = T.map(cardHtml).join("") || `<div class="muted" title='maxpm target add &lt;name&gt;'>No deploy targets${scope.project ? " for " + esc(scope.project) : ""}.</div>`;
+  const html = T.map(cardHtml).join("");
+  if (box.dataset.sig === html) return;  // a redraw every 3 seconds would close a menu or lose a hover
+  box.innerHTML = html; box.dataset.sig = html;
   box.querySelectorAll("details[data-keep]").forEach(d => { if (open.has(d.dataset.keep)) d.open = true; });
 }
 

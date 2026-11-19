@@ -173,9 +173,12 @@ try {
   await until(() => q("#projects [data-ptable]") || q("#projects .pcard, #projects [data-fold]"), "the project cards");
   const fold = q("#projects [data-fold]"); if (fold) { fold.click(); await sleep(100); }
   check(q("#blockedList").textContent.includes("waits on the logo"), "blocked items on Projects");
-  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="releases"]').click();
-  await until(() => q("#targets").textContent.includes("prod") && location.pathname === "/plan/releases", "Plan > Releases: the target prod");
-  q('[data-plan-view="goals"]').click();
+  // Releases moved from Plan to the Deploy tab (#6136): the target prod is a pipeline row, its page has its card.
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="prod"]') && location.pathname === "/deploy", "Deploy: the target prod as a pipeline");
+  q('#dpList [data-dp-open="prod"]').click();
+  await until(() => q("#targets").textContent.includes("prod") && location.pathname === "/deploy/pipeline/prod", "Deploy > prod: its release card");
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="goals"]').click();
   await until(() => q('#goalCards [data-goalcard="launch"]') && q("#goalCards").textContent.includes("Done when: it answers"), "Plan > Goals: launch with its done-when");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="done"]').click();
   await until(() => q("#log").textContent.includes("logo"), "the done log");
@@ -300,8 +303,13 @@ try {
   for (const tab of [...document.querySelectorAll("nav button[data-tab]")].map(b => b.dataset.tab)) {
     q(`nav button[data-tab="${tab}"]`).click();
     await until(() => !q("#tab-" + tab).classList.contains("hidden"), "the tab " + tab);
+    if (tab === "deploy") {  // its pipelines, then a pipeline's own page (#6136)
+      await look(tab); const row = q("#dpList [data-dp-open]");
+      if (row) { row.click(); await look("deploy/pipeline"); }
+      continue;
+    }
     if (tab !== "plan") { await look(tab); continue; }
-    for (const v of ["overview", "items", "goals", "graph", "releases", "done"]) { q(`[data-plan-view="${v}"]`).click(); await look("plan/" + v); }
+    for (const v of ["overview", "items", "goals", "graph", "done"]) { q(`[data-plan-view="${v}"]`).click(); await look("plan/" + v); }
   }
   q('nav button[data-tab="sessions"]').click();
   q("#sessYouRow .srow-main").click(); await look("sessions/you");
@@ -1485,7 +1493,7 @@ try {
   post({ path: location.pathname, tab: q("#tabName").textContent, tabs: [...document.querySelectorAll("nav button")].map(b => b.dataset.tab) });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/?as=mark"), {"path": "/you", "tab": "Sessions",
-                                                           "tabs": ["sessions", "plan", "terminal"]})
+                                                           "tabs": ["sessions", "plan", "deploy", "terminal"]})
 
     def test_the_work_controls_of_the_sessions_list(self):
         """#5102 step 2 (design #4657): Start an agent at the top of the list; All (#5886: Active | All at the right of
@@ -1632,7 +1640,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 3, "scrim": True,
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 4, "scrim": True,  # Deploy: #6136
                                "picked": "Plan false false true", "menu": True, "closed": True,
                                "settings": "Settings true false", "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,

@@ -1,19 +1,19 @@
-// The Pipelines view of Plan (#6116; canvas pipeline-mockup v2 of #6110, mark 2026-11-18: "kind of like code
-// pipelines"). One pipeline at a time: its stages left to right (they get narrow to fit the width, then the row
+// The tabs Stages and Versions of a pipeline's page in Deploy (#6116 in Plan, moved to Deploy by #6136; canvas
+// pipeline-mockup v2 of #6110, mark 2026-11-18: "kind of like code pipelines"). One pipeline at a time, the one that
+// views/deploy.js names (showPipeline): its stages left to right (they get narrow to fit the width, then the row
 // scrolls with a faded edge), the gates between them, the detail of the chosen stage (its steps on a time line, its
 // last lines, its tests failed first with the prompt that analyzes the failures), where each version runs, and the
 // versions in each stage. A deploy target with no pipeline of its own shows as its default pipeline, computed from
-// its releases. Reads only: GET api/pipelines, api/pipeline/<name>, api/pipeline-run/<id> (river/routes/pipeline.py);
-// the actions (hold, approve, roll back, run again) come with #6117.
-import { $, esc, getJson, ago, copyText, toast, store, act } from "../lib.js";
+// its releases. Reads: GET api/pipeline/<name>, api/pipeline-run/<id> (river/routes/pipeline.py); the actions (hold,
+// approve, roll back, run again) are #6117.
+import { $, esc, getJson, ago, copyText, toast, act } from "../lib.js";
 import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
 import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, textarea, actions } from "../components/form.js";
-import { scope, planShown } from "../page.js";
 
-const V = { list: [], name: null, data: null, run: null, stage: null, tab: "stages", filter: "failed" };
+const V = { shown: false, name: null, data: null, run: null, stage: null, tab: "stages", filter: "failed" };
 let sig = "", runSig = "";
 const WORD = { passed: "passed", running: "running", failed: "failed", queued: "waiting", skipped: "skipped",
   cancelled: "cancelled", stopped: "stopped", error: "error", none: "no run yet" };
@@ -23,29 +23,29 @@ const st = (s, word) => `<span class="pl-st ${esc(s || "none")}">● ${esc(word 
 const short = (rev) => rev && /^[0-9a-f]{12,}$/.test(rev) ? rev.slice(0, 7) : rev || "";
 const secs = (n) => n == null ? "" : n < 90 ? `${Math.round(n)}s` : n < 5400 ? `${Math.round(n / 60)}m` : `${Math.round(n / 3600)}h`;
 
-function mine(p) {
-  if (!scope.project) return true;
-  return p.project === scope.project || (p.projects || []).includes(scope.project);
+// The pipeline and tab that the Deploy tab shows (views/deploy.js): another pipeline starts with no chosen stage.
+export function showPipeline(name, tab) {
+  if (name !== V.name) { V.stage = null; V.run = null; V.version = null; V.data = null; sig = ""; runSig = ""; }
+  V.name = name; V.tab = tab; V.shown = !!name && ["stages", "versions"].includes(tab);
 }
+export function hidePipeline() { V.shown = false; }
 
 export async function renderPipeline(force) {
-  if (!planShown("pipelines")) return;
-  let L;
-  try { L = await getJson("api/pipelines"); } catch (e) { $("#plNote").textContent = e.message; return; }
-  V.list = L.pipelines.filter(mine);
-  const kept = store("river.pipeline");
-  if (!V.list.some(p => p.name === V.name)) V.name = (V.list.find(p => p.name === kept) || V.list[0] || {}).name || null;
-  if (!V.name) {
-    $("#plPick").innerHTML = ""; $("#plTabs").innerHTML = ""; $("#plNote").textContent = "";
-    $("#plBody").innerHTML = empty(`No pipeline for ${scope.project ? esc(scope.project) : "any project"} yet. Ask the manager
-      for one ("build, test, then beta, then prod after my yes"), or give the project a deploy target.`);
-    sig = ""; return;
+  if (!V.shown) return;
+  const name = V.name;
+  let D;
+  try { D = await getJson("api/pipeline/" + encodeURIComponent(name)); }
+  catch (e) {
+    if (V.name !== name) return;
+    $("#plNote").textContent = ""; sig = "";
+    $("#plBody").innerHTML = empty(`No pipeline or deploy target ${esc(name)}: ${esc(e.message)}`);
+    return;
   }
-  try { V.data = await getJson("api/pipeline/" + encodeURIComponent(V.name)); }
-  catch (e) { $("#plNote").textContent = e.message; return; }
+  if (V.name !== name || !V.shown) return;  // another pipeline or tab while the read ran
+  V.data = D;
   if (!V.data.stages.some(s => s.name === V.stage)) V.stage = (V.data.stages.find(s => s.last_run && s.last_run.state === "failed")
     || V.data.stages.find(s => s.last_run) || V.data.stages[0] || {}).name || null;
-  const s = JSON.stringify([V.list, V.data, V.stage, V.tab, V.filter]);
+  const s = JSON.stringify([V.name, V.data, V.stage, V.tab, V.filter]);
   if (s === sig && !force) return refreshRun(force);
   sig = s;
   draw();
@@ -54,14 +54,9 @@ export async function renderPipeline(force) {
 
 function draw() {
   const D = V.data;
-  $("#plPick").innerHTML = V.list.map(p => button(esc(p.name) + (p.default ? ` <span class="muted t-s">target</span>` : ""),
-    { cls: "plan-vbtn", pressed: p.name === V.name, data: { "pl-pick": p.name }, attrs: `role="tab" aria-selected="${p.name === V.name}"`,
-      title: p.default ? "Deploy target releases" : "Pipeline" })).join("");
-  $("#plTabs").innerHTML = [["stages", "Stages"], ["versions", "Versions"]].map(([k, n]) => button(n,
-    { cls: "plan-vbtn", pressed: V.tab === k, data: { "pl-tab": k }, attrs: `role="tab" aria-selected="${V.tab === k}"` })).join("");
   const envs = D.envs.length;
   $("#plNote").innerHTML = `${D.stages.length} stage${D.stages.length === 1 ? "" : "s"} · ${envs} environment${envs === 1 ? "" : "s"}`
-    + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : D.project ? ` · project ${esc(D.project)}` : "")
+    + (D.default ? ` · the releases of deploy target ${esc(D.name)}, as a pipeline` : "")  // the page's head names the project
     + (D.default ? "" : " " + (D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
       : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" })))
     + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
@@ -207,9 +202,9 @@ function stageActions(s, r) {
   return `<div class="pl-bar">${b.join("")}</div>`;
 }
 
-// The reason of a hold or a roll back: a small dialog (components/dialog.js).
+// The reason of a hold or a roll back: a small dialog (components/dialog.js). The Emergency tab asks with it too.
 let askDlg = null, askBox = null, askThen = null;
-function askReason(title, text, go, then) {
+export function askReason(title, text, go, then) {
   if (!askDlg) {
     const d = document.createElement("div");
     d.id = "plAskDlg"; d.className = "hidden";
@@ -292,7 +287,7 @@ async function drawTasks(rev) {
 
 // ---- clicks
 
-$("#plan-pipelines").addEventListener("click", (e) => {
+$("#dpStages").addEventListener("click", (e) => {
   const vb = e.target.closest("[data-pl-version]");
   if (vb) { V.version = V.version === vb.dataset.plVersion ? null : vb.dataset.plVersion; sig = ""; renderPipeline(true).then(() => drawTasks(V.version)); return; }
   const fx = e.target.closest("[data-pl-fix]");
@@ -317,13 +312,11 @@ $("#plan-pipelines").addEventListener("click", (e) => {
       "Its deploy stage runs with this version, and that gate holds until you end the hold, so no newer version comes by itself.",
       "Roll back", (reason) => doAct("pipeline_rollback", { env: d.plRollback, rev: d.rev, reason }));
   }
-  const t = e.target.closest("[data-pl-pick],[data-pl-tab],[data-pl-stage],[data-pl-filter],[data-pl-copy]");
+  const t = e.target.closest("[data-pl-stage],[data-pl-filter],[data-pl-copy]");
   if (!t) return;
-  if (t.dataset.plPick) { V.name = t.dataset.plPick; V.stage = null; store("river.pipeline", V.name); return renderPipeline(true); }
-  if (t.dataset.plTab) { V.tab = t.dataset.plTab; return renderPipeline(true); }
   if (t.dataset.plStage) { V.stage = t.dataset.plStage; V.run = null; runSig = ""; draw(); return refreshRun(true); }
   if (t.dataset.plFilter) { V.filter = t.dataset.plFilter; runSig = ""; return refreshRun(true); }
   if (t.dataset.plCopy && V.run && V.run.prompt) copyText(V.run.prompt).then(() => toast("Copied the prompt"));
 });
-$("#plan-pipelines").addEventListener("scroll", (e) => { if (e.target.id === "plScroll") fade(); }, true);
-window.addEventListener("resize", () => { if (planShown("pipelines")) fit(); });
+$("#dpStages").addEventListener("scroll", (e) => { if (e.target.id === "plScroll") fade(); }, true);
+window.addEventListener("resize", () => { if (V.shown && V.tab === "stages") fit(); });

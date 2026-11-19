@@ -1,0 +1,31 @@
+<!-- The Deploy tab (#6136; canvas release-tracking Decision 6, mark 2026-11-18: "in the top we have sessions, Plan,
+     Deploy, Terminal tabs"; canvas deploy-tab-mockup pictures 1, 4 and 13). The parts of Deploy are buttons at the top:
+     Pipelines, Agents, Runners, Where each version runs, Accounts, Audit log. A pipeline (or a deploy target's releases,
+     as its default pipeline) has a page of its own with the tabs Stages, Versions, Triggers, Emergency and Audit log.
+     views/deploy.js draws it; the stages of one pipeline are views/pipeline.js, a target's release card views/targets.js.
+     maxpm serve puts it into index.html, at view: deploy. -->
+<section id="tab-deploy" class="hidden">
+  <div class="plan-bar">
+    <span class="plan-views" id="dpParts" role="tablist" aria-label="Parts of Deploy"></span>
+  </div>
+  <div id="deploy-list" class="dp-view hidden">
+    <div id="dpBanners" class="dp-banners"></div>
+    <div class="panel"><div id="dpList" class="dp-list"></div></div>
+  </div>
+  <div id="deploy-pipeline" class="dp-view hidden">
+    <div class="panel pl-panel">
+      <div class="pl-head" id="dpHead"></div>
+      <span class="pl-tabs" id="plTabs" role="tablist" aria-label="Pipeline views"></span>
+      <div id="dpStages">
+        <div class="muted t-s" id="plNote"></div>
+        <div id="plBody"></div>
+        <!-- The release card of each deploy target that the pipeline names (the Releases view of Plan until #6136). -->
+        <div id="targetsPanel"><div id="targets"></div></div>
+      </div>
+      <div id="dpPage"></div>
+    </div>
+  </div>
+  <div id="deploy-part" class="dp-view hidden">
+    <div class="panel"><div id="dpPart"></div></div>
+  </div>
+</section>

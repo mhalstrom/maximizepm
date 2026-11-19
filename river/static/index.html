@@ -22,6 +22,7 @@
 <link rel="stylesheet" href="views/browsers.css">
 <link rel="stylesheet" href="views/targets.css">
 <link rel="stylesheet" href="views/pipeline.css">
+<link rel="stylesheet" href="views/deploy.css">
 <link rel="stylesheet" href="views/ops.css">
 <link rel="stylesheet" href="views/overview.css">
 <link rel="stylesheet" href="views/terminal.css">
@@ -42,6 +43,8 @@
   <nav id="tabNav">
     <button data-tab="sessions" class="on" title="Sessions and their work">Sessions</button>
     <button data-tab="plan" title="Projects, goals and items">Plan</button>
+    <!-- Deploy (#6136): pipelines and releases; the red number counts what waits on you there (views/deploy.js). -->
+    <button data-tab="deploy" title="Pipelines and releases">Deploy<span class="wbadge hidden" id="deployBadge"></span></button>
     <button data-tab="terminal" title="A shell here">Terminal</button>
   </nav>
   <span class="spacer"></span>
@@ -75,6 +78,8 @@
 <main>
   <div id="bootNote" class="boot-note muted" role="status">Loading the queue…</div>
   <!-- view: plan -->
+
+  <!-- view: deploy -->
 
   <!-- view: sessions -->
 

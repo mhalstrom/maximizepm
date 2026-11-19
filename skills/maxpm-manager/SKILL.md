@@ -143,7 +143,8 @@ ends the session, and tell the user.
   its summary for the person: one paragraph, risks first (a revert, a review
   fix, an open fault), in plain words: `maxpm target summary <deploy id>
   "<paragraph>"`. The first summary sends the person one Read card; the page
-  shows the report from Plan > Releases (Report) and from the deploy item.
+  shows the report from the target's pipeline in Deploy (Report) and from the
+  deploy item.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
   review-passed, review-failed, deployed, deploy; `--clear` removes one; no event lists

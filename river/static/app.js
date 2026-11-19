@@ -33,7 +33,7 @@ import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
 import * as ops from "./views/ops.js";
-import { renderPipeline } from "./views/pipeline.js";
+import * as deploy from "./views/deploy.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
 import { renderHealth } from "./views/health.js";
@@ -44,6 +44,8 @@ import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
   openPlan: (view) => showPlan(view),
+  // The Deploy tab (#6136) on what deploy.D names now: a new entry in the history, so Back returns.
+  deployGo: async () => { if (tab !== "deploy") return setTab("deploy"); syncUrl(true); return deploy.renderDeploy(true); },
   // One project in Plan (#5879: a project's own browser in the Browsers view has no session to open).
   openProject: (name) => { setScope(name, ""); return showPlan("overview"); },
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },
@@ -280,7 +282,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); renderPipeline(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -334,6 +336,9 @@ document.addEventListener("click", async (e) => {
   const pg = t.closest("[data-plan-go]");
   if (pg) { if (drawer.isOpen()) closeDrawer(); setPlan(null, { project: pg.dataset.project || "", goal: pg.dataset.goal || "" });
     store("river.scope", JSON.stringify(scope)); return showPlan(pg.dataset.planGo); }
+  // A target a session owns (#6136): its pipeline's page in Deploy.
+  const dt = t.closest("[data-deploy-target]");
+  if (dt) { if (drawer.isOpen()) closeDrawer(); return deploy.openTarget(dt.dataset.deployTarget); }
   // Plan (#5102 step 4): a view button, a project or a goal of the left bar (the scope), + project.
   const pv = t.closest("[data-plan-view]"); if (pv) return showPlan(pv.dataset.planView);
   const sg = t.closest("[data-scope-goal]"); if (sg) return setScope(sg.dataset.scopeProject, scope.goal === sg.dataset.scopeGoal ? "" : sg.dataset.scopeGoal);
@@ -366,8 +371,8 @@ document.addEventListener("click", async (e) => {
 $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").value); inbox.actorChanged().catch(() => {}); });
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
-  plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals(); targets.renderTargets();
-  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderPipeline(true); renderEvents();
+  plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals();
+  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -411,13 +416,14 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["sessions", "plan", "settings", "terminal"];
+const TABS = ["sessions", "plan", "deploy", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
 //   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
 //   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /settings
+//   /deploy   /deploy/<part>   /deploy/pipeline/<name>[/<tab>] (#6136; /plan/releases and /plan/pipelines lead there)
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
 // are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
@@ -443,8 +449,11 @@ function readUrl() {
     r.changes = parts[2] === "changes"; }  // #5855: /sessions/<name>/changes opens its Changes (a review before a push)
   if (pane === "arts") r.art = parts[1] || null;
   // Plan (#5102): /plan/<view>?project=<p>&goal=<g>. The old paths (/board, /projects, ...) answer "not found".
+  // Releases and Pipelines left Plan for the Deploy tab (#6136): their old addresses show Deploy's pipelines.
+  if (r.tab === "plan" && ["releases", "pipelines"].includes(parts[1])) { r.tab = "deploy"; parts.splice(1); }
   if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
+  if (r.tab === "deploy") r.deploy = deploy.fromUrl(parts.slice(1));
   return r;
 }
 function urlItem() { return readUrl().item; }
@@ -458,6 +467,7 @@ function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
   }
   const q = new URLSearchParams();
   if (tabName === "plan") { p += "/" + planView; if (scope.project) q.set("project", scope.project); if (scope.goal) q.set("goal", scope.goal); }
+  if (tabName === "deploy") p += deploy.urlPath();
   if (asParam) q.set("as", asParam);
   if (item != null) q.set("item", item);
   return ROOT + p + (q.toString() ? "?" + q : "");
@@ -475,7 +485,9 @@ function setTab(name, push = true) {
   if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   setTabName(name); document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   // A phone's bar (#4903): the name of the tab; Settings is no tab of the bar but opens from the ⋯ (#5116).
-  $("#tabName").textContent = (document.querySelector("nav button.on") || {}).textContent || (tab === "settings" ? "Settings" : "");
+  // The tab's own word: its first text, without a number in it (Deploy's red number, #6136).
+  const onBtn = document.querySelector("nav button.on");
+  $("#tabName").textContent = onBtn ? onBtn.firstChild.textContent.trim() : tab === "settings" ? "Settings" : "";
   $("#settingsBtn").classList.toggle("on", tab === "settings");
   if (header.classList.contains("tabs-open") || header.classList.contains("more")) headerOpen(null);
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -484,6 +496,7 @@ function setTab(name, push = true) {
   renderLog(true); renderHealth(true); ops.renderOps(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
+  deploy.renderDeploy(tab === "deploy");  // shown: it reads and draws; hidden: its pipeline stops reading
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
   return renderGraph(false);  // the same graph keeps its drawing (#5556)
 }
@@ -912,6 +925,7 @@ async function openFromUrl() {
     if (r.terminal) openTerminal(r.terminal);
     if (r.pane === "arts" && r.art) return await openArtifact(null, r.art);
     if (r.plan) { setPlan(r.plan.view, r.plan); planDraw(); }
+    if (r.deploy) { deploy.setDeploy(r.deploy); if (r.tab === tab) deploy.renderDeploy(true); }
     if (r.tab !== tab) await setTab(r.tab, false);
     if (r.pane === "you") sessionsTab.showYou(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
@@ -1118,7 +1132,7 @@ setInterval(() => {
   const r = readUrl();
   firstPage = r.root && r.item == null;  // before the session list writes the address of the session it shows
   {
-    try { if (r.plan) setPlan(r.plan.view, r.plan); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
+    try { if (r.plan) setPlan(r.plan.view, r.plan); if (r.deploy) deploy.setDeploy(r.deploy); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
       if (r.pane === "you") sessionsTab.showYou(false);
       if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); if (r.pane === "cost") sessionsTab.showCost(false);
       if (r.pane === "browsers") sessionsTab.showBrowsers(false);
