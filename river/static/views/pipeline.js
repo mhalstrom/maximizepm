@@ -81,11 +81,18 @@ function draw() {
 // news" with the time of the last read, never a green that may be stale.
 const tokenFails = D => D.account && ["refused", "missing"].includes(D.account.state);
 
+// The tier of a stage as a badge (#6137): prod in the warning color, beta in the person's, alpha in the ready one,
+// a tier of the pipeline's own plain. Several stages may share a tier.
+const TIER_COLOR = { prod: "c-warn", beta: "c-human", alpha: "c-ready" };
+function tierBadge(s) {
+  return s.tier ? " " + chip(`${TIER_COLOR[s.tier] || ""} pl-tier`, esc(s.tier.toUpperCase()), `Tier ${s.tier}`) : "";
+}
+
 function stageCard(s) {
   const D = V.data;
   if (tokenFails(D) && s.workflow && !s.run) {
     const r = s.last_run, read = D.account.read_at;
-    return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}</span>
+    return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
       <span class="pl-name">${esc(s.name)}</span><span class="pl-ver">${esc(short(r && r.version))}</span>
       ${st("none", "no news")}<span class="pl-meta pl-more-line">${read ? "last read " + esc(ago(read)) : "not read yet"}</span></span>`,
       { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
@@ -95,7 +102,7 @@ function stageCard(s) {
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
   const meta = !r ? "" : r.state === "queued" && r.gate_note ? r.gate_note
     : r.ended_at ? `${WORD[r.state] || r.state} ${ago(r.ended_at)}` : r.started_at ? `since ${ago(r.started_at)}` : "";
-  return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}</span>
+  return button(`<span class="pl-in"><span class="pl-kind">${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}${tierBadge(s)}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}

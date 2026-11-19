@@ -15,6 +15,7 @@
 .pl-stage.on { border-color: var(--accent); box-shadow: 0 0 0 var(--hair) var(--accent); }
 .pl-stage.pl-env { border-width: var(--hair-2); }
 .pl-kind { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase; }
+.pl-kind .pl-tier { font-size: var(--fs-xs); padding: 0 var(--sp-1); margin-left: var(--sp-1); }
 .pl-name { font-weight: 600; }
 .pl-ver { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-s); }
 .pl-meta { font-size: var(--fs-s); color: var(--muted); }

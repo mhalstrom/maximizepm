@@ -54,11 +54,6 @@ def _may(conn, actor):
         raise core.RiverError(why)
 
 
-def _tiers(conn):
-    """Whether stages have tiers yet (#6137): the column pipeline_stages.tier."""
-    return any(r["name"] == "tier" for r in conn.execute("PRAGMA table_info(pipeline_stages)"))
-
-
 def _rule(conn, pid, ref):
     ref = str(ref or "").strip().lower().lstrip("t")
     row = conn.execute("SELECT * FROM pipeline_triggers WHERE id=? AND pipeline_id=?",
@@ -101,8 +96,12 @@ def _check_fields(conn, p, event, stage, tier, runner, keys, actor):
         names = [r["name"] for r in conn.execute("SELECT name FROM pipeline_stages WHERE pipeline_id=? AND removed_at "
                                                  "IS NULL ORDER BY pos", (p["id"],))]
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage!r}; its stages: {', '.join(names) or 'none'}")
-    if tier and not _tiers(conn):
-        raise core.RiverError("stages have no tiers yet (#6137): name a stage (--stage) or none (any stage)")
+    if tier and not conn.execute("SELECT 1 FROM pipeline_stages WHERE pipeline_id=? AND tier=? AND removed_at IS NULL",
+                                 (p["id"], tier)).fetchone():
+        tiers = sorted({r["tier"] for r in conn.execute("SELECT tier FROM pipeline_stages WHERE pipeline_id=? AND tier "
+                                                         "IS NOT NULL AND removed_at IS NULL", (p["id"],))})
+        raise core.RiverError(f"no stage of pipeline {p['name']} has the tier {tier!r}; its tiers: "
+                              f"{', '.join(tiers) or 'none yet (maxpm pipeline stage <name> <stage> --tier <tier>)'}")
     if runner not in RUNNERS:
         raise core.RiverError(f"no runner {runner!r}: an agent runs on {', '.join(RUNNERS)} (runners on other "
                               "machines come later)")
@@ -221,7 +220,6 @@ def add_default(conn, pid, actor=None):
 def rules(conn, pipeline, fired=20):
     """The rules of a pipeline, what they did lately, and the choices of a rule's fields (the Triggers tab)."""
     p = store._pipeline(conn, pipeline)
-    tiers = _tiers(conn)
     stages = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL ORDER BY pos, id",
                           (p["id"],)).fetchall()
     return {"pipeline": p["name"], "project": p["project"],
@@ -230,7 +228,7 @@ def rules(conn, pipeline, fired=20):
             "fired": [dict(f, rule=f"t{f['trigger_id']}") for f in conn.execute(
                 "SELECT * FROM pipeline_trigger_fires WHERE pipeline_id=? ORDER BY id DESC LIMIT ?", (p["id"], fired))],
             "events": EVENTS, "runners": list(RUNNERS), "stages": [s["name"] for s in stages],
-            "tiers": sorted({s["tier"] for s in stages if s["tier"]}) if tiers else None}
+            "tiers": sorted({s["tier"] for s in stages if s["tier"]})}
 
 
 def export(conn, pid):

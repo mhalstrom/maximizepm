@@ -13,6 +13,11 @@ Deploy tab of the page.
   kind: `build`, `test`, `review`, `approve`, `deploy`, `check` or `other`.
   It does its work by a command in the project folder (`--run`) or by a
   workflow on a forge (`--workflow`), never both.
+- **Tier**: how close a stage is to the users: `alpha`, `beta`, `prod`, or a
+  short name of the pipeline's own (`--tier`; `''` clears it). Several stages
+  can share a tier, for example two prod regions. The stage card shows it as a
+  badge, and a trigger rule can name a tier ("any prod stage failed"). A
+  deploy target's default pipeline has its deploy and watch stages in prod.
 - **Environment**: a place that runs the code (dev, beta, prod, one server).
   A deploy stage names the environment it deploys to. When the stage passes,
   that version runs there.
@@ -47,8 +52,8 @@ Only a person or the manager defines a pipeline. A worker asks the manager.
    ```
    maxpm pipeline stage <name> build --kind build --run "make build"
    maxpm pipeline stage <name> test --kind test --run "make test" --junit report.xml
-   maxpm pipeline stage <name> beta --kind deploy --env beta --run "make deploy-beta"
-   maxpm pipeline stage <name> prod --kind deploy --env prod --run "make deploy" --mode "yes mark"
+   maxpm pipeline stage <name> beta --kind deploy --env beta --tier beta --run "make deploy-beta"
+   maxpm pipeline stage <name> prod --kind deploy --env prod --tier prod --run "make deploy" --mode "yes mark"
    ```
    `--pos <n>` moves a stage; `--remove` removes it (its runs stay). A stage
    with nothing to change is refused, so a typo does not look like a change.
@@ -571,7 +576,7 @@ comes back to you as an answer to the question.
 
 ## Later
 
-Each Deploy tab task adds its part to this guide when it is built: tiers,
-manual starts, the holding stage, branches, operators and the override,
+Each Deploy tab task adds its part to this guide when it is built: manual
+starts, the holding stage, branches, operators and the override,
 and runners that start agents with no person's computer (a rule then names
 one of them).

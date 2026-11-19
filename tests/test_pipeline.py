@@ -104,7 +104,7 @@ class Commands(Base):
         self.assertEqual([s["name"] for s in exp["stages"]], ["build", "test", "review", "beta", "prod"])
         self.assertEqual(exp["stages"][-1], {"name": "prod", "kind": "deploy", "run": "make prod-release",
                                              "workflow": None, "env": "prod", "junit": None, "waves": None,
-                                             "check": None, "rollback": None, "wave_wait": None,
+                                             "check": None, "rollback": None, "wave_wait": None, "tier": None,
                                              "transition": {"mode": "delay 30m", "window": None, "freezes": [],
                                                             "fault_rule": False}})
         self.assertEqual(exp["environments"][1]["target"], "toolscaled-prod")
@@ -126,6 +126,35 @@ class Commands(Base):
         core.register(self.c, "boss")
         self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
         define.stage_set(self.c, "web", "build", "build", actor="boss")
+
+    def test_stage_tiers_several_stages_may_share_one_and_a_trigger_names_one(self):
+        """#6137: each stage may have a tier (alpha, beta, prod, or a name of the pipeline's own); two stages can be
+        prod; the show, the export, the history and the trigger rules read it."""
+        self.toolscaled()
+        define.env_set(self.c, "toolscaled", "prod-b", actor="mark")
+        define.stage_set(self.c, "toolscaled", "prod-b", "deploy", env="prod-b", tier="prod", actor="mark")
+        for stage, tier in (("beta", "beta"), ("prod", "PROD"), ("test", "canary-1")):
+            define.stage_set(self.c, "toolscaled", stage, tier=tier, actor="mark")
+        tiers = {s["name"]: s["tier"] for s in store.show(self.c, "toolscaled")["stages"]}
+        self.assertEqual(tiers, {"build": None, "test": "canary-1", "beta": "beta", "prod": "prod", "prod-b": "prod"})
+        self.assertEqual(define.export(self.c, "toolscaled")["stages"][-1]["tier"], "prod")
+        self.assertIn("stage prod changed: tier none -> prod", define.history(self.c, "toolscaled", 5)[1]["change"])
+        for bad in ("Prod Region", "x" * 40, "-a"):
+            with self.assertRaises(RiverError):
+                define.stage_set(self.c, "toolscaled", "beta", tier=bad, actor="mark")
+        define.stage_set(self.c, "toolscaled", "test", tier="", actor="mark")
+        self.assertIsNone(store.show(self.c, "toolscaled")["stages"][1]["tier"])
+        code, out = self.cli("pipeline", "stage", "toolscaled", "build", "--tier", "alpha")
+        self.assertEqual(code, 0, out)
+        code, out = self.cli("pipeline", "show", "toolscaled")
+        self.assertIn("1. build  [build, tier alpha]", out)
+        self.assertIn("5. prod-b  [deploy, env prod-b, tier prod]", out)
+        from river.pipeline import triggers
+        triggers.rule_add(self.c, "toolscaled", "stage-failed", does="find the cause", tier="prod", actor="mark")
+        with self.assertRaises(RiverError) as e:  # no stage has it
+            triggers.rule_add(self.c, "toolscaled", "stage-failed", does="x", tier="gamma", actor="mark")
+        self.assertIn("its tiers: alpha, beta, prod", str(e.exception))
+        self.assertEqual(triggers.rules(self.c, "toolscaled")["tiers"], ["alpha", "beta", "prod"])
 
     def test_change_move_remove_and_bring_back_a_stage(self):
         self.toolscaled()
@@ -650,6 +679,8 @@ class Actions(RunnerBase):
         self.assertEqual([(r["rev"], r["what"], r["state"], r["live"]) for r in runs],
                          [("new0002", "deployed", "passed", True), ("old0001", "deployed", "passed", False)])
         self.assertEqual(runs[0]["why"], "the flow: the stage before passed")
+        # A stage with no environment: its newest passed run is the version it has now.
+        self.assertEqual([r["live"] for r in store.stage_versions(self.c, "app", "build")["runs"]], [True, False])
         with self.assertRaises(RiverError):  # never passed there
             self.runner.move_back(self.c, "app", "beta", "zzz9999", reason="x", actor="mark")
         with self.assertRaises(RiverError):  # an agent

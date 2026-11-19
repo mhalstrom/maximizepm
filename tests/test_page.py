@@ -145,7 +145,7 @@ try {
         define.stage_set(self.c, "app", "build", "build")
         define.stage_set(self.c, "app", "test", "test")
         define.stage_set(self.c, "app", "beta", "test")
-        define.stage_set(self.c, "app", "prod", "deploy", env="prod", gate="yes mark")
+        define.stage_set(self.c, "app", "prod", "deploy", env="prod", gate="yes mark", tier="prod")
         transitions.block(self.c, "app", "test", "the test database is down", until="2h", actor="mark")
         t = core.now()
         transitions.change(self.c, "app", "beta", window=f"{t + core.timedelta(hours=2):%H:%M}-"
@@ -160,7 +160,8 @@ try {
   q('#dpList [data-dp-open="app"]').click();
   await until(() => q('#plRow [data-pl-arrow="prod"]'), "the arrows of app");
   const arrow = n => q(`#plRow [data-pl-arrow="${n}"]`).textContent.replace(/\s+/g, " ").trim();
-  const out = { test: arrow("test"), beta: arrow("beta"), prod: arrow("prod"), first: !!q('#plRow [data-pl-arrow="build"]') };
+  const out = { test: arrow("test"), beta: arrow("beta"), prod: arrow("prod"), first: !!q('#plRow [data-pl-arrow="build"]'),
+    tier: q('#plRow [data-pl-stage="prod"] .pl-tier') && q('#plRow [data-pl-stage="prod"] .pl-tier').textContent };  // #6137
   q('#plRow [data-pl-arrow="test"]').click();
   await until(() => q("#plDetail").textContent.includes("The transition build → test"), "the controls of build → test");
   out.detail = q("#plDetail").textContent.replace(/\s+/g, " ");
@@ -181,6 +182,7 @@ try {
             self.assertIn("🕒 closed", r["beta"], r)
             self.assertIn("✋ mark's yes", r["prod"], r)
             self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
+            self.assertEqual(r["tier"], "PROD", r)  # the tier badge on the stage card (#6137)
             self.assertIn("the test database is down", r["detail"], r)
             self.assertIn("abc1234 waits since", r["detail"], r)
             for b in ("Unblock", "Delay…", "Disable…", "Let abc1234 pass once…", "Freeze…",

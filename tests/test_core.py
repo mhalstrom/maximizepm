@@ -1797,7 +1797,8 @@ class Plan(Base):
                      "## Transitions", "maxpm pipeline pass",  # #6139
                      "## The audit log", "maxpm pipeline correct",  # #6144
                      "**The way back.**", "maxpm pipeline move-back",  # #6141
-                     "## Trigger rules", "check-failed", "maxpm pipeline trigger <name> add"):  # #6150
+                     "## Trigger rules", "check-failed", "maxpm pipeline trigger <name> add",  # #6150
+                     "- **Tier**:", "--tier prod"):  # #6137
             self.assertIn(part, text)
         for skill in ("maxpm", "maxpm-manager"):
             self.assertIn("maxpm guide\npipelines", (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")

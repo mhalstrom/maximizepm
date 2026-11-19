@@ -202,6 +202,7 @@ def default_pipeline(conn, name):
         last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
         stages.append({"name": stage, "pos": len(stages) + 1, "kind": kind, "run": cmd, "workflow": None,
                        "env": name if stage == "deploy" else None, "transition": transitions.plain(gate),
+                       "tier": "prod" if stage in ("deploy", "watch") else None,  # #6137: the target is production
                        "junit": None, "last_run": last})
     live = done[0] if done else None
     env = {"name": name, "target": name, "url": None, "notes": t["description"],

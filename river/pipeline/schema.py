@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   check_cmd    TEXT,                     -- ... the check of one server after its deploy (MAXPM_HOST)
   rollback_cmd TEXT,                     -- ... puts the version before back on one server (MAXPM_HOST, MAXPM_PREV_REV)
   wave_wait    TEXT,                     -- ... how long the checks of a wave must hold before the next wave
+  tier         TEXT,                     -- alpha, beta, prod, or a name the pipeline adds; several stages may share one
+                                         -- (#6137). Readers: the stage card, trigger rules (any stage of a tier)
   UNIQUE (pipeline_id, name)
 );
 
@@ -357,7 +359,8 @@ def migrate(conn):
         if c not in cols:  # #6119, #6117, #6121, #6159
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_stages)")}
-    for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait"):  # #6113, #6114, #6120
+    for c in ("removed_at", "junit", "waves", "check_cmd", "rollback_cmd", "wave_wait",
+              "tier"):  # #6113, #6114, #6120, #6137
         if c not in stage_cols:
             conn.execute(f"ALTER TABLE pipeline_stages ADD COLUMN {c} TEXT")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_runs)")}

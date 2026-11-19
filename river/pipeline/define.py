@@ -16,7 +16,9 @@ import re
 from .. import core
 from . import audit, store, transitions
 
-_FIELDS = ("kind", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback", "wave_wait")
+_FIELDS = ("kind", "tier", "run", "workflow", "env", "mode", "junit", "waves", "check", "rollback", "wave_wait")
+TIERS = ("alpha", "beta", "prod")  # the usual tiers; a pipeline may name others (#6137)
+_TIER = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 
 def parse_waves(text):
@@ -126,11 +128,11 @@ def _stage_detail(conn, s):
             "env": env["name"] if env else None, "mode": transitions.mode_words(t["mode"], t["mode_arg"]),
             "junit": s["junit"],
             "waves": "; ".join(", ".join(w) for w in json.loads(s["waves"])) if s["waves"] else None,
-            "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"]}
+            "check": s["check_cmd"], "rollback": s["rollback_cmd"], "wave_wait": s["wave_wait"], "tier": s["tier"]}
 
 
 def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None, gate=None, pos=None, remove=False,
-              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None):
+              actor=None, junit=None, waves=None, check=None, rollback=None, wave_wait=None, tier=None):
     """Add a stage (kind needed), or change the fields given ('' clears run, workflow or env), or move it (pos), or
     remove it (its runs stay; adding the name again brings it back). A stage runs a command (run) or a forge
     workflow (workflow), not both; a deploy stage names its environment."""
@@ -172,6 +174,12 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
                     raise core.RiverError(f"pipeline {p['name']} has no environment {env}; add it first: "
                                           f"maxpm pipeline env {p['name']} {env}")
                 sets["env_id"] = e["id"]
+        if tier is not None:  # alpha, beta, prod, or the pipeline's own name; several stages may share one (#6137)
+            t = tier.strip().lower()
+            if t and not _TIER.match(t):
+                raise core.RiverError(f"the tier {tier!r} is a short lower-case name such as {', '.join(TIERS)} "
+                                      "(letters, digits, '-')")
+            sets["tier"] = t or None
         if junit is not None:  # a test stage's JUnit XML file, in the project folder (#6114)
             sets["junit"] = junit.strip() or None
         if waves is not None:  # a stage over many servers (#6120)
@@ -195,7 +203,7 @@ def stage_set(conn, pipeline, name, kind=None, run=None, workflow=None, env=None
             sid = row["id"]
             changed = "added again" if row["removed_at"] else "changed"
             if changed == "changed" and not sets and pos is None and rule is None:
-                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --run, --workflow, --env, "
+                raise core.RiverError(f"stage {name} exists; give what to change: --kind, --tier, --run, --workflow, --env, "
                                       "--gate or --pos")
             if row["removed_at"]:
                 sets["removed_at"] = None

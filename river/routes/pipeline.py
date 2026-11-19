@@ -242,7 +242,7 @@ def _strip(stages, no_news=False, work=None):
     for s in stages:
         r = s.get("last_run") or {}
         t = s.get("transition") or {}
-        out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"),
+        out.append({"name": s["name"], "kind": s["kind"], "env": s.get("env"), "tier": s.get("tier"),
                     "transition": {k: t.get(k) for k in ("mode", "arg", "text", "state", "state_text", "set_by",
                                                          "until")},
                     "state": r.get("state") or "none", "version": r.get("version"), "fault": r.get("fault_item"),

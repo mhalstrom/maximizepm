@@ -501,8 +501,9 @@ def stage_versions(conn, pipeline, stage, limit=STAGE_VERSIONS):
     out, live_seen = [], False
     for r in conn.execute("SELECT r.*, v.rev FROM stage_runs r LEFT JOIN pipeline_versions v ON v.id=r.version_id "
                           "WHERE r.stage_id=? ORDER BY r.id DESC LIMIT ?", (s["id"], limit)):
-        is_live = bool(not live_seen and live and live["version_id"] and r["version_id"] == live["version_id"]
-                       and r["state"] == "passed")
+        # A stage with no environment: its newest passed run is the version it has now.
+        is_live = bool(not live_seen and r["state"] == "passed" and (
+            not s["env_id"] or (live and live["version_id"] and r["version_id"] == live["version_id"])))
         live_seen = live_seen or is_live
         who = r["sent_by"] or r["passed_by"] or r["approved_by"]
         why = r["reason"] or (f"{r['approved_by']} said yes" if r["approved_by"] and not r["sent_by"] else

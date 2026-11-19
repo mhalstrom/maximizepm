@@ -127,7 +127,7 @@ function stripHtml(p) {
   return p.stages.map((s, i) => {
     const [m, cls, title] = gateMark(s);
     return (i ? `<span class="dp-arrow ${cls ? "dp-" + cls : ""}" title="${esc(title)}">${m}</span>` : "")
-      + `<span class="dp-mini" title="${esc(s.name)}: ${s.no_news ? "no news" : esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
+      + `<span class="dp-mini" title="${esc(s.name)}${s.tier ? " (" + esc(s.tier) + ")" : ""}: ${s.no_news ? "no news" : esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
         <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${stageMarks(s.work)}</span>`;
   }).join("") || `<span class="muted t-s">no stages yet</span>`;
 }
