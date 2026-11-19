@@ -27,7 +27,7 @@ What a run is, step by step (serve_pass, each pass of maxpm serve):
 How it reaches the queue: only over this SSH connection, which this computer opens (Tailscale SSH or a key, policy
 p159). Nothing listens on the tailnet for it, and the runner needs no address of this computer. A CI runner of a forge
 is outside the tailnet: there the forge starts the agent in its own job, and the pipeline's read of the forge brings its
-state and proof back (river/pipeline/agent_job.py, #6152; runner 'github'). The model key of the CLI is the runner's
+state and proof back (river/pipeline/agent_job.py, #6152; runner 'github', and 'gitlab', #6172). The model key of the CLI is the runner's
 own (a key in its environment, or the CLI's own sign-in there), or a set granted to the runner (#6153: maxpm secret
 grant <set> --runner <name>; its secret carries the variable the CLI reads, maxpm secret level <name> --var
 ANTHROPIC_API_KEY). The run also gets the sets that its rule granted to its task (pipeline/keys.run_env), in the script

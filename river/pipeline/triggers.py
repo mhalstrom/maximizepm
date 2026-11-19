@@ -18,7 +18,7 @@ target or of the pipeline's project.
 A rule names the event, the stage it watches (a stage, any stage of a tier, or any stage), what the agent does (the
 instructions of its task), where the agent runs (this computer, or a runner that the pipeline ticks, #6151: a server
 where the agent runs with no terminal and no prompt, river/runners.py; or github, #6152: a job in GitHub Actions that
-GitHub starts when the stage's workflow fails, river/pipeline/agent_job.py), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
+GitHub starts when the stage's workflow fails, river/pipeline/agent_job.py; or gitlab, #6172, the same in GitLab CI), and the keys its task gets (credential sets, granted to that task alone until it closes). A person or the
 manager adds, changes, turns off and removes rules; a rule that is off acts on nothing until it is on again, and then
 only on what happens after that.
 

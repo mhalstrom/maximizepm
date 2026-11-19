@@ -1,9 +1,9 @@
 {
   "contract": 1,
   "name": "gitlab",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "level": "act",
-  "description": "GitLab CI (gitlab.com or your own server): one MaximizePM stage for each GitLab stage; reads the jobs of the newest pipelines, their test report and the environments' deployments; plays a stage's manual jobs when its transition lets the version in, retries them for a run again or a roll back, and cancels them.",
+  "description": "GitLab CI (gitlab.com or your own server): one MaximizePM stage for each GitLab stage; reads the jobs of the newest pipelines, their test report and the environments' deployments; plays a stage's manual jobs when its transition lets the version in, retries them for a run again or a roll back, and cancels them; reads the state and proof of the agent job maxpm-agent.",
   "run": ["{python}", "plugin.py"],
   "actions": ["start", "stop", "rerun", "rollback"],
   "settings": {

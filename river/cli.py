@@ -2735,6 +2735,18 @@ def build_parser(only=None):
     x.add_argument("--allow", help="the tools of Claude Code allowed with no prompt (default: files and git commit)")
     x.add_argument("--file", help="where to write it (default: .github/workflows/agent.yml of this checkout)")
     x.add_argument("--print", dest="show", action="store_true", help="show the file; write and change nothing")
+    x = rus.add_parser("gitlab", help="write the job maxpm-agent into .gitlab-ci.yml: when a job of the pipeline "
+                       "fails, GitLab starts the agent in its own runner; its state and proof come back (#6172)")
+    x.add_argument("pipeline")
+    x.add_argument("--cli", choices=["claude", "codex"], default="claude", help="the agent CLI of the job")
+    x.add_argument("--secret", help="the CI/CD variable of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
+    x.add_argument("--max-minutes", type=int, default=30, help="GitLab stops the job after this")
+    x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
+    x.add_argument("--allow", help="the tools of Claude Code allowed with no prompt (default: files and git commit)")
+    x.add_argument("--image", help="the job's image (default node:20: it has npm, git and python3)")
+    x.add_argument("--file", help="where to write it (default: .gitlab-ci.yml of this checkout)")
+    x.add_argument("--print", dest="show", action="store_true", help="show the job; write and change nothing")
     pg = sub.add_parser("plugin", help="pipeline plugins: install, keep each version, pin one for each pipeline, and a "
                         "person's yes before a plugin runs (#6166)")
     pgs = pg.add_subparsers(dest="pgcmd", required=True)
@@ -8426,6 +8438,10 @@ def _runner_cmd(conn, a, actor):
         from .pipeline import agent_job
         return agent_job.setup(conn, a.pipeline, a.cli, a.secret, a.test, a.max_minutes, a.max_cost, a.allow, a.file,
                                a.show, actor, os.getcwd())
+    if s == "gitlab":  # #6172
+        from .pipeline import agent_job
+        return agent_job.setup(conn, a.pipeline, a.cli, a.secret, a.test, a.max_minutes, a.max_cost, a.allow, a.file,
+                               a.show, actor, os.getcwd(), forge="gitlab", image=a.image)
     return runners.stop(conn, a.run, actor, a.reason)
 
 
@@ -8535,6 +8551,24 @@ def render_runner(a, res):
               f"workflow_run job only from there. Until then a failure waits 30 minutes for the job, then a session "
               f"here takes its fault.")
         print("  3. Watch the jobs: maxpm runner runs github; a job's transcript: maxpm runner log <run>.")
+        return
+    if s == "gitlab":  # #6172
+        if res["text"] is not None:
+            print(res["text"], end="")
+            return
+        print(f"wrote the job maxpm-agent of pipeline {res['pipeline']} ({res['repo']}) into {res['file']}: GitLab "
+              f"starts the agent ({res['cli']}) when a job of these stages fails: {', '.join(res['workflows'])}")
+        for line in res["rules"]:
+            print(f"  - rule {line}")
+        print("Next:")
+        print(f"  1. A person sets two masked CI/CD variables (GitLab: Settings > CI/CD > Variables): {res['secret']}, "
+              f"the model key, and MAXPM_GITLAB_TOKEN, a project access token (role Developer, scopes api and "
+              f"write_repository) that reads the failed jobs' logs, pushes the fix and opens the merge request. A "
+              f"protected variable reaches only a protected branch.")
+        print(f"  2. Commit .gitlab-ci.yml and bring it to the branch the pipeline follows: a pipeline runs the job "
+              f"only when its commit has it. Until then a failure waits 30 minutes for the job, then a session here "
+              f"takes its fault.")
+        print("  3. Watch the jobs: maxpm runner runs gitlab; a job's transcript: maxpm runner log <run>.")
         return
     if s in ("add", "check", "set"):
         r = res["runner"]

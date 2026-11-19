@@ -1100,6 +1100,65 @@ Note: GitHub does not run your workflows on a pull request that the job's own
 token opened. The proof is the job's own `--test` run; the session that
 merges runs the tests again.
 
+## Agents in GitLab CI
+
+The same for a pipeline that reads GitLab: its agent runs in GitLab's own
+runner, and the gitlab plugin's read (once a minute) brings its state, proof
+and transcript back.
+
+```
+maxpm runner gitlab <pipeline> --test "<the command that proves a fix>"
+maxpm runner gitlab <pipeline> --print         # show the job; write and change nothing
+maxpm runner runs gitlab                       # the jobs, newest first
+maxpm runner stop <run> --reason "<why>"       # cancels the job on GitLab
+```
+
+`maxpm runner gitlab` (a person or the manager) does two things:
+
+- It writes the job `maxpm-agent` at the end of `.gitlab-ci.yml` in the
+  checkout you run it in (a checkout of the pipeline's project; `--file
+  <path>` writes elsewhere), between two marked lines: running it again
+  replaces the job and keeps the rest of the file. The job is in GitLab's last
+  stage `.post` with `when: on_failure`, so GitLab starts it in the pipeline
+  of the failed commit, after a job failed, on the branch the pipeline
+  follows, in the project itself (never a fork). `--image` names its image
+  (default `node:20`: it needs npm, git and python3).
+- It moves the pipeline's stage-failed rules to `gitlab`, as for GitHub.
+
+Then a person sets two masked CI/CD variables (Settings > CI/CD > Variables),
+once, and commits `.gitlab-ci.yml` to the branch the pipeline follows:
+
+1. The model key: `ANTHROPIC_API_KEY` (or `CODEX_API_KEY` with `--cli codex`;
+   `--secret <NAME>` names another).
+2. `MAXPM_GITLAB_TOKEN`: a project access token, role Developer, scopes `api`
+   and `write_repository`. The job reads the failed jobs' logs with it, pushes
+   the fix and opens the merge request. With none, the agent gets no log, and
+   the push uses the job's own token (only when the project allows a push
+   with it).
+
+A protected variable reaches only a protected branch. MaximizePM never reads
+or searches for either value.
+
+What the job does, in order:
+
+1. Saves the logs of the failed jobs of the pipeline's stages in
+   `maxpm-agent/failed.log`. A failure only in a stage that no MaximizePM stage
+   names starts no agent.
+2. Runs the agent as the GitHub job does, with a clean environment: GitLab
+   gives every CI/CD variable to every job, so the agent and the `--test` run
+   get only the model key, `HOME`, `PATH` and `CI`.
+3. When the agent committed: runs `--test`, pushes the commit to
+   `maxpm/fix-<pipeline id>` with no hook of the checkout, and opens a merge
+   request into the failed branch (git push options).
+4. Keeps the artifact `maxpm-agent/` for 14 days: `proof.json` (the same
+   fields; `pr` is the merge request) and the transcript.
+
+What MaximizePM does with it is the same as for GitHub, with the record
+`gitlab-r<run>`. The plugin finds the job `maxpm-agent` among the jobs of the
+failed run's GitLab pipeline. When that pipeline ended with no such job (the
+commit's file has none), the run ends at once and a session here takes the
+task.
+
 ## What agents may do with no prompt
 
 An agent on a runner has nobody at a terminal to answer a permission prompt.
@@ -1147,8 +1206,9 @@ The Triggers tab shows the list (Edit the list changes it) and the steps
 that runs asked for, each with its card and answer. Only a person or the
 manager changes the list. Each change is a line of the audit log and a
 version of the definition; going back to a version brings its list back.
-The agent job in GitHub Actions (previous section) is not a run of this
-list: its tools are the `--allow` of `maxpm runner github`.
+The agent job in GitHub Actions or GitLab CI (the sections above) is not a
+run of this list: its tools are the `--allow` of `maxpm runner github` or
+`maxpm runner gitlab`.
 
 ## Actions on a running pipeline
 

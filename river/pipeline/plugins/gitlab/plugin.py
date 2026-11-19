@@ -15,6 +15,9 @@ stage run is the jobs of that GitLab stage in the pipeline of one commit: its ke
 - rerun, rollback: retries the stage's jobs in that commit's pipeline. That is GitLab's own roll back of an
   environment: the deploy job of an older pipeline runs again.
 - stop: cancels the stage's running jobs.
+- agents (#6172): when the request lists agent jobs that MaximizePM waits for, the job maxpm-agent (in .gitlab-ci.yml,
+  written by maxpm runner gitlab) of each failed run's GitLab pipeline goes back as "agents": its state, and at its
+  end the proof and the transcript of its artifact. stop of such a run cancels that job.
 
 What it cannot do, and why: a stage whose jobs start by themselves (no when: manual) runs before its transition
 opens; give its transition the mode forge, so MaximizePM only reads it. The token: a project access token with the
@@ -22,6 +25,7 @@ api scope, sent as PRIVATE-TOKEN.
 """
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -63,8 +67,8 @@ class Api:
         self.project = "/projects/" + urllib.parse.quote(s["repo"], safe="")  # group%2Fproject
         self.fetch = fetch
 
-    def call(self, method, path, body=None):
-        """The answer as JSON. A status of 300 or more fails with GitLab's own message."""
+    def call(self, method, path, body=None, raw=False):
+        """The answer as JSON (raw: bytes). A status of 300 or more fails with GitLab's own message."""
         headers = {"PRIVATE-TOKEN": self.token, "Accept": "application/json", "User-Agent": "maxpm-pipeline"}
         data = None
         if body is not None:
@@ -78,6 +82,8 @@ class Api:
             except (ValueError, AttributeError):
                 msg = (out or b"")[:200].decode("utf-8", "replace")
             raise Failed(f"GitLab answered {status} to {method} {self.project}{path}: {msg}")
+        if raw:
+            return out or b""
         return json.loads(out) if out else {}
 
 
@@ -203,7 +209,76 @@ def poll(req, api):
         sha = d.get("sha") or ((d.get("deployable") or {}).get("commit") or {}).get("id")
         events.append(event("service", "deployed", e["name"], {"environment": {"id": e["name"], "source": "gitlab"}},
                             {"version": sha}, d.get("created_at"), f"gl-dep-{d['id']}"))
-    return {"events": events, "counts": {"pipelines": count}, "state": {**state, "tested": tested[-TESTED_KEEP:]}}
+    answer = {"events": events, "counts": {"pipelines": count}, "state": {**state, "tested": tested[-TESTED_KEEP:]}}
+    if req.get("agents"):
+        answer["agents"] = agent_runs(api, req)
+    return answer
+
+
+# ---------------------------------------------------------------- the agent job (#6172)
+
+AGENT_JOB = "maxpm-agent"  # the job that maxpm runner gitlab writes into .gitlab-ci.yml (stage .post, on_failure)
+AGENT_DIR = "maxpm-agent"  # its artifact's folder, in the project folder
+TRANSCRIPT_KEEP = 400  # the last lines of the transcript that go back
+AGENT_STATE = {"running": "running", "success": "ended", "failed": "failed", "canceled": "stopped",
+               "skipped": "stopped"}  # any other state of a job waits: queued
+LIVE = ("created", "pending", "running", "waiting_for_resource", "preparing", "scheduled", "manual")
+
+
+def agent_runs(api, req):
+    """For each run that MaximizePM waits for ({"run", "key": "gl-<pipeline id>-<stage>"}): the job maxpm-agent of
+    that GitLab pipeline, its state, and at its end the proof and the transcript of its artifact. A pipeline whose
+    jobs all ended with no such job will not get it (the commit's .gitlab-ci.yml has none, or its rule did not
+    match): the run ends at once, as failed, with the reason."""
+    asks = {}
+    for a in req["agents"]:
+        m = re.match(r"gl-(\d+)-", str(a.get("key") or ""))
+        if m:
+            asks.setdefault(m.group(1), []).append(a)
+    out = []
+    for pl, runs in asks.items():
+        jobs = api.call("GET", f"/pipelines/{pl}/jobs?per_page=100")
+        jobs = jobs if isinstance(jobs, list) else []
+        job = next((j for j in jobs if j.get("name") == AGENT_JOB), None)
+        if job is None:
+            if any(j.get("status") in LIVE for j in jobs):
+                continue  # the pipeline still runs; GitLab makes the job at the start, so it may come with a retry
+            d = {"state": "failed", "note": f"GitLab pipeline {pl} has no job {AGENT_JOB}: the .gitlab-ci.yml of "
+                                            f"that commit does not have it (maxpm runner gitlab), or its rule did not "
+                                            f"match (another branch)"}
+        else:
+            d = {"job": f"gl-job-{job['id']}", "url": job.get("web_url"),
+                 "started_at": job.get("started_at") or job.get("created_at"),
+                 "state": AGENT_STATE.get(job.get("status"), "queued")}
+            if d["state"] not in ("queued", "running"):
+                d["ended_at"] = job.get("finished_at")
+                d.update(agent_artifact(api, job))
+        out += [{"run": a["run"], **d} for a in runs]
+    return out
+
+
+def agent_artifact(api, job):
+    """proof.json and the end of transcript.jsonl, read by path from the artifact of a finished job."""
+    out = {}
+    for name in ("proof.json", "transcript.jsonl"):
+        try:
+            data = api.call("GET", f"/jobs/{job['id']}/artifacts/{AGENT_DIR}/{name}", raw=True)
+        except Failed as e:
+            if " 404 " not in str(e):
+                raise
+            if name == "proof.json":
+                out["note"] = f"the job left no {AGENT_DIR}/proof.json in its artifact"
+            continue
+        text = data.decode("utf-8", "replace")
+        if name == "proof.json":
+            try:
+                proof = json.loads(text)
+                out["proof"] = proof if isinstance(proof, dict) else {}
+            except ValueError:
+                out["note"] = "its proof.json is not JSON"
+        else:
+            out["transcript"] = "\n".join(text.splitlines()[-TRANSCRIPT_KEEP:]) + "\n"
+    return out
 
 
 def stage_jobs(api, gl_stage, sha):
@@ -219,6 +294,10 @@ def act(req, api):
     """start: play the stage's manual jobs; rerun, rollback: retry its jobs (an older commit's for a roll back); stop:
     cancel its running jobs. The answer's key gives the jobs of that pipeline's stage to this run."""
     run = req["run"]
+    m = re.match(r"gl-job-(\d+)$", str(run.get("key") or ""))
+    if req["call"] == "stop" and m:  # the agent job maxpm-agent (#6172)
+        api.call("POST", f"/jobs/{m.group(1)}/cancel")
+        return {"note": f"asked GitLab to cancel job {m.group(1)}"}
     pl, jobs = stage_jobs(api, run["work"], run.get("version"))
     if req["call"] == "stop":
         n = 0

@@ -23,9 +23,23 @@ github plugin, once a minute), the same path that brings the stage runs:
    task, still open, goes back to the queue with the proof in a note, and the manager hears of it. The session that
    takes the task checks the pull request and merges it.
 
-A rule on 'github' whose event or stage did not run in GitHub (a command stage of this computer) falls back to a
-session here. A run whose job GitHub did not show within QUEUE_MAX ends as failed, and its task goes back too.
-GitLab and Pulumi Delivery come later: each adds its name to FORGES, its part of the plugin's poll, and its file.
+A rule on 'github' whose event or stage did not run in GitHub (a command stage of this computer), or ran on another
+branch than the one the pipeline follows, falls back to a session here. A run whose job GitHub did not show within
+QUEUE_MAX ends as failed, and its task goes back too.
+
+GitLab CI (#6172) takes the same path with its own file:
+
+    maxpm runner gitlab <pipeline>     writes the job maxpm-agent into .gitlab-ci.yml of a checkout (between two marked
+                                       lines, so a second run replaces it), and moves the rules as for GitHub
+
+The job is in GitLab's own last stage .post with when: on_failure, so GitLab starts it in the pipeline of the failed
+commit, after a job failed. Its key is the stage run's own: the failed stage run gl-<pipeline id>-<stage> and the job
+are in one GitLab pipeline, and the gitlab plugin finds the job maxpm-agent among that pipeline's jobs. GitLab gives
+every CI/CD variable to every job, so the agent and the proof command run with a clean environment (env -i): only
+the model key goes in. The CI/CD variable MAXPM_GITLAB_TOKEN (a project access token that a person sets, policy g6)
+reads the failed jobs' logs and pushes the fix; push options open the merge request. The artifact holds the proof and
+the transcript, and the plugin reads the two files by path. Pulumi Delivery comes later: it adds its name to FORGES,
+its part of the plugin's poll, and its file.
 
 Standard library only."""
 
@@ -41,8 +55,14 @@ from .. import __version__, core, runners
 from ..core import RiverError
 from . import store
 
-FORGES = {"github": "GitHub Actions"}  # a rule's runner that is a forge's own CI: the label on the page
+FORGES = {"github": "GitHub Actions", "gitlab": "GitLab CI"}  # a rule's runner that is a forge's own CI: its label
+SOURCE = {"github": "GitHub", "gitlab": "GitLab"}  # the pipeline's source that each one needs
+KEY = {"github": "gh-run-", "gitlab": "gl-"}  # the start of the key of a stage run that ran in that forge
 WORKFLOW = "agent.yml"  # the workflow file of the agent job, and the setting 'agent' of the github plugin
+FILE = {"github": f".github/workflows/{WORKFLOW}", "gitlab": ".gitlab-ci.yml"}  # where the job is, in the checkout
+CHANGE = {"github": "pull request", "gitlab": "merge request"}  # what the job opens with the fix
+IMAGE = "node:20"  # GitLab: the job's image (it has npm, git and python3); maxpm runner gitlab --image changes it
+TOKEN_VAR = "MAXPM_GITLAB_TOKEN"  # GitLab: the CI/CD variable with a project access token (the logs and the push)
 JOB = "maxpm-agent"     # the job's name, and the name of its artifact
 OUT = "/tmp/maxpm-agent"  # the job's own files on the runner (the log, the transcript, the proof): the artifact
 QUEUE_MAX = 30 * 60     # seconds: a run whose job the forge did not show by then fails
@@ -75,10 +95,13 @@ def queue(conn, p, rule, item_id, ev):
     here = f"; a session here takes #{item_id}"
     if ev["event"] != "stage-failed":
         return f"; {label(forge)} starts its agent job only when a stage fails{here}"
-    row = conn.execute("SELECT r.key, s.workflow FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
-                       "WHERE r.id=?", (ev.get("run_id"),)).fetchone()
-    if row is None or not row["workflow"] or not (row["key"] or "").startswith("gh-run-"):
+    row = conn.execute("SELECT r.key, s.workflow, v.ref FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
+                       "LEFT JOIN pipeline_versions v ON v.id=r.version_id WHERE r.id=?", (ev.get("run_id"),)).fetchone()
+    if row is None or not row["workflow"] or not (row["key"] or "").startswith(KEY.get(forge, "-")):
         return f"; stage {ev['stage']} did not run in {label(forge)}{here}"
+    ref = p["ref"] or "main"
+    if row["ref"] and row["ref"] != ref:  # the job runs only on the branch the pipeline follows
+        return f"; it failed on {row['ref']}, and the job {JOB} runs only on {ref}{here}"
     it = core._item(conn, item_id)
     if it["assignee"] or (it["reserved_for"] and (it["reserved_until"] or "9") > runners._now()):
         return f"; #{item_id} is with {it['assignee'] or it['reserved_for']} already: no job in {label(forge)}"
@@ -157,29 +180,29 @@ def _finish(conn, run_id, state, a):
         path.write_text(a["transcript"][-TRANSCRIPT_MAX:], encoding="utf-8")
         path = str(path)
     _cost, last = runners._transcript_end(path) if path else (None, None)
-    words = proof_text(proof, last, a.get("note"))
+    words = proof_text(proof, last, a.get("note"), CHANGE.get(run["runner"], "pull request"))
     with core.tx(conn):
         conn.execute("UPDATE runner_runs SET transcript=?, proof=? WHERE id=?",
                      (path, json.dumps(proof)[:20000] if proof else None, run["id"]))
         if proof.get("commit") or proof.get("pr"):
             core._send(conn, "note", run["agent"],
                        f"The agent job in {label(run['runner'])} (run #{run['id']}"
-                       + (f", {run['url']}" if run["url"] else "") + f") made a fix: {words}. Check it: read the pull "
-                       f"request, check that its tests pass, merge it, then close this task. Its transcript: maxpm "
-                       f"runner log {run['id']}.", item_id=run["item"])
+                       + (f", {run['url']}" if run["url"] else "") + f") made a fix: {words}. Check it: read the "
+                       f"{CHANGE.get(run['runner'], 'pull request')}, check that its tests pass, merge it, then close "
+                       f"this task. Its transcript: maxpm runner log {run['id']}.", item_id=run["item"])
     code = proof.get("agent_exit") if isinstance(proof.get("agent_exit"), int) else None
     run = conn.execute("SELECT * FROM runner_runs WHERE id=?", (run["id"],)).fetchone()  # with its transcript
     return runners._end(conn, run, state, code, words)
 
 
-def proof_text(proof, last=None, note=None):
+def proof_text(proof, last=None, note=None, change="pull request"):
     """The proof of a job in one line: what it committed, where, and the test's result; or that it fixed nothing."""
     if proof.get("commit"):
         text = f"proof ready: commit {str(proof['commit'])[:12]}"
         if proof.get("branch"):
             text += f" on branch {proof['branch']}"
         if proof.get("pr"):
-            text += f", pull request {proof['pr']}"
+            text += f", {change} {proof['pr']}"
         test = proof.get("test") if isinstance(proof.get("test"), dict) else {}
         if test.get("command"):
             text += f"; {test['command']}: " + ("passed" if test.get("exit") == 0 else f"exit {test.get('exit')}")
@@ -206,11 +229,13 @@ def serve_pass(conn):
                             f"ORDER BY id", tuple(FORGES)).fetchall():
         age = (t - core.parse_iso(run["started_at"] or run["queued_at"])).total_seconds()
         if run["state"] == "queued" and age > QUEUE_MAX:
+            where = (f"is .github/workflows/{WORKFLOW} on the default branch (maxpm runner github {run['pipeline']}), "
+                     f"and its model key set as a repository secret?" if run["runner"] == "github" else
+                     f"is the job {JOB} in .gitlab-ci.yml of the failed commit (maxpm runner {run['runner']} "
+                     f"{run['pipeline']}), and its model key set as a CI/CD variable?")
             out.append(runners._end(conn, run, "failed", None, (run["result"] + "; " if run["result"] else "") +
                                     f"{label(run['runner'])} showed no job {JOB} for the failed run within "
-                                    f"{QUEUE_MAX // 60}m: is .github/workflows/{WORKFLOW} on the default branch "
-                                    f"(maxpm runner github {run['pipeline']}), and its model key set as a "
-                                    f"repository secret?"))
+                                    f"{QUEUE_MAX // 60}m: {where}"))
         elif run["state"] == "running" and age > RUN_MAX + 600:
             out.append(runners._end(conn, run, "failed", None, f"the job {JOB} reported no end within "
                                                                 f"{RUN_MAX // 3600}h"))
@@ -231,7 +256,8 @@ def stop(conn, run, actor, why):
             m = plugin.of(p)
             plugin._trusted(conn, m, p)
             req = plugin._request(conn, p, m, "stop")
-            req["run"] = {"id": run["id"], "key": run["job"], "stage": None, "work": WORKFLOW, "version": run["rev"]}
+            req["run"] = {"id": run["id"], "key": run["job"], "stage": None, "version": run["rev"],
+                          "work": WORKFLOW if run["runner"] == "github" else JOB}
             plugin.call(m, req)
         except RiverError as e:
             why += f"; cancel the job on its page{': ' + run['url'] if run['url'] else ''} ({e})"
@@ -255,7 +281,8 @@ def listing(conn, runs=8):
                             (name,)).fetchone()[0]
         out.append({"name": name, "label": text, "pipelines": pipes, "used_by": sorted({x["pipeline"] for x in rules}),
                     "rules": rules, "busy": count("running"), "waiting": count("queued"), "last_seen": last,
-                    "what": f"the job {JOB} in .github/workflows/{WORKFLOW} of each repository",
+                    "what": f"the job {JOB} in {FILE[name]} of each " + ("repository" if name == "github" else
+                                                                         "project"),
                     "runs": [runners._run_info(x) for x in conn.execute(
                         "SELECT * FROM runner_runs WHERE runner=? ORDER BY id DESC LIMIT ?", (name, runs))]})
     return out
@@ -271,9 +298,10 @@ def _git(folder, *args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def same_repo(url, repo):
-    """Whether a git address is the GitHub repository owner/name."""
-    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url or "")
+def same_repo(url, repo, host="github.com"):
+    """Whether a git address is the repository owner/name (GitLab: group/subgroup/project) on host: an https
+    address, ssh://git@host:2222/..., or git@host:...."""
+    m = re.search(rf"{re.escape(host)}(?::\d+)?[:/]+(.+?)(?:\.git)?/?$", url or "", re.I)
     return bool(m) and m.group(1).lower() == (repo or "").lower()
 
 
@@ -445,26 +473,242 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- the job in GitLab CI (#6172)
+
+BEGIN = "# >>> maxpm-agent"  # the marked lines around the job in .gitlab-ci.yml: a second write replaces what is between
+END = "# <<< maxpm-agent"
+_BLOCK = re.compile(r"^# >>> maxpm-agent\b.*?^# <<< maxpm-agent[^\n]*(?:\n|\Z)", re.M | re.S)
+# What the agent and the proof command get of the job's environment: GitLab gives every CI/CD variable (deploy
+# keys among them) to every job, so they start with env -i and only these, and the model key.
+CLEAN_ENV = 'env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 CI=true'
+
+
+def _gl(text):
+    """A text that GitLab expands in a variable's value: '$' of the text stays a '$'."""
+    return (text or "").replace("$", "$$")
+
+
+def gitlab_prompt(does, test):
+    """The agent's instructions in the GitLab job: the predefined variables in it are GitLab's to expand."""
+    return ("You are a MaximizePM agent in a GitLab CI job, with no person, no terminal and no permission prompt. "
+            "A job of the pipeline $CI_PIPELINE_URL failed for commit $CI_COMMIT_SHA on $CI_COMMIT_BRANCH. The failed "
+            "jobs' logs are in the file $MAXPM_OUT/failed.log. This folder is a checkout of that commit.\n\n"
+            f"What to do: {_gl(does)}\n\n"
+            "Find the cause in the log and the code, and fix it in this folder. "
+            + (f"Prove the fix: run `{_gl(test)}`. " if test else "")
+            + "Commit the fix with a message that says what you changed and why (git add, git commit). Do not push: "
+            "the job pushes your commit to a branch and opens a merge request after you. When you cannot fix it, "
+            "commit nothing. End with a short report: the cause, what you changed, and the proof.")
+
+
+def gitlab_text(pipeline, repo, ref, stages, cli="claude", secret=None, test=None, max_minutes=30, max_cost=5.0,
+                allow=None, does=None, image=None):
+    """The job maxpm-agent between the marked lines, for the end of .gitlab-ci.yml. stages: the GitLab stages of the
+    pipeline's MaximizePM stages; a failure in another stage starts no agent (when the token reads the jobs)."""
+    secret = secret or SECRET[cli]
+    tools = tool_list(allow or ALLOW)
+    if test and not allow:
+        tools.append(f"Bash({shlex.split(test)[0]}:*)")
+    key = f'{SECRET[cli]}="${secret}"'
+    if cli == "codex":
+        agent = (f'{CLEAN_ENV} {key} codex exec --json --sandbox workspace-write --skip-git-repo-check '
+                 '"$MAXPM_PROMPT" > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > '
+                 '"$MAXPM_OUT/agent-exit"')
+    else:
+        agent = (f'{CLEAN_ENV} {key} claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose '
+                 f'--permission-mode dontAsk --max-budget-usd {float(max_cost):g} --add-dir "$MAXPM_OUT" '
+                 '--allowedTools ' + " ".join(shlex.quote(t) for t in tools)
+                 + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
+    when = (f'$CI_COMMIT_BRANCH == "{ref}" && $CI_PROJECT_PATH == "{repo}" && '
+            '$CI_PIPELINE_SOURCE != "merge_request_event"')
+    text = gitlab_prompt(does or "Find the cause of the failure and fix it.", test)
+    script = [
+        "set +e",
+        'mkdir -p "$MAXPM_OUT"',
+        "echo /maxpm-agent/ >> .git/info/exclude",
+        'git remote set-url origin "$CI_PROJECT_URL.git"  # the clone\'s address holds the job token',
+        "python3 - <<'EOF'",
+        "import json, os, urllib.request",
+        f'out, tok = os.environ["MAXPM_OUT"], os.environ.get("{TOKEN_VAR}")',
+        'api = os.environ["CI_API_V4_URL"] + "/projects/" + os.environ["CI_PROJECT_ID"]',
+        'stages = os.environ.get("MAXPM_STAGES", "").split()',
+        "def get(path):",
+        '    req = urllib.request.Request(api + path, headers={"PRIVATE-TOKEN": tok})',
+        "    with urllib.request.urlopen(req, timeout=30) as r:",
+        "        return r.read()",
+        'log = ["The pipeline: " + os.environ["CI_PIPELINE_URL"]]',
+        "try:",
+        "    if not tok:",
+        f'        raise RuntimeError("the CI/CD variable {TOKEN_VAR} is not set: read the failed jobs of the '
+        f'pipeline above")',
+        '    jobs = json.loads(get("/pipelines/" + os.environ["CI_PIPELINE_ID"] + "/jobs?scope%5B%5D=failed&per_page=100"))',
+        f'    failed = [j for j in jobs if not j.get("allow_failure") and j.get("name") != "{JOB}"]',
+        '    mine = [j for j in failed if not stages or j.get("stage") in stages]',
+        "    if failed and not mine:",
+        '        open(os.path.join(out, "skip"), "w").write("no failed job in the stages " + " ".join(stages))',
+        "    for j in mine:",
+        '        trace = get("/jobs/%d/trace" % j["id"]).decode("utf-8", "replace")',
+        '        log.append("===== job %s (stage %s): %s\\n%s" % (j["name"], j["stage"], j.get("web_url"), trace[-100000:]))',
+        "except Exception as e:",
+        '    log.append("No log: %s" % e)',
+        'open(os.path.join(out, "failed.log"), "w").write("\\n".join(log)[-200000:])',
+        "EOF",
+        'if [ -f "$MAXPM_OUT/skip" ]; then',
+        f'  echo "{JOB}: $(cat "$MAXPM_OUT/skip"): no agent"',
+        "else",
+        f'  npm install -g {PACKAGE[cli]} > "$MAXPM_OUT/npm.log" 2>&1',
+        '  git config user.name "maxpm-agent"',
+        '  git config user.email "maxpm-agent@users.noreply.gitlab.com"',
+        f"  {agent}",
+        "fi",
+        'head=$(git rev-parse HEAD)',
+        'branch=""; mr=""; error=""; test_exit=""',
+        'if [ "$head" != "$CI_COMMIT_SHA" ]; then',
+        '  if [ -n "$MAXPM_TEST" ]; then',
+        f'    {CLEAN_ENV} bash -c "$MAXPM_TEST" > "$MAXPM_OUT/test.log" 2>&1; test_exit=$?',
+        "  fi",
+        '  branch="maxpm/fix-$CI_PIPELINE_ID"',
+        '  auth="gitlab-ci-token:$CI_JOB_TOKEN"',
+        f'  if [ -n "${TOKEN_VAR}" ]; then auth="oauth2:${TOKEN_VAR}"; fi',
+        "  # No hook of the checkout runs: the agent could have written one, and the push holds the token.",
+        '  git -c core.hooksPath=/dev/null push -o merge_request.create -o "merge_request.target=$CI_COMMIT_BRANCH" '
+        '-o "merge_request.title=maxpm agent: fix pipeline $CI_PIPELINE_ID for $CI_COMMIT_SHORT_SHA" '
+        '-o merge_request.remove_source_branch '
+        '"$CI_SERVER_PROTOCOL://$auth@$CI_SERVER_HOST:$CI_SERVER_PORT/$CI_PROJECT_PATH.git" "HEAD:refs/heads/$branch" '
+        '> "$MAXPM_OUT/push.log" 2>&1',
+        "  pushed=$?",
+        '  sed -i "s|$auth|[masked]|g" "$MAXPM_OUT/push.log"',
+        '  if [ "$pushed" -eq 0 ]; then',
+        "    mr=$(grep -o 'https\\?://[^ ]*/-/merge_requests/[0-9]*' \"$MAXPM_OUT/push.log\" | tail -1)",
+        '    if [ -z "$mr" ]; then error="pushed $branch, but GitLab opened no merge request"; fi',
+        "  else",
+        '    error="the push of $branch failed: $(tail -1 "$MAXPM_OUT/push.log")"',
+        "  fi",
+        "fi",
+        'HEAD_SHA="$head" BRANCH="$branch" PR="$mr" ERROR="$error" TEST_EXIT="$test_exit" python3 - <<\'EOF\'',
+        "import json, os",
+        'out = os.environ["MAXPM_OUT"]',
+        "def tail(name):",
+        "    try:",
+        '        lines = [x.strip() for x in open(os.path.join(out, name), errors="replace") if x.strip()]',
+        "    except OSError:",
+        "        return None",
+        "    return lines[-1][:300] if lines else None",
+        'changed = os.environ["HEAD_SHA"] != os.environ["CI_COMMIT_SHA"]',
+        'test = {"command": os.environ["MAXPM_TEST"], "exit": int(os.environ["TEST_EXIT"]), "last": tail("test.log")} '
+        'if os.environ.get("TEST_EXIT") else None',
+        'proof = {"rev": os.environ["CI_COMMIT_SHA"], "commit": os.environ["HEAD_SHA"] if changed else None,',
+        '         "branch": os.environ["BRANCH"] or None, "pr": os.environ["PR"] or None, "test": test,',
+        '         "error": os.environ["ERROR"] or (tail("skip") if os.path.exists(os.path.join(out, "skip")) else None),',
+        '         "agent_exit": int(tail("agent-exit") or 0)}',
+        'json.dump({k: v for k, v in proof.items() if v is not None}, open(os.path.join(out, "proof.json"), "w"))',
+        "EOF",
+    ]
+    lines = [
+        f"{BEGIN}: the MaximizePM agent job of pipeline {pipeline} (#6172), written by maxpm {__version__}:",
+        f"#   maxpm runner gitlab {pipeline}",
+        "# When a job of the pipeline fails on the branch the pipeline follows, an agent looks for the cause and fixes",
+        "# it on a branch, with a merge request. MaximizePM reads this job's state and its artifact (the proof and the",
+        "# transcript). Write it again with the command; a change by hand between the two marked lines is lost then.",
+        f"# The model key: the CI/CD variable {secret} (Settings > CI/CD > Variables, masked).",
+        f"# The logs, the push and the merge request: the CI/CD variable {TOKEN_VAR}, a project access token (role",
+        "# Developer, scopes api and write_repository), masked.",
+        f"{JOB}:",
+        "  stage: .post",
+        f"  image: {image or IMAGE}",
+        "  rules:",
+        "    # Only a failure on the branch the pipeline follows, in this project (never a fork's copy of this file).",
+        f"    - if: {_yaml_str(when)}",
+        "      when: on_failure",
+        "  allow_failure: true",
+        "  interruptible: false",
+        f"  timeout: {int(max_minutes)} minutes",
+        "  variables:",
+        "    MAXPM_OUT: $CI_PROJECT_DIR/maxpm-agent",
+        f"    MAXPM_STAGES: {_yaml_str(' '.join(stages))}",
+        f"    MAXPM_TEST: {_yaml_str(_gl(test))}",
+        "    MAXPM_PROMPT: |",
+        *[("      " + x).rstrip() for x in text.splitlines()],
+        "  script:",
+        "    - |",
+        *[("      " + x).rstrip() for x in script],
+        "  artifacts:",
+        "    when: always",
+        f"    name: {JOB}",
+        "    paths: [maxpm-agent/]",
+        "    expire_in: 14 days",
+        f"{END}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def put_block(old, block):
+    """The text of .gitlab-ci.yml with the job's marked block in it: in place of the block before, or at the end."""
+    rest = _BLOCK.sub("", old or "", count=1)
+    if re.search(rf"^{JOB}:", rest, re.M):
+        raise RiverError(f"the file has a job {JOB} of its own, outside the lines that maxpm runner gitlab marks: "
+                         f"rename it, then run this again")
+    if _BLOCK.search(old or ""):
+        return _BLOCK.sub(lambda m: block, old, count=1)
+    return (old.rstrip("\n") + "\n\n" if (old or "").strip() else "") + block
+
+
+def _target(p, forge, file, show, cwd):
+    """(the file to write or None, the checkout's top folder or None): --file, else the place in this checkout."""
+    top = _git(cwd or ".", "rev-parse", "--show-toplevel")
+    if show:
+        return None, top
+    if file:
+        path = Path(file).expanduser()
+        return (path if path.is_absolute() else Path(cwd or ".").resolve() / path), top
+    if not top:
+        raise RiverError(f"this folder is not a git checkout: run it in a checkout of {p['repo']}, or name the "
+                         f"file: --file <path>, or see it: --print")
+    origin = _git(top, "remote", "get-url", "origin")
+    host = "github.com"
+    if forge == "gitlab":
+        from urllib.parse import urlparse
+        host = urlparse(p["forge_url"] or "https://gitlab.com").hostname or "gitlab.com"
+    if not same_repo(origin, p["repo"], host):
+        raise RiverError(f"this folder is a checkout of {origin or 'no remote origin'}, not of {p['repo']}: run "
+                         f"it in a checkout of {p['repo']}, or name the file: --file <path>")
+    path = Path(top) / FILE[forge]
+    if forge == "gitlab" and not path.exists():
+        raise RiverError(f"{top} has no .gitlab-ci.yml: the job joins the pipeline that GitLab runs from it; name "
+                         f"another file with --file <path>")
+    return path, top
+
+
 def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, max_cost=5.0, allow=None, file=None,
-          show=False, actor=None, cwd=None):
-    """maxpm runner github <pipeline>: write the agent job into a checkout of the pipeline's repository, and set the
-    pipeline's stage-failed rules on this computer to run their agent there. --print only shows the file."""
+          show=False, actor=None, cwd=None, forge="github", image=None):
+    """maxpm runner github|gitlab <pipeline>: write the agent job into a checkout of the pipeline's repository, and
+    set the pipeline's stage-failed rules on this computer to run their agent there. --print only shows the file."""
     from . import triggers
     runners._may(conn, actor, "writes the agent job of a pipeline and moves its trigger rules there, because the "
                               "job runs an agent with the repository's rights")
+    if forge not in FORGES:
+        raise RiverError(f"the agent job runs in one of: {', '.join(FORGES)}")
     p = store._pipeline(conn, pipeline)
-    if p["forge"] != "github":
-        raise RiverError(f"pipeline {p['name']} does not read GitHub (its source: {p['forge'] or 'none'}); the job "
-                         f"runs in GitHub Actions only, for now"
-                         + ("" if p["forge"] in ("gitea", "forgejo") else
-                            f": first maxpm pipeline forge {p['name']} github --repo owner/name --secret <name>"))
+    if p["forge"] != forge:
+        hint = {"github": "owner/name", "gitlab": "group/project"}[forge]
+        raise RiverError(f"pipeline {p['name']} does not read {SOURCE[forge]} (its source: {p['forge'] or 'none'})"
+                         + (f": its job is maxpm runner {p['forge']} {p['name']}" if p["forge"] in FORGES else
+                            f"; the job runs in {', '.join(FORGES.values())} only, for now"
+                            if p["forge"] in ("gitea", "forgejo") else
+                            f": first maxpm pipeline forge {p['name']} {forge} --repo {hint} --secret <name>"))
+    if image is not None and (forge != "gitlab" or not re.match(r"^[\w.:/@-]{1,200}$", image)):
+        raise RiverError("--image is a GitLab job's image, such as node:20 or registry.example.com/ci/agent:1"
+                         if forge == "gitlab" else "--image is for maxpm runner gitlab: GitHub runs ubuntu-latest")
     if cli not in SECRET:
         raise RiverError(f"the agent CLI of the job is one of: {', '.join(SECRET)}")
     secret = secret or SECRET[cli]
-    if not _SECRET_NAME.match(secret):
-        raise RiverError("a repository secret's name is upper-case letters, digits and '_', such as ANTHROPIC_API_KEY")
+    kind = "repository secret" if forge == "github" else "CI/CD variable"
+    if not _SECRET_NAME.match(secret) or secret == TOKEN_VAR:
+        raise RiverError(f"a {kind}'s name is upper-case letters, digits and '_', such as ANTHROPIC_API_KEY"
+                         + (f" (not {TOKEN_VAR}: that one holds the project access token)" if forge == "gitlab" else ""))
     if not 1 <= int(max_minutes) <= RUN_MAX // 60:
-        raise RiverError(f"--max-minutes is a whole number from 1 to {RUN_MAX // 60} (GitHub's limit for a job)")
+        raise RiverError(f"--max-minutes is a whole number from 1 to {RUN_MAX // 60} (the limit of the job)")
     if float(max_cost) <= 0:
         raise RiverError("--max-cost is a number of dollars above 0")
     if test is not None and not test.strip():
@@ -477,26 +721,18 @@ def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, 
     stages = conn.execute("SELECT name, workflow, tier FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS "
                           "NULL AND workflow IS NOT NULL ORDER BY pos, id", (p["id"],)).fetchall()
     if not stages:
-        raise RiverError(f"no stage of pipeline {p['name']} runs a GitHub workflow: maxpm pipeline stage {p['name']} "
-                         f"<stage> --workflow tests.yml")
-    top = _git(cwd or ".", "rev-parse", "--show-toplevel")
-    path = None
-    if not show:
-        if file:
-            path = Path(file).expanduser()
-            if not path.is_absolute():
-                path = Path(cwd or ".").resolve() / path
-        else:
-            if not top:
-                raise RiverError(f"this folder is not a git checkout: run it in a checkout of {p['repo']}, or name the "
-                                 f"file: --file <path>, or see it: --print")
-            origin = _git(top, "remote", "get-url", "origin")
-            if not same_repo(origin, p["repo"]):
-                raise RiverError(f"this folder is a checkout of {origin or 'no remote origin'}, not of {p['repo']}: run "
-                                 f"it in a checkout of {p['repo']}, or name the file: --file <path>")
-            path = Path(top) / ".github" / "workflows" / WORKFLOW
-    folder = (path.parent.parent.parent if path and path.parent.name == "workflows" else None) or top
-    names = list(dict.fromkeys(workflow_name(folder, s["workflow"]) for s in stages))
+        raise RiverError(f"no stage of pipeline {p['name']} runs a " + (
+            f"GitHub workflow: maxpm pipeline stage {p['name']} <stage> --workflow tests.yml" if forge == "github" else
+            f"GitLab stage: maxpm pipeline stage {p['name']} <stage> --workflow <GitLab stage>"))
+    ref = p["ref"] or "main"
+    if forge == "gitlab" and ('"' in ref or '"' in (p["repo"] or "")):
+        raise RiverError("the branch or the project of the pipeline has a '\"': GitLab's rule of the job cannot name it")
+    path, top = _target(p, forge, file, show, cwd)
+    if forge == "github":
+        folder = (path.parent.parent.parent if path and path.parent.name == "workflows" else None) or top
+        names = list(dict.fromkeys(workflow_name(folder, s["workflow"]) for s in stages))
+    else:
+        names = list(dict.fromkeys(s["workflow"] for s in stages))  # the GitLab stages
     rules = conn.execute("SELECT * FROM pipeline_triggers WHERE pipeline_id=? AND event='stage-failed' ORDER BY id",
                          (p["id"],)).fetchall()
     stage_names = {s["name"] for s in stages}
@@ -504,12 +740,22 @@ def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, 
     moves = [r for r in rules if r["enabled"] and r["runner"] == triggers.THIS
              and (not r["stage"] or r["stage"] in stage_names) and (not r["tier"] or r["tier"] in tiers)]
     does = next((r["does"] for r in moves + [x for x in rules if x["runner"] == p["forge"]]), None)
-    text = workflow_text(p["name"], p["repo"], p["ref"] or "main", names, cli, secret, test, max_minutes, max_cost,
-                         allow, does)
-    out = {"pipeline": p["name"], "repo": p["repo"], "workflows": names, "file": str(path) if path else None,
-           "secret": secret, "cli": cli, "rules": [], "text": text if show else None}
+    if forge == "github":
+        text = workflow_text(p["name"], p["repo"], ref, names, cli, secret, test, max_minutes, max_cost, allow, does)
+    else:
+        text = gitlab_text(p["name"], p["repo"], ref, names, cli, secret, test, max_minutes, max_cost, allow, does,
+                           image)
+    out = {"pipeline": p["name"], "repo": p["repo"], "forge": forge, "workflows": names,
+           "file": str(path) if path else None, "secret": secret, "cli": cli, "rules": [],
+           "text": text if show else None}
     if show:
         return out
+    if forge == "gitlab":
+        try:
+            old = path.read_text(encoding="utf-8") if path.exists() else ""
+        except (OSError, UnicodeDecodeError) as e:
+            raise RiverError(f"cannot read {path}: {e}") from None
+        text = put_block(old, text)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     for r in moves:
@@ -521,6 +767,7 @@ def setup(conn, pipeline, cli="claude", secret=None, test=None, max_minutes=30, 
     from . import define
     with core.tx(conn):
         define._change(conn, p["id"], actor, f"agent job written ({path.name}, {cli}, secret {secret}"
-                       + (f", test {test}" if test else "") + f") for the workflows {', '.join(names)}",
+                       + (f", test {test}" if test else "") + f") for the "
+                       + ("workflows" if forge == "github" else "GitLab stages") + f" {', '.join(names)}",
                        {"file": str(path), "cli": cli, "secret": secret, "test": test, "workflows": names})
     return out

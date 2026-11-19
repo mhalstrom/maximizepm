@@ -13,7 +13,7 @@ from river import cli, core, runners
 from river.core import RiverError
 from river.pipeline import agent_job, define, triggers
 
-from tests.test_pipeline import Base, FakeGitHub, gh_run, plugin_hooks
+from tests.test_pipeline import Base, FakeGitHub, FakeGitLab, gh_run, gl_job, plugin_hooks
 
 TRANSCRIPT = "\n".join([
     json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5-5", "cwd": "/work"}),
@@ -216,3 +216,188 @@ class AgentJob(Base):
         with contextlib.redirect_stdout(out):
             cli.run(["--as", "mark", "runner", "list"])
         self.assertIn("GitHub Actions (github): the job maxpm-agent", out.getvalue())
+
+
+class AgentJobGitLab(Base):
+    """The same in GitLab CI (#6172): maxpm runner gitlab writes the job maxpm-agent (stage .post, when: on_failure)
+    into .gitlab-ci.yml; the gitlab plugin finds it in the failed run's GitLab pipeline and reads its artifact."""
+
+    P = "/projects/grp%2Fshop"
+    CI = "stages: [test, deploy]\nunit:\n  stage: test\n  script: [make test]\n"
+
+    def setUp(self):
+        super().setUp()
+        from river.pipeline import runner
+        runner.SYNC["on"] = True
+        self.addCleanup(runner.SYNC.update, on=False)
+        self.api = FakeGitLab()
+        self.gl = plugin_hooks(self, self.api)
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        define.pipeline_add(self.c, "shop", project="shop")
+        define.stage_set(self.c, "shop", "test", "test", workflow="test", gate="forge")
+        define.stage_set(self.c, "shop", "check", "test", run="true")  # a stage of this computer
+        define.forge_set(self.c, "shop", "gitlab", repo="grp/shop", secret="gl-token")
+        self.p = lambda: self.c.execute("SELECT * FROM pipelines WHERE name='shop'").fetchone()
+        self.pls, self.jobs = [], {}
+        self.api.routes[("GET", f"{self.P}/pipelines?per_page")] = lambda path, body: (200, self.pls)
+        self.api.routes[("GET", f"{self.P}/environments")] = (200, [])
+        self.file = os.path.join(self.dir.name, ".gitlab-ci.yml")
+        with open(self.file, "w") as f:
+            f.write(self.CI)
+
+    def setup_job(self, **kw):
+        return agent_job.setup(self.c, "shop", file=self.file, actor="mark", cwd=self.dir.name, forge="gitlab", **kw)
+
+    def pipeline(self, n, sha, jobs, status="failed", ref="main"):
+        self.pls.insert(0, {"id": n, "sha": sha, "ref": ref, "status": status, "web_url": f"p/{n}"})
+        self.jobs[n] = jobs
+        self.api.routes[("GET", f"{self.P}/pipelines/{n}/jobs")] = lambda path, body: (200, self.jobs[n])
+        self.api.routes[("GET", f"{self.P}/pipelines/{n}/test_report")] = (200, {"test_suites": []})
+
+    def fail_tests(self, ref="main"):
+        """The GitLab stage test fails for commit bbb...; the poll reads it and the rule acts."""
+        self.pipeline(501, "b" * 40, [self.job(1, "unit", "test", "failed"),
+                                      self.job(9, "maxpm-agent", ".post", "created")], ref=ref)
+        self.gl.poll(self.c, self.p())
+        triggers.serve_pass(self.c)
+        return self.c.execute("SELECT * FROM runner_runs").fetchone()
+
+    def job(self, n, name, stage, status):
+        return gl_job(n, name, stage, status, at=core.iso(core.now()))  # a rule acts on what happens after it
+
+    def agent(self, status):
+        self.jobs[501][1] = self.job(9, "maxpm-agent", ".post", status)
+
+    def test_setup_writes_the_job_into_the_file_and_moves_the_rule(self):
+        res = self.setup_job(test="python3 -m unittest", max_minutes=20)
+        with open(self.file) as f:
+            text = f.read()
+        self.assertTrue(text.startswith(self.CI + "\n# >>> maxpm-agent"))  # the person's file stays as it was
+        self.assertEqual(res["workflows"], ["test"])
+        for part in ("maxpm-agent:\n  stage: .post\n", "when: on_failure", "image: node:20", "timeout: 20 minutes",
+                     '$CI_COMMIT_BRANCH == \\"main\\" && $CI_PROJECT_PATH == \\"grp/shop\\"',
+                     'MAXPM_STAGES: "test"', "env -i HOME=", 'ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" claude -p',
+                     "'Bash(git commit:*)' 'Bash(python3:*)'", "--permission-mode dontAsk",
+                     "core.hooksPath=/dev/null push -o merge_request.create", "paths: [maxpm-agent/]",
+                     "MAXPM_GITLAB_TOKEN"):
+            self.assertIn(part, text)
+        self.assertNotIn("${{", text)
+        rule = triggers.rules(self.c, "shop")["rules"][0]
+        self.assertEqual(rule["runner"], "gitlab")
+        self.assertIn("now runs its agent in GitLab CI", res["rules"][0])
+        self.assertIn("gitlab", runners.choices(self.c, self.p()))
+        # Again, with another key: the job is replaced, not added twice.
+        self.setup_job(secret="MY_KEY", image="python:3.12")
+        with open(self.file) as f:
+            text = f.read()
+        self.assertEqual(text.count("# >>> maxpm-agent"), 1)
+        self.assertIn('ANTHROPIC_API_KEY="$MY_KEY"', text)
+        self.assertIn("image: python:3.12", text)
+        self.assertTrue(text.startswith(self.CI))
+        shown = agent_job.setup(self.c, "shop", show=True, actor="mark", cli="codex", forge="gitlab")
+        self.assertIn('CODEX_API_KEY="$CODEX_API_KEY" codex exec --json', shown["text"])
+        with self.assertRaisesRegex(RiverError, "does not read GitHub.*maxpm runner gitlab shop"):
+            agent_job.setup(self.c, "shop", file=self.file, actor="mark")
+        with self.assertRaisesRegex(RiverError, "MAXPM_GITLAB_TOKEN"):
+            self.setup_job(secret="MAXPM_GITLAB_TOKEN")
+
+    def test_setup_refuses_a_job_of_the_same_name_and_another_checkout(self):
+        with open(self.file, "a") as f:
+            f.write("maxpm-agent:\n  script: [echo mine]\n")
+        with self.assertRaisesRegex(RiverError, "a job maxpm-agent of its own"):
+            self.setup_job()
+        repo = os.path.join(self.dir.name, "shop")
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(["git", "-C", repo, "remote", "add", "origin", "git@gitlab.com:grp/else.git"], check=True)
+        with self.assertRaisesRegex(RiverError, "not of grp/shop"):
+            agent_job.setup(self.c, "shop", actor="mark", cwd=repo, forge="gitlab")
+        subprocess.run(["git", "-C", repo, "remote", "set-url", "origin", "git@gitlab.com:grp/shop.git"], check=True)
+        with self.assertRaisesRegex(RiverError, "has no .gitlab-ci.yml"):
+            agent_job.setup(self.c, "shop", actor="mark", cwd=repo, forge="gitlab")
+        with open(os.path.join(repo, ".gitlab-ci.yml"), "w") as f:
+            f.write(self.CI)
+        res = agent_job.setup(self.c, "shop", actor="mark", cwd=repo, forge="gitlab")
+        self.assertEqual(res["file"], os.path.join(os.path.realpath(repo), ".gitlab-ci.yml"))
+        self.assertTrue(agent_job.same_repo("https://gitlab.com/grp/shop.git", "grp/shop", "gitlab.com"))
+        self.assertTrue(agent_job.same_repo("ssh://git@git.example.com:2222/grp/sub/shop.git", "grp/sub/shop",
+                                            "git.example.com"))
+        self.assertFalse(agent_job.same_repo("https://github.com/grp/shop.git", "grp/shop", "gitlab.com"))
+
+    def test_a_failure_in_gitlab_goes_to_the_job_and_its_proof_comes_back(self):
+        self.setup_job()
+        run = self.fail_tests()
+        self.assertEqual((run["runner"], run["state"], run["forge_key"], run["agent"]),
+                         ("gitlab", "queued", "gl-501-test", f"gitlab-r{run['id']}"))
+        self.assertEqual(core._item(self.c, run["item"])["reserved_for"], run["agent"])
+        fire = self.c.execute("SELECT result FROM pipeline_trigger_fires").fetchone()["result"]
+        self.assertIn("the job maxpm-agent in GitLab CI works on it", fire)
+        # GitLab starts the job in the same pipeline.
+        self.agent("running")
+        self.gl.poll(self.c, self.p())
+        run = self.c.execute("SELECT * FROM runner_runs").fetchone()
+        self.assertEqual((run["state"], run["job"], run["url"]), ("running", "gl-job-9", "u/9"))
+        # The job ends: the plugin reads the two files of its artifact by path.
+        self.agent("success")
+        art = f"{self.P}/jobs/9/artifacts/maxpm-agent/"
+        self.api.routes[("GET", art + "proof.json")] = (200, json.dumps({
+            "rev": "b" * 40, "commit": "7e1a2b0" + "0" * 33, "branch": "maxpm/fix-501",
+            "pr": "https://gitlab.com/grp/shop/-/merge_requests/3",
+            "test": {"command": "make test", "exit": 0, "last": "OK"}, "agent_exit": 0}).encode())
+        self.api.routes[("GET", art + "transcript.jsonl")] = (200, TRANSCRIPT.encode())
+        self.gl.poll(self.c, self.p())
+        run = self.c.execute("SELECT * FROM runner_runs").fetchone()
+        self.assertEqual((run["state"], run["cost"]), ("ended", 1.1))
+        self.assertIn("proof ready: commit 7e1a2b000000 on branch maxpm/fix-501, merge request "
+                      "https://gitlab.com/grp/shop/-/merge_requests/3; make test: passed (OK)", run["result"])
+        item = core._item(self.c, run["item"])
+        self.assertIsNone(item["reserved_for"])
+        notes = [m["body"] for m in self.c.execute("SELECT body FROM messages WHERE item_id=?", (item["id"],))]
+        self.assertTrue(any("read the merge request" in b for b in notes))
+        forge = [f for f in runners.listing(self.c)["forges"] if f["name"] == "gitlab"][0]
+        self.assertEqual((forge["label"], forge["used_by"]), ("GitLab CI", ["shop"]))
+        self.assertIn(".gitlab-ci.yml", forge["what"])
+        n = len(self.api.calls)
+        self.gl.poll(self.c, self.p())  # no open job: no read of the agent's files
+        self.assertFalse([c for c in self.api.calls[n:] if "artifacts" in c[1]])
+
+    def test_a_pipeline_that_ended_with_no_job_gives_the_task_back_at_once(self):
+        self.setup_job()
+        run = self.fail_tests()
+        self.jobs[501] = [self.job(1, "unit", "test", "failed")]  # the commit's file had no job maxpm-agent
+        self.gl.poll(self.c, self.p())
+        run = self.c.execute("SELECT * FROM runner_runs").fetchone()
+        self.assertEqual(run["state"], "failed")
+        self.assertIn("has no job maxpm-agent", run["result"])
+        self.assertIsNone(core._item(self.c, run["item"])["reserved_for"])
+
+    def test_a_failure_on_another_branch_stays_here(self):
+        self.setup_job()
+        self.assertIsNone(self.fail_tests(ref="feature"))
+        fire = self.c.execute("SELECT result FROM pipeline_trigger_fires").fetchone()["result"]
+        self.assertIn("it failed on feature, and the job maxpm-agent runs only on main", fire)
+
+    def test_stop_cancels_the_job_on_gitlab(self):
+        self.setup_job()
+        self.fail_tests()
+        self.agent("running")
+        self.gl.poll(self.c, self.p())
+        self.api.routes[("POST", f"{self.P}/jobs/9/cancel")] = (201, {})
+        run = self.c.execute("SELECT * FROM runner_runs").fetchone()
+        self.assertEqual(runners.stop(self.c, run["id"], "mark", "a person looks at it")["state"], "stopped")
+        self.assertIn(("POST", f"{self.P}/jobs/9/cancel", None), self.api.calls)
+
+    def test_the_command_line(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "runner", "gitlab", "shop", "--file", self.file, "--test", "make test"])
+        text = out.getvalue()
+        self.assertIn(f"into {self.file}", text)
+        self.assertIn("MAXPM_GITLAB_TOKEN", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "runner", "gitlab", "shop", "--print"])
+        self.assertTrue(out.getvalue().startswith("# >>> maxpm-agent: the MaximizePM agent job of pipeline shop"))
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            cli.run(["--as", "w1", "runner", "gitlab", "shop", "--print"])
