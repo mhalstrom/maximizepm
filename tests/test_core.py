@@ -11941,6 +11941,17 @@ class ShippedPolicies(unittest.TestCase):
                 self.assertIn(x, (None,) + core.POLICY_ROLES)
         self.assertEqual(len(core.global_policies()), len(ids))
 
+    def test_the_manager_only_rules_reach_only_the_manager(self):
+        # #6450: the general rules of the manager ship as built-in policies with the role manager.
+        with tempfile.TemporaryDirectory() as d:
+            c = core.connect(os.path.join(d, "t.db"))
+            mine = {p["pid"] for p in core.global_policies() if p["roles"] == ["manager"]}
+            self.assertLessEqual({"g8", "g9", "g10"}, mine)
+            self.assertLessEqual(mine, {p["pid"] for p in core.policies_for(c, role="manager")})
+            for role in ("worker", "reviewer", "expert"):
+                self.assertFalse(mine & {p["pid"] for p in core.policies_for(c, role=role)}, role)
+            c.close()
+
 
 class SessionSamples(Base):
     """maxpm serve records each live session's state once a minute, so maxpm health can show idle time (#5352)."""

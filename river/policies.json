@@ -51,6 +51,27 @@
       "reason": "A fault investigation starts at once, before a person looks; a guess that changes production can make the fault worse, while a found cause and fix items go through review. The monitor is deterministic, and the investigation is ordinary queue work (#5431, #5432).",
       "source": "mark 2026-11-12",
       "role": "worker"
+    },
+    {
+      "id": "g8",
+      "text": "Answer a session's prompt yourself (maxpm approve) when it only reads a file that is not secret, in a folder its task names: read the path first, answer one prompt at a time, and pick the option for that one file, never 'always allow'. At a folder trust prompt, choose Yes only for a folder that MaximizePM made or a project's linked folder. Send a prompt about a secret, a deletion, a push, a payment or a sign-in on to the person.",
+      "reason": "MaximizePM holds a session's prompt for the manager first (#6282), so the person does not click each safe file read. One answer for every prompt at once, or 'always allow', gives a session more access than its task needs.",
+      "source": "mark 2026-11-20",
+      "role": "manager"
+    },
+    {
+      "id": "g9",
+      "text": "After the first launch of an agent type, or a launch in a folder that no session used before, look at the session's terminal once, about a minute after the start. When it stands at a prompt or an error that MaximizePM did not report, answer it as g8 says, and add a fix task so that MaximizePM catches that text.",
+      "reason": "MaximizePM reports the prompts and start errors that it knows (#6282, #6429). A new agent type or a new folder can show one that it does not know, and the session then waits with no alert until the person asks why nothing happens.",
+      "source": "mark 2026-11-20, 2026-11-14",
+      "role": "manager"
+    },
+    {
+      "id": "g10",
+      "text": "Let agent_order choose the agent of each launch. Name an agent (--agent) only for a task that fixes or tests that agent.",
+      "reason": "agent_order holds the person's order of agents and the session limit of each (#6361). A launch that names an agent skips that order, and tasks then wait on one agent while another has free slots.",
+      "source": "mark 2026-11-20, 2026-11-10",
+      "role": "manager"
     }
   ]
 }
