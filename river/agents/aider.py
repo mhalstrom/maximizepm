@@ -155,13 +155,50 @@ def _skill_file():
     return words[-1] if words[-2:-1] == ["--append-system-prompt-file"] else None
 
 
+def instruction_files(folder):
+    """Each AGENTS.md from the repository root down to `folder`, as absolute paths (#6420). Aider reads no
+    instruction file by itself, so build_command gives each one with --read, as the other agents read them: the
+    root's rules first, the start folder's last. The walk stops at the first folder with a .git (a worktree has a
+    .git file); with no repository, only the folder's own file."""
+    if not folder:
+        return []
+    here = Path(folder).expanduser().resolve()
+    found = []
+    for d in (here, *here.parents):
+        f = d / SETUP["instructions"]
+        if f.is_file():
+            found.append(str(f))
+        if (d / ".git").exists():
+            return found[::-1]
+    own = here / SETUP["instructions"]
+    return [str(own)] if own.is_file() else []
+
+
+def _logged_reads(log):
+    """The AGENTS.md files that the last aider command line in a chat log read (--read) and that still exist: a
+    resume has no folder, so it reads the files that the session read at its start. Aider logs its argv joined by
+    spaces with no quotes (main.py), so a path with a space is not found."""
+    words = []
+    try:
+        lines = Path(log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        cmd = line.removeprefix("> ").split()
+        if cmd and Path(cmd[0]).name == "aider" and "--chat-history-file" in cmd:
+            words = cmd
+    return [w for k, w in zip(words, words[1:]) if k == "--read" and Path(w).name == SETUP["instructions"]
+            and Path(w).is_file()]
+
+
 def build_command(name, folder, model, effort, settings, prompt):
     """aider [--model M] [--reasoning-effort E] [settings] --chat-history-file <its log> --input-history-file <its
     prompts> [--restore-chat-history] --no-show-release-notes --set-env MAXPM_AIDER_SESSION=<name> [--read <skill>]
     [--read AGENTS.md] [args]. The session's log is chat_file(name); a resume (settings['resume']) appends to the log
     and the prompts of the session it resumes. With no name and no resume, Aider keeps both in the git root. The
-    prompt is not in the argv (FIRST_PROMPT). AGENTS.md of the folder goes in with --read, as Aider reads no
-    instruction file by itself. A start asks no question (#5270), as nobody watches a new pane yet: the release notes
+    prompt is not in the argv (FIRST_PROMPT). Each AGENTS.md from the repository root to the folder goes in with
+    --read (instruction_files), as Aider reads no instruction file by itself; with no folder (a resume),
+    settings['instruction_files']. A start asks no question (#5270), as nobody watches a new pane yet: the release notes
     question is off, and so are, by their settings' defaults, the .gitignore question, the analytics question and the
     model warnings (with
     them off, ollama_chat/<model> reaches the local Ollama at its default address with no OLLAMA_API_BASE)."""
@@ -191,8 +228,8 @@ def build_command(name, folder, model, effort, settings, prompt):
     skill = _skill_file() if s.get("system_prompt_file") else None
     if skill:
         argv += ["--read", skill]
-    if folder and Path(folder, SETUP["instructions"]).is_file():
-        argv += ["--read", SETUP["instructions"]]
+    for f in (s.get("instruction_files") if folder is None else None) or instruction_files(folder):
+        argv += ["--read", f]
     if (s.get("args") or "").strip():
         argv.append(Raw(s["args"].strip()))
     return argv
@@ -508,12 +545,15 @@ INPUT = {"native": None, "interrupt": ["C-c"]}
 def resume_command(session_ref, model, effort, settings, name=None):
     """aider on the chat log of session_ref (a session name) with --restore-chat-history, which reads the old turns
     back into the chat; None when that session has no log. The files of the chat and its chat mode do not come back.
-    A first prompt (settings['prompt']) goes in as at a start (FIRST_PROMPT)."""
-    if not session_ref or chat_path(session_ref) is None:
+    A first prompt (settings['prompt']) goes in as at a start (FIRST_PROMPT). The AGENTS.md files that the session
+    read at its start come from its log (_logged_reads), as a resume has no folder (#6420)."""
+    log = chat_path(session_ref) if session_ref else None
+    if log is None:
         return None
     ref = Path(str(session_ref)).name.removesuffix(".chat.history.md")
     s = {k: v for k, v in (settings or {}).items() if k not in ("fork", "prompt")}
-    return build_command(name or ref, None, model, effort, {**s, "resume": ref}, None)
+    return build_command(name or ref, None, model, effort,
+                         {**s, "resume": ref, "instruction_files": _logged_reads(log)}, None)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -590,7 +630,8 @@ COMMANDS = [
 # ---------------------------------------------------------------------------------------------------------------
 
 SETUP = {
-    # Aider reads no instruction file by itself; build_command passes this one with --read when the folder has it.
+    # Aider reads no instruction file by itself; build_command passes each one from the repository root to the
+    # start folder with --read (instruction_files).
     "instructions": "AGENTS.md",
     "skills_dir": None,
     "voice": "/voice records from the microphone and types the words as the prompt (it needs an OpenAI key).",

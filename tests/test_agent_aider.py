@@ -122,7 +122,30 @@ class Launch(Env):
         (folder / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
         with mock.patch.object(core, "skill_prompt_args", lambda args: "--append-system-prompt-file /x/skill.md"):
             argv = self.a.build_command("w1", str(folder), None, None, {"system_prompt_file": True}, None)
-        self.assertEqual(argv[-4:], ["--read", "/x/skill.md", "--read", "AGENTS.md"])
+        self.assertEqual(argv[-4:], ["--read", "/x/skill.md", "--read", str((folder / "AGENTS.md").resolve())])
+
+    def test_each_agents_md_from_the_repository_root_to_the_start_folder_is_read(self):
+        # #6420: the end-to-end run asked for codewords in the root's and the start folder's AGENTS.md; Aider, started
+        # in the subfolder, answered NONE. The other agents read both, the root's first.
+        outside = self.root / "outside"
+        repo = outside / "repo"
+        sub = repo / "pkg" / "sub"
+        sub.mkdir(parents=True)
+        (repo / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")  # a worktree's .git is a file
+        for d in (outside, repo, sub):
+            (d / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+        want = [str((repo / "AGENTS.md").resolve()), str((sub / "AGENTS.md").resolve())]
+        self.assertEqual(aider.instruction_files(str(sub)), want)  # not the file above the repository
+        argv = self.a.build_command("w1", str(sub), None, None, {}, None)
+        self.assertEqual(argv[-4:], ["--read", want[0], "--read", want[1]])
+        # No repository: only the folder's own file.
+        lone = self.root / "lone" / "a"
+        lone.mkdir(parents=True)
+        (lone.parent / "AGENTS.md").write_text("# above\n", encoding="utf-8")
+        self.assertEqual(aider.instruction_files(str(lone)), [])
+        (lone / "AGENTS.md").write_text("# own\n", encoding="utf-8")
+        self.assertEqual(aider.instruction_files(str(lone)), [str((lone / "AGENTS.md").resolve())])
+        self.assertEqual(aider.instruction_files(None), [])
 
     def test_no_name_leaves_aiders_own_log(self):
         argv = self.a.build_command(None, None, "sonnet", None, {}, None)
@@ -167,6 +190,24 @@ class Launch(Env):
                                 "--no-show-release-notes", "--set-env", "MAXPM_AIDER_SESSION=w2"])
         self.assertEqual(self.a.resume_command(str(log))[4:8], ["--chat-history-file", str(log), "--input-history-file",
                                                                  str(self.root / "aider" / "w1.input.history")])
+
+    def test_a_resume_reads_the_agents_md_files_that_its_start_read(self):
+        # #6420: a resume has no folder; the session's log holds its start's command line, with its --read files.
+        repo = self.root / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        for d in (repo, sub):
+            (d / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+        start = self.a.build_command("w1", str(sub), "sonnet", None, {}, None)
+        log = self.root / "aider" / "w1.chat.history.md"
+        log.parent.mkdir()
+        # Aider logs its argv joined by spaces (main.py), after a '> '; a later line is not a command line.
+        log.write_text("\n# aider chat started at 2026-11-20 10:00:00\n\n> /usr/local/bin/" + " ".join(start)
+                       + "  \n> Aider v0.86.2  \n\n#### hello --read /x/AGENTS.md\n", encoding="utf-8")
+        (sub / "AGENTS.md").unlink()  # gone since the start: not read
+        argv = self.a.resume_command("w1", "sonnet", None, {})
+        self.assertEqual([w for k, w in zip(argv, argv[1:]) if k == "--read"], [str((repo / "AGENTS.md").resolve())])
 
     def test_a_maxpm_command_inside_aider_records_the_name_and_the_sessions_tab_finds_the_log(self):
         self.assertEqual(aider.IDENTITY["source"], "env")
