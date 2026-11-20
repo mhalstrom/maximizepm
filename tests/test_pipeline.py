@@ -2048,6 +2048,35 @@ class GitHub(Base):
         self.assertEqual((beta["key"], beta["state"], beta["approved_by"]), ("gh-run-202", "passed", "mark"))
         self.assertEqual(store.show(self.c, "mpm")["envs"][0]["rev"], "a" * 40)
 
+    def test_a_refused_artifact_download_skips_its_report_and_never_reads_as_a_refused_token(self):
+        # The storage host of the artifact answers 401 (#6459): the run is read, its report is skipped, and the
+        # pipeline keeps no error that the token check reads as GitHub's refusal of the token.
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": [
+            {"name": "junit-3.13", "expired": False, "archive_download_url": "https://api.github.com/download/1"}]})
+        self.api.routes[("GET", "/download/1")] = (401, b"<Error><Code>InvalidAuthenticationInfo</Code></Error>")
+        out = self.gh.poll(self.c, self.p())
+        self.assertEqual((out["runs"], out["tests"]), (1, 0))
+        self.assertFalse(self.p()["poll_error"])
+        self.assertEqual(self.stage_runs()["tests"]["state"], "passed")
+
+    def test_the_token_goes_only_to_the_host_it_was_sent_to(self):
+        import importlib.util
+        import urllib.request
+        path = os.path.join(os.path.dirname(store.__file__), "plugins", "github", "plugin.py")
+        spec = importlib.util.spec_from_file_location("maxpm_plugin_github_redirect", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        req = urllib.request.Request("https://api.github.com/repos/o/r/actions/artifacts/1/zip",
+                                     headers={"Authorization": "Bearer t", "User-Agent": "maxpm-pipeline"})
+        h = mod._Redirect()
+        blob = h.redirect_request(req, None, 302, "Found", {}, "https://blob.core.windows.net/x?sig=s")
+        self.assertNotIn("Authorization", blob.headers)
+        self.assertEqual(blob.headers["User-agent"], "maxpm-pipeline")
+        same = h.redirect_request(req, None, 302, "Found", {}, "https://api.github.com/repos/o/r/other")
+        self.assertEqual(same.headers["Authorization"], "Bearer t")
+
     def test_a_forge_gate_waits_for_the_tag_run_and_takes_it(self):
         define.stage_set(self.c, "mpm", "beta", gate="forge")
         self.runs["tests.yml"] = [gh_run(101, "a" * 40)]

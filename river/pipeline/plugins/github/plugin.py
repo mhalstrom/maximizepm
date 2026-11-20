@@ -33,6 +33,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -46,16 +47,35 @@ OUTCOME = {"success": "success", "failure": "failure", "timed_out": "failure", "
 
 
 class Failed(Exception):
-    """A call that did not work: main() answers {"error": <its words>} and exits 1."""
+    """A call that did not work: main() answers {"error": <its words>} and exits 1. status: the HTTP status, if any."""
+
+    def __init__(self, words, status=None):
+        super().__init__(words)
+        self.status = status
 
 
 # ---------------------------------------------------------------- the API
+
+class _Redirect(urllib.request.HTTPRedirectHandler):
+    """urllib keeps every header on a redirect, the token too. An artifact download redirects to a storage host
+    (GitHub: an Azure blob with its own signed address), which answers 401 to a token that is not its own (#6459):
+    the token goes only to the host that it was sent to."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            new.remove_header("Authorization")
+        return new
+
+
+_OPENER = urllib.request.build_opener(_Redirect)
+
 
 def http(method, url, headers, body):
     """One HTTP call: (status, bytes). Tests pass their own function with the same form (recorded answers)."""
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with _OPENER.open(req, timeout=20) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -104,10 +124,21 @@ class Api:
                 msg = json.loads(out or b"{}").get("message") or ""
             except (ValueError, AttributeError):
                 msg = (out or b"")[:200].decode("utf-8", "replace")
-            raise Failed(f"{self.name} answered {status} to {method} {path}: {msg}")
+            raise Failed(f"{self.name} answered {status} to {method} {path}: {msg}", status)
         if raw:
             return out
         return json.loads(out) if out else {}
+
+    def artifact(self, art):
+        """The zip of one artifact, or None with the reason. The forge answers its download with a redirect to a
+        storage host; a refusal there says nothing of the token (the artifact list just read with it worked), so it
+        fails only this artifact, and its words never read as the forge's refusal of the token (#6459)."""
+        try:
+            return zipfile.ZipFile(io.BytesIO(self.call("GET", art["archive_download_url"], raw=True))), None
+        except Failed as e:
+            return None, f"the download of the artifact {art.get('name')} failed with HTTP status {e.status}"
+        except zipfile.BadZipFile:
+            return None, f"the artifact {art.get('name')} is not a zip file"
 
     def optional(self, path, default):
         """A read that some Gitea and Forgejo versions do not have (jobs, artifacts): default when they have none."""
@@ -233,7 +264,10 @@ def junit_reports(api, stage, run):
     for a in arts:
         if a.get("expired") or not (a["name"] == want if want else a["name"].lower().startswith("junit")):
             continue
-        with zipfile.ZipFile(io.BytesIO(api.call("GET", a["archive_download_url"], raw=True))) as z:
+        z, _why = api.artifact(a)
+        if z is None:
+            continue  # this report is skipped; the read of the run goes on (#6459)
+        with z:
             for name in z.namelist():
                 if name.lower().endswith(".xml"):
                     out.append({"run_key": f"gh-run-{run['id']}", "xml": z.read(name).decode("utf-8", "replace")})
@@ -371,7 +405,10 @@ def agent_artifact(api, run):
     if art is None:
         return {"note": f"the job left no artifact {AGENT_ART}"}
     out = {}
-    with zipfile.ZipFile(io.BytesIO(api.call("GET", art["archive_download_url"], raw=True))) as z:
+    z, why = api.artifact(art)
+    if z is None:
+        return {"note": why}
+    with z:
         names = {n.rsplit("/", 1)[-1]: n for n in z.namelist()}
         if "proof.json" in names:
             try:
