@@ -5446,6 +5446,18 @@ def render_status(res):
         print(f"  {ag['name']} ({ag['kind']}, {ag['state']}): {holds}{owns}")
     if res.get("ended"):
         print(f"  ({res['ended']} stopped or gone agent(s) that hold nothing: maxpm who --all)")
+    if res.get("providers"):
+        print()
+        how = "agent_order" if res["providers"][0].get("set") else "the launch_agents entries; agent_order sets an order and limits"
+        print(f"Agent providers, in launch order ({how}):")
+        for p in res["providers"]:
+            me = ", ".join(x for x in (p.get("run_model"), p.get("run_effort")) if x)
+            slots = (f"{p['used']} of {p['max']} session{'s' if p['max'] != 1 else ''}" if p["max"] is not None
+                     else f"{p['used']} session{'s' if p['used'] != 1 else ''}, no limit")
+            use = (f"AT USAGE LIMIT{' ' + p['until'] if p.get('until') else ''}" if p["limited"]
+                   else f"{p['remaining_pct']:.0f}% usage left" if p.get("remaining_pct") is not None else "usage not known")
+            full = " (full: the next provider takes new work)" if p["full"] and not p["limited"] else ""
+            print(f"  {p['pos']}. {p['label']}{f' ({me})' if me else ''}: {slots}{full}; {use}")
     if res.get("agent_limits"):
         print()
         print("Agent usage:")

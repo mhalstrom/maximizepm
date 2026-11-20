@@ -27,6 +27,9 @@
       <code>Claude Code=@claude-code; Plan first=@claude-code permission_mode=plan; Codex=@codex; Grok=grok "run maxpm go in this folder and follow the briefing"</code>.
       Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</details>
     <div class="set-setup" id="setSetupRow"><button class="btn" id="openSetup">Open setup guide</button></div>
+    <!-- #6361: the agent providers in launch order (agent_order), each with its model and effort (the agent's own
+         settings), its limit of active sessions and the sessions it runs now; views/settings.js renderProviders. -->
+    <div id="setProviders" class="set-providers hidden"></div>
     <!-- #5850: one row per setting: its label, its value for every project, the values for one project, agent or item. -->
     <div id="setRows" class="set-rows"></div>
     <details class="set-scoped"><summary>Set one for a single project, agent or item</summary>

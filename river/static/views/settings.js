@@ -8,6 +8,7 @@ import { button, iconButton } from "../components/button.js";
 import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
 import { labelOf, programOf } from "./settingLabels.js";
+import { loadAgents } from "../components/agents.js";
 
 const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -82,6 +83,8 @@ export function renderSettings() {
   $("#setGroupNote").textContent = g[2];
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
+  $("#setProviders").classList.toggle("hidden", current !== "agents");
+  if (current === "agents") renderProviders();
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
     .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
@@ -104,6 +107,80 @@ export function renderSettings() {
     tableGroup = current;
   }
 }
+
+// The agent providers (#6361, mark 2026-11-20: 'we should be able to set the agent usage priority and when all the
+// slots of a provider are used we go to the next provider down'; and 'with aggy there is a claude model usage credit
+// that has a seperate 5 hour limit'): one row for each entry in launch order, an agent and its model, so one agent can
+// have an entry for each model group. Each has its model and effort (empty: the agent's own setting, shown greyed),
+// its limit of active sessions (empty: no limit), the sessions it runs now, ↑ ↓ ✕, and Add. A change writes
+// agent_order for every project.
+function provField(i, k, p) {
+  const ph = (k === "model" ? p.run_model : p.run_effort) || "its default";
+  return `<input data-prov-field="${k}" data-prov-i="${i}" value="${esc(p[k] || "")}" placeholder="${esc(ph)}" aria-label="${esc(p.label)} ${k}">`;
+}
+function renderProviders() {
+  const host = $("#setProviders");
+  if (host.contains(document.activeElement)) return;  // a field the person types in keeps its text
+  loadAgents().then((agents) => drawProviders(host, agents));
+}
+function drawProviders(host, agents) {
+  const P = S.providers || [], set = P.length && P[0].set;
+  const rows = P.map((p, i) => {
+    const use = p.limited ? chip("c-warn", "at usage limit") : p.remaining_pct != null ? `${Math.round(p.remaining_pct)}% left` : "";
+    return `<div class="prov-row">
+      <span class="prov-name"><span class="muted" title="Launch order">${p.pos}</span> ${esc(p.label)}</span>
+      <label class="prov-f">Model${provField(i, "model", p)}</label>
+      <label class="prov-f">Effort${provField(i, "effort", p)}</label>
+      <label class="prov-f prov-max">Max sessions<input data-prov-field="max" data-prov-i="${i}" inputmode="numeric" value="${p.max == null ? "" : p.max}" placeholder="no limit" aria-label="${esc(p.label)} max sessions"></label>
+      <span class="prov-used t-s${p.full ? " prov-full" : " muted"}">${p.used} running${p.full ? ", full" : ""}${use ? ` · ${use}` : ""}</span>
+      <span class="prov-acts">${iconButton("↑", `Move ${p.name} up`, { data: { "prov-up": i } })}${iconButton("↓", `Move ${p.name} down`, { data: { "prov-down": i } })}${iconButton("✕", `Remove ${p.name}`, { data: { "prov-del": i } })}</span>
+    </div>`;
+  }).join("");
+  // An agent can be added again, with another model (an entry for each model group).
+  const free = (agents || []).filter(a => a.launch && Object.keys(a.launch).length);
+  const html = `<div class="cred-sub">Agent providers, in launch order</div>
+    <div class="muted t-s set-note">A new session takes the first provider with a free slot and usage left. ${set ? ""
+      : "No order is set: these are the Start button's agents. A change here saves the order."}</div>
+    ${rows || `<div class="muted">No provider yet.</div>`}
+    ${free.length ? `<div class="prov-add"><select id="provAdd" aria-label="Agent to add">${free.map(a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join("")}</select>${button("Add provider", { data: { "prov-add": "1" } })}</div>` : ""}`;
+  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+}
+async function saveOrder(list) {
+  const value = list.map(p => [p.agent, ...["model", "effort", "max"].filter(k => p[k] != null && p[k] !== "")
+    .map(k => `${k} ${p[k]}`)].join(" ")).join(", ");
+  try {
+    if (value) await act("config_set", { key: "agent_order", value });
+    else await act("config_unset", { key: "agent_order" });
+    toast(value ? `Agent providers: ${value}` : "Agent providers: back to the Start button's agents");
+  } catch (e) { /* act showed the error */ }
+}
+const provList = () => (S.providers || []).map(p => ({ agent: p.platform || p.agent, model: p.model, effort: p.effort, max: p.max }));
+$("#setProviders").addEventListener("change", (e) => {
+  const t = e.target, k = t.dataset.provField;
+  if (!k) return;
+  const v = t.value.trim();
+  if (k === "max" && v && !/^\d{1,4}$/.test(v)) { toast("Max sessions: a whole number, or empty for no limit", true); return; }
+  const L = provList(), i = +t.dataset.provI;
+  L[i] = { ...L[i], [k]: v === "" ? null : k === "max" ? +v : v };
+  saveOrder(L);
+});
+$("#setProviders").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); e.target.blur(); }
+});
+$("#setProviders").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-prov-up],[data-prov-down],[data-prov-del],[data-prov-add]");
+  if (!t) return;
+  const L = provList();
+  if (t.dataset.provAdd) return saveOrder([...L, { agent: $("#provAdd").value }]);
+  const i = +(t.dataset.provUp ?? t.dataset.provDown ?? t.dataset.provDel);
+  if (t.dataset.provDel !== undefined) L.splice(i, 1);
+  else {
+    const j = t.dataset.provUp !== undefined ? i - 1 : i + 1;
+    if (j < 0 || j >= L.length) return;
+    [L[i], L[j]] = [L[j], L[i]];
+  }
+  saveOrder(L);
+});
 
 // A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
 export async function saveRow(el) {

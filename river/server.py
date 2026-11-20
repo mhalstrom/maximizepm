@@ -171,14 +171,15 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
 
 
 def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
-                  prompt=None, folder=None, reuse_workspace_from=None):
+                  prompt=None, folder=None, reuse_workspace_from=None, auto_agent=False):
     """Start work on one ready item: a session that waits for work in its project gets it (push);
     else river names a new session, reserves the item for it (push), and opens the chosen agent in the
     project folder with MAXPM_AGENT set to that name and MAXPM_FOCUS=item:<id>, so its first maxpm go takes it.
     With a custom prompt (maxpm launch --prompt) it always opens a new session.
-    reuse_workspace_from: another session's name whose active worktree this new session continues (#6348)."""
+    reuse_workspace_from: another session's name whose active worktree this new session continues (#6348).
+    auto_agent: `agent` is maxpm serve's preference, and the provider list replaces it when it is full (#6361)."""
     t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
-                           prompt=prompt, folder=folder)
+                           prompt=prompt, folder=folder, auto_agent=auto_agent)
     waiting = None if (t["custom_prompt"] or reuse_workspace_from) else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
@@ -786,6 +787,11 @@ def _started(conn, name, t):
     platform = t.get("platform") or core._exe_platform(t.get("command") or "")
     if name and platform:
         core.set_agent_type(conn, name, platform)
+    if name and t.get("model"):  # its provider entry counts it at once (#6361), before its first maxpm go says it
+        try:
+            core.set_agent_model(conn, name, t["model"])
+        except RiverError:
+            pass
     if name and t.get("session_id"):
         core.record_session(conn, name, t["session_id"])  # a start that chose its session's id (Aider, #5280)
 
@@ -3188,7 +3194,7 @@ def _limit_model(conn, agent, ad, lines):
 
 def _handle_limit_stops(conn, limit_hits):
     """#6348: When a worker session stops at its usage limit, stop it with a handback note and start its item again
-    with the next agent of agent_order that is not at its limit (default Antigravity, then Claude Code), continuing the
+    with the next provider of agent_order that has usage left and a free slot (#6361: core.agent_providers), continuing the
     uncommitted work in the same folder/worktree. Returns a list of restart/alert result dicts."""
     out = []
     for agent, (ad, hit, _pane) in sorted(limit_hits.items()):
@@ -3235,13 +3241,13 @@ def _handle_limit_stops(conn, limit_hits):
                 core.sync_needs_you(conn)
             out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "reason": "no fallback"})
             continue
-        _fb_id, fb_label = fb
+        _fb_id, fb_label, _entry = fb  # dispatch_item picks the entry again (#6361): its model and effort run
         cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at its {ad.label} usage limit"
                        f"{reset_part} ({msg}). Check git status and git diff in this folder and continue the "
                        f"uncommitted work.")
         try:
             started = dispatch_item(conn, primary["id"], agent=fb_label, actor="maxpm",
-                                    prompt=cont_prompt, reuse_workspace_from=agent)
+                                    prompt=cont_prompt, reuse_workspace_from=agent, auto_agent=True)
         except RiverError as e:
             manager = core.active_manager(conn)
             to = [manager] if manager else [
@@ -3754,11 +3760,16 @@ def start_fresh(conn, item_id, why, runner=None):
         return resumed
     it = core.annotate(conn)[item_id]
     p = core._project(conn, it["project"])
-    label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
-    opt = next((o for o in core.launch_options(conn) if o["label"] == label), None)
+    # The item's agent is a preference: a provider at its limit of sessions or usage gives the item to the next one of
+    # agent_order (#6361). With agent_order set, an item that names no agent of its own takes the list's first.
+    if it["agent"] and not core.default_gives_way(conn, it.get("agent_from"), p["id"]):
+        label = core.agent_for_type(conn, it["agent"], p["id"])
+    else:
+        label = None if core.provider_order_set(conn, p["id"]) else _agent_for(conn, it["model"])[0]
+    opt = next((o for o in core.launch_options(conn) if o["label"] == label), None) if label else None
     model = it["model"] if opt and any(x["name"] == it["model"] for x in opt["models"]) else None
     effort = it["effort"] if opt and it["effort"] in opt["efforts"] else None
-    t = core.launch_target(conn, agent=label, item=item_id, model=model, effort=effort)
+    t = core.launch_target(conn, agent=label, item=item_id, model=model, effort=effort, auto_agent=True)
     _can_open_terminal(runner, f"cd {t['path']} && MAXPM_FOCUS=item:{item_id} claude go")
     return _start_for_item(conn, t, runner, "maxpm", why, by="maxpm serve")
 

@@ -691,14 +691,19 @@ DEFAULT_SETTINGS = {
     # (--kind).
     "agent_rules": "",
     "default_agent": "",
-    # The agent types in the order a launch tries them when one is at its usage limit (#6348): a session that stops at
-    # its limit starts again on the first other agent of the list that is not at its limit, and a launch whose agent
-    # is at its limit takes that one. One ordered list, comma separated.
-    "agent_order": "antigravity, claude-code",
     # When no session of Claude Code or Antigravity runs, maxpm serve opens it in a hidden tmux pane, types /usage,
     # reads the remaining usage, and closes it (#6364): at most once in usage_probe_every for each agent, and not while
     # a reading is newer than that. 0s: never.
     "usage_probe_every": "30m",
+    # The provider entries in the order a launch takes them (#6348, #6361): an agent with an optional model, effort and
+    # limit of active sessions, and an entry for each model group of an agent that has a usage window for each
+    # (agy's Gemini and Claude models): "antigravity model gemini-4-neon effort medium max 2, antigravity model
+    # claude-opus-5-5, claude-code model opus". A launch that names no agent takes the first entry with a free slot
+    # and usage left for its model, and runs that model and effort; an entry at its limit of sessions or of usage is
+    # skipped. A session that stops at its usage limit starts again on the next entry down. An explicit --agent still
+    # wins. Empty: the launch_agents entries in their order, with no limits, and default_agent picks first. With a list,
+    # a global default_agent gives way to it. An entry with no model runs the agent's own (agy_model, ...).
+    "agent_order": "",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
     # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
     # deployer a deploy item, an expert an expert-tier task; the manager has no item.
@@ -3522,22 +3527,59 @@ def _rule_agent(rules, it):
 DEFAULT_LIMIT_COOLDOWN = timedelta(minutes=30)
 
 
-def parse_agent_order(value):
-    """The agent_order setting (#6348): agent types in the order a launch tries them, 'antigravity, claude-code'
-    ('->' between them works too). One ordered list, so the provider list of #6361 extends it. Returns the adapter
-    ids, each once; [] when empty."""
+_ENTRY_KEYS = ("model", "effort", "max")
+
+
+def parse_providers(value):
+    """The agent_order setting (#6348, #6361): the provider entries in the order a launch takes them. An entry is an
+    agent, with an optional model (an agent can have one entry for each model group: mark 2026-11-20, agy's Claude
+    models have a 5-hour window of their own), effort, and limit of active sessions:
+    'antigravity model gemini-4-neon effort medium max 2, antigravity model claude-opus-5-5, claude-code model opus'
+    ('->' or ';' between entries works too, and 'max=2'). Returns [{"agent": adapter id, "model", "effort", "max": int
+    or None}]; [] when empty. A limit of 0 keeps the entry in the list and starts no session on it."""
     out = []
     for raw in re.split(r"\s*(?:,|->|;|\n)\s*", value or ""):
-        name = raw.strip()
-        if not name:
+        raw = raw.strip()
+        if not raw:
             continue
-        ad = _adapters().find(name)
+        words = re.sub(r"\s*=\s*", " ", raw).split()
+        i = next((k for k, w in enumerate(words) if w.lower() in _ENTRY_KEYS), len(words))
+        name, rest, entry = " ".join(words[:i]), words[i:], {"model": None, "effort": None, "max": None}
+        if len(rest) % 2:
+            raise RiverError(f"agent_order: {raw!r}: each of model, effort and max needs a value, as "
+                             f"\"antigravity model gemini-4-neon effort medium max 2\"")
+        for k, v in zip(rest[::2], rest[1::2]):
+            k = k.lower()
+            if k not in _ENTRY_KEYS:
+                raise RiverError(f"agent_order: {raw!r}: {k!r} is none of model, effort, max")
+            if k == "max":
+                if not re.fullmatch(r"\d{1,4}", v):
+                    raise RiverError(f"agent_order: {raw!r}: max is a whole number of sessions, as \"antigravity max 2\"")
+                v = int(v)
+            elif k == "model":
+                _check_model_name(v)
+            elif not re.match(r"^[a-z][a-z0-9_-]{0,31}$", v):
+                raise RiverError(f"agent_order: {raw!r}: effort {v!r}: a level such as low, medium, high")
+            entry[k] = v
+        ad = _adapters().find(name) or _adapters().find(name.replace(" ", "-"))  # 'Claude Code' too
         if ad is None:
             raise RiverError(f"agent_order: unknown agent {name!r}; known: {', '.join(agent_types())}")
-        if ad.id in out:
-            raise RiverError(f"agent_order: {ad.id} is in the list twice")
-        out.append(ad.id)
+        if any(p["agent"] == ad.id and (p["model"] or "") == (entry["model"] or "") for p in out):
+            raise RiverError(f"agent_order: {ad.id}{' model ' + entry['model'] if entry['model'] else ''} is in the "
+                             f"list twice")
+        out.append({"agent": ad.id, **entry})
     return out
+
+
+def providers_text(entries):
+    """agent_order's text of provider entries (parse_providers), as the page writes it."""
+    return ", ".join(" ".join([_platform_of(_adapters().find(p["agent"])) or p["agent"]]
+                              + [f"{k} {p[k]}" for k in _ENTRY_KEYS if p.get(k) is not None]) for p in entries)
+
+
+def parse_agent_order(value):
+    """The adapter ids of agent_order (parse_providers), in order."""
+    return [p["agent"] for p in parse_providers(value)]
 
 
 def _limit_adapter_id(agent_type):
@@ -3811,19 +3853,139 @@ def record_log_limits(conn):
     return out
 
 
-def fallback_agent(conn, agent_type, project_id=None, model=None):
-    """The agent that takes over from `agent_type` at its usage limit (#6348): the first agent of agent_order, other
-    than `agent_type`, that is not at its limit for `model` (agent_is_limited) and has a launch entry. Returns
-    (adapter_id, launch_label), or None when the list names no such agent."""
-    aid = _limit_adapter_id(agent_type)
-    for cur in parse_agent_order(setting(conn, "agent_order", project_id=project_id)):
-        if cur == aid or agent_is_limited(conn, cur, model=model, project_id=project_id):
+def provider_sessions(conn):
+    """The live agent sessions (#6361): [(adapter id, model or None)] of the sessions that max_sessions counts
+    (live_sessions: not gone or stopped; no assistant or plain session), whose agent type is known."""
+    return [(_limit_adapter_id(r["agent_type"]), r["model"]) for r in conn.execute(
+        "SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL AND agent_type != '' "
+        "AND COALESCE(role, '') NOT IN ('assistant', 'plain')") if _agent_state(conn, r) not in ("gone", "stopped")]
+
+
+def _model_key(conn, model, ladder=None):
+    """The provider word of a model, which matches a session to a provider entry (#6361): its model_ladder family
+    (opus: claude), else its first word (gemini-4-neon: gemini; claude-opus-5-5-medium: claude). None for no model."""
+    m = (model or "").strip().lower()
+    if not m:
+        return None
+    fam, _ = _family(ladder if ladder is not None else parse_ladder(setting(conn, "model_ladder")), m)
+    if fam:
+        return fam.lower()
+    w = re.findall(r"[a-z]+", m)
+    return w[0] if w else m
+
+
+def _entry_usage(conn, st, model):
+    """The usage left for a model of an agent (#6361, #6370): the least remaining_percent of the windows that cover
+    it (a window of its model group, or of every model); the agent's own number when no window names a group."""
+    if not st:
+        return None
+    wins = [w for w in st.get("windows") or () if w.get("remaining_percent") is not None]
+    if model and any(_window_group(w.get("name")) for w in wins):
+        words = _model_words(conn, model)
+        cover = [w["remaining_percent"] for w in wins
+                 if _window_group(w.get("name")) is None or _window_group(w.get("name")) & words]
+        if cover:
+            return round(min(float(x) for x in cover), 1)
+    return st["remaining_pct"]
+
+
+def provider_order_set(conn, project_id=None):
+    """Whether agent_order names providers for this project (or every project): then the list picks the agent of a
+    launch that names none, before a global default_agent (#6361)."""
+    return bool((setting(conn, "agent_order", project_id=project_id) or "").strip())
+
+
+def default_gives_way(conn, source, project_id=None):
+    """Whether an item's or role's agent from `source` gives way to the provider list (#6361): a global default_agent
+    does when agent_order is set; an item's own --agent, agent_rules, agent_for.<role> and a default_agent of a
+    project, kind or item stay the first choice, and the list is their fallback."""
+    return source == "global" and provider_order_set(conn, project_id)
+
+
+def agent_providers(conn, project_id=None, model=None):
+    """The provider entries in launch order (#6361): agent_order, else the agent types of the launch_agents entries
+    (no model, no limit). Each: its place (pos), adapter id, platform, label, name (the label and its model), its own
+    model and effort (None: the agent's own settings, agy_model and the like) and the model a launch runs (run_model),
+    its limit (max: None for no limit), the live sessions it counts (used: a session of the agent counts for the first
+    entry of the agent whose model has the session's provider word, else for the first entry of the agent with no model
+    of its own), full (used >= max), and its usage for that model (limited, until, remaining_pct; #6370 counts a model
+    group's window only for its models). set: the list comes from agent_order. model: the launch's model, for an
+    entry that names none."""
+    text = setting(conn, "agent_order", project_id=project_id) or ""
+    lst = parse_providers(text)
+    if not lst:
+        seen = []
+        for _, cmd in parse_launch_agents(setting(conn, "launch_agents", project_id=project_id)):
+            prof = parse_profile(cmd)
+            plat = prof[0] if prof else _exe_platform(entry_exe(cmd))
+            aid = _limit_adapter_id(plat) if plat else None
+            if aid and aid not in seen and _adapters().find(aid) is not None:
+                seen.append(aid)
+        lst = [{"agent": a, "model": None, "effort": None, "max": None} for a in seen]
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    runs, keys, stats = [], [], {}
+    for p in lst:
+        ad = _adapters().find(p["agent"])
+        runs.append(p["model"] or (agent_default(conn, ad, "model", project_id) if ad else None) or model
+                    or (ad.describe.get("default_model") if ad else None) or None)
+        keys.append(_model_key(conn, runs[-1], ladder))
+        if p["agent"] not in stats:
+            stats[p["agent"]] = agent_limit_status(conn, p["agent"])
+    used = [0] * len(lst)
+    for aid, smodel in provider_sessions(conn):
+        mine = [i for i, p in enumerate(lst) if p["agent"] == aid]
+        if not mine:
             continue
-        ad = _adapters().find(cur)
-        plat = (ad.describe.get("platform") or ad.id) if ad is not None else cur
-        lbl = agent_for_type(conn, plat, project_id)
+        key = _model_key(conn, smodel, ladder)
+        i = next((i for i in mine if key and keys[i] == key), None)
+        i = i if i is not None else next((i for i in mine if not lst[i]["model"]), mine[0])
+        used[i] += 1
+    out = []
+    for i, p in enumerate(lst):
+        ad = _adapters().find(p["agent"])
+        lim = agent_is_limited(conn, p["agent"], model=runs[i], project_id=project_id)
+        label = ad.label if ad else p["agent"]
+        out.append({
+            "pos": i + 1, "agent": p["agent"], "platform": _platform_of(ad), "label": label,
+            "name": f"{label} ({p['model']})" if p["model"] else label,
+            "model": p["model"], "effort": p["effort"], "run_model": runs[i],
+            "run_effort": p["effort"] or (agent_default(conn, ad, "effort", project_id) if ad else None),
+            "max": p["max"], "used": used[i], "full": p["max"] is not None and used[i] >= p["max"],
+            "limited": bool(lim), "until": _until_text(lim).strip() if lim else "",
+            "limit_reason": lim["reason"] if lim and lim.get("model") else None,  # a model group's window (#6370)
+            "remaining_pct": 0.0 if lim else _entry_usage(conn, stats[p["agent"]], runs[i]),
+            "set": bool(text.strip()),
+        })
+    return out
+
+
+def _slots_text(p):
+    return f"{p['used']} of {p['max']} session{'s' if p['max'] != 1 else ''}"
+
+
+def _entry_for(conn, provs, aid, model):
+    """The provider entry of an agent and a model (#6361): the first entry of the agent whose model has the model's
+    provider word, else its first entry with no model of its own, else its first entry; None when the list has none."""
+    mine = [p for p in provs if p["agent"] == aid]
+    key = _model_key(conn, model)
+    return (next((p for p in mine if key and _model_key(conn, p["run_model"]) == key), None)
+            or next((p for p in mine if not p["model"]), None) or (mine[0] if mine else None))
+
+
+def fallback_agent(conn, agent_type, project_id=None, model=None, slots=True):
+    """The provider entry that takes over from `agent_type` running `model` at its usage limit (#6348, #6361): the
+    first entry of the list (agent_providers) other than that one, with usage left for its model (#6370), a free slot
+    (slots), and a launch entry: another model group of the same agent counts (agy's Claude models when its Gemini
+    window is empty). Returns (adapter_id, launch_label, entry), or None when the list names no such entry."""
+    aid = _limit_adapter_id(agent_type) if agent_type else None
+    provs = agent_providers(conn, project_id, model=model)
+    stopped = _entry_for(conn, provs, aid, model) if aid else None
+    for p in provs:
+        if p is stopped or p["limited"] or (slots and p["full"]):
+            continue
+        lbl = agent_for_type(conn, p["platform"], project_id)
         if lbl:
-            return cur, lbl
+            return p["agent"], lbl, p
     return None
 
 
@@ -3835,33 +3997,83 @@ def _until_text(lim):
     return ""
 
 
-def pick_available_agent(conn, agent, project_id=None, explicit=False, model=None):
-    """Ensure a new launch picks no agent that is at its usage limit until its reset time (#6348).
-    `agent`: a launch_agents label (or None for the first entry). `model`: the model of the launch, when it is
-    known; a model group at its limit counts only for a model of that group (#6370).
-    Returns (chosen_label, fallback_note_or_None). Raises RiverError if the agent is limited and explicit=True,
-    or if no non-limited fallback is available."""
-    entries = launch_entries(conn, project_id)
-    pick = entries[0] if agent is None else next((a for a in entries if a[0] == agent), None)
-    if pick is None:
-        return agent, None
-    prof = parse_profile(pick[1])
-    plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
-    if not plat:
-        return pick[0], None
-    lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
-    if not lim:
-        return pick[0] if agent is not None else agent, None
-    until = _until_text(lim)
+def _limit_what(lim):
     # A model group at its limit (#6370): name the group, so the person can pick a model of another group.
-    what = f"{lim['label']} ({lim['reason']})" if lim.get("model") else lim["label"]
-    if explicit:
-        raise RiverError(f"{what} is at its usage limit{until}; pick another agent"
-                         + (" or model" if lim.get("model") else "") + " or wait until it resets")
-    fb = fallback_agent(conn, plat, project_id=project_id, model=model)
-    if fb is not None:
-        return fb[1], f"{what} is at its usage limit{until}; using {fb[1]}"
-    raise RiverError(f"{what} is at its usage limit{until}, and no fallback agent is available")
+    return f"{lim['label']} ({lim['reason']})" if lim.get("model") else lim["label"]
+
+
+def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, model=None, fits=None):
+    """The launch entry and provider entry a new session starts (#6348, #6361, #6370). `agent`: a launch_agents
+    label, or None. `model`: the launch's model when it is known (a model group at its limit counts only for a model
+    of that group). fits(model, platform): whether an entry's model fits the item's limits; an entry that does not
+    is skipped.
+    - explicit (--agent, the dialog's choice): that agent; refused only when it is at its usage limit.
+    - None, and agent_order is set: the first entry of the list with a free slot and usage left for its model.
+    - None with no agent_order (the first launch entry), or a preference (the item's agent, a role's): that agent's
+      entry, unless it is at its usage limit or (slots) has no free slot; then the first such entry of the list.
+    slots: count the limits of active sessions (a work launch); the manager, an expert and a deployer start anyway.
+    Returns {"label" (None: the first launch entry), "model" and "effort" (the entry's own, else None), "pos" (the
+    entry's place, or None), "note" (why it is not the first choice, or None)}. Raises RiverError when no entry is
+    free."""
+    entries = launch_entries(conn, project_id)
+    provs = agent_providers(conn, project_id, model=model)
+    none = {"model": None, "effort": None, "pos": None, "note": None}
+    skip = None
+    if agent is None and provs and provs[0]["set"]:
+        why = None
+    else:
+        pick = entries[0] if agent is None else next((a for a in entries if a[0] == agent), None)
+        if pick is None:
+            return {**none, "label": agent}
+        prof = parse_profile(pick[1])
+        plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
+        keep = pick[0] if agent is not None else agent
+        if not plat:
+            return {**none, "label": keep}
+        aid = _limit_adapter_id(plat)
+        if explicit:
+            lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
+            if lim:
+                raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
+                                 + (" or model" if lim.get("model") else "") + " or wait until it resets")
+            return {**none, "label": agent}
+        skip = _entry_for(conn, provs, aid, model)
+        run = model or (skip["run_model"] if skip else None)
+        lim = agent_is_limited(conn, plat, model=run, project_id=project_id)
+        full = slots and skip is not None and skip["full"]
+        if not lim and not full:
+            got = skip if skip is not None and not model else None
+            return {**none, "label": keep, **({"model": got["model"], "effort": got["effort"], "pos": got["pos"]}
+                                              if got else {})}
+        why = (f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
+               else f"{skip['name']} has {_slots_text(skip)}")
+    skipped = []
+    for p in provs:
+        if p is skip:
+            continue
+        if p["limited"] or (slots and p["full"]):
+            why_lim = f" ({p['limit_reason']})" if p.get("limit_reason") else ""
+            skipped.append(f"{p['name']}{why_lim} " + (f"is at its usage limit{(' ' + p['until']) if p['until'] else ''}"
+                                                       if p["limited"] else f"has {_slots_text(p)}"))
+            continue
+        if fits and p["model"] and not fits(p["model"], p["platform"]):
+            skipped.append(f"{p['name']} is outside the item's model limits")
+            continue
+        lbl = agent_for_type(conn, p["platform"], project_id)
+        if lbl:
+            note = "; ".join(([why] if why else []) + skipped)
+            return {"label": lbl, "model": p["model"], "effort": p["effort"], "pos": p["pos"],
+                    "note": f"{note}; using {p['name']}" if note else None}
+    allw = "; ".join(([why] if why else []) + skipped) or "agent_order names no provider with a launch entry"
+    raise RiverError(f"{allw}, and no fallback agent is available: the work starts when a session ends or a limit "
+                     f"resets (maxpm status shows the providers; maxpm config set agent_order \"<agent> max <n>, ...\" "
+                     f"changes a limit)")
+
+
+def pick_available_agent(conn, agent, project_id=None, explicit=False, slots=True, model=None):
+    """pick_provider's launch label and note: (label or None for the first launch entry, note or None)."""
+    got = pick_provider(conn, agent, project_id, explicit=explicit, slots=slots, model=model)
+    return got["label"], got["note"]
 
 
 def _levels(value):
@@ -21869,6 +22081,7 @@ def status(conn, recent=10):
         "excess_sessions": cap["excess_sessions"],
         "advice": cap["advice"],
         "agent_limits": agent_limits_list(conn),
+        "providers": agent_providers(conn),
     }
 
 
@@ -23039,7 +23252,7 @@ def project_sessions(conn, ann=None):
 
 
 def launch_target(conn, project=None, agent=None, item=None, model=None, effort=None, spread=False,
-                  options=None, actor=None, prompt=None, folder=None, preview=False):
+                  options=None, actor=None, prompt=None, folder=None, preview=False, auto_agent=False):
     """Where and how a new agent session should start: the folder of the project that holds the most
     important ready item an agent can take (or of the project named, or of the one item named), and the
     command of the chosen launch_agents entry (the first when none is named). Refuses when nothing is ready there.
@@ -23097,8 +23310,10 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not p["path"] and top["kind"] == "review":
         # A deploy project has no folder: the reviewer starts in a folder of the release.
         p = _review_folder(conn, top) or p
-    explicit_agent = agent is not None
-    if agent is None and top["agent"]:
+    # auto_agent (maxpm serve's starts): the agent passed is a preference, which the provider list replaces when it is
+    # full or at its usage limit (#6361); a person's --agent or the dialog's choice is explicit and wins.
+    explicit_agent = agent is not None and not auto_agent
+    if agent is None and top["agent"] and not default_gives_way(conn, top.get("agent_from"), p["id"]):
         agent = agent_for_type(conn, top["agent"], p["id"])
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
@@ -23107,17 +23322,36 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         return {"project": p["name"], "path": p["path"] or None,
                 "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
                 "ready": len(pool), "why": why}
-    agent, fallback_why = pick_available_agent(conn, agent, project_id=p["id"], explicit=explicit_agent,
-                                               model=model or top.get("model"))
+    # The provider entry (#6361): a person's --model, or the item's own model, is the launch's model; else the entry's
+    # model and effort run (agent_order: 'antigravity model claude-opus-5-5 effort medium'). An entry whose model is
+    # outside the item's limits is skipped.
+    model_explicit = model is not None and not auto_agent
+    own_model = top.get("model") if top.get("model_from") == "item" else None
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+
+    def fits(m, plat_):
+        return model_check(ladder, m, top["min_model"], top["max_model"],
+                           platform_spec(plat_)["family"] if plat_ else None)[0]
+    preferred = agent
+    got = pick_provider(conn, agent, project_id=p["id"], explicit=explicit_agent,
+                        model=model if model_explicit else own_model, fits=fits)
+    agent, fallback_why = got["label"], got["note"]
+    if auto_agent and preferred is not None and agent != preferred:
+        model = effort = None  # chosen for the preferred agent: the new one takes the item's own or its default
+    entry_model = got["model"] if got["model"] and not model_explicit and not own_model else None
+    if entry_model:
+        model = entry_model
+    if got["effort"] and (effort is None or auto_agent) and top.get("effort_from") != "item":
+        effort = got["effort"]
     p = start_folder(conn, p, folder, actor)
     plat = _launch_platform(conn, p["id"], agent)
     if model:
         # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
-        ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"],
+        ok, why = model_check(ladder, model, top["min_model"], top["max_model"],
                               platform_spec(plat)["family"] if plat else None)
         if not ok:
             raise RiverError(f"#{top['id']} {why}; pick another model")
-        model_why = "chosen for this launch"
+        model_why = f"provider {got['pos']} of agent_order" if entry_model else "chosen for this launch"
     else:
         # No model named: the item's own (#4961), else the default_model setting (#5346: the manager launched seven
         # items with default_model opus and each pane ran Sonnet, the CLI's own default), of the agent's family, so
@@ -23184,15 +23418,17 @@ def role_agent(conn, role, project_id=None, item_id=None):
         if role != item_role(it):  # the item is taken in another role (an expert for a work item): that role's agent
             it = {**dict(it), "kind": {"reviewer": "review", "deployer": "deploy"}.get(role, "work"),
                   "tier": "expert" if role == "expert" else None}
-        t = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn),
-                         setting(conn, "model_ladder"))["agent"]
+        m = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn),
+                         setting(conn, "model_ladder"))
         project_id = it["project_id"] if project_id is None else project_id
+        t = None if default_gives_way(conn, m["agent_from"], project_id) else m["agent"]  # #6361: the provider list
     else:  # the most specific scope wins: a project's default_agent comes before a global agent_for.<role>
         scopes = ([f"project:{_project_name(conn, project_id)}"] if project_id is not None else []) + ["global"]
         for sc in scopes:
             rows = {r["key"]: r["value"] for r in conn.execute(
                 "SELECT key, value FROM settings WHERE scope=? AND key IN (?, 'default_agent')", (sc, f"agent_for.{role}"))}
-            t = rows.get(f"agent_for.{role}") or rows.get("default_agent")
+            t = rows.get(f"agent_for.{role}") or (
+                None if default_gives_way(conn, sc, project_id) else rows.get("default_agent"))
             if t:
                 break
     if not t:
@@ -23202,7 +23438,9 @@ def role_agent(conn, role, project_id=None, item_id=None):
     if label is None:
         raise RiverError(f"the {role} runs {t}, and no launch entry runs it; add one: maxpm config set launch_agents "
                          f"\"...; {platform_spec(t)['label']}=@{t}\"")
-    label, _ = pick_available_agent(conn, label, project_id=project_id, explicit=False)
+    # A worker's or reviewer's start counts the limits of sessions (#6361); a manager, an expert or a deployer starts.
+    label, _ = pick_available_agent(conn, label, project_id=project_id, explicit=False,
+                                    slots=role in ("worker", "reviewer"))
     return label
 
 
@@ -23234,7 +23472,12 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
     manager_autocompact): claude --autocompact, unless the profile's args already name one."""
     agents = launch_entries(conn, project_id)
-    agent, _ = pick_available_agent(conn, agent, project_id=project_id, explicit=agent is not None, model=model)
+    # The caller chose the agent (launch_target counted the slots of a work launch); with none, the provider list picks
+    # an entry with usage left, also when its slots are full: a manager or an expert starts anyway (#6361). The entry's
+    # model and effort run when the caller names none.
+    got = pick_provider(conn, agent, project_id=project_id, explicit=agent is not None, slots=False, model=model)
+    agent = got["label"]
+    model, effort = model or got["model"], effort or got["effort"]
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
         raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
@@ -23702,6 +23945,7 @@ def state(conn, closed=True):
             "SELECT id, kind, item_id, message_id, human, summary, opened_at FROM needs_you "
             "WHERE closed_at IS NULL ORDER BY id DESC")],
         "agent_limits": agent_limits_list(conn),
+        "providers": agent_providers(conn),
     }
 
 

@@ -226,7 +226,9 @@ class FallbackAndLaunchAvoidance(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_agent_order_setting(self):
-        self.assertEqual(core.setting(self.conn, "agent_order"), "antigravity, claude-code")
+        # Empty by default (#6361): the launch_agents entries in their order, so a new queue never starts Antigravity.
+        self.assertEqual(core.setting(self.conn, "agent_order"), "")
+        self.assertEqual([p["agent"] for p in core.agent_providers(self.conn)], ["claude"])
         self.assertEqual(core.parse_agent_order("antigravity, claude-code, codex"), ["antigravity", "claude", "codex"])
         self.assertEqual(core.parse_agent_order("antigravity -> claude-code"), ["antigravity", "claude"])
         with self.assertRaises(core.RiverError):
@@ -620,6 +622,144 @@ class UsageProbe(unittest.TestCase):
         self.assertNotIn("/usage", self.typed["%usage-claude"])
         self.assertEqual(self.calls[-1][:3], ["kill-pane", "-t", "%usage-claude"])
         self.assertFalse(core.agent_limit_status(self.conn, "claude"))
+
+
+class ProviderSlots(unittest.TestCase):
+    """#6361: agent providers in order, each with a limit of active sessions."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = _db(self.tmp.name)
+        self.t0 = datetime(2026, 11, 20, 16, 0, 0, tzinfo=timezone.utc)
+        p_now = mock.patch.object(core, "now", side_effect=lambda: self.t0)
+        p_now.start()
+        self.addCleanup(p_now.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+        core.config_set(self.conn, "launch_agents", "Claude Code=@claude-code; Antigravity=@antigravity; Codex=@codex")
+        core.config_set(self.conn, "agent_order", "antigravity max 2, claude-code")
+
+    def _dispatch(self, item_id, agent=None):
+        """The page's Dispatch of one item, with the terminal faked: the started session's name and agent type."""
+        with mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", return_value={}):
+            r = server.dispatch_item(self.conn, item_id, agent=agent, actor="mark")
+        name = r["session_name"]
+        return name, self.conn.execute("SELECT agent_type FROM agents WHERE name=?", (name,)).fetchone()[0]
+
+    def test_parse_providers(self):
+        e = lambda agent, model=None, effort=None, mx=None: {"agent": agent, "model": model, "effort": effort, "max": mx}
+        self.assertEqual(core.parse_providers("antigravity max 2, claude-code"), [e("antigravity", mx=2), e("claude")])
+        self.assertEqual(core.parse_providers("codex max=1 -> Claude Code max 3"), [e("codex", mx=1), e("claude", mx=3)])
+        # One agent, an entry for each model group (mark 2026-11-20: agy's Claude models have their own 5-hour window).
+        text = "antigravity model gemini-4-neon effort medium max 2, antigravity model claude-opus-5-5, claude-code model opus"
+        got = core.parse_providers(text)
+        self.assertEqual(got, [e("antigravity", "gemini-4-neon", "medium", 2), e("antigravity", "claude-opus-5-5"),
+                               e("claude", "opus")])
+        self.assertEqual(core.providers_text(got), text)
+        self.assertEqual(core.parse_agent_order("antigravity max 0, codex"), ["antigravity", "codex"])
+        for bad in ("antigravity max two", "antigravity max", "nonexistent max 2", "codex, codex max 1",
+                    "antigravity model gemini-4-neon, antigravity model gemini-4-neon", "codex speed 2",
+                    "codex effort Very-High"):
+            with self.assertRaises(core.RiverError, msg=bad):
+                core.config_set(self.conn, "agent_order", bad)
+
+    def test_one_agent_with_an_entry_for_each_model_group(self):
+        core.config_set(self.conn, "agent_order", "antigravity model gemini-4-neon effort medium max 1, "
+                                                  "antigravity model claude-opus-5-5 effort high max 1, claude-code model opus")
+        ids = [core.item_add(self.conn, "app", f"Build part {n}")["id"] for n in (1, 2, 3)]
+        got = [self._dispatch(i) for i in ids]
+        self.assertEqual([t for _, t in got], ["antigravity", "antigravity", "claude-code"])
+        models = [self.conn.execute("SELECT model FROM agents WHERE name=?", (n,)).fetchone()[0] for n, _ in got]
+        self.assertEqual(models, ["gemini-4-neon", "claude-opus-5-5", "opus"])
+        provs = core.agent_providers(self.conn)
+        self.assertEqual([(p["name"], p["used"], p["full"]) for p in provs],
+                         [("Antigravity CLI (gemini-4-neon)", 1, True), ("Antigravity CLI (claude-opus-5-5)", 1, True),
+                          ("Claude Code (opus)", 1, False)])
+        self.assertEqual(provs[1]["run_effort"], "high")
+
+    def test_a_model_group_out_of_usage_skips_only_its_entry(self):
+        core.config_set(self.conn, "agent_order", "antigravity model gemini-4-neon, antigravity model claude-opus-5-5, "
+                                                  "claude-code")
+        core.record_agent_limit(self.conn, "antigravity", limited=True, source="screen", windows=[
+            {"name": "Gemini models: 5-hour", "used_percent": 100.0, "remaining_percent": 0.0,
+             "resets_at": core.iso(self.t0 + timedelta(hours=2))},
+            {"name": "Claude and GPT models: 5-hour", "used_percent": 1.0, "remaining_percent": 99.0}])
+        provs = core.agent_providers(self.conn)
+        self.assertEqual([(p["limited"], p["remaining_pct"]) for p in provs[:2]], [(True, 0.0), (False, 99.0)])
+        it = core.item_add(self.conn, "app", "Build feature")["id"]
+        t = core.launch_target(self.conn, item=it)
+        self.assertEqual((t["platform"], t["model"]), ("antigravity", "claude-opus-5-5"))
+        self.assertIn("Gemini models: 5-hour at 0% left", t["fallback_why"])
+        # The quota restart of #6348 takes the same list: the next entry after the one that stopped.
+        self.assertEqual(core.fallback_agent(self.conn, "antigravity", model="gemini-4-neon")[2]["model"],
+                         "claude-opus-5-5")
+
+    def test_three_ready_items_two_on_antigravity_and_the_third_on_claude_code(self):
+        ids = [core.item_add(self.conn, "app", f"Build part {n}")["id"] for n in (1, 2, 3)]
+        got = [self._dispatch(i) for i in ids]
+        self.assertEqual([t for _, t in got], ["antigravity", "antigravity", "claude-code"])
+        provs = {p["agent"]: p for p in core.agent_providers(self.conn)}
+        self.assertEqual((provs["antigravity"]["used"], provs["antigravity"]["full"]), (2, True))
+        self.assertEqual((provs["claude"]["used"], provs["claude"]["max"]), (1, None))
+        # A slot frees (a session ends): the next ready item takes it; the running Claude Code session stays.
+        core.unregister(self.conn, got[0][0])
+        nxt = core.item_add(self.conn, "app", "Build part 4")["id"]
+        self.assertEqual(self._dispatch(nxt)[1], "antigravity")
+        self.assertEqual(self.conn.execute("SELECT agent_type FROM agents WHERE name=?", (got[2][0],)).fetchone()[0],
+                         "claude-code")
+
+    def test_a_provider_out_of_usage_is_skipped(self):
+        core.record_agent_limit(self.conn, "antigravity", limited=True, resets_at=core.iso(self.t0 + timedelta(hours=1)),
+                                reason="Individual quota reached", source="limit_stop")
+        it = core.item_add(self.conn, "app", "Build feature")["id"]
+        t = core.launch_target(self.conn, item=it)
+        self.assertEqual(t["platform"], "claude-code")
+        self.assertIn("usage limit", t["fallback_why"])
+
+    def test_explicit_agent_wins_and_all_full_refuses(self):
+        core.config_set(self.conn, "agent_order", "antigravity max 1, claude-code max 1")
+        a, b, c, d = (core.item_add(self.conn, "app", f"Build part {n}")["id"] for n in (1, 2, 3, 4))
+        self.assertEqual(self._dispatch(a)[1], "antigravity")
+        self.assertEqual(self._dispatch(b)[1], "claude-code")
+        with self.assertRaises(core.RiverError) as cm:
+            core.launch_target(self.conn, item=c)
+        self.assertIn("1 of 1 session", str(cm.exception))
+        self.assertIn("no fallback agent is available", str(cm.exception))
+        # A person's --agent still wins over the limit.
+        self.assertEqual(core.launch_target(self.conn, item=c, agent="Antigravity")["platform"], "antigravity")
+        # serve's start of an item (start_fresh) waits too: the item stays in the queue.
+        with mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", return_value={}):
+            with self.assertRaises(core.RiverError):
+                server.start_fresh(self.conn, d, "test")
+
+    def test_global_default_agent_gives_way_to_the_list_and_an_items_own_agent_does_not(self):
+        core.config_set(self.conn, "default_agent", "codex")
+        it = core.item_add(self.conn, "app", "Build feature")["id"]
+        self.assertEqual(core.launch_target(self.conn, item=it)["platform"], "antigravity")
+        own = core.item_add(self.conn, "app", "Draw the logo", models={"agent": "codex"})["id"]
+        self.assertEqual(core.launch_target(self.conn, item=own)["platform"], "codex")
+        # An item's own agent at its usage limit goes to the list.
+        core.record_agent_limit(self.conn, "codex", limited=True, source="limit_stop")
+        self.assertEqual(core.launch_target(self.conn, item=own)["platform"], "antigravity")
+
+    def test_status_shows_each_provider_with_its_slots_and_place(self):
+        core.config_set(self.conn, "agy_model", "gemini-4-neon")
+        core.config_set(self.conn, "agy_effort", "medium")
+        it = core.item_add(self.conn, "app", "Build feature")["id"]
+        self._dispatch(it)
+        st = core.status(self.conn)
+        self.assertEqual([(p["pos"], p["agent"], p["used"], p["max"]) for p in st["providers"]],
+                         [(1, "antigravity", 1, 2), (2, "claude", 0, None)])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.render_status(st)
+        out = buf.getvalue()
+        self.assertIn("Agent providers, in launch order (agent_order):", out)
+        self.assertIn("1. Antigravity CLI (gemini-4-neon, medium): 1 of 2 sessions", out)
+        self.assertIn("2. Claude Code: 0 sessions, no limit", out)
+        self.assertEqual(core.state(self.conn)["providers"][0]["used"], 1)
 
 
 if __name__ == "__main__":

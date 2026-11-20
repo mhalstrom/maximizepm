@@ -29,12 +29,31 @@
 .set-ov { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--sp-2); min-width: 0; }
 .set-ov .chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }  /* a long value wraps (a prompt) */
 .set-scoped { margin-top: var(--sp-6); }
+/* #6361: the agent providers in launch order: place, name, model, effort, max sessions, running, ↑ ↓ ✕. A phone puts
+   the fields under the name, two to a line. */
+.set-providers { margin-bottom: var(--sp-6); }
+.prov-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--w-m) var(--w-xs) var(--w-xs) var(--w-m) auto;
+  gap: var(--sp-1) var(--sp-3); align-items: end; padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+.prov-name, .prov-used, .prov-acts { align-self: center; }
+.prov-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.prov-f { display: flex; flex-direction: column; gap: var(--sp-0); font-size: var(--fs-s); color: var(--muted); min-width: 0; }
+.prov-f input { background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s);
+  padding: var(--sp-1) var(--sp-2); box-sizing: border-box; width: 100%; min-width: 0; color: var(--ink); }
+.prov-full { color: var(--warn); font-weight: 600; }
+.prov-acts { display: flex; gap: var(--sp-0); }
+.prov-add { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
+.prov-add select { background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s);
+  padding: var(--sp-1) var(--sp-2); }
 .cred-adds { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-6) 0 var(--sp-3); }
 .set-scoped > summary { cursor: pointer; font-weight: 600; padding-left: 0; }
 @media (max-width: 759px) {  /* a phone: one row of tabs that scrolls sideways, each at the size of a tap */
   .set-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: var(--sp-1); scrollbar-width: none; }
   .set-tab { flex: none; min-height: var(--tap); }
   .set-row { grid-template-columns: minmax(0, 1fr); }
+  /* name and ↑ ↓ ✕; model and effort; max sessions and running */
+  .prov-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .prov-acts { grid-row: 1; grid-column: 2; justify-content: flex-end; }
+  .prov-f input, .prov-add select { min-height: var(--tap); }
   .set-ctl input, .set-ctl select { min-height: var(--tap); }
 }
 /* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
