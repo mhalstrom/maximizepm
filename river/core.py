@@ -486,6 +486,13 @@ DEFAULT_SETTINGS = {
     # (a clean copy, an export). maxpm serve removes it, and the Cargo targets in the session's Claude Code
     # scratchpad, once the session ended (river/scratch.py).
     "session_builds": "~/Projects/.session-builds",
+    # Free space on the disk of the queue (#6506, river/diskguard.py): below disk_warn_free the manager (else the
+    # person) gets one alert; below disk_sweep_free maxpm serve removes the build folders of ended sessions and runs
+    # disk_sweep_cmd (a shell line of this computer that frees build output and caches), at most once an hour, and
+    # tells the free space before and after. A size such as 30GB, or off.
+    "disk_warn_free": "30GB",
+    "disk_sweep_free": "20GB",
+    "disk_sweep_cmd": "",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
@@ -3257,7 +3264,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
-    elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
+    elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free"):
         from . import space
         space.parse_size(value)
     elif key == "fresh_min":
