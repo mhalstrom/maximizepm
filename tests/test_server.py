@@ -4885,7 +4885,8 @@ class LaunchProfiles(unittest.TestCase):
         (prof,) = server.setup_status(self.c)["launch_profiles"]
         self.assertEqual([o["setting"] for o in prof["options"]],
                          ["claude_remote_control", "claude_permission_mode", "claude_model_ids", "claude_args",
-                          "claude_skill_prompt", "claude_prompt", "claude_activity_hooks"])
+                          "claude_skill_prompt", "claude_prompt", "claude_activity_hooks", "claude_model",
+                          "claude_effort"])
 
     def test_a_started_claude_code_session_reports_its_activity(self):
         from river import agents

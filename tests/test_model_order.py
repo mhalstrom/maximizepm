@@ -256,5 +256,46 @@ class EachAgentsOwnList(Db):
         self.assertEqual(agy["efforts"], ["low", "medium", "high", "xhigh"])  # no agy model takes max
 
 
+class AgentDefaults(Db):
+    """#6264 (mark 2026-11-19: 'set neon medium as our default agent for now'): each agent has a default model and
+    effort, <prefix>model and <prefix>effort; a start that names none takes them, and the dialog preselects them."""
+
+    def setUp(self):
+        super().setUp()
+        core.config_set(self.c, "launch_agents", "Antigravity CLI=@antigravity; Claude Code=@claude-code", actor="mark")
+
+    def test_the_settings_are_checked_against_the_agent_s_own_list(self):
+        core.config_set(self.c, "agy_model", "gemini-4-neon", actor="mark")
+        core.config_set(self.c, "agy_effort", "medium", actor="mark")
+        with self.assertRaisesRegex(core.RiverError, "Antigravity CLI has no model 'opus'"):
+            core.config_set(self.c, "agy_model", "opus", actor="mark")
+        with self.assertRaisesRegex(core.RiverError, "gemini-4-neon takes effort low, medium, high, xhigh, not max"):
+            core.config_set(self.c, "agy_effort", "max", actor="mark")
+        self.assertEqual(core.setting(self.c, "claude_model"), "")  # every agent has the setting, empty by default
+
+    def test_a_start_that_names_none_takes_them_and_a_named_one_wins(self):
+        core.config_set(self.c, "agy_model", "gemini-4-neon", actor="mark")
+        core.config_set(self.c, "agy_effort", "medium", actor="mark")
+        r = core._launch_agent_cmd(self.c, None, "Antigravity CLI")
+        self.assertEqual((r["model"], r["effort"]), ("gemini-4-neon", "medium"))
+        self.assertIn("--model gemini-4-neon --effort medium", r["command"])
+        r = core._launch_agent_cmd(self.c, None, "Antigravity CLI", "gemini-4-carbon", "low")
+        self.assertEqual((r["model"], r["effort"]), ("gemini-4-carbon", "low"))
+        # A default effort that the chosen model does not take goes; the start does not fail for it.
+        r = core._launch_agent_cmd(self.c, None, "Antigravity CLI", "gemini-pro-orchestrator")
+        self.assertEqual(r["effort"], None)
+        self.assertNotIn("--effort", r["command"])
+        r = core._launch_agent_cmd(self.c, None, "Antigravity CLI", "gpt-oss-120b")  # takes only medium
+        self.assertEqual(r["effort"], "medium")
+
+    def test_the_dialog_gets_them(self):
+        core.config_set(self.c, "agy_model", "gemini-4-neon", actor="mark")
+        core.config_set(self.c, "agy_effort", "medium", actor="mark")
+        agy = next(o for o in core.launch_options(self.c) if o["platform"] == "antigravity")
+        self.assertEqual((agy["default_model"], agy["default_effort"]), ("gemini-4-neon", "medium"))
+        cc = next(o for o in core.launch_options(self.c) if o["platform"] == "claude-code")
+        self.assertEqual((cc["default_model"], cc["default_effort"]), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

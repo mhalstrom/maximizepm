@@ -1111,10 +1111,11 @@ class SettingsAndEffort(Env):
         self.assertEqual([(o["name"], o["label"], o["value"], o["fixed"]) for o in opt["options"]],
                          [("mode", "Mode", "careful", False), ("trust", "Trust", "off", True)])
         prof = next(p for p in core.launch_profiles(self.c) if p["platform"] == "xyz")
-        self.assertEqual((prof["label"], [o["name"] for o in prof["options"]]), ("Xyz CLI", ["mode", "trust", "args", "prompt"]))
+        self.assertEqual((prof["label"], [o["name"] for o in prof["options"]]), ("Xyz CLI", ["mode", "trust", "args", "model", "effort", "prompt"]))  # #6264: each agent's default model and effort
         self.assertEqual(core.setting(self.c, "xyz_prompt"), core.FIRST_PROMPT)  # #5168: every agent has a first prompt
         self.assertEqual(core.profile_options(self.c, "xyz", {"trust": "off"}, chosen={"mode": "fast"}),
-                         {"mode": "fast", "trust": "off", "args": "", "prompt": core.FIRST_PROMPT})
+                         {"mode": "fast", "trust": "off", "args": "", "model": "", "effort": "",
+                          "prompt": core.FIRST_PROMPT})
 
     def test_an_agent_with_no_effort_offers_none(self):
         self.user_module("plain", '''

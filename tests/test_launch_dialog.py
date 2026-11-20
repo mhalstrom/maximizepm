@@ -61,6 +61,20 @@ class PlaceholderNote(unittest.TestCase):
         self.assertEqual(json.loads(out.stdout), [["low", "medium", "high"], [], opt["efforts"], opt["efforts"],
                                                   "high", "", "sonnet"])
 
+    def test_the_agent_s_default_model_and_effort_are_preselected(self):
+        # #6264: agy_model gemini-4-neon, agy_effort medium; an item's own recommendation still wins.
+        opt = {"efforts": ["low", "medium", "high"], "default_model": "gemini-4-neon", "default_effort": "medium",
+               "models": [{"name": "gemini-4-neon", "efforts": ["low", "medium", "high", "xhigh"]},
+                          {"name": "gemini-4-carbon", "efforts": ["low", "medium", "high"]}]}
+        js = ("const m = await import('./components/launchDialog.js');"
+              f"const o = {json.dumps(opt)};"
+              "console.log(JSON.stringify([m.pickModel(o, null, {}, 'gemini-4-carbon', {}),"
+              " m.pickEffort(o, null, 'low', 'gemini-4-neon'), m.pickEffort(o, {effort: 'high'}, '', 'gemini-4-neon'),"
+              " m.pickModel(o, {model: 'gemini-4-carbon'}, {}, '', {})]));")
+        out = subprocess.run(["node", "--input-type=module", "-e", js], cwd=STATIC, capture_output=True, text=True,
+                             timeout=30, check=True)
+        self.assertEqual(json.loads(out.stdout), ["gemini-4-neon", "medium", "high", "gemini-4-carbon"])
+
     def test_an_item_s_model_words_show_only_for_an_agent_that_has_the_model(self):
         # #6257: with Antigravity CLI chosen, '#6250 recommends opus. #6250 allows at most opus.' said nothing true.
         agy = {"efforts": ["low", "high"], "models": [{"name": "gemini-4-neon", "label": "Gemini 4 Neon",

@@ -861,7 +861,23 @@ class Adapter:
             out.append({"label": s["key"].replace("_", " ").capitalize(), "choices": [], "text": "", "flag": [],
                         "live": None, "read": None, "config": True, "session": False, "note": None, **s,
                         "default": s.get("default", "off" if kind == "toggle" else "")})
+        # Every agent's default model and effort (#6264: agy_model gemini-4-neon, agy_effort medium): a start that
+        # names none takes them (core._launch_agent_cmd). No flag: MaximizePM gives them to build_command as its
+        # model and effort. Text, so the launch dialog does not list them under More (it has its own two fields).
+        have = {s["key"] for s in out}
+        if self.describe.get("prefix"):
+            if "model" not in have:
+                out.append(self._default_spec("model", "Default model", "the model a start of this agent takes when it "
+                                              "names none; empty: the agent's own default"))
+            if "effort" not in have and self.effort:
+                out.append(self._default_spec("effort", "Default effort", "the effort a start of this agent takes when "
+                                              "it names none; empty: the agent's own default"))
         return out
+
+    @staticmethod
+    def _default_spec(key, label, text):
+        return {"key": key, "label": label, "kind": "text", "choices": [], "default": "", "text": text, "flag": [],
+                "live": None, "read": None, "config": True, "session": False, "note": None}
 
     def options(self):
         """{key: spec} of the settings that are config keys (<prefix><key>): the options of a launch profile

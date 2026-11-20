@@ -3235,6 +3235,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         parse_launch_agents(value)
     elif _platform_setting(key):
         _check_option(*_platform_setting(key), value)
+        if _platform_setting(key)[1] in ("model", "effort"):
+            check_agent_default(conn, *_platform_setting(key), value)
     elif key == "model_ladder":
         parse_ladder(value)
     elif key == "agent_rules":
@@ -22710,14 +22712,26 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     # No model named: the adapter's own default (DESCRIBE['default_model'], #5284: OpenCode runs on its free model,
     # not on whatever model its TUI remembers); "" lets the agent pick. The default_model setting is not forced on
     # the CLI (#4961).
+    # Before it, the agent's own setting (#6264: agy_model, agy_effort): the order is the dialog's choice or
+    # --model/--effort (or the item's, which the caller passes), then the agent's setting, then its own default.
     adapter_default = None
-    if not model and platform:
-        a = _adapters().find(platform)
-        adapter_default = (a.describe.get("default_model") or None) if a else None
+    a = _adapters().find(platform) if platform else None
+    if not model and a:
+        adapter_default = agent_default(conn, a, "model", project_id) or a.describe.get("default_model") or None
         model = _check_model_name(adapter_default) if adapter_default else None
+    default_effort = None
+    if not effort and a and a.effort:
+        effort = default_effort = agent_default(conn, a, "effort", project_id)
     mid = model_id(conn, platform, model, project_id, prof[1] if prof else None)
     if effort and platform:
-        _check_agent_effort(_adapters().get(platform), mid, effort)
+        try:
+            _check_agent_effort(_adapters().get(platform), mid, effort)
+        except RiverError:
+            if not default_effort:
+                raise
+            effort = None  # the agent's default effort, which this model does not take: its own default runs
+        if default_effort and a.model_efforts(mid) == []:
+            effort = None  # a model with no effort (agy's Orchestrators) gets none
     prompt = custom_prompt(prompt) if prompt is not None else None
     if prof:
         opts = profile_options(conn, prof[0], prof[1], project_id, options)
@@ -22882,6 +22896,35 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
             "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 
+def agent_default(conn, ad, key, project_id=None):
+    """The agent's default model or effort (#6264): its setting <prefix>model or <prefix>effort, the most specific
+    scope first; None when it is empty or the agent has no such setting."""
+    if not ad.describe.get("prefix") or key not in ad.options():
+        return None
+    return setting(conn, ad.config_key(key), project_id=project_id) or None
+
+
+def check_agent_default(conn, platform, key, value):
+    """Refuse a default model that the agent does not list, or an effort that the agent (or its default model) does
+    not take (#6264). An agent whose list is empty (Amp) or still being read refuses no model."""
+    ad = _adapters().find(platform)
+    if ad is None or not value:
+        return
+    if key == "model":
+        names = [m["name"] for m in platform_models(conn, platform)]
+        if names and value not in names:
+            raise RiverError(f"{ad.label} has no model {value!r}; it lists {', '.join(names[:12])}"
+                             f"{' and more' if len(names) > 12 else ''} (the Start an agent dialog shows them all)")
+    elif key == "effort":
+        model = setting(conn, ad.config_key("model")) or None
+        mid = model_id(conn, platform, model) if model else None
+        levels = (ad.model_efforts(mid) if mid else None)
+        levels = ad.effort_choices() if levels is None else levels
+        if value not in levels:
+            raise RiverError(f"{ad.label}{' ' + model if model else ''} takes effort "
+                             f"{', '.join(levels) or 'none'}, not {value}")
+
+
 def _check_agent_effort(ad, mid, effort):
     """Refuse an effort that an agent with a per-model reader of its levels (EFFORT and read_effort_levels: Codex)
     does not take: for the model, when the reader lists it, else the adapter's EFFORT levels. An agent with no such
@@ -23015,6 +23058,9 @@ def _launch_option(conn, label, cmd, ladder, levels):
     return {"label": label, "family": fam, "platform": prof[0] if prof else None,
             "agent_type": prof[0] if prof else _exe_platform(cmd),
             "models": models, "efforts": _efforts_of(models, efforts),
+            # The agent's default model and effort (#6264): the dialog preselects them when the item names none.
+            "default_model": agent_default(conn, ad, "model") if ad else None,
+            "default_effort": agent_default(conn, ad, "effort") if ad else None,
             "takes_model": bool(prof) or "{model}" in cmd,
             "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
             # The options the dialog can change for one launch, preset from the entry and the settings.

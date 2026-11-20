@@ -69,6 +69,8 @@ export function pickModel(opt, it, ladder, last, ids) {
     const allowed = opt.models.filter(x => ok(x.name));
     if (allowed.length) return allowed.reduce((a, x) => rank(x.name) < rank(a.name) ? x : a).name;
   } else if (it && ok(mine(it.max_model))) return mine(it.max_model);
+  // The agent's default model (#6264: agy_model) before the last choice in this browser.
+  if (opt.default_model && ok(opt.default_model)) return opt.default_model;
   return last && ok(last) ? last : "";
 }
 
@@ -86,6 +88,7 @@ export function pickEffort(opt, it, last, model) {
   const e = it && it.effort;
   if (e && efforts.includes(e)) return e;
   if (e === "max" && efforts.length) return efforts[efforts.length - 1];
+  if (opt.default_effort && efforts.includes(opt.default_effort)) return opt.default_effort;  // #6264: agy_effort
   return last && efforts.includes(last) ? last : "";
 }
 
