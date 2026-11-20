@@ -590,16 +590,19 @@ button.srow-it { cursor: pointer; }
 #setDlg > .box { width: min(var(--w-dlg-m), calc(100vw - 2 * var(--sp-6))); }
 .set-head { margin: var(--sp-3) 0; }
 /* The third column has one width in every row (Change now, restart, now, fixed), so each field ends at the same x (#5322). */
-.set-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
-.set-row select, .set-row input { font: inherit; background-color: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
-.set-row > .btn, .set-row > span.muted { justify-self: start; white-space: nowrap; }
-.set-row [data-other] { grid-column: 2; }
+/* sdlg-row, not set-row (#6262): the Settings tab's .set-row (views/settings.css, a two-column grid loaded after this
+   sheet) took over these rows, and the select covered labels such as 'Show tool calls'. */
+.sdlg-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
+.sdlg-row > label { min-width: 0; overflow-wrap: anywhere; }
+.sdlg-row select, .sdlg-row input { font: inherit; background-color: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
+.sdlg-row > .btn, .sdlg-row > span.muted { justify-self: start; white-space: nowrap; }
+.sdlg-row [data-other] { grid-column: 2; }
 .set-sub { grid-column: 2 / 4; font-size: var(--fs-s); }
 .set-foot { display: flex; gap: var(--sp-4); align-items: center; margin-top: calc(var(--sp-5) + var(--sp-0)); flex-wrap: wrap; }
 /* The row that a slash command opened the dialog for (#5220: /model, /effort from the message box). */
-.set-row.on > label { color: var(--accent); font-weight: 600; }
+.sdlg-row.on > label { color: var(--accent); font-weight: 600; }
 /* A phone: the name on its own line; the field, then Change now (or the word) on the line under it, at the left. */
-@media (max-width: 560px) { .set-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .set-row > label, .set-sub { grid-column: 1 / -1; } .set-row [data-other] { grid-column: 1; } }
+@media (max-width: 560px) { .sdlg-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .sdlg-row > label, .set-sub { grid-column: 1 / -1; } .sdlg-row [data-other] { grid-column: 1; } }
 /* A phone (#5422): the list of settings is taller than the screen, so its foot (the default box and Restart) stays at
    the bottom of the screen while the list scrolls under it; at the end of the list it sits under the last row. */
 @media (max-width: 759px) {

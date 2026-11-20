@@ -21,6 +21,8 @@
    one project, agent or item under them. A phone puts the field under the label, full width. */
 .set-row { display: grid; grid-template-columns: minmax(0, 1fr) var(--w-l); gap: var(--sp-1) var(--sp-5); align-items: center;
   padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+.set-row select, .set-row input { background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s);
+  padding: var(--sp-1) var(--sp-2); box-sizing: border-box; }
 .set-label { min-width: 0; overflow-wrap: anywhere; }
 .set-ctl { display: flex; gap: var(--sp-1); align-items: center; min-width: 0; }
 .set-ctl input, .set-ctl select { flex: 1; min-width: 0; width: 100%; }

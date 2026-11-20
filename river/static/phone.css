@@ -59,7 +59,7 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
     background-repeat: no-repeat; background-position: right 10px center; }
   /* A select with a padding of its own keeps the room of the arrow; no rule sets the background shorthand on a select,
      which would take the arrow away (#5421, tests/test_ui_parts.py). */
-  .set-row select, .tabulator .tabulator-header .tabulator-col .tabulator-header-filter select { padding-right: 28px; }
+  .set-row select, .sdlg-row select, .tabulator .tabulator-header .tabulator-col .tabulator-header-filter select { padding-right: 28px; }
   .sp-tab-l { min-height: 34px; }
   button.btn { min-height: 44px; padding: 6px 12px; }
   /* The inset of a text button that starts a line (#5314) follows this padding: 12 px and the border (#5366). */
