@@ -5407,6 +5407,16 @@ class Models(Base):
         with self.assertRaisesRegex(RiverError, "a version such as 5.5"):
             core.config_set(self.c, "model_min_version", "new")
 
+    def test_launch_agent_takes_a_label_an_id_or_an_alias(self):
+        # #6421: launch --agent codex was refused while the entry's label is Codex; every other command takes the id.
+        x = core.item_add(self.c, "a", "x")["id"]
+        for name, label in (("Codex", "Codex"), ("codex", "Codex"), ("CODEX", "Codex"),
+                            ("claude-code", "Claude Code"), ("claude", "Claude Code"), ("claude code", "Claude Code")):
+            r = core.launch_target(self.c, item=x, agent=name, actor="mark")
+            self.assertEqual(r["agent"], label, name)
+        with self.assertRaisesRegex(RiverError, r"no agent 'nobody' in launch_agents; known: .*an agent id or alias"):
+            core.launch_target(self.c, item=x, agent="nobody", actor="mark")
+
     def test_add_and_edit_store_the_fields_and_validate_them(self):
         i = core.item_add(self.c, "a", "x", models={"model": "Opus", "effort": "high", "min_model": "opus, sol"})
         self.assertEqual((i["model"], i["effort"], i["min_model"], i["model_from"]), ("opus", "high", "opus, sol", "item"))

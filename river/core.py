@@ -4109,9 +4109,10 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
     if agent is None and provs and provs[0]["set"]:
         why = None
     else:
-        pick = entries[0] if agent is None else next((a for a in entries if a[0] == agent), None)
+        pick = launch_entry(entries, agent)
         if pick is None:
             return {**none, "label": agent}
+        agent = pick[0] if agent is not None else None  # an id or alias ('codex') becomes its entry's label (#6421)
         prof = parse_profile(pick[1])
         plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
         keep = pick[0] if agent is not None else agent
@@ -23524,6 +23525,29 @@ def launch_entries(conn, project_id=None):
     return out
 
 
+def launch_entry(entries, agent):
+    """The launch entry (label, command) that `agent` names, or None: the first entry for None; else a label as
+    written, then a label in any case, then the first entry that runs the agent type an id, alias or platform name
+    names ('codex', 'claude-code', 'claude'), as every other command takes it (#6421: launch --agent codex was
+    refused while the entry's label is Codex)."""
+    if agent is None:
+        return entries[0] if entries else None
+    name = agent.strip()
+    got = next((e for e in entries if e[0] == name), None) or next(
+        (e for e in entries if e[0].lower() == name.lower()), None)
+    if got:
+        return got
+    plat = _agent_platform(name)
+    if plat is None:
+        return None
+    return next((e for e in entries if (parse_profile(e[1]) or (_exe_platform(e[1]),))[0] == plat), None)
+
+
+def _no_launch_entry(agent, entries):
+    return RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in entries)} "
+                      f"(or an agent id or alias: {', '.join(agent_types())})")
+
+
 def role_agent(conn, role, project_id=None, item_id=None):
     """The launch entry label that a session of this role starts (#5168): for an item, its effective agent
     (_item_models: its own --agent, agent_rules, agent_for.<role>, default_agent); else agent_for.<role>, then
@@ -23576,9 +23600,9 @@ def _start_next(conn):
 def _launch_platform(conn, project_id, agent):
     """The adapter id of the chosen launch_agents entry (None for a custom command)."""
     agents = launch_entries(conn, project_id)
-    pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
+    pick = launch_entry(agents, agent)
     if pick is None:
-        raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
+        raise _no_launch_entry(agent, agents)
     prof = parse_profile(pick[1])
     return prof[0] if prof else None
 
@@ -23597,10 +23621,10 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     got = pick_provider(conn, agent, project_id=project_id, explicit=agent is not None, slots=False, model=model)
     agent = got["label"]
     model, effort = model or got["model"], effort or got["effort"]
-    pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
+    pick = launch_entry(agents, agent)
     if pick is None:
-        raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
-    model, first = _check_model_name(model) if model else None, None
+        raise _no_launch_entry(agent, agents)
+    model, first =_check_model_name(model) if model else None, None
     if effort and not re.match(r"^[a-z][a-z0-9_-]{0,31}$", effort):
         raise RiverError(f"effort {effort!r}: a level such as low, medium, high")
     prof = parse_profile(pick[1])
