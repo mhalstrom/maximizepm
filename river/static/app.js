@@ -1,4 +1,4 @@
-import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left, getJson, ownSignIn } from "./lib.js";
+import { $, esc, store, actor, toast, act, typeAction, clip, fillSelect, hooks, artId, ago, left, getJson, ownSignIn } from "./lib.js";
 import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
@@ -624,6 +624,13 @@ async function openSetup() {
 }
 const setupDialog = makeDialog($("#setup"));
 let setupSig = "";
+// While an install or a sign-in window runs (#6239), the guide asks again every 3 s for its last lines and the
+// agent's state; not while the person types in a field of the guide.
+let setupPoll = false;
+setInterval(() => {
+  const f = document.activeElement;
+  if (setupPoll && setupDialog.isOpen() && !document.hidden && !(f && $("#setupSteps").contains(f) && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName))) openSetup();
+}, 3000);
 function closeSetup() { setupDialog.close(); }
 // A remote host (#5882): the last result of Set up and of an agent sign-in there, so a new draw of the guide keeps them.
 let hostTarget = "", hostRes = null, hostSign = null;
@@ -717,20 +724,45 @@ function renderSetup(st) {
       : "The folder of something you're building. Agents you start work in it." + folderForm(),
     blocks.map(f => `<button class="btn" data-su="block" data-path="${esc(f.path)}">Update ${esc(f.path.split("/").pop())}</button>`).join("")));
   // An agent the Start button can open: installed here, and on the Start button's list.
+  // Choose an agent (#6239): every agent with its state from a real check (a green check: the program is on this
+  // computer; an empty circle: it is not, with Install), Claude Code and Codex first, the others under More agents.
+  // Add puts an installed agent on the Start button; Install runs its vendor's install and Sign in its own sign-in,
+  // each in a window of the Terminal tab that the guide shows the last lines of.
   const ready = (st.start_agents || []).filter(a => a.found).map(a => a.label);
-  const addable = st.agent_clis.filter(a => a.found && !a.added);
-  const none = !ready.length && !addable.length;
-  const addBtns = addable.map(a => `<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="${esc(a.command)}">Add ${esc(a.label)}</button>`).join("");
+  const clis = st.agent_clis || [];
+  const signedOut = clis.filter(a => a.found && a.added && a.signed_in === false);
+  const agentRow = (a) => {
+    const job = a.jobs.install && a.jobs.install.running ? a.jobs.install : a.jobs.signin || a.jobs.install;
+    const btns = [];
+    if (job) btns.push(`<button class="btn" data-su="job" data-pane="${esc(job.pane)}" data-name="${esc(job.name)}">${job.running ? "Show" : "Show the window"}</button>`);
+    if (a.found && !a.added) btns.push(`<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="Add to Start button">Add</button>`);
+    if (a.found && a.signin && a.signed_in !== true) btns.push(`<button class="btn${a.signed_in === false ? " primary" : ""}" data-su="signin" data-platform="${esc(a.platform)}">Sign in</button>`);
+    if (!a.found && a.install && !a.install.missing && !(job && job.running))
+      btns.push(`<button class="btn${a.main && !ready.length ? " primary" : ""}" data-su="install" data-platform="${esc(a.platform)}" title="${esc(a.install.command)}">Install</button>`);
+    const state = job && job.running ? (job === a.jobs.install ? "installing…" : "signing in…")
+      : !a.found && job && job === a.jobs.install && job.exit ? `the install stopped (exit ${job.exit}): Show has its output`
+      : a.found ? [a.added ? "on the Start button" : "installed", a.signed_in === true ? "signed in" : a.signed_in === false ? "not signed in" : ""].filter(Boolean).join(", ")
+      : a.install && a.install.missing ? `needs ${a.install.missing === "npm" ? "Node.js" : esc(a.install.missing)} first`
+      : "not installed";
+    const tail = job && job.tail.length ? `<div class="su-tail">${job.tail.map(esc).join("<br>")}</div>` : "";
+    return `<div class="su-agent"><span class="su-am ${a.found ? "ok" : "no"}" aria-hidden="true">${a.found ? "✓" : "○"}</span>
+      <b title="${esc(a.path || a.label)}">${esc(a.label)}</b> <span class="muted">${state}</span>
+      <span class="su-ab">${btns.join("")}</span>${tail}</div>`;
+  };
+  const mains = clis.filter(a => a.main), others = clis.filter(a => !a.main);
+  const anyJob = clis.some(a => (a.jobs.install && a.jobs.install.running) || (a.jobs.signin && a.jobs.signin.running));
+  const agentList = mains.map(agentRow).join("")
+    + (others.length ? `<details class="su-more" ${others.some(a => a.found || Object.keys(a.jobs).length) ? "open" : ""}>
+        <summary>More agents</summary>${others.map(agentRow).join("")}</details>` : "")
+    + (anyJob ? "" : `<button class="btn" data-su="recheck">Check again</button>`);
+  setupPoll = anyJob;
   const opens = "The Start button opens " + ready.map(esc).join(" or ")
     + (st.tmux ? " in a tmux pane (maxpm view in a terminal shows every agent side by side)."
       : ` in a tmux pane, and tmux is not installed: ${esc(st.tmux_install || "brew install tmux")}.`);
-  out.push(step(ready.length > 0, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
-    ready.length ? (addable.length ? `<span class="fix" style="display:inline-flex">${addBtns}</span>` : "")
-      : none ? `No AI coding agent is installed on this Mac yet. Install one, then check again:
-          <a href="https://docs.claude.com/en/docs/claude-code/setup" target="_blank" rel="noopener">Claude Code</a> or
-          <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>.`
-      : "Found on this Mac: " + addable.map(a => esc(a.label)).join(", ") + ". Add one to the Start button.",
-    (none ? `<button class="btn" data-su="recheck">Check again</button>` : "") + addBtns));
+  out.push(step(ready.length > 0 && !signedOut.length, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
+    (ready.length ? signedOut.length ? `Sign in to ${signedOut.map(a => esc(a.label)).join(" and ")}: the sign-in opens in a terminal window here.`
+        : "" : "Install an AI coding agent, sign in to it, and add it to the Start button.")
+      + `<div class="su-agents">${agentList}</div>`));
   // The Browser pane needs Google Chrome (#5624): a missing Chrome shows here, not only in More.
   const chromeStep = extra(st.chrome !== false, "Google Chrome for the Browser",
     st.chrome === false ? "The Browser shows web pages to you and your agents, and it needs Google Chrome. Download it, install it, then check again."
@@ -867,6 +899,14 @@ $("#setupSteps").addEventListener("click", async (e) => {
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
     else if (k === "tmux") { const r = await act("setup_tmux", {}); toast(r.note || "A Terminal window installs tmux"); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
+    else if (k === "install" || k === "signin") {  // #6239: a window of the Terminal tab runs it; the guide shows its end
+      try {
+        const r = await typeAction(k === "install" ? "setup_agent_install" : "setup_agent_signin", { platform: b.dataset.platform });
+        if (k === "signin") openTerminal(r.pane, { shell: true, title: r.name });
+        else toast(`${r.name}: the last lines show here. Show opens the whole window.`);
+      } catch (err) { toast(err.message || "failed", true); }
+    }
+    else if (k === "job") { openTerminal(b.dataset.pane, { shell: true, title: b.dataset.name }); return; }
     else if (k === "ntfy") {
       const r = await act("setup_ntfy", {});
       await openSetup();

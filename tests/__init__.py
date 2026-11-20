@@ -58,6 +58,11 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
     if _name:
         os.environ.pop(_name, None)
 
+from river import agentinstall as _agentinstall  # noqa: E402
+# Nor the person's agent programs (#6239): the setup guide also looks in ~/.local/bin and Homebrew's bin, and a test
+# of the guide found the Claude Code of the person who ran it there. A test of the search sets its own folders.
+_agentinstall.DIRS = []
+_agentinstall.STATUS_RUNNER = lambda argv: 1
 REAL_TMUX_PATH = core.tmux_path  # for the test of the lookup itself, with a fake app folder (#6237)
 core.tmux_path = lambda: None
 # The tests never probe the network (#6099): this computer is online for every test, offline or in a sandbox. A test

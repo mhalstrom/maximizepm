@@ -128,7 +128,7 @@ OPS.update({op: ONLY_PERSON for op in (
     "relay_disconnect", "release_changes", "release_download", "release_now", "release_agent", "release_update", "rqs_connect", "session_interrupt",
     "session_pin", "session_restart", "session_send", "session_setting", "session_upload",
     "session_upload_drop", "setup_agent_add", "setup_block", "setup_maxpm_cmd", "setup_ntfy", "setup_skills",
-    "setup_tmux",
+    "setup_tmux", "setup_agent_install", "setup_agent_signin",
     "shell_close", "shell_keys", "shell_open", "start_manager", "tailnet_serve", "takeover_seen", "takeovers_seen",
     "terminal_keys", "undo_takeover", "update")})
 

@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import ask_forms, core, dictation, relay
+from . import agentinstall, ask_forms, core, dictation, relay
 from .core import RiverError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -1012,7 +1012,11 @@ def _tmux_env():
     ids (MAXPM_*, CLAUDE*, CODEX_*) must stay out, or each new agent would start as a copy of that session."""
     import os
     keep = ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
-    return {k: v for k, v in os.environ.items() if k in keep or not k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}
+    env = {k: v for k, v in os.environ.items() if k in keep or not k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}
+    # The folders where agent installers put programs (#6239): the server that this command starts gives its panes
+    # this PATH, so an agent that the setup guide found also starts from an app that Finder opened.
+    env["PATH"] = agentinstall.extra_path(env.get("PATH", ""))
+    return env
 
 
 def _tmux_panes(everywhere=False):
@@ -5186,6 +5190,7 @@ def frame_check(url):
 PAGE_TOKEN = secrets.token_urlsafe(24)
 TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_send_now", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
+              "setup_agent_install", "setup_agent_signin",  # they run a command in a shell of that tab (#6239)
               "browser_input",  # the person's mouse and keys in a project's browser (#4631)
               "browser_hand",  # Hand to <session>: it types a line into that session's chat (#5616)
               "browser_steps",  # Record and Stop of the pane: Stop types the steps into the session's chat (#5707)
@@ -5464,6 +5469,33 @@ def host_signin_op(conn, args, who=None):
     return host.signin(str(args.get("target") or "").strip(), str(args.get("agent") or ""), args.get("code") or None)
 
 
+def _agent_cli(conn, label, exe, cmd, term, have, jobs):
+    """One agent of the setup guide's Choose an agent (#6239). signed_in: True or False from the CLI's own status
+    command, None when it has none; install.needs: a program the install needs that is not on this computer."""
+    platform = cmd[1:] if cmd.startswith("@") else None
+    m = agentinstall.METHODS.get(platform) or {}
+    path = term.get(exe)
+    needs = m.get("needs")
+    return {"label": label, "platform": platform, "found": bool(path), "path": path,
+            "added": label in have or exe in have, "command": _shown_cmd(conn, cmd),
+            "main": platform in agentinstall.MAIN,
+            "install": {"command": m["install"], "missing": needs if needs and not term.get(needs) else None}
+            if m.get("install") else None,
+            "signin": bool(m.get("signin")),
+            "signed_in": agentinstall.signed_in(platform, path) if path else None,
+            "jobs": jobs.get(platform) or {}}
+
+
+def setup_agent_install(conn, args, who):
+    """Install an agent CLI by its vendor's method, in a window of the Terminal tab (#6239)."""
+    return agentinstall.run(conn, str(args.get("platform") or ""), "install", who)
+
+
+def setup_agent_signin(conn, args, who):
+    """The CLI's own sign-in, in a window of the Terminal tab; the person signs in there (#6239)."""
+    return agentinstall.run(conn, str(args.get("platform") or ""), "signin", who)
+
+
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
@@ -5483,8 +5515,14 @@ def setup_status(conn):
     have = {label for label, _ in agents} | {core.entry_exe(c) for _, c in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
     # Agents start in a new tmux pane, whose login shell must find their programs.
-    exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents})
-    term = _login_shell_which(exes)
+    exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents} | {"npm"})
+    # Also where the installers put programs (#6239): an app started from Finder has a short PATH, and a login shell
+    # that does not load a profile file misses ~/.local/bin and Homebrew's bin.
+    term = agentinstall.find(exes, _login_shell_which(exes))
+    try:
+        jobs = agentinstall.jobs()
+    except RiverError:
+        jobs = {}
     return {
         "done": core.setting(conn, "setup_done") == "on",
         "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
@@ -5504,8 +5542,9 @@ def setup_status(conn):
         "brew": bool(core.brew_path()),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
-        "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have or exe in have,
-                        "command": _shown_cmd(conn, cmd)} for label, exe, cmd in known],
+        # Each agent CLI (#6239): found by a real check, on the Start button or not, its install method, its sign-in,
+        # and the install or sign-in window that runs now. Claude Code and Codex first (main), the others under More.
+        "agent_clis": [_agent_cli(conn, label, exe, cmd, term, have, jobs) for label, exe, cmd in known],
         # The options of each launch profile the Start button uses, for toggles (Settings > Setup).
         "launch_profiles": core.launch_profiles(conn),
         "notify_channels": core._channels(core.setting(conn, "notify_channels")),
@@ -5731,7 +5770,7 @@ def setup_agent_add(conn, label, actor=None):
         # The first agent is the Start button's default: when its program is not on this computer (the
         # default Claude Code on a Mac that has only Codex), the agent added now becomes the default.
         first = core.entry_exe(agents[0][1]) if agents else None
-        missing = first and not _login_shell_which([first])[first]
+        missing = first and not agentinstall.find([first], _login_shell_which([first]))[first]
         agents = [(label, cmd)] + agents if missing else agents + [(label, cmd)]
         core.config_set(conn, "launch_agents", "; ".join(f"{a}={c}" for a, c in agents), actor=actor)
     return [a for a, _ in agents]
@@ -5892,6 +5931,8 @@ OPS = {
                                                    bool(a.get("create"))),
     "setup_skills": lambda c, a, who: setup_skills(),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
+    "setup_agent_install": setup_agent_install,  # #6239: a window of the Terminal tab runs the vendor's install
+    "setup_agent_signin": setup_agent_signin,
     "setup_ntfy": lambda c, a, who: setup_ntfy(c, who, a.get("open")),
     # prompt: maxpm launch --prompt, which a command in a sandbox hands to maxpm serve. folder: the folder picked for
     # a project with none (#5894).

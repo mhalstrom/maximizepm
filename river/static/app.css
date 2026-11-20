@@ -352,6 +352,17 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .step.next { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--r-m);
   padding-left: var(--sp-2); padding-right: var(--sp-2); margin-left: calc(-1 * var(--sp-2)); margin-right: calc(-1 * var(--sp-2)); }
 #setup .mark.opt { color: var(--muted); }
+/* Choose an agent (#6239): one row for each agent, its state mark (installed: a green check; not: an empty circle),
+   its name and state, its buttons, and the last lines of its install or sign-in window. On a phone the buttons wrap. */
+#setup .su-agents { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+#setup .su-agent { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); }
+#setup .su-am { width: var(--sp-6); text-align: center; font-weight: 600; }
+#setup .su-am.ok { color: var(--ready); }
+#setup .su-am.no { color: var(--muted); }
+#setup .su-ab { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); margin-left: auto; }
+#setup .su-tail { flex: 1 0 100%; margin-left: calc(var(--sp-6) + var(--sp-3)); font-family: var(--mono, monospace);
+  font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+#setup .su-more summary { cursor: pointer; color: var(--muted); font-size: var(--fs-m); margin: var(--sp-1) 0; }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .link.ref { cursor: pointer; }

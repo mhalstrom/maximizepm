@@ -4495,6 +4495,120 @@ class SetupGuide(unittest.TestCase):
         self.assertIsNone(core.bundled_tmux())
         self.assertEqual(server._tmux_cmd(), ["/opt/homebrew/bin/tmux"])
 
+    def _agent_bin(self, *names):
+        """A folder where an installer put these programs, as the only folder the search reads (#6239)."""
+        from river import agentinstall
+        b = os.path.join(self.dir.name, "bin")
+        os.makedirs(b, exist_ok=True)
+        for n in names:
+            Path(b, n).write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(Path(b, n), 0o755)
+        old = agentinstall.DIRS, server._login_shell_which
+        self.addCleanup(lambda: (setattr(agentinstall, "DIRS", old[0]), setattr(server, "_login_shell_which", old[1])))
+        agentinstall.DIRS = [b, os.path.join(self.dir.name, "missing")]
+        server._login_shell_which = lambda names: {n: None for n in names}  # Finder's short PATH: a login shell finds none
+        return b
+
+    def test_choose_an_agent_shows_each_agent_by_a_real_check_with_claude_code_and_codex_first(self):
+        """#6239 (mark 2026-11-19): every agent is in the list with its state from a real check, also when the app has
+        Finder's short PATH: codex in an installer's folder (~/.local/bin, Homebrew's bin) counts as installed.
+        Claude Code is always there (it was left out when it was on the Start button), with Install when missing.
+        Gemini installs with npm only, so with no npm it says what it needs."""
+        b = self._agent_bin("codex")
+        clis = {a["label"]: a for a in server.setup_status(self.c)["agent_clis"]}
+        claude, codex, gemini = clis["Claude Code"], clis["Codex"], clis["Gemini CLI"]
+        self.assertEqual((claude["found"], claude["added"], claude["main"]), (False, True, True))
+        self.assertEqual(claude["install"], {"command": "curl -fsSL https://claude.ai/install.sh | bash", "missing": None})
+        self.assertTrue(claude["signin"])
+        self.assertEqual((codex["found"], codex["path"], codex["added"], codex["main"]),
+                         (True, os.path.join(b, "codex"), False, True))
+        self.assertEqual(gemini["install"]["missing"], "npm")
+        self.assertFalse(gemini["main"])
+        self.assertEqual([a["label"] for a in clis.values() if a["main"]], ["Claude Code", "Codex"])
+        # The Start button's list counts the same check: Codex added becomes the default (Claude Code is missing).
+        self.assertEqual(server.setup_agent_add(self.c, "Codex"), ["Codex", "Claude Code"])
+
+    def test_the_installers_folders_go_on_the_path_of_the_panes(self):
+        """#6239: a pane of the app's tmux finds what the guide found, also when the app started from Finder."""
+        b = self._agent_bin()
+        from river import agentinstall
+        self.assertEqual(agentinstall.extra_path("/usr/bin:/bin"), f"/usr/bin:/bin:{b}")
+        self.assertEqual(agentinstall.extra_path(f"{b}:/usr/bin"), f"{b}:/usr/bin")
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            self.assertEqual(server._tmux_env()["PATH"], f"/usr/bin:/bin:{b}")
+
+    def test_install_and_sign_in_run_in_a_window_of_the_terminal_tab(self):
+        """#6239: Install runs the vendor's install command, and Sign in the CLI's own sign-in, in a window of the
+        Terminal tab (the person reads it there and answers a question or a password), with the installers' folders on
+        its PATH. Only a person; Node.js first for an npm install; no window for a CLI with no sign-in command."""
+        from river import agentinstall
+        self._agent_bin()
+        calls = []
+
+        def tmux(a):
+            calls.append(a)
+            return None if a[0] == "has-session" else "%7" if a[0] in ("new-session", "new-window") else ""
+        old = server.TMUX_RUNNER
+        self.addCleanup(setattr, server, "TMUX_RUNNER", old)
+        server.TMUX_RUNNER = tmux
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "bot")
+        r = server.OPS["setup_agent_install"](self.c, {"platform": "claude-code"}, "mark")
+        self.assertEqual(r, {"pane": "%7", "name": "Install Claude Code",
+                             "command": "curl -fsSL https://claude.ai/install.sh | bash"})
+        new = next(a for a in calls if a[0] == "new-session")
+        self.assertEqual(new[new.index("-s") + 1], "maxpm-shell")
+        self.assertIn("-e", new)
+        self.assertTrue(new[new.index("-e") + 1].startswith("PATH="))
+        self.assertIn("curl -fsSL https://claude.ai/install.sh | bash\n", new[-1])
+        self.assertIn(["set-option", "-p", "-t", "%7", "@maxpm_job", "install:claude-code"], calls)
+        r = server.OPS["setup_agent_signin"](self.c, {"platform": "codex"}, "mark")
+        self.assertEqual((r["name"], r["command"]), ("Sign in to Codex", "codex login --device-auth"))
+        with self.assertRaisesRegex(core.RiverError, "only a person"):
+            server.OPS["setup_agent_install"](self.c, {"platform": "codex"}, "bot")
+        with self.assertRaisesRegex(core.RiverError, "install Node.js first"):
+            server.OPS["setup_agent_install"](self.c, {"platform": "gemini"}, "mark")
+        with self.assertRaisesRegex(core.RiverError, "no sign-in command"):
+            server.OPS["setup_agent_signin"](self.c, {"platform": "copilot"}, "mark")
+        self.assertIn("setup_agent_install", server.TYPING_OPS)
+
+    def test_the_guide_shows_the_last_lines_of_a_running_install(self):
+        """#6239: a window of an install runs until its last step records the exit status on its pane (@maxpm_exit)."""
+        from river import agentinstall
+        screen = {"%7": "Downloading Claude Code\n\nInstalling to ~/.local/bin\n  50%\n", "%8": "Done\n"}
+
+        def tmux(a):
+            if a[0] == "has-session":
+                return ""
+            if a[0] == "list-panes":
+                return "%7|install:claude-code|Install Claude Code|\n%8|signin:codex|Sign in to Codex|0\n%9||shell 1|"
+            if a[0] == "capture-pane":
+                return screen[a[a.index("-t") + 1]]
+            return ""
+        old = server.TMUX_RUNNER
+        self.addCleanup(setattr, server, "TMUX_RUNNER", old)
+        server.TMUX_RUNNER = tmux
+        self.assertEqual(agentinstall.jobs(), {
+            "claude-code": {"install": {"pane": "%7", "name": "Install Claude Code", "running": True,
+                                        "exit": None, "tail": ["Downloading Claude Code", "Installing to ~/.local/bin", "  50%"]}},
+            "codex": {"signin": {"pane": "%8", "name": "Sign in to Codex", "running": False, "exit": 0, "tail": ["Done"]}}})
+
+    def test_the_sign_in_state_comes_from_the_clis_own_status_and_is_kept_for_a_while(self):
+        """#6239: claude auth status and codex login status exit 0 when signed in; the guide asks at most every
+        STATUS_TTL seconds. A CLI with no status command has no sign-in state."""
+        from river import agentinstall
+        asked = []
+        old = agentinstall.STATUS_RUNNER
+        self.addCleanup(setattr, agentinstall, "STATUS_RUNNER", old)
+        self.addCleanup(agentinstall.forget_status)
+        agentinstall.forget_status()
+        agentinstall.STATUS_RUNNER = lambda argv: (asked.append(argv), 0)[1]
+        self.assertTrue(agentinstall.signed_in("claude-code", "/x/claude"))
+        self.assertTrue(agentinstall.signed_in("claude-code", "/x/claude"))
+        self.assertEqual(asked, [["/x/claude", "auth", "status"]])
+        self.assertIsNone(agentinstall.signed_in("copilot", "/x/copilot"))
+        self.assertIsNone(agentinstall.signed_in("codex", None))
+
     def test_a_tmux_that_crashes_with_no_output_names_its_signal(self):
         """#6240: the app's tmux crashed at its first server start and printed nothing, so the start error said only
         'tmux new-session: '. It now names the signal, or the exit status."""
