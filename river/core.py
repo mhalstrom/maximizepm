@@ -2295,7 +2295,22 @@ def _upgrade(conn):
     except sqlite3.OperationalError:
         pass  # a new database: no meta table yet
     try:
-        conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
+        # CREATE ... IF NOT EXISTS only, in one write transaction (executescript ends an open transaction itself, so
+        # the script begins its own). Without the write lock, connections that opened a new queue file at once ran
+        # SCHEMA at the same time, and one stopped with 'database schema has changed' (#6499: the release checks of
+        # v1.5.0 on GitHub; 5 of 2400 rounds of 4 threads here). BEGIN IMMEDIATE waits for the lock (busy_timeout),
+        # and as in tx it tries again LOCK_TRIES times in all; the script only creates what is missing, so a second
+        # run of it is safe.
+        for n in range(LOCK_TRIES):
+            try:
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
+                break
+            except BaseException as e:
+                if conn.in_transaction:
+                    conn.rollback()
+                if not (isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e)) \
+                        or n == LOCK_TRIES - 1:
+                    raise
         with tx(conn):
             _migrate(conn)
             _graph_triggers(conn)
