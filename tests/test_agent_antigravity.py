@@ -197,6 +197,23 @@ class Chat(unittest.TestCase):
         self.assertEqual(antigravity.parse_chat(lines()[:cancelled + 1])[1], "working")
         self.assertEqual(screen((FIX / "pane_cancelled.txt").read_text(encoding="utf-8"))[0], "idle")
 
+    def test_a_stop_hook_message_is_an_event(self):
+        # #6367: the Stop hook's reason (the messages that waited) shows in the chat; agy's own reminders do not.
+        pre = ("The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as "
+               "important information to pay attention to.\n\n")
+        d = {"step_index": 30, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE",
+             "created_at": "2026-11-20T05:00:00Z",
+             "content": pre + "<SYSTEM_MESSAGE>\nStop hook blocked termination: [maxpm alert from tester] "
+                              "look at #12\n</SYSTEM_MESSAGE>"}
+        entries, turn = antigravity.parse_chat_line(d)
+        self.assertEqual(entries, [{"at": "2026-11-20T05:00:00Z", "role": "event",
+                                    "text": "[maxpm alert from tester] look at #12"}])
+        self.assertEqual(turn, "working")
+        d["content"] = "<SYSTEM_MESSAGE>Stop hook blocked termination: [maxpm note from tester] hi</SYSTEM_MESSAGE>"
+        self.assertEqual(antigravity.parse_chat_line(d)[0][0]["text"], "[maxpm note from tester] hi")
+        reminder = json.loads(lines()[9])
+        self.assertEqual(antigravity.parse_chat_line(reminder), ([], None))
+
     def test_an_interrupted_turn_error_message_ends_the_turn(self):
         # #6261: Stop (Esc) mid-stream leaves an empty PLANNER_RESPONSE and an ERROR_MESSAGE.
         interrupted = [

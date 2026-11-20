@@ -395,6 +395,9 @@ def chat_path(session_ref, folder=None, root=None):
 CHAT = {"compressed": False, "file_tools": ["edit_file", "write_to_file"], "ref": "session", "cache_write": False}
 
 _REQUEST = re.compile(r"<USER_REQUEST>\n?(.*?)\n?</USER_REQUEST>", re.S)
+# The last <SYSTEM_MESSAGE> block of a SYSTEM_MESSAGE step: agy's preamble names the tag once before it.
+_SYSTEM = re.compile(r"<SYSTEM_MESSAGE>\n?((?:(?!<SYSTEM_MESSAGE>).)*?)\n?</SYSTEM_MESSAGE>", re.S)
+_STOP_HOOK = "Stop hook blocked termination:"
 # The first lines of a tool's result: 'Created At: <time>' and 'Completed At: <time>', twice.
 _STAMPS = re.compile(r"\A(?:(?:Created|Completed) At: [^\n]*\n)+")
 
@@ -438,7 +441,8 @@ def _args(tc):
 def parse_chat_line(d):
     """(entries, turn) of one step of the transcript. USER_INPUT: the person's prompt (the text in <USER_REQUEST>);
     PLANNER_RESPONSE: the model's text and its tool calls; GENERIC from the model: the result of a tool call (status
-    ERROR: a failed or refused call, its error). SYSTEM_MESSAGE steps (agy's own reminders to the model) are no entries.
+    ERROR: a failed or refused call, its error); SYSTEM_MESSAGE with the Stop hook's reason: an event with the text
+    that MaximizePM brought in at the turn's end (agy's own reminders to the model are no entries).
     The turn: working after a prompt, a tool call and a result; idle after a reply with text and no tool call, or an
     ERROR_MESSAGE (an interrupted or failed turn, #6261)."""
     if not isinstance(d, dict):
@@ -469,6 +473,15 @@ def parse_chat_line(d):
                  "error": error}], "working"
     if kind == "ERROR_MESSAGE":
         return [], "idle"
+    if kind == "SYSTEM_MESSAGE":
+        # The reason of MaximizePM's Stop hook (the messages that waited, #6351): the turn goes on with it, and the
+        # chat shows what came in (#6367). agy's own reminders stay out.
+        content = d.get("content") if isinstance(d.get("content"), str) else ""
+        m = _SYSTEM.search(content)
+        text = (m.group(1) if m else content).strip()
+        if text.startswith(_STOP_HOOK):
+            text = text[len(_STOP_HOOK):].strip()
+            return ([{"at": at, "role": "event", "text": text}] if text else []), "working"
     return [], None
 
 
