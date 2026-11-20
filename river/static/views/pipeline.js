@@ -25,9 +25,11 @@ const V = { shown: false, name: null, data: null, run: null, stage: null, arrow:
 let sig = "", runSig = "";
 const WORD = { passed: "passed", running: "running", failed: "failed", queued: "waiting", skipped: "skipped",
   cancelled: "cancelled", stopped: "stopped", error: "error", none: "no run yet" };
-// The mark of a transition: its mode when no control holds it, else the control (mark, word, chip color).
-const MODE_MARK = { auto: ["→", "auto", ""], yes: ["✋", "yes", "c-human"], delay: ["⏱", "delay", ""],
-  release: ["📦", "release", "c-human"], forge: ["⎇", "forge", ""] };
+// The mark of a transition: its mode when no control holds it, else the control (mark, word, chip color). The words
+// are what the step does (#6482, mark 2026-11-20: 'release or approve is fine'): a mode where the Git host starts the
+// stage by itself names that host (arrowMark).
+const MODE_MARK = { auto: ["→", "auto", ""], yes: ["✋", "approve", "c-human"], delay: ["⏱", "delay", ""],
+  release: ["📦", "release", "c-human"], forge: ["⎇", "runs it", ""] };
 const STATE_MARK = { disabled: ["⏸", "disabled", "c-waiting"], blocked: ["⛔", "blocked", "c-warn"],
   fault: ["⛔", "fault", "c-warn"], frozen: ["❄", "frozen", "c-warn"], window: ["🕒", "closed", "c-human"],
   delayed: ["⏱", "delayed", "c-waiting"] };
@@ -278,7 +280,7 @@ function stageCardOnly(s) {
       <span class="pl-name">${esc(s.name)}</span><span class="pl-ver">${esc(short(r && r.version))}</span>
       ${st("none", "no news")}<span class="pl-meta pl-more-line">${read ? "last read " + esc(ago(read)) : "not read yet"}</span></span>`,
       { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
-        title: "Forge workflow: " + s.workflow });
+        title: "Workflow: " + s.workflow });
   }
   const r = s.last_run, live = r && s.env && r.state === "passed";
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
@@ -298,7 +300,7 @@ function stageCardOnly(s) {
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : "") + (nextAt(V.data) === s.name ? " pl-waits" : "") + (moving ? " pl-moving" : ""),
       pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
-      title: s.run ? "Runs: " + s.run : s.workflow ? "Forge workflow: " + s.workflow : s.name, attrs: moving ? `style="${phase()}"` : "" });
+      title: s.run ? "Runs: " + s.run : s.workflow ? "Workflow: " + s.workflow : s.name, attrs: moving ? `style="${phase()}"` : "" });
 }
 
 // The keys a stage may read (#6153), by name only: the secrets of the credential sets granted to the stage or its
@@ -323,10 +325,14 @@ function keysHtml(s) {
 }
 
 // The mark and the words of a transition: [mark, short word, chip color].
-function arrowMark(t) {
+function arrowMark(s) {
+  const t = s.transition;
   if (t.state !== "open") return STATE_MARK[t.state] || ["⛔", t.state, "c-warn"];
   const m = MODE_MARK[t.mode] || MODE_MARK.auto;
-  if (t.mode === "yes") return [m[0], t.arg && t.arg !== "manager" ? `${t.arg}'s yes` : t.arg ? "manager" : "a yes", m[2]];
+  if (t.mode === "yes") return [m[0], t.arg && t.arg !== "manager" ? `${t.arg} approves` : t.arg ? "manager approves" : "approve", m[2]];
+  // The Git host starts it (a push or a tag): into a deploy stage that is the release; else the host runs it.
+  if (t.mode === "forge") return s.kind === "deploy" || s.env ? ["📦", "release", ""]
+    : [m[0], `${(t.host || "the Git host").replace(/^the /, "")} ${m[1]}`, m[2]];
   if (t.mode === "delay") return [m[0], t.arg, m[2]];
   return m;
 }
@@ -337,7 +343,7 @@ function arrowEl(s, i) {
   const t = s.transition;
   if (!t || (!i && plainArrow(t))) return "";
   if (V.data && V.data.followed) return i ? `<div class="pl-gate"></div>` : "";  // #6167: no transition of ours
-  const [m, word, cls] = arrowMark(t);
+  const [m, word, cls] = arrowMark(s);
   const w = (t.waiting || [])[0];
   const by = t.state !== "open" ? [t.set_by, t.until ? (t.until.startsWith("#") ? `until ${t.until} closes` : `${left(t.until)} left`) : ""]
     .filter(Boolean).join(" · ") : "";
@@ -416,8 +422,8 @@ function sourceCard(D) {
   const state = a.state === "refused" ? `<span class="c-warn">✕ refused</span>` : a.state === "missing" ? `<span class="c-warn">○ not saved</span>`
     : a.read_at ? `● read ${esc(ago(a.read_at))}` : `<span class="muted">not read yet</span>`;
   return `<div class="pl-card"><h3>Where its runs come from</h3><div class="pl-table"><table class="pl-blocks">
-    <tr><th>Forge</th><th>Account</th><th>Token</th><th>Last read</th><th>The token runs out</th></tr>
-    <tr><td data-label="Forge">${esc(a.label)} <span class="muted t-s">${esc(a.host)}</span></td>
+    <tr><th>Git host</th><th>Account</th><th>Token</th><th>Last read</th><th>The token runs out</th></tr>
+    <tr><td data-label="Git host">${esc(a.label)} <span class="muted t-s">${esc(a.host)}</span></td>
       <td data-label="Account">${esc(a.owner || "?")}${a.kind ? ` <span class="muted t-s">${esc(a.kind)}</span>` : ""}</td>
       <td class="mono" data-label="Token">${esc(a.secret || "none named")}</td><td data-label="Last read">${state}</td>
       <td class="${a.days_left != null && a.days_left <= 7 ? "c-warn" : ""}" data-label="Runs out">${esc(runsOut(a)) || `<span class="muted">-</span>`}</td></tr></table></div>
@@ -760,8 +766,8 @@ function arrowOptions(s) {
 function arrowDetail(s) {
   const D = V.data, t = s.transition, i = D.stages.indexOf(s);
   const from = (t.from || []).length ? t.from.join(" + ") : t.from ? "start" : i > 0 ? D.stages[i - 1].name : "start";  // #6142
-  const [m, word, cls] = arrowMark(t);
-  const row = (what, now, by) => `<tr><td><b>${esc(what)}</b></td><td>${now}</td><td class="t-s muted">${by}</td></tr>`;
+  const [m, word, cls] = arrowMark(s);
+  const row =(what, now, by) => `<tr><td><b>${esc(what)}</b></td><td>${now}</td><td class="t-s muted">${by}</td></tr>`;
   const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : t.fixed || D.default ? "the deploy target" : "the start: automatic")];
   if (t.window) rows.push(row("Time window", `${esc(t.window.text)} ${st(t.window.open ? "passed" : "queued", t.window.open ? "open now" : "closed now")}`,
     setBy(t.window.by, t.window.at) + (t.window.change ? ` · ${t.window.open ? "closes" : "opens"} ${esc(when(t.window.change))}` : "")));
@@ -941,15 +947,16 @@ function arrowAct(d) {
     (v) => v.to ? doAct("pipeline_freeze", { stage: n, from: v.from || null, to: v.to, reason: v.why }) : toast("Say until when", true));
   if (d.plUnfreeze) return doAct("pipeline_freeze", { stage: n, clear: true });
   const target = V.data.default;  // #6176: a deploy target's mode comes from the target
+  const words = t.words === "forge" ? "host" : t.words;  // #6482: the page says host (parse_mode takes both)
   // #6205: the window is marked on a week calendar (components/weekPicker.js); its text stays under it.
   return askForm(`Change ${into}`, (target ? "" : "The mode is how a version passes when nothing holds it. ") + "Mark the hours when versions may pass; none marked: at any time.",
-    "Save", [...(target ? [] : [{ id: "mode", label: "Mode", value: t.words, hint: "auto, yes mark, delay 10m, release" }]),
+    "Save", [...(target ? [] : [{ id: "mode", label: "Mode", value: words, hint: "auto, yes mark, delay 10m, release" }]),
       { id: "window", label: "When versions may pass", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00",
         before: weekPickerHtml(), wire: wireWeekPicker },
       { id: "fault", label: "Fault rule", options: [["on", "Block it"], ["off", "Let versions pass"]], value: t.fault_rule ? "on" : "off" }],
     (v) => {
       const args = { stage: n, reason: v.why || null };
-      if (v.mode && v.mode !== t.words) args.mode = v.mode;
+      if (v.mode && v.mode !== words) args.mode = v.mode;
       if (v.window !== (t.window ? t.window.text : "")) args.window = v.window || "none";
       if ((v.fault === "on") !== !!t.fault_rule) args.fault_rule = v.fault === "on";
       if (Object.keys(args).length === 2) return toast("Nothing changed");

@@ -199,7 +199,9 @@ def _mode(conn, r, t):
     if mode == "auto" or (mode == "forge" and r["outside"]):  # #6164: the outside system starts it: it asked first
         return True, None
     if mode == "forge":  # #6119: a push or a tag starts it on the forge; its plugin links that run to this one
-        return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
+        f = conn.execute("SELECT forge FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
+        return False, (f"{transitions.host_name(f['forge'] if f else None)} starts it by itself (a push or a tag); "
+                       "MaximizePM reads its run")
     if r["approved_at"]:
         return True, None
     if mode == "delay":
@@ -341,7 +343,8 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
     r = _waiting_run(conn, p, stage, rev)
     t = transitions.get(conn, r["stage_id"])
     if t["mode"] in ("auto", "forge"):
-        raise core.RiverError(f"the transition into stage {stage} is {transitions.mode_text(t['mode'], t['mode_arg'])}"
+        raise core.RiverError(f"the transition into stage {stage} is "
+                              f"{transitions.mode_text(t['mode'], t['mode_arg'], transitions.host_name(p['forge']))}"
                               f": it takes no yes. To let {(r['rev'] or '')[:12]} past its controls: maxpm pipeline "
                               f"pass {p['name']} {stage} --rev {(r['rev'] or '')[:12]} --reason \"<why>\"")
     why = _yes_refusal(conn, t, stage, actor)

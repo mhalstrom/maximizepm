@@ -34,7 +34,7 @@ COMMANDS = {
                "risk": LEAD, "mode": LEAD, "releaser": LEAD,
                "report": ANY, "summary": LEAD, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
-                 "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "rerun": LEAD,
+                 "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "host": LEAD, "rerun": LEAD,
                  "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD,
                  "fix": ANY, "version": ANY, "item": ANY,  # #6113, #6114, #6116
                  "transition": LEAD, "block": LEAD, "unblock": LEAD, "delay": LEAD, "disable": LEAD,

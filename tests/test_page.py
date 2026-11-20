@@ -273,7 +273,7 @@ try {
             self.assertIn("⛔ blocked", r["test"], r)
             self.assertIn("abc1234 waits", r["test"], r)
             self.assertIn("🕒 closed", r["beta"], r)
-            self.assertIn("✋ mark's yes", r["prod"], r)
+            self.assertIn("✋ mark approves", r["prod"], r)  # #6482: the chip says what the step does
             self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
             self.assertEqual(r["tier"], "PROD", r)  # the tier badge on the stage card (#6137)
             self.assertIn("the test database is down", r["detail"], r)

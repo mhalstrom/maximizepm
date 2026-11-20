@@ -41,7 +41,7 @@ function row(a) {
   const btn = ["refused", "missing"].includes(a.state)
     ? button(a.state === "refused" ? "Replace" : "Add it", { kind: "primary", data: { "ac-add": a.forge, "ac-name": a.secret || "",
       "ac-url": a.host && !["github.com", "gitlab.com", "api.pulumi.com"].includes(a.host) ? "https://" + a.host : "" }, title: "Save a new token" })
-    : button("Check now", { data: { "dp-check": a.secret || "" }, title: "Ask the forge now" });
+    : button("Check now", { data: { "dp-check": a.secret || "" }, title: "Check the token" });
   return `<tr>
     <td><b>${esc(a.label)}</b> · ${esc(a.owner || "?")}<div class="muted t-s">${esc(a.host)}${a.kind ? " · " + esc(a.kind) : ""}</div></td>
     <td class="mono" data-label="Token">${esc(a.secret || "none named")}</td>
@@ -59,15 +59,15 @@ export function accountsHtml(data) {
   const accts = data.accounts || [];
   const here = data.pipelines.filter(p => !p.default && p.source.state === "local").map(p => p.name);
   const plugins = data.pipelines.filter(p => !p.default && p.source.plugin).map(p => p.name);
-  const add = button("Add a token", { kind: "primary", data: { "ac-add": "github" }, title: "Save a forge token" });
+  const add = button("Add a token", { kind: "primary", data: { "ac-add": "github" }, title: "Save a token" });
   const table = accts.length ? `<div class="pl-card"><div class="pl-bar"><h3>Accounts and tokens</h3>${add}</div>
-    <div class="muted t-s">One token for each account on a forge; many pipelines can use one token. MaximizePM asks the forge about each token once an hour.</div>
+    <div class="muted t-s">One token for each account on a Git host; many pipelines can use one token. MaximizePM asks the Git host about each token once an hour.</div>
     <div class="pl-table"><table class="pl-blocks">
       <tr><th>Account</th><th>Token</th><th>State</th><th>Runs out</th><th>Reaches</th><th>Used by</th><th></th></tr>
       ${accts.map(row).join("")}</table></div>
     <div class="muted t-s">A token is a secret of MaximizePM. Nobody sees its value, not here and not in a terminal.</div></div>`
     : `<div class="pl-card"><div class="pl-bar"><h3>Accounts and tokens</h3>${add}</div>
-      <div class="muted t-s">No pipeline names a forge token yet. Add one here, then name it: maxpm pipeline forge &lt;pipeline&gt; github --repo &lt;owner/name&gt; --secret &lt;name&gt;</div></div>`;
+      <div class="muted t-s">No pipeline names a Git host token yet. Add one here, then name it: maxpm pipeline host &lt;pipeline&gt; github --repo &lt;owner/name&gt; --secret &lt;name&gt;</div></div>`;
   const local = here.length ? `<div class="pl-card"><h3>This computer</h3><div class="t-m muted">maxpm serve runs these stages here: no token.</div>
     <div class="t-m">${here.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open the pipeline" })).join(" ")}</div></div>` : "";
   const plug = plugins.length ? `<div class="pl-card"><h3>Plugins</h3><div class="t-m muted">A plugin reads its own system with the secrets its pipeline maps to it.</div>
@@ -85,17 +85,17 @@ let dlg = null, box = null;
 function formHtml(forge, name, url) {
   return `<div class="dlg-head"><h2>Add a token</h2>${iconButton("✕", "Close", { data: { "ac-close": 1 } })}</div>
     <div class="form">
-      ${field("Forge", select({ id: "acForge" }, FORGES, forge))}
+      ${field("Git host", select({ id: "acForge" }, FORGES, forge))}
       ${field("Server", input({ id: "acUrl", value: url || "", placeholder: "https://<host>, for a server of your own" }))}
       ${field("Token", input({ id: "acToken", type: "password", autocomplete: "off", spellcheck: "false", placeholder: "paste the token" }))}
-      ${field("Name", input({ id: "acName", value: name || "", placeholder: "<forge>-<account>, filled in after the check" }))}
+      ${field("Name", input({ id: "acName", value: name || "", placeholder: "<host>-<account>, filled in after the check" }))}
       <div class="muted t-s" id="acNeeds">${esc(NEEDS[forge] || "")}</div>
     </div>
     ${actions(button("Cancel", { data: { "ac-close": 1 } }) + button("Check and save", { kind: "primary", data: { "ac-save": 1 }, title: "Check, then save" }))}
     <div class="t-m" id="acResult"></div>
     <div class="ac-or muted t-s">or</div>
     <div>${button("Make the token for me", { data: { "ac-make": 1 }, title: "A session makes it" })}
-      <div class="muted t-s">A session opens the forge's new-token page in the project's browser, on the Sessions tab. You sign in there; the session fills in the name, the repositories and the permissions, and you press Generate. It saves the token without anyone seeing it.</div></div>`;
+      <div class="muted t-s">A session opens the Git host's new-token page in the project's browser, on the Sessions tab. You sign in there; the session fills in the name, the repositories and the permissions, and you press Generate. It saves the token without anyone seeing it.</div></div>`;
 }
 
 const val = (id) => (box.querySelector(id).value || "").trim();
@@ -131,7 +131,7 @@ async function onClick(e) {
     const end = r.expires_at ? `runs out ${r.expires_at.slice(0, 10)}` : "no end date";
     box.querySelector("#acResult").innerHTML = `<span class="c-ready">●</span> ${esc(r.label)} accepts it: ${esc(r.kind || "account")}
       <b>${esc(r.owner || "?")}</b>, ${esc(end)}${r.scopes ? `, scopes ${esc(r.scopes)}` : ""}. ${r.replaced ? "It replaced" : "Saved as"}
-      <span class="mono">${esc(r.secret)}</span>${r.used_by.length ? `, used by ${r.used_by.map(esc).join(", ")}` : ". Name it in a pipeline: maxpm pipeline forge &lt;pipeline&gt; " + esc(r.forge) + " --secret " + esc(r.secret)}.`;
+      <span class="mono">${esc(r.secret)}</span>${r.used_by.length ? `, used by ${r.used_by.map(esc).join(", ")}` : ". Name it in a pipeline: maxpm pipeline host &lt;pipeline&gt; " + esc(r.forge) + " --secret " + esc(r.secret)}.`;
     return;
   }
   if (e.target.closest("[data-ac-make]")) {

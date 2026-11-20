@@ -2074,6 +2074,26 @@ class GitHub(Base):
         r104 = self.c.execute("SELECT state, errors FROM stage_runs WHERE key='gh-run-104'").fetchone()
         self.assertEqual((r104["state"], r104["errors"]), ("skipped", "action_required"))
 
+    def test_a_stored_held_pr_run_is_not_the_last_run_and_the_arrow_names_github(self):
+        # #6482: a run stored before #6473 (an outside PR's run that GitHub held: errors action_required) is not the
+        # stage's last run; the stage shows the run of main before it. The arrow names GitHub, never 'forge'.
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        tests_id = self.c.execute("SELECT id FROM pipeline_stages WHERE name='tests'").fetchone()["id"]
+        self.c.execute("INSERT INTO stage_runs(pipeline_id, stage_id, key, state, ended_at, source, errors) "
+                       "VALUES (?,?,?,?,?,?,?)", (self.p()["id"], tests_id, "gh-run-99", "failed",
+                                                  "2026-11-20T20:36:27Z", "github", "action_required"))
+        tests = next(s for s in store.show(self.c, "mpm")["stages"] if s["name"] == "tests")
+        self.assertEqual((tests["last_run"]["state"], tests["last_run"]["version"]), ("passed", "a" * 40))
+        define.stage_set(self.c, "mpm", "beta", gate="forge")
+        beta = next(s for s in store.show(self.c, "mpm")["stages"] if s["name"] == "beta")["transition"]
+        self.assertEqual((beta["host"], beta["text"]), ("GitHub", "GitHub starts it by itself (a push or a tag)"))
+        self.assertNotIn("forge", json.dumps(beta["text"]) + beta["state_text"])
+        from river.pipeline import transitions
+        self.assertEqual(transitions.parse_mode("host"), ("forge", None))  # the page's word for the mode
+
     def test_a_refused_artifact_download_skips_its_report_and_never_reads_as_a_refused_token(self):
         # The storage host of the artifact answers 401 (#6459): the run is read, its report is skipped, and the
         # pipeline keeps no error that the token check reads as GitHub's refusal of the token.
@@ -2112,7 +2132,7 @@ class GitHub(Base):
         self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
         out = self.runner.serve_pass(self.c)
         beta = self.stage_runs()["beta"]
-        self.assertIn("the forge starts it by itself", out["waiting"][beta["id"]])
+        self.assertIn("GitHub starts it by itself", out["waiting"][beta["id"]])  # #6482: the host's own name
         self.assertFalse([c for c in self.api.calls if c[0] == "POST"])  # MaximizePM starts nothing
         self.runs["desktop-release.yml"] = [gh_run(404, "a" * 40, title="v0.9.0")]  # the manager's tag
         self.jobs(404)

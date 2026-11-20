@@ -310,7 +310,7 @@ $("#tab-deploy").addEventListener("click", (e) => {
   if (!t) return;
   const d = t.dataset;
   if (d.dpTriggers) return go({ part: null, pipeline: d.dpTriggers, tab: "triggers" });
-  if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the forge");
+  if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the Git host");
   if (d.dpPart) return go({ part: d.dpPart, pipeline: null, tab: "stages" });
   if (d.dpOpen) return go({ part: null, pipeline: d.dpOpen, tab: "stages" });
   if (d.dpTab) return go({ part: null, pipeline: D.pipeline, tab: d.dpTab });

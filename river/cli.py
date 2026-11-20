@@ -1047,10 +1047,17 @@ def parse_args(argv=None):
         try:
             args = build_parser(only=cmd).parse_args(words)
             if args.cmd == cmd:
-                return args
+                return _alias(args)
         except _Retry:
             pass
-    return build_parser().parse_args(words)
+    return _alias(build_parser().parse_args(words))
+
+
+def _alias(args):
+    """maxpm pipeline host is maxpm pipeline forge (#6482: the page says Git host; argparse keeps the alias typed)."""
+    if getattr(args, "plcmd", None) == "host":
+        args.plcmd = "forge"
+    return args
 
 
 BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
@@ -1975,7 +1982,7 @@ def build_parser(only=None):
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
-    x = pls.add_parser("forge", help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
+    x = pls.add_parser("forge", aliases=["host"], help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
                        "minute and starts a gated workflow after the gate), an installed plugin (maxpm pipeline "
                        "plugins), or none (the stages run here)")
     x.add_argument("name")
