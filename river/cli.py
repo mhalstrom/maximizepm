@@ -111,6 +111,12 @@ SETUP = """Setting up agents to use MaximizePM
      maxpm setup-agent --claude-desktop    then quit and reopen the app
    The ChatGPT desktop app (Work and Codex modes) the same way:
      maxpm setup-agent --chatgpt-desktop   then restart the app
+
+8. Claude Code sessions that the person starts by hand: only maxpm serve
+   writes the queue, and the sessions that MaximizePM starts cannot write its
+   file. Ask the person whether their own sessions get the same rule (it goes
+   into ~/.claude/settings.json); with a yes:
+     maxpm setup-agent --guard             (--remove takes it out)
 """
 
 HINTS = {
@@ -2900,8 +2906,13 @@ def build_parser(only=None):
     x.add_argument("--chatgpt-desktop", "--codex", dest="codex", action="store_true",
                    help="add MaximizePM (maxpm mcp) to ~/.codex/config.toml, which the ChatGPT desktop app (Work and Codex "
                         "modes) and the Codex CLI share, leaving the other servers as they are")
-    x.add_argument("--remove", action="store_true", help="with --claude-desktop or --chatgpt-desktop: take MaximizePM out again")
-    x.add_argument("--config", help="with --claude-desktop or --chatgpt-desktop: the config file (default: where the app keeps it)")
+    x.add_argument("--guard", action="store_true",
+                   help="add the queue guard to Claude Code's user settings: sessions that you start by hand cannot "
+                        "write the queue file (the sessions that maxpm serve starts get it by themselves)")
+    x.add_argument("--remove", action="store_true",
+                   help="with --claude-desktop, --chatgpt-desktop or --guard: take MaximizePM out again")
+    x.add_argument("--config", help="with --claude-desktop, --chatgpt-desktop or --guard: the config file (default: "
+                                    "where the app keeps it)")
     return p
 
 
@@ -3373,8 +3384,12 @@ def _run_words(words, rec):
         print(json.dumps(res) if args.json else "\n".join(core.ops_probe_lines(res)))
         return core.OPS_PROBE_EXIT[res["status"]]
     if args.cmd == "setup-agent":
-        if args.claude_desktop and args.codex:
-            raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")
+        if sum(map(bool, (args.claude_desktop, args.codex, args.guard))) > 1:
+            raise RiverError("one at a time: --claude-desktop, --chatgpt-desktop or --guard")
+        if args.guard:  # #6412: the person runs it, which is the yes
+            from . import agents
+            print(agents.get("claude").write_guard(args.config, args.remove))
+            return 0
         if args.claude_desktop:
             from . import agents
             print(agents.get("claude").write_mcp_config(args.config, args.remove))
@@ -3384,7 +3399,7 @@ def _run_words(words, rec):
             print(agents.get("codex").write_mcp_config(args.config, args.remove))
             return 0
         if args.remove or args.config:
-            raise RiverError("--remove and --config go with --claude-desktop or --chatgpt-desktop")
+            raise RiverError("--remove and --config go with --claude-desktop, --chatgpt-desktop or --guard")
         if not args.append:
             print(AGENT_SNIPPET)
             return 0

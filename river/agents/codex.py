@@ -65,10 +65,18 @@ EFFORT = {
 # cat .env (including gitignored files) was refused ('Operation not permitted'), touch in the read folder was refused,
 # and the PreToolUse hook ran with no trust prompt. A legacy --sandbox flag overrides default_permissions, so
 # workspace-write and read-only go into the profile's extends instead when read_dirs is set.
+#
+# The queue guard (#6412): the same profile marks the queue file and its -wal and -shm files "read", so only maxpm
+# serve writes the queue, although --add-dir lets the session write the rest of the queue folder. Measured 2026-11-20
+# with codex-cli 0.159.1 (codex sandbox -P with a profile that extends :workspace): a "read" file inside a "write"
+# folder refused 'echo >> file' and the creation of the -shm file ('Operation not permitted'), read the file, and
+# wrote another file of the folder. So every start and resume in a sandbox has the profile; danger-full-access has
+# no sandbox and gets none.
 LAUNCH = {"extra_dirs": True, "resume": True, "read_dirs": True}
 READ_DIR_DENY = ("{d}/**/.env", "{d}/**/.env.*", "{d}/**/.envrc",
                  "{d}/**/*.secret", "{d}/**/*.secrets", "{d}/**/secrets/**")
-_READ_DIR_PROFILE = "maxpm_read_dirs"
+_PROFILE = "maxpm"
+_OLD_PROFILES = ("maxpm_read_dirs",)  # the profile's name before #6412
 _SANDBOX_PROFILES = {"workspace-write": ":workspace", "read-only": ":read-only"}
 
 
@@ -91,22 +99,36 @@ def _config_top():
     return got
 
 
+def _base_profile(sandbox):
+    """The profile that MaximizePM's profile extends: --sandbox read-only or workspace-write, else config.toml's
+    default_permissions, else its sandbox_mode, else :workspace. None when the session has no sandbox
+    (danger-full-access): no profile then."""
+    if sandbox:
+        return _SANDBOX_PROFILES.get(sandbox)
+    top = _config_top()
+    base = top.get("default_permissions")
+    if base in (_PROFILE, *_OLD_PROFILES):
+        return ":workspace"
+    if base:
+        return None if "danger" in base else base
+    mode = top.get("sandbox_mode") or "workspace-write"
+    return _SANDBOX_PROFILES.get(mode)
+
+
 def read_dir_words(dirs, sandbox=None):
-    """-c words for the project's read_dirs (#6304): a permission profile extending the active profile and denying
-    secret files in each read folder. Codex's -c splits keys on '.' even when quoted, so filesystem entries go as one
-    inline table."""
-    if not dirs:
-        return []
+    """-c words for a permission profile extending the active profile: it marks the queue files "read" (#6412) and
+    denies secret files in each of the project's read_dirs (#6304). Codex's -c splits keys on '.' even when quoted,
+    so filesystem entries go as one inline table. [] when the session has no sandbox, or nothing to mark."""
     import json
-    base = _SANDBOX_PROFILES.get(sandbox or "")
-    if not base:
-        top = _config_top()
-        base = top.get("default_permissions") or _SANDBOX_PROFILES.get(top.get("sandbox_mode") or "") or ":workspace"
-        if base == _READ_DIR_PROFILE:
-            base = ":workspace"
-    fs = ",".join(f'{json.dumps(p.format(d=d))}="deny"' for d in dirs for p in READ_DIR_DENY)
-    return ["-c", f"default_permissions={json.dumps(_READ_DIR_PROFILE)}",
-            "-c", f"permissions.{_READ_DIR_PROFILE}={{extends={json.dumps(base)},filesystem={{{fs}}}}}"]
+    from ..core import queue_files
+    base = _base_profile(sandbox)
+    entries = ([f'{json.dumps(f)}="read"' for f in queue_files()]
+               + [f'{json.dumps(p.format(d=d))}="deny"' for d in dirs or () for p in READ_DIR_DENY])
+    if not base or not entries:
+        return []
+    fs = ",".join(entries)
+    return ["-c", f"default_permissions={json.dumps(_PROFILE)}",
+            "-c", f"permissions.{_PROFILE}={{extends={json.dumps(base)},filesystem={{{fs}}}}}"]
 
 # A Codex session records no task link: its web link is Codex's web app (core.CODEX_WEB).
 IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "pane": None, "url": "https://chatgpt.com/codex",
@@ -131,13 +153,14 @@ def build_command(name, folder, model, effort, settings, prompt):
     sandbox = s.get("sandbox")
     words = ["codex"] + (["resume", s["resume"]] if s.get("resume") else [])
     words += (["-m", model] if model else []) + ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
-    # A legacy --sandbox flag overrides default_permissions in Codex 0.159.1, dropping the read_dirs deny profile;
+    # A legacy --sandbox flag overrides default_permissions in Codex 0.159.1, dropping MaximizePM's profile;
     # workspace-write and read-only go into the profile's extends instead.
-    if sandbox and not (rd and sandbox in _SANDBOX_PROFILES):
+    profile = read_dir_words(rd, sandbox)
+    if sandbox and not profile:
         words += ["--sandbox", sandbox]
     words += ["--ask-for-approval", s["approval"]] if s.get("approval") else []
     words += ["--add-dir", river_dir()]
-    words += read_dir_words(rd, sandbox)
+    words += profile
     if ("--no-daemon" in codex_flags() and "--no-daemon" not in s.get("args", "")
             and "--no-daemon" not in (s.get("noflags") or ())):
         words.append("--no-daemon")

@@ -218,33 +218,105 @@ WAKE_EVENTS = ("UserPromptSubmit", "Stop")
 WAKE_TIMEOUT = 86400
 
 
+GUARD_FILE = "claude-guard.json"  # beside the queue: the guard alone, for a start with the activity hooks off
+
+
+def guard_settings():
+    """The Claude Code settings that deny writes to the queue file and its -wal and -shm files (#6412): only maxpm
+    serve writes the queue. sandbox.filesystem.denyWrite holds for the sandbox's Bash commands (sqlite3 too), and the
+    Edit(//<path>) deny rules for the Edit and Write tools. Claude Code 2.1.329 describes denyWrite as 'Additional
+    paths to deny writing within the sandbox. Merged with paths from Edit(...) deny permission rules'; a --settings
+    file merges these lists with the person's own."""
+    from ..core import queue_files
+    files = queue_files()
+    if not files:
+        return {}
+    return {"permissions": {"deny": [f"Edit(/{f})" for f in files]}, "sandbox": {"filesystem": {"denyWrite": files}}}
+
+
 def hook_settings(report):
     """The Claude Code settings (claude --settings) with MaximizePM's hooks: each event runs `report --hook claude`,
     which reads the hook's JSON on stdin, and WAKE_EVENTS also start the listener `report --wake claude`. report: the
-    maxpm report command (argv words)."""
+    maxpm report command (argv words). The queue guard (guard_settings) goes in the same file."""
     import shlex
     run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
             "timeout": 10}]
     wake = {"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--wake", "claude"]),
             "asyncRewake": True, "timeout": WAKE_TIMEOUT}
-    return {"hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
+    return {**guard_settings(),
+            "hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
                       else [{"hooks": run + [wake] if ev in WAKE_EVENTS else run}] for ev in HOOK_EVENTS}}
 
 
-def install_hooks(folder, report):
-    """Write the hook file beside the queue when its text changes; the start adds --settings <file>."""
+def _write_settings(name, data, fix):
+    """Write a settings file beside the queue when its text changes; the words that pass it to claude."""
     import json
     from pathlib import Path
     from ..core import RiverError, river_dir
-    f = Path(river_dir()) / HOOK_FILE
-    text = json.dumps(hook_settings(report), indent=2) + "\n"
+    f = Path(river_dir()) / name
+    text = json.dumps(data, indent=2) + "\n"
     try:
         if not f.exists() or f.read_text(encoding="utf-8") != text:
             f.write_text(text, encoding="utf-8")
     except OSError as e:
-        raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: "
-                         f"maxpm config set claude_activity_hooks off")
+        raise RiverError(f"cannot write {f}: {e}; {fix}")
     return ["--settings", str(f)]
+
+
+def install_hooks(folder, report):
+    """Write the hook file beside the queue when its text changes; the start adds --settings <file>."""
+    return _write_settings(HOOK_FILE, hook_settings(report),
+                           "turn the hooks off: maxpm config set claude_activity_hooks off")
+
+
+def install_guard(folder):
+    """Write the guard file (guard_settings alone) beside the queue, for a start with the activity hooks off."""
+    return _write_settings(GUARD_FILE, guard_settings(), "check that the queue folder can be written")
+
+
+def write_guard(path=None, remove=False):
+    """Add (or remove) the queue guard in Claude Code's user settings (maxpm setup-agent --guard), for the sessions
+    that a person starts by hand: the sessions that MaximizePM starts get it with each start. The person's own rules
+    stay; the old file is kept as <name>.bak when it changes."""
+    import json
+    from pathlib import Path
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else _config_dir() / "settings.json"
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError as e:
+        raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it")
+    if not isinstance(data, dict):
+        raise RiverError(f"{f}: expected a JSON object; fix it first")
+    guard = guard_settings()
+    lists = ((("permissions", "deny"), guard["permissions"]["deny"]),
+             (("sandbox", "filesystem", "denyWrite"), guard["sandbox"]["filesystem"]["denyWrite"]))
+    changed = False
+    for keys, values in lists:
+        d = data
+        for k in keys[:-1]:
+            if not isinstance(d.setdefault(k, {}), dict):
+                raise RiverError(f"{f}: {'.'.join(keys[:-1])} is not an object; fix it first")
+            d = d[k]
+        have = d.setdefault(keys[-1], [])
+        if not isinstance(have, list):
+            raise RiverError(f"{f}: {'.'.join(keys)} is not a list; fix it first")
+        new = [v for v in have if v not in values] if remove else have + [v for v in values if v not in have]
+        changed = changed or new != have
+        d[keys[-1]] = new
+    if not changed:
+        return f"{f} {'has no' if remove else 'already has the'} queue guard; nothing changed"
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    bak = f" (the old file: {f.name}.bak)" if old else ""
+    if remove:
+        return f"took the queue guard out of {f}{bak}. New Claude Code sessions may write the queue file again."
+    return (f"added the queue guard to {f}{bak}: Claude Code sessions that you start by hand cannot write the queue "
+            f"file ({guard['sandbox']['filesystem']['denyWrite'][0]}) or its -wal and -shm files; their maxpm commands "
+            f"go through maxpm serve. It applies to new sessions.")
 
 
 _TASK_ENDED = {"completed", "failed", "killed", "stopped", "cancelled", "canceled", "done", "error"}

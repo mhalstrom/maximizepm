@@ -1263,7 +1263,7 @@ class ReadDirs(Env):
         self.assertIn(f"read_file({rd}/deep/.env)", agy)
         self.assertNotIn("--add-dir", agy)  # it would move where agy runs its commands (#6278)
         codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
-        self.assertIn('default_permissions="maxpm_read_dirs"', codex)
+        self.assertIn('default_permissions="maxpm"', codex)
         self.assertIn(f'"{rd}/**/.env"="deny"', codex)
         self.assertIn(f'"{rd}/**/secrets/**"="deny"', codex)
         # Active profile comes from CODEX_HOME/config.toml (default_permissions), or :workspace; --sandbox
@@ -1276,9 +1276,9 @@ class ReadDirs(Env):
         try:
             ad = agents.get("codex")
             w_start = ad.build_command("n", str(proj), None, None, {"read_dirs": [str(rd)]}, "go")
-            self.assertIn(f'permissions.maxpm_read_dirs={{extends="custom-local",filesystem={{', " ".join(w_start))
+            self.assertIn(f'permissions.maxpm={{extends="custom-local",filesystem={{', " ".join(w_start))
             w_res = ad.resume_command("tid-1", None, None, {"read_dirs": [str(rd)], "prompt": "go"})
-            self.assertIn('default_permissions="maxpm_read_dirs"', w_res)
+            self.assertIn('default_permissions="maxpm"', w_res)
             self.assertIn(f'"{rd}/**/.env"="deny"', " ".join(w_res))
             w_ro = ad.build_command("n", str(proj), None, None,
                                     {"read_dirs": [str(rd)], "sandbox": "read-only"}, "go")
@@ -1294,7 +1294,79 @@ class ReadDirs(Env):
                 os.environ["CODEX_HOME"] = old_ch
         core.config_unset(self.c, "read_dirs", project="p")
         self.assertNotIn("--disallowedTools", core._launch_agent_cmd(self.c, pid, "Claude Code")["command"])
-        self.assertNotIn("maxpm_read_dirs", core._launch_agent_cmd(self.c, pid, "Codex")["command"])
+        codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
+        self.assertNotIn("default_permissions", codex)  # the tests run with no queue guard (QueueGuard has it)
+
+
+class QueueGuard(Env):
+    """#6412: no session that MaximizePM starts writes the queue file; only maxpm serve does."""
+
+    def setUp(self):
+        super().setUp()
+        core.QUEUE_GUARD = True
+        self.addCleanup(setattr, core, "QUEUE_GUARD", False)
+
+    def test_claude_starts_deny_writes_to_the_queue_files_with_and_without_hooks(self):
+        db = core.db_path()
+        files = core.queue_files()
+        self.assertEqual([Path(f).name for f in files], [db.name, db.name + "-wal", db.name + "-shm"])
+        self.assertTrue(all(Path(f).parent == db.resolve().parent for f in files))
+        pid = core.project_add(self.c, "p")["id"]
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex")
+        for hooks in ("on", "off"):
+            core.config_set(self.c, "claude_activity_hooks", hooks)
+            cmd = core._launch_agent_cmd(self.c, pid, "Claude Code")["command"]
+            name = "claude-hooks.json" if hooks == "on" else "claude-guard.json"
+            path = Path(core.river_dir()) / name
+            self.assertIn(f"--settings {path}", cmd)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], files)
+            self.assertEqual(data["permissions"]["deny"], [f"Edit(/{f})" for f in files])
+            self.assertEqual("hooks" in data, hooks == "on")
+
+    def test_codex_marks_the_queue_files_read_unless_it_has_no_sandbox(self):
+        ad = agents.get("codex")
+        ch = Path(self.tmp.name, "codex-home")
+        ch.mkdir()
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(ch)
+        self.addCleanup(lambda: os.environ.pop("CODEX_HOME", None) if old is None
+                        else os.environ.__setitem__("CODEX_HOME", old))
+        line = " ".join(ad.build_command("n", None, None, None, {}, "go"))
+        for f in core.queue_files():
+            self.assertIn(f'"{f}"="read"', line)
+        self.assertIn('extends=":workspace"', line)
+        line = " ".join(ad.build_command("n", None, None, None, {"sandbox": "workspace-write"}, "go"))
+        self.assertNotIn("--sandbox", line)  # the flag would drop the profile
+        self.assertIn('extends=":workspace"', line)
+        line = " ".join(ad.build_command("n", None, None, None, {"sandbox": "danger-full-access"}, "go"))
+        self.assertIn("--sandbox danger-full-access", line)
+        self.assertNotIn("default_permissions", line)
+        (ch / "config.toml").write_text('sandbox_mode = "danger-full-access"\n', encoding="utf-8")
+        self.assertNotIn("default_permissions", " ".join(ad.build_command("n", None, None, None, {}, "go")))
+        (ch / "config.toml").write_text('default_permissions = "maxpm_read_dirs"\n', encoding="utf-8")
+        self.assertIn('extends=":workspace"', " ".join(ad.build_command("n", None, None, None, {}, "go")))
+
+    def test_setup_agent_guard_adds_and_removes_the_rule_and_keeps_the_persons_own(self):
+        f = Path(self.tmp.name, "settings.json")
+        f.write_text(json.dumps({"permissions": {"deny": ["Bash(rm *)"]}, "model": "opus"}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--config", str(f)])
+        data = json.loads(f.read_text(encoding="utf-8"))
+        files = core.queue_files()
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm *)"] + [f"Edit(/{x})" for x in files])
+        self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], files)
+        self.assertEqual(data["model"], "opus")
+        self.assertTrue(Path(str(f) + ".bak").exists())
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--config", str(f)])
+        self.assertIn("already has the queue guard", out.getvalue())
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--remove", "--config", str(f)])
+        data = json.loads(f.read_text(encoding="utf-8"))
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm *)"])
+        self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], [])
 
     def test_state_preview_does_not_scan_read_dirs_and_launch_scans_once(self):
         # #6342: core.state -> _start_next -> launch_target(preview=True) must not build the launch command or walk

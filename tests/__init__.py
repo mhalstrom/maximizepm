@@ -112,6 +112,9 @@ os.environ["TMUX_TMPDIR"] = _queue_dir
 # The tests never probe the network (#6099): this computer is online for every test, offline or in a sandbox. A test
 # of an outage sets core.NET_PROBE itself.
 core.NET_PROBE = lambda hosts, dns: None
+# The start commands of the tests carry no queue guard (#6412: no session writes the queue file), so the tests of exact
+# commands stay as they were; tests.test_agents.QueueGuard turns it on.
+core.QUEUE_GUARD = False
 from river import cli as _cli  # noqa: E402
 # The tests run inside an agent CLI (its variables are in their environment), but a test's command is a person's
 # terminal unless the test says otherwise: the permission table (#5974) reads this hook. Its tests set their own.

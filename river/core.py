@@ -18556,6 +18556,20 @@ def hook_file(adapter):
     return adapter.install_hooks(None, report_command())[-1]
 
 
+def settings_file(adapter, opts):
+    """The settings file that a start passes (LAUNCH['hooks_file']): the hook file, which holds the queue guard too,
+    when the agent's activity_hooks setting is on; else the queue guard alone (#6412: no session writes the queue
+    file), or None."""
+    if not adapter.launch.get("hooks_file"):
+        return None
+    if opts.get("activity_hooks") == "on":
+        return hook_file(adapter)
+    if not QUEUE_GUARD:
+        return None
+    words = adapter.install_guard()
+    return words[-1] if words else None
+
+
 def activity_hook_file():
     """Claude Code's hook file (hook_file of the claude adapter)."""
     from . import agents
@@ -22840,6 +22854,20 @@ def river_dir():
     return d
 
 
+QUEUE_GUARD = True  # tests/__init__.py turns it off: the tests of exact start commands predate the guard
+
+
+def queue_files():
+    """The queue file and its -wal and -shm files, as real paths (#6412): each session that MaximizePM starts gets a
+    sandbox rule that denies writes to them, so only maxpm serve writes the queue. A process that cannot write them
+    still reads the queue (SQLite opens it read-only), and a write ends in READONLY_REFUSAL. [] when QUEUE_GUARD is
+    off."""
+    if not QUEUE_GUARD:
+        return []
+    name = db_path().expanduser().name
+    return [os.path.join(river_dir(), name + end) for end in ("", "-wal", "-shm")]
+
+
 def parse_read_dirs(value, strict=False):
     """The folders of the read_dirs setting (#6281): absolute real paths, in order, each once. strict (config set):
     RiverError for a path that is not absolute or not a folder; else such a path is left out (it may be gone)."""
@@ -23936,8 +23964,9 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         caps, built = _adapters().get(prof[0]).launch, dict(opts)
         if caps.get("system_prompt_file") and opts.get("skill_prompt") == "on":
             built["system_prompt_file"] = True
-        if caps.get("hooks_file") and opts.get("activity_hooks") == "on":
-            built["hooks_file"] = hook_file(_adapters().get(prof[0]))
+        sfile = settings_file(_adapters().get(prof[0]), opts)
+        if sfile:
+            built["hooks_file"] = sfile
         if caps.get("mcp_config") and name and project_id is not None:
             from .browser import mcp_config_file  # browser_mcp on: Playwright MCP on the project's browser (#5405)
             path = mcp_config_file(conn, project_id, name)
@@ -24069,8 +24098,9 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     m = re.search(ad.effort["read"], a["pid_cmd"] or "") if (ad.effort or {}).get("read") else None
     effort = ov.get("effort") or (m.group(1) if m else None)
     settings = {**opts, "noflags": list(ov.get("noflags") or ())}
-    if ad.launch.get("hooks_file") and opts.get("activity_hooks") == "on":
-        settings["hooks_file"] = hook_file(ad)
+    sfile = settings_file(ad, opts)
+    if sfile:
+        settings["hooks_file"] = sfile
     settings.update(read_dir_keys(conn, project_id, ad))  # the project's read_dirs (#6281)
     tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
     if tokens and ad.launch.get("autocompact"):

@@ -330,7 +330,7 @@ LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extr
 # The MaximizePM keys in settings, each only when the caller wants it and LAUNCH has its capability:
 LAUNCH_KEYS = {
     "system_prompt_file": "True: put the maxpm skill into the system prompt",
-    "hooks_file": "the path of MaximizePM's hooks file",
+    "hooks_file": "the path of MaximizePM's hooks file, or of the queue guard alone (core.settings_file, #6412)",
     "fork": "the session id to start a fork of",
     "resume": "the session id to resume (resume_command)",
     "autocompact": "the token count to compact at",
@@ -587,6 +587,9 @@ COMMAND_PAGES = ("usage",)
 #    }
 # write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
 # mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
+# write_guard(path=None, remove=False) -> one text that says what changed: adds the queue guard (#6412: no write to
+# the queue file and its -wal and -shm files) to the agent's own settings, for sessions that a person starts by hand
+# (maxpm setup-agent --guard), or takes it out again.
 SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
               "skills_dir": (str, type(None)),
               "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
@@ -598,7 +601,7 @@ PARTS = {
     "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ("config_settings",)},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
     "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command", "trust_workspace",
-                                                       "untrust_workspace"), "required": True},
+                                                       "untrust_workspace", "install_guard"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
@@ -611,7 +614,7 @@ PARTS = {
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
-    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
+    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard")},
 }
 
 BUILTIN = ("claude", "codex", "antigravity", "pi", "copilot", "hermes", "grok", "opencode", "goose", "aider", "amp", "cursor")
@@ -1201,6 +1204,18 @@ class Adapter:
         if f is None:
             raise RiverError(f"agent {self.id} has no MCP config writer (write_mcp_config); add it to {self._file()}")
         return f(path, remove)
+
+    def write_guard(self, path=None, remove=False):
+        f = self._fn("write_guard")
+        if f is None:
+            raise RiverError(f"agent {self.id} has no queue guard for sessions started by hand: its sandbox takes "
+                             f"the rule only at each start, which MaximizePM adds itself")
+        return f(path, remove)
+
+    def install_guard(self, folder=None):
+        """The words that load the queue guard (#6412) for a start without MaximizePM's hooks file, or []."""
+        f = self._fn("install_guard")
+        return [str(w) for w in f(folder) or ()] if f else []
 
     def inside(self, env):
         """Whether a command with environment `env` runs inside this agent (IDENTITY['inside_env'])."""
