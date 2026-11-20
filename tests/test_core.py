@@ -130,6 +130,49 @@ class Ordering(Base):
         self.assertEqual([(n["to_agent"], n["body"].split(" ended")[0]) for n in notes],
                          [("ag", f"the wait on #{y} agent step")])
 
+    def test_block_releases_held_item(self):
+        core.project_add(self.c, "a")
+        core.register(self.c, "w")
+        core.register(self.c, "boss")
+        x = self.add("a", "first")
+        y = core.item_add(self.c, "a", "second", found_during=x)["id"]
+        z = self.add("a", "third")
+        # Holder blocks an in_progress item: released in the same tx, shows blocked until, next skips it, go moves on.
+        core.claim(self.c, x, "w")
+        got = core.block(self.c, x, "waiting on DNS", actor="w", until="3h")
+        self.assertEqual(got["status"], "open")
+        self.assertIsNone(got["assignee"])
+        self.assertIsNone(got["claimed_at"])
+        self.assertIsNone(got["lease_expires_at"])
+        a = core.annotate(self.c)
+        self.assertFalse(a[x]["ready"])
+        self.assertTrue(a[x]["blocked_text"].startswith("blocked until "))
+        changes = [e["change"] for e in got["events"]]
+        self.assertTrue(any(c.startswith("blocked: waiting on DNS (until ") for c in changes))
+        self.assertIn("released: waiting on DNS", changes)
+        self.assertNotIn(x, [i["id"] for i in core.ready_list(self.c)])
+        nxt = core.go(self.c, ".", actor="w", project="a")
+        self.assertEqual(nxt["item"]["id"], y)
+        # Holder blocks a held item (waiting on a prereq): also released and prereq reservation cleared.
+        pre = core.item_add(self.c, "a", "prereq", blocks=y, actor="w", mode="keep")["id"]
+        self.assertEqual(core._item(self.c, y)["status"], "held")
+        got_y = core.block(self.c, y, "waiting on vendor", actor="w")
+        self.assertEqual(got_y["status"], "open")
+        self.assertIsNone(got_y["assignee"])
+        self.assertIsNone(got_y["hold_expires_at"])
+        self.assertIsNone(core._item(self.c, pre)["reserved_for"])
+        # Unnamed caller (actor=None) blocking an in_progress item also releases it.
+        core.claim(self.c, z, "w")
+        got_z = core.block(self.c, z, "outside wait", until="2h")
+        self.assertEqual(got_z["status"], "open")
+        self.assertIsNone(got_z["assignee"])
+        # Another actor blocking a held item leaves it with the holder (so push_guard can still stop a push).
+        core.unblock(self.c, z)
+        core.claim(self.c, z, "w")
+        got_boss = core.block(self.c, z, "hold on", actor="boss")
+        self.assertEqual(got_boss["status"], "in_progress")
+        self.assertEqual(got_boss["assignee"], "w")
+
     def test_zones_without_a_time_zone_database(self):
         # Windows has no zone database unless tzdata is installed: UTC still works, other names say how to fix it.
         from unittest import mock
@@ -10992,7 +11035,9 @@ class PushGuard(Base):
 
     def test_a_blocked_item_holds_a_push_and_the_setting_turns_it_off(self):
         core.block(self.c, self.item, "waiting on the vendor", actor="w")
-        self.assertIsNone(self.bash("git push")["deny"])  # its own block: it pushes the parts that are done
+        self.assertIsNone(self.bash("git push")["deny"])  # its own block releases the item: it pushes the parts that are done
+        core.unblock(self.c, self.item)
+        core.claim(self.c, self.item, "w")
         core.block(self.c, self.item, "waiting on the vendor", actor="boss")
         self.assertIn(f"#{self.item} is blocked: waiting on the vendor", self.bash("git push")["deny"])
         core.message(self.c, "alert", "stop", to="w", actor="boss")

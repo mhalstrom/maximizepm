@@ -6406,7 +6406,7 @@ def render_go(b):
                 f"  - It needs an item that is in the queue already: {r} dep {it['id']} --on <its id> --release   (add the link;",
                 f"    after a release with only a note such as \"waits on #12\", go gives this item to the next session).",
                 f"  - You find other work: {r} add \"<title>\" --found-during {it['id']}. Do not do it now.",
-                f"  - Waiting on something outside the queue: {r} blocked {it['id']} --reason \"<what>\", release, run go again.",
+                f"  - Waiting on something outside the queue: {r} blocked {it['id']} --reason \"<what>\" (releases the item), then run go again.",
                 # The three rules of #1599 (research #1597: 30 stops and 11 stands at the prompt for limits of the
                 # machine, 10 stands after a refused command, an item held 6.5 hours for the word "push").
                 f"  - A limit of the machine (a full disk, a build stop, a push freeze, quiet time during a release gate) "
@@ -6820,7 +6820,7 @@ def render_secret(a, res):
               + (f"; grant {res['grant']}" if res.get("grant") else ""))
         if cmd == "request" and res.get("sites") and res.get("item_id"):  # #5840: do not wait at the prompt (p154)
             print(f"next: commit what is done, then maxpm blocked {res['item_id']} --reason \"waits for request "
-                  f"{res['request']}\" and maxpm release {res['item_id']}: the person's Allow ends the block, and the "
+                  f"{res['request']}\": that releases the item, the person's Allow ends the block, and the "
                   f"next session of #{res['item_id']} opens the sites signed in")
     elif cmd == "requests":
         if not res["requests"]:

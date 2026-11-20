@@ -12516,7 +12516,11 @@ def block(conn, item_id, reason=None, actor=None, until=None):
     """Record a blocker that is not an item in the queue ("waiting on Stripe review").
 
     With `until` (see parse_when) the blocker ends by itself at that time: the
-    sweep clears it, and the item is ready again."""
+    sweep clears it, and the item is ready again. When the holder (or an unnamed
+    caller) blocks an item in progress or held, it releases the item in the same
+    transaction with the reason as the note so `go` can take new work and `next`
+    skips it (#6451). A block by another agent or a person leaves a held item
+    with its holder so push_guard can still stop a push (#5381)."""
     if not reason and not until:
         raise RiverError("say what the item waits on: --reason \"<what>\", --until <time>, or both")
     with tx(conn):
@@ -12530,7 +12534,10 @@ def block(conn, item_id, reason=None, actor=None, until=None):
                      "blocked_at=COALESCE(CASE WHEN blocked_reason IS NOT NULL THEN blocked_at END, ?) WHERE id=?",
                      (reason, t, actor, iso(now()), it["id"]))
         _event(conn, it["id"], actor, f"blocked: {reason}" + (f" (until {show_time(t, zone)})" if t else ""))
-        _raise_blocked(conn, actor, "item", it["id"])  # what it just told the manager about this item (#1608)
+        if it["status"] in ("in_progress", "held") and (not actor or it["assignee"] == actor):
+            _unhold(conn, it["id"], actor, f"released: {reason}")
+        else:
+            _raise_blocked(conn, actor, "item", it["id"])  # what it just told the manager about this item (#1608)
     return item_show(conn, item_id)
 
 
