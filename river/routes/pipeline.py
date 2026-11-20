@@ -423,7 +423,8 @@ def deploy(conn, path):
     saved = {r["name"] for r in conn.execute("SELECT name FROM secrets")}
     account_list = _accounts().listing(conn)
     accts = {(a["forge"], a["host"], a["secret"] or ""): a for a in account_list}
-    defaults = {t["name"]: targets.default_pipeline(conn, t["name"]) for t in targets.default_list(conn)}
+    defaults = {t["name"]: targets.default_pipeline(conn, t["name"], watch_history=False)
+                for t in targets.default_list(conn)}
     work = _links().stage_work(conn, defaults=defaults)
     out = []
     sources = targets.check_source_ids(conn)

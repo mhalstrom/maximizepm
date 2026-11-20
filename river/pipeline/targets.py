@@ -263,7 +263,7 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
                                   dep["closed_at"] if done else pruns[-1]["ended_at"] if pruns and pst != "running"
                                   else None, steps=_steps(conn, after), item=dep["id"],
                                   errors=pruns[-1]["note"] if pruns and pst == "failed" else None)
-    w = _watch(conn, t, dep, next_at, checks)
+    w = _watch(conn, t, dep, next_at, checks) if checks is not None else None
     if w:
         out["watch"] = w
     label = rev or f"deploy #{dep['id']}"
@@ -326,7 +326,7 @@ def shape(conn, name, deps=None):
     return out + ["deploy", "watch"]
 
 
-def release_runs(conn, name, deps=None):
+def release_runs(conn, name, deps=None, watch_history=True):
     """The releases of target name, newest first: [{deploy, status, runs: {stage: run}}] (_release)."""
     t = _target(conn, name)
     deps = _deploys(conn, name) if deps is None else deps
@@ -335,20 +335,22 @@ def release_runs(conn, name, deps=None):
     checks = _checks(conn, name)
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
     out = []
+    newest_watch = done[0]["id"] if done else None
     for d in deps:
         later = [x["closed_at"] for x in done if x["closed_at"] > (d["closed_at"] or "")]
+        watch_checks = checks if watch_history or d["id"] == newest_watch else None
         out.append({"deploy": d["id"], "status": d["status"], "closed_at": d["closed_at"], "cut_rev": d["cut_rev"],
-                    "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, checks)})
+                    "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, watch_checks)})
     return out
 
 
-def default_pipeline(conn, name):
+def default_pipeline(conn, name, watch_history=True):
     """The default pipeline of target name, in the form of store.show, with its releases newest first. Its arrows
     have the controls of the target's stored pipeline (#6176, target_flow.py) when it has one, else none set yet."""
     from . import target_flow
     t = _target(conn, name)
     deps = _deploys(conn, name)
-    releases = release_runs(conn, name, deps)
+    releases = release_runs(conn, name, deps, watch_history=watch_history)
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
     hook = {r["event"]: r["command"] for r in conn.execute(
         "SELECT h.event, h.command FROM hooks h JOIN targets x ON x.id=h.target_id WHERE x.name=?", (name,))}

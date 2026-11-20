@@ -1690,6 +1690,8 @@ class DefaultPipelines(Base):
         self.assertEqual(deploy["state"], "queued")  # the newest release's
         env = p["envs"][0]
         self.assertEqual((env["rev"], env["since"]), ("aaaaaaa", old))
+        summary = self.targets.default_pipeline(self.c, "web-prod", watch_history=False)
+        self.assertEqual(summary["stages"], p["stages"])
         # The deploy hook's runs are the steps of the first release's deploy stage: one failed, then one passed.
         runs = self.targets._release(self.c, self.targets._target(self.c, "web-prod"),
                                      self.c.execute("SELECT * FROM items WHERE id=?", (d1,)).fetchone(), None, False,
@@ -1876,6 +1878,10 @@ class DefaultPipelines(Base):
         p = self.targets.default_pipeline(self.c, "web-prod")
         self.assertLess(time.monotonic() - t, timing.limit(0.1))
         self.assertEqual(len(p["releases"]), self.targets.RELEASES)
+        with mock.patch.object(self.targets, "_watch", wraps=self.targets._watch) as watch:
+            summary = self.targets.default_pipeline(self.c, "web-prod", watch_history=False)
+        self.assertEqual(watch.call_count, 1)
+        self.assertEqual(summary["stages"], p["stages"])
 
 
 class Prompt(Base):
