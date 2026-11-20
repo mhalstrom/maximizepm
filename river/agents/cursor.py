@@ -249,25 +249,64 @@ def read_effort_levels(model):
     return list(row["efforts"]) if row else None
 
 
+_LEVEL_MAP = {"extra-high": "xhigh", "extra high": "xhigh"}
+_DISPLAY_LEVEL = re.compile(r"\b(extra[- ]high|xhigh|minimal|low|medium|high|max)\b", re.I)
+
+
+def _norm_level(value):
+    """Normalize a Cursor effort name ('Extra High' / 'extra-high' -> 'xhigh')."""
+    v = str(value or "").strip().lower()
+    return _LEVEL_MAP.get(v, v) or None
+
+
+def _param_effort(params):
+    """The effort or reasoning_effort parameter of a Cursor parameter list ([{'id', 'value'}]), or None."""
+    if not isinstance(params, list):
+        return None
+    for p in params:
+        if isinstance(p, dict) and p.get("id") in ("effort", "reasoning_effort") and isinstance(p.get("value"), str):
+            lv = _norm_level(p["value"])
+            if lv:
+                return lv
+    return None
+
+
 def config_settings():
-    """What a Cursor session takes from ~/.cursor/cli-config.json when its command line names nothing (#6280): the
-    selected model (model.modelId: grok-4.7 on 2026-11-20; an id with a level gives the model and the level), the
-    sandbox (sandbox.mode: disabled) and the mode: agent, Cursor's own when no --mode names plan or ask."""
+    """What a Cursor session takes from ~/.cursor/cli-config.json when its command line names nothing (#6280, #6319):
+    the selected model (model.modelId or selectedModel.modelId, else 'auto'), its effort (from a level suffix on the
+    id, else selectedModel.parameters or modelParameters[id] where Cursor stores effort/reasoning_effort for base ids
+    such as grok-4.7 and claude-fable-5-2, else model.displayName, else 'none' for auto or a model with no levels and
+    'default' otherwise), the sandbox (sandbox.mode: disabled) and the mode: agent, Cursor's own when no --mode names
+    plan or ask."""
     try:
         d = json.loads((Path.home() / ".cursor" / "cli-config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         d = {}
     d = d if isinstance(d, dict) else {}
-    mid = ((d.get("model") or {}).get("modelId") if isinstance(d.get("model"), dict) else None) or \
-        ((d.get("selectedModel") or {}).get("modelId") if isinstance(d.get("selectedModel"), dict) else None)
+    mod = d.get("model") if isinstance(d.get("model"), dict) else {}
+    sel = d.get("selectedModel") if isinstance(d.get("selectedModel"), dict) else {}
+    mid = mod.get("modelId") or sel.get("modelId")
     m = _SUFFIX.search(mid or "")
-    model, level = (mid[:m.start()] + (m.group(2) or ""), m.group(1)) if m else (mid, None)
+    model, level = (mid[:m.start()] + (m.group(2) or ""), _norm_level(m.group(1))) if m else (mid, None)
+    if not model or model == "default":
+        model = "auto"
+    if not level:
+        if not sel.get("modelId") or sel.get("modelId") == mid:
+            level = _param_effort(sel.get("parameters"))
+        if not level and isinstance(d.get("modelParameters"), dict):
+            level = _param_effort(d["modelParameters"].get(mid)) or _param_effort(d["modelParameters"].get(model))
+        if not level:
+            dn = mod.get("displayName") or mod.get("displayNameShort") or ""
+            dm = _DISPLAY_LEVEL.search(dn) if isinstance(dn, str) else None
+            if dm and not (dm.group(1).lower() == "max" and mod.get("maxMode")):
+                level = _norm_level(dm.group(1))
+        if not level:
+            level = "none" if model == "auto" or read_effort_levels(model) == [] else "default"
     sandbox = (d.get("sandbox") or {}).get("mode") if isinstance(d.get("sandbox"), dict) else None
     return {"model": model, "effort": level, "sandbox": sandbox, "mode": "agent"}
 
 
-# Where the Settings dialog reads each setting of a running session (#6280). The effort has no source when the model
-# id names no level (Cursor's default level of that model).
+# Where the Settings dialog reads each setting of a running session (#6280, #6319).
 SETTINGS_READ = {"model": ("config",), "effort": ("config",), "sandbox": ("config",), "mode": ("config",)}
 
 

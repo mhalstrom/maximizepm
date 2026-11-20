@@ -129,6 +129,70 @@ class Launch(Env):
         self.assertEqual(self.a.parse_command(argv), {"settings": s, "prompt": "go"})
 
 
+class ConfigSettings(Env):
+    """#6319: config_settings reads the effort from cli-config.json even when modelId names no level."""
+
+    def _write(self, data):
+        p = self.root / "home" / ".cursor" / "cli-config.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_selected_model_parameters_effort(self):
+        self._write({
+            "model": {"modelId": "claude-fable-5-2", "displayName": "Claude Fable 5.2 300K Low"},
+            "selectedModel": {"modelId": "claude-fable-5-2", "parameters": [
+                {"id": "context", "value": "300k"}, {"id": "effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "claude-fable-5-2", "effort": "low", "sandbox": "disabled", "mode": "agent"})
+
+    def test_model_parameters_reasoning_effort(self):
+        self._write({
+            "model": {"modelId": "grok-4.7"},
+            "modelParameters": {"grok-4.7": [
+                {"id": "context", "value": "256k"}, {"id": "reasoning_effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "grok-4.7", "effort": "low", "sandbox": "disabled", "mode": "agent"})
+
+    def test_display_name_and_extra_high_normalization(self):
+        self._write({
+            "model": {"modelId": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol 1M Extra High"},
+        })
+        self.assertEqual(cursor.config_settings()["effort"], "xhigh")
+        self._write({"model": {"modelId": "gpt-5.5-extra-high"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]),
+                         ("gpt-5.5", "xhigh"))
+
+    def test_auto_and_missing_config_and_bare_model_fallback(self):
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "auto", "effort": "none", "sandbox": None, "mode": "agent"})
+        self._write({"model": {"modelId": "default"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]), ("auto", "none"))
+        self._write({"model": {"modelId": "grok-4.7"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]),
+                         ("grok-4.7", "default"))
+
+    def test_session_settings_uses_config_effort_when_command_names_none(self):
+        from river import sessions
+        self._write({
+            "model": {"modelId": "claude-fable-5-2"},
+            "selectedModel": {"modelId": "claude-fable-5-2", "parameters": [{"id": "effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "cur1")
+        conn.execute("UPDATE agents SET agent_type='cursor', pid_cmd='cursor-agent go' WHERE name='cur1'")
+        got = {s["key"]: s for s in sessions.session_settings(conn, "cur1")["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("claude-fable-5-2", "config"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "config"))
+        self.assertEqual((got["sandbox"]["value"], got["sandbox"]["source"]), ("disabled", "config"))
+        self.assertEqual((got["mode"]["value"], got["mode"]["source"]), ("agent", "config"))
+
+
 class Chat(Env):
     def test_the_workspace_keys(self):
         self.assertEqual(cursor.workspace_key("/private/tmp/claude-501/-Users-x/a.b/ws"), "private-tmp-claude-501-Users-x-a-b-ws")
