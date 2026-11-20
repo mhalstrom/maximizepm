@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import core  # first: core loads the agent adapters while it loads (#5181)
@@ -379,11 +380,12 @@ _TAIL_CACHE = {}  # (path, tail) -> (size, mtime, the answer of entries(kind, pa
 
 
 def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
-    """{entries, cursor, turn, before}: the page lines of the transcript after cursor (None: its last part), at most
-    limit of them (the newest), the cursor of the next read, the state of the last turn (working, idle, or None), and
-    the byte where the line of the first entry starts: the earlier lines are before it (older_page)."""
+    """{entries, cursor, turn, turn_at, before}: the page lines of the transcript after cursor (None: its last part),
+    at most limit of them (the newest), the cursor of the next read, the state of the last turn (working, idle, or
+    None), when the file last changed (UTC ISO, for comparing with a newer screen report), and the byte where the line
+    of the first entry starts: the earlier lines are before it (older_page)."""
+    st = Path(path).stat()
     if cursor is None:
-        st = Path(path).stat()
         got = _TAIL_CACHE.get((str(path), tail))
         if not got or got[:2] != (st.st_size, st.st_mtime_ns):
             got = _TAIL_CACHE[(str(path), tail)] = (st.st_size, st.st_mtime_ns, _entries(kind, path, None, tail=tail))
@@ -391,8 +393,9 @@ def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
     else:
         r = _entries(kind, path, cursor)
     k = _first(r["offs"], limit)
-    return {"entries": r["entries"][k:], "cursor": r["cursor"], "turn": r["turn"], "cwd": r["cwd"],
-            "before": r["offs"][k] if k else r["start"]}
+    turn_at = core.iso(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc))
+    return {"entries": r["entries"][k:], "cursor": r["cursor"], "turn": r["turn"], "turn_at": turn_at,
+            "cwd": r["cwd"], "before": r["offs"][k] if k else r["start"]}
 
 
 def _first(offs, limit):
@@ -570,7 +573,16 @@ def older_page(conn, agent, file, before=None, root=None, croot=None):
     return {"agent": agent, "entries": got, "older": older, "refs": item_refs(conn, got)}
 
 
-def state(conn, a, turn, waiting=None):
+def _screen_idle(conn, a, turn_at=None):
+    """Whether the pane watcher's idle report is at least as new as the transcript's last write, for an agent whose
+    state comes from its screen (STATE 'detect', #6261): a turn cancelled with Esc can leave its prompt or an empty
+    step last in the log while the screen is back at the idle prompt."""
+    if a.get("activity_event") != "report:idle" or core._state_source(conn, a["name"]) != "detect":
+        return False
+    return not turn_at or (a.get("activity_at") or "") >= turn_at
+
+
+def state(conn, a, turn, waiting=None, turn_at=None):
     """(key, label) of what a session does now: stopping, prompt (a permission prompt), answer (an open question to
     a person), idle (in maxpm wait, or its turn ended), or working."""
     if a.get("stop_at"):
@@ -579,6 +591,8 @@ def state(conn, a, turn, waiting=None):
         return "prompt", STATES["prompt"]
     if a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]])):
         return "answer", STATES["answer"]
+    if turn == "working" and _screen_idle(conn, a, turn_at):
+        turn = "idle"
     if a.get("role") in ("expert", "assistant") and turn != "working":
         # An expert waits at its prompt for the person by design (#4955), and so does an assistant (#5110): not idle,
         # and nothing waits on the person.
@@ -595,17 +609,17 @@ def state(conn, a, turn, waiting=None):
     return "working", STATES["working"]
 
 
-def pane_state(conn, a, turn, prompt=None, pane=False, waiting=None):
+def pane_state(conn, a, turn, prompt=None, pane=False, waiting=None, turn_at=None):
     """state() with what the session's tmux pane shows now (server.pane_prompts): a prompt there is a prompt. For an
     agent whose state comes from its pane (its adapter's STATE['state'] is 'detect': Codex), a pane read now that
     shows no prompt wins over the blocked state that the watch of maxpm serve recorded up to notify_interval before
     (#5220: after mark chose in Codex's /model menu, the page said for half a minute that it waited at a permission
     prompt)."""
-    key, label = state(conn, a, turn, waiting)
+    key, label = state(conn, a, turn, waiting, turn_at)
     if prompt and key != "stopping":
         return "prompt", STATES["prompt"]
     if key == "prompt" and pane and not prompt and core._state_source(conn, a["name"]) == "detect":
-        return state(conn, dict(a, activity_prompt=None), turn, waiting)
+        return state(conn, dict(a, activity_prompt=None), turn, waiting, turn_at)
     return key, label
 
 
@@ -825,7 +839,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         prompt = (prompts or {}).get(a["name"])
         # The override of pane_state only after a read of the panes (prompts given), not with no read at all.
         key, label = pane_state(conn, a, tail["turn"], prompt,
-                                prompts is not None and bool((terminals or {}).get(a["name"])), waiting)
+                                prompts is not None and bool((terminals or {}).get(a["name"])), waiting,
+                                tail.get("turn_at"))
         # #6282: a prompt that waits for the manager first shows no card to the person (as a held question, #5307).
         boss = core.prompt_held(conn, a["name"], prompt) if prompt else None
         if boss:
@@ -904,7 +919,7 @@ def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=Fals
                 "state_label": label, "session_url": a.get("session_url"), "note": note}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
-    key, label = pane_state(conn, a, turn, prompt, pane)
+    key, label = pane_state(conn, a, turn, prompt, pane, turn_at=got.get("turn_at"))
     older = None
     if cursor is None:  # the first read: where the earlier lines start, for scrolling up (#5120)
         chain = transcript_chain(conn, agent, kind, path)

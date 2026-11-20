@@ -2129,7 +2129,8 @@ def _quiet_session(conn, agent, who):
     if not path:
         raise RiverError(f"no transcript of {agent} on this computer, so MaximizePM cannot tell when it is quiet")
     tail = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)
-    if tail["turn"] != "idle" or a.get("activity_prompt") or core.waits_on_person(conn, [agent]):
+    idle = tail["turn"] == "idle" or (tail["turn"] == "working" and sessions._screen_idle(conn, a, tail.get("turn_at")))
+    if not idle or a.get("activity_prompt") or core.waits_on_person(conn, [agent]):
         raise RiverError(f"{agent} works now or waits on a prompt or an answer; change its settings when its turn has ended")
     return a, kind, path, tail
 

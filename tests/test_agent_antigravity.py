@@ -197,6 +197,19 @@ class Chat(unittest.TestCase):
         self.assertEqual(antigravity.parse_chat(lines()[:cancelled + 1])[1], "working")
         self.assertEqual(screen((FIX / "pane_cancelled.txt").read_text(encoding="utf-8"))[0], "idle")
 
+    def test_an_interrupted_turn_error_message_ends_the_turn(self):
+        # #6261: Stop (Esc) mid-stream leaves an empty PLANNER_RESPONSE and an ERROR_MESSAGE.
+        interrupted = [
+            json.dumps({"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-20T05:00:00Z",
+                        "content": "<USER_REQUEST>\nWrite 1 to 300.\n</USER_REQUEST>"}),
+            json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-20T05:00:01Z",
+                        "content": ""}),
+            json.dumps({"step_index": 2, "type": "ERROR_MESSAGE", "created_at": "2026-11-20T05:00:05Z",
+                        "content": "The stream was interrupted"}),
+        ]
+        self.assertEqual(antigravity.parse_chat(interrupted[:2])[1], "working")
+        self.assertEqual(antigravity.parse_chat(interrupted)[1], "idle")
+
     def test_the_sessions_tab_reads_an_agy_transcript(self):
         from river import sessions
         r = sessions._parse("antigravity", LOG.read_bytes(), 0)
@@ -241,6 +254,77 @@ class Chat(unittest.TestCase):
         d = {"step_index": 10, "type": "PLANNER_RESPONSE", "tool_calls": [
             {"name": "run_command", "args": {"CommandLine": "\"touch made.txt\"", "WaitMsBeforeAsync": "5000"}}]}
         self.assertEqual(antigravity.parse_chat_line(d)[0][0]["detail"], "touch made.txt")
+
+
+class IdleAfterStop(Home):
+    """#6261: after Stop (Esc), the page says idle and Settings restart works."""
+
+    def _setup_session(self, name, agent_type, log_lines):
+        c = core.connect()
+        self.addCleanup(c.close)
+        core.register(c, name)
+        core.set_agent_type(c, name, agent_type)
+        c.execute("UPDATE agents SET pid=?, host=? WHERE name=?", (os.getpid(), core.this_host(), name))
+        c.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
+                  (name, CID, core.iso(core.now())))
+        c.commit()
+        if agent_type == "antigravity":
+            p = self.home / ".gemini" / "antigravity-cli" / "brain" / CID / ".system_generated" / "logs" / "transcript_full.jsonl"
+        else:
+            p = self.home / ".claude" / "projects" / "p" / f"{CID}.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        return c, p
+
+    def test_error_message_makes_page_and_settings_restart_see_idle(self):
+        from river import server, sessions
+        c, _p = self._setup_session("agy1", "antigravity", [
+            json.dumps({"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-20T05:00:00Z",
+                        "content": "<USER_REQUEST>\nWrite 1 to 300.\n</USER_REQUEST>"}),
+            json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-20T05:00:01Z",
+                        "content": ""}),
+            json.dumps({"step_index": 2, "type": "ERROR_MESSAGE", "created_at": "2026-11-20T05:00:05Z",
+                        "content": "The stream was interrupted"}),
+        ])
+        self.assertEqual(sessions.view(c, "agy1")["state"], "idle")
+        self.assertEqual(sessions.views(c)[0]["state"], "idle")
+        self.assertEqual(server._quiet_session(c, "agy1", None)[1], "antigravity")
+
+    def test_newer_screen_idle_report_overrides_working_turn_for_detect_agent(self):
+        from river import server, sessions
+        # Cancelled before any model step: transcript ends at USER_INPUT (turn='working').
+        c, p = self._setup_session("agy1", "antigravity", [
+            json.dumps({"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-20T05:00:00Z",
+                        "content": "<USER_REQUEST>\nWrite a 400-word story.\n</USER_REQUEST>"}),
+        ])
+        # With no idle report, it is working and Settings restart refuses.
+        self.assertEqual(sessions.view(c, "agy1")["state"], "working")
+        with self.assertRaisesRegex(core.RiverError, "works now"):
+            server._quiet_session(c, "agy1", None)
+
+        # Pane watcher reports idle after the transcript write: page says idle and Settings restart succeeds.
+        core.report(c, "agy1", "idle")
+        self.assertEqual(sessions.view(c, "agy1")["state"], "idle")
+        self.assertEqual(sessions.views(c)[0]["state"], "idle")
+        self.assertEqual(server._quiet_session(c, "agy1", None)[1], "antigravity")
+
+        # An older idle report (before a newer transcript write) does NOT override a working turn.
+        c.execute("UPDATE agents SET activity_at=? WHERE name='agy1'",
+                  (core.iso(core.now() - core.timedelta(minutes=5)),))
+        c.commit()
+        self.assertEqual(sessions.view(c, "agy1")["state"], "working")
+        self.assertEqual(sessions.views(c)[0]["state"], "working")
+        with self.assertRaisesRegex(core.RiverError, "works now"):
+            server._quiet_session(c, "agy1", None)
+
+    def test_hook_agent_working_turn_is_not_overridden_by_report_idle(self):
+        from river import sessions
+        c, _p = self._setup_session("cc1", "claude", [
+            json.dumps({"type": "user", "timestamp": "2026-11-20T05:00:00Z",
+                        "message": {"role": "user", "content": "hi"}}),
+        ])
+        core.report(c, "cc1", "idle")
+        self.assertEqual(sessions.view(c, "cc1")["state"], "working")
 
 
 class Screen(unittest.TestCase):

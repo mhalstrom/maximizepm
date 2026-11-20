@@ -431,7 +431,8 @@ def parse_chat_line(d):
     """(entries, turn) of one step of the transcript. USER_INPUT: the person's prompt (the text in <USER_REQUEST>);
     PLANNER_RESPONSE: the model's text and its tool calls; GENERIC from the model: the result of a tool call (status
     ERROR: a failed or refused call, its error). SYSTEM_MESSAGE steps (agy's own reminders to the model) are no entries.
-    The turn: working after a prompt, a tool call and a result; idle after a reply with text and no tool call."""
+    The turn: working after a prompt, a tool call and a result; idle after a reply with text and no tool call, or an
+    ERROR_MESSAGE (an interrupted or failed turn, #6261)."""
     if not isinstance(d, dict):
         return [], None
     at, kind, step = d.get("created_at"), d.get("type"), _step(d)
@@ -458,6 +459,8 @@ def parse_chat_line(d):
         text = _STAMPS.sub("", text if isinstance(text, str) else "").strip()
         return [{"at": at, "role": "result", "text": text, "for": f"s{step}" if step is not None else "",
                  "error": error}], "working"
+    if kind == "ERROR_MESSAGE":
+        return [], "idle"
     return [], None
 
 
