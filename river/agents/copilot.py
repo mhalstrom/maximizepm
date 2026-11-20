@@ -86,10 +86,19 @@ IDENTITY = {"source": "hook", "env": None, "pane": None,
             "url": None, "inside_env": ["COPILOT_CLI"]}
 
 
+# The rule that lets a session run maxpm with no question (#6417). Without it, Copilot 1.0.109 asked 'Do you want to
+# run this command?' at the first maxpm go of each new session, in a trusted worktree, so the session waited for a
+# person before it registered. ':*' matches maxpm with any arguments, and the rule lasts for that run only. The '='
+# form keeps the variadic --allow-tool from reading the next words as more rules. allow-all-tools and allow-all
+# cover every shell command already.
+ALLOW_MAXPM = "--allow-tool=shell(maxpm:*)"
+
+
 def build_command(name, folder, model, effort, settings, prompt):
-    """copilot [--resume <id> | --name N] [--model M] [--reasoning-effort E] [--<permissions>] [--mode M]
-    --add-dir <queue folder> <args> [-i <prompt>]. -i starts the interactive session and runs the prompt; with no
-    prompt it waits at its own prompt. A resumed session keeps its name, so --name goes only on a new one."""
+    """copilot [--resume <id> | --name N] [--model M] [--reasoning-effort E] [--<permissions> | --allow-tool=
+    shell(maxpm:*)] [--mode M] --add-dir <queue folder> <args> [-i <prompt>]. -i starts the interactive session and
+    runs the prompt; with no prompt it waits at its own prompt. A resumed session keeps its name, so --name goes only
+    on a new one."""
     from ..core import river_dir
     s = settings
     words = ["copilot"]
@@ -97,6 +106,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     words += (["--model", model] if model else [])
     words += ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
     words += [f"--{s['permissions']}"] if s.get("permissions") else []
+    words += [] if s.get("permissions") in ("allow-all-tools", "allow-all") else [ALLOW_MAXPM]
     words += ["--mode", s["mode"]] if s.get("mode") else []
     words += ["--add-dir", river_dir()]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
@@ -113,7 +123,8 @@ def resume_command(session_ref, model, effort, settings, name=None):
 
 def parse_command(words):
     """A hand-written copilot command that a profile builds exactly: --model {model}, --reasoning-effort {effort},
-    a known permission flag, --mode with a known mode, --add-dir of the queue folder, and -i <prompt>."""
+    a known permission flag, the maxpm allow rule, --mode with a known mode, --add-dir of the queue folder, and
+    -i <prompt>."""
     from ..core import river_dir
     if not words or Path(words[0]).name.lower() != "copilot":
         return None
@@ -126,6 +137,8 @@ def parse_command(words):
             i += 2
         elif t.startswith("--") and t[2:] in perms and "permissions" not in opts:
             opts["permissions"] = t[2:]
+            i += 1
+        elif t == ALLOW_MAXPM:  # build_command adds it by itself
             i += 1
         elif t == "--mode" and nxt in modes:
             opts["mode"] = nxt
