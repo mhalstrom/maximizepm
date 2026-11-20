@@ -67,14 +67,14 @@ FAKE_GH = textwrap.dedent('''\
     elif a[:2] == ["run", "list"]:
         b = st.get("built")
         out = [] if st["run"] == "none" or not b or b["sha"] != flag("--commit") else [
-            {"databaseId": 7, "headSha": b["sha"], "status": "completed", "conclusion": st["run"], "url": url,
-             "createdAt": b["at"]}]
+            {"databaseId": 7, "headSha": b["sha"], "status": "completed",
+             "conclusion": st.get("checks") or st["run"], "url": url, "createdAt": b["at"]}]
         print(json.dumps(out))
     elif a[:2] == ["run", "view"]:
         bad = st["run"] == "failure"
-        jobs = [("checks", "success"), ("mac", "failure" if bad else "success"),
+        jobs = [("checks", st.get("checks") or "success"), ("mac", "failure" if bad else "success"),
                 ("mac-intel", "skipped" if bad else "success"), ("publish", "skipped" if bad else "success")]
-        print(json.dumps({"status": "completed", "conclusion": st["run"], "url": url, "jobs": [
+        print(json.dumps({"status": "completed", "conclusion": st.get("checks") or st["run"], "url": url, "jobs": [
             {"name": n, "status": "completed", "conclusion": c, "startedAt": "2026-11-19T10:01:00Z",
              "completedAt": "2026-11-19T10:09:00Z", "url": url + "/job/" + n} for n, c in jobs]}))
     elif a[:2] == ["release", "view"]:
@@ -172,7 +172,8 @@ class Script(unittest.TestCase):
         bin_ = os.path.join(self.tmp, "bin")
         self.gh_log = os.path.join(self.tmp, "gh.log")
         _write(os.path.join(bin_, "gh"), f"#!{sys.executable}\n" + FAKE_GH, stat.S_IXUSR)
-        _write(os.path.join(bin_, "maxpm"), f"#!/bin/sh\ncat {self.tmp}/report.json\n", stat.S_IXUSR)
+        _write(os.path.join(bin_, "maxpm"), f'#!/bin/sh\nprintf "%s|" "$@" >> {self.tmp}/maxpm.log\n'
+               f"echo >> {self.tmp}/maxpm.log\ncat {self.tmp}/report.json\n", stat.S_IXUSR)
         _write(os.path.join(self.tmp, "report.json"), json.dumps(REPORT))
         self.github()
         self.env.update({"GH": os.path.join(bin_, "gh"), "MAXPM_BIN": os.path.join(bin_, "maxpm"), "FAKE_GH": self.tmp})
@@ -298,6 +299,27 @@ class Script(unittest.TestCase):
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
         self.assertEqual(self.releases(), {})
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "notes.md")))
+
+    def test_a_failed_github_test_job_is_a_note_and_the_release_goes_on(self):
+        # #6499: the unit tests on GitHub failed (v1.5.0: one flaky test), the .dmg files were built: the release
+        # asks for the yes on its draft, and the failure is a note on its step and in the output.
+        self.github(run="success", checks="failure")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 76, r.stdout + r.stderr)
+        self.assertIn("::step end build-checks failed at=2026-11-19T10:09:00Z "
+                      "https://github.example/actions/runs/7/job/checks report only: the release goes on", r.stdout)
+        self.assertIn("::step end build-publish passed", r.stdout)
+        self.assertIn("the build of v1.4.0 passed: https://github.example/actions/runs/7; note: the GitHub job checks "
+                      "failed (https://github.example/actions/runs/7/job/checks), report only", r.stdout)
+        with open(os.path.join(self.tmp, "maxpm.log"), encoding="utf-8") as f:
+            adds = [line for line in f if line.startswith("-q|add|")]
+        self.assertEqual(len(adds), 1, adds)
+        self.assertTrue(adds[0].startswith("-q|add|maximizepm|Fix the GitHub job checks that failed in the build of "
+                                           "v1.4.0|--found-during|6047|--context|The job checks of the workflow "
+                                           "desktop-release failed at "), adds[0])
+        self.assertIn("https://github.example/actions/runs/7/job/checks", adds[0])
+        self.assertEqual(self.releases()["v1.4.0"]["draft"], True)
+        self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
 
     def test_a_missing_download_or_a_wrong_manifest_stops_the_release(self):
         for state, words in ((dict(missing=["MaximizePM-1.4.0-x64.dmg"]), "no MaximizePM-1.4.0-x64.dmg"),

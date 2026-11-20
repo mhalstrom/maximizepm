@@ -25,8 +25,11 @@ env:
   SHA: ${{ github.event.inputs.sha || github.sha }}
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
 jobs:
-  # Before the release builds (#4636): the unit tests, and the wheel builds, installs and runs. The desktop smoke
-  # test (maxpm serve starts and stops) runs in the mac jobs before their build step.
+  # The unit tests and the wheel (#4636), as a report only (#6499, mark 2026-11-20: 'these types of issues should not
+  # block deployment. especially if they are failing on github.'): the release's own test step on the release commit
+  # (scripts/release/github-release.sh) is the gate, so the mac job does not wait on this one, and a failure here is a
+  # note on the release (scripts/release/downloads.py, REPORT_ONLY), never a stop. The desktop smoke test (maxpm serve
+  # starts and stops) runs in the mac jobs before their build step.
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -56,9 +59,12 @@ jobs:
           MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm guide | head -1
           MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm project add demo
   mac:
-    needs: checks
     runs-on: macos-latest
     steps:
+      - name: The tag and the commit
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, not $TAG"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full commit id, not $SHA"; exit 1; }
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.SHA }}
@@ -198,8 +204,9 @@ jobs:
           node-version: "22"
       # The browser tests run in tests.yml on each push, not in a release (#5583: on the Intel runner of v0.2.0 a
       # dictation test waited 15 s for words that come in under 1 s on Linux and Apple silicon, and no release was
-      # made). This job checks the Intel build.
-      - name: Tests on Intel (standard library only, without browser or timing-sensitive tests)
+      # made). This job checks the Intel build. The unit tests here report only, as the checks job does (#6499).
+      - name: Tests on Intel (standard library only, without browser or timing-sensitive tests; a report only)
+        continue-on-error: true
         env:
           MAXPM_NO_BROWSER: "1"
           MAXPM_SKIP_LOCAL_ONLY: "1"

@@ -10,8 +10,8 @@ download.
 watch: finds the run of the workflow desktop-release that the deploy hook started for the commit (a workflow_dispatch
 run, created at --since or later), waits until it ends, and prints a '::step' line for each of its jobs (checks, mac,
 mac-intel, publish) as it starts and ends, with the job's link, so the deploy stage of maximizepm-github shows them
-(scripts/release/github-release.sh). Exit 0 when the run passed; 1 when it failed, was cancelled, or did not end
-within --wait seconds, with the run's link.
+(scripts/release/github-release.sh). Exit 0 when the run passed, also when only a REPORT_ONLY job failed (a note);
+1 when another job failed, the run was cancelled, or did not end within --wait seconds, with the run's link.
 
 assets: the GitHub release of the tag has both .dmg files, the code archive and manifest.json, and manifest.json
 names this version and this code archive (what the app's Update reads, river/release.py). With --draft it must be a
@@ -34,6 +34,11 @@ import time
 
 WORKFLOW = "desktop-release.yml"
 KINDS = {"checks": "test", "publish": "deploy"}  # every other job builds
+# The jobs that only report (#6499, mark 2026-11-20: 'these types of issues should not block deployment. especially if
+# they are failing on github.'): the GitHub run of the unit tests. The release's own test step is the gate; a failure
+# here is a note on its step and in the result, and the build passes when every other job passed.
+REPORT_ONLY = {"checks"}
+REPORT_NOTE = "report only: the release goes on"
 
 
 class GhError(Exception):
@@ -100,9 +105,10 @@ def _state(conclusion):
     return {"success": "passed", "skipped": "skipped", "neutral": "passed"}.get(conclusion or "", "failed")
 
 
-def watch(tag, sha, wait, poll, since="", out=sys.stdout):
+def watch(tag, sha, wait, poll, since="", out=sys.stdout, noted=None):
     """Wait for the desktop-release run of tag at sha (created at since or later) and print its jobs as steps.
-    Returns (ok, text)."""
+    noted: a file that gets one line '<job> <link>' for each REPORT_ONLY job that failed (the hook adds a fix item
+    for each). Returns (ok, text)."""
     t0 = time.monotonic()
     started, ended, run, last_error = set(), set(), None, None
 
@@ -130,14 +136,27 @@ def watch(tag, sha, wait, poll, since="", out=sys.stdout):
                     if j.get("status") == "completed" and name not in ended:
                         ended.add(name)
                         at = f" at={j['completedAt']}" if j.get("completedAt") else ""
-                        print(f"::step end {name} {_state(j.get('conclusion'))}{at} {j.get('url') or ''}".rstrip(),
+                        state = _state(j.get("conclusion"))
+                        note = f" {REPORT_NOTE}" if state == "failed" and _name(j) in REPORT_ONLY else ""
+                        print(f"::step end {name} {state}{at} {j.get('url') or ''}".rstrip() + note,
                               file=out, flush=True)
                 if v.get("status") == "completed":
                     url = v.get("url") or run.get("url")
                     if v.get("conclusion") == "success":
                         return True, f"the build of {tag} passed: {url}"
-                    bad = [j.get("name") for j in v.get("jobs") or [] if j.get("status") == "completed"
+                    jobs = v.get("jobs") or []
+                    bad = [j.get("name") for j in jobs if j.get("status") == "completed"
                            and _state(j.get("conclusion")) == "failed"]
+                    failed = [j for j in jobs if _name(j) in REPORT_ONLY and _state(j.get("conclusion")) == "failed"]
+                    rest = [j for j in jobs if _name(j) not in REPORT_ONLY]
+                    if (v.get("conclusion") == "failure" and failed and rest
+                            and all(_state(j.get("conclusion")) == "passed" for j in rest)):
+                        if noted:
+                            with open(noted, "w", encoding="utf-8") as f:
+                                f.writelines(f"{_name(j)} {j.get('url') or url}\n" for j in failed)
+                        return True, (f"the build of {tag} passed: {url}; note: the GitHub job "
+                                      + ", ".join(f"{j.get('name')} failed ({j.get('url') or url})" for j in failed)
+                                      + f", {REPORT_NOTE}")
                     return False, (f"the build of {tag} ended {v.get('conclusion') or 'with no result'}"
                                    + (f" (failed: {', '.join(bad)})" if bad else "") + f": {url}")
             last_error = None
@@ -159,6 +178,7 @@ def main(argv=None):
     w.add_argument("--since", default="", help="only a run created at this time (UTC, ISO) or later")
     w.add_argument("--wait", type=float, default=3600)
     w.add_argument("--poll", type=float, default=30)
+    w.add_argument("--noted", help="a file for the report-only jobs that failed: '<job> <link>' lines")
     a = sub.add_parser("assets", help="the release of a tag has every download")
     a.add_argument("--tag", required=True)
     state = a.add_mutually_exclusive_group()
@@ -182,7 +202,7 @@ def main(argv=None):
               f"{rel.get('url') or '-'}")
         return 0
     if args.cmd == "watch":
-        ok, text = watch(args.tag, args.sha, args.wait, args.poll, args.since)
+        ok, text = watch(args.tag, args.sha, args.wait, args.poll, args.since, noted=args.noted)
         print(f"downloads: {text}")
         return 0 if ok else 1
     if args.cmd == "assets":

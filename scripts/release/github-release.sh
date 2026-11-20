@@ -44,7 +44,9 @@
 #   build     starts the workflow desktop-release for the commit (gh workflow run, with tag and sha); each of its jobs
 #             is a step build-<job> (checks, mac, mac-intel, publish) with its link (scripts/release/downloads.py
 #             watch; RELEASE_WAIT seconds, default 60 minutes, within deploy_timeout 2h). The run makes a DRAFT GitHub
-#             release: nothing is public. A failed job stops the release with the run's link
+#             release: nothing is public. A failed job stops the release with the run's link, except the job checks
+#             (the unit tests on GitHub): it reports only, as a note on its step and a fix item in RELEASE_PROJECT
+#             (default maximizepm), and the test step above is the gate (#6499, mark 2026-11-20)
 #   draft     the draft of vX.Y.Z is made from the commit and has both .dmg files, the code archive and manifest.json
 #   notes     gh release edit of the draft with the notes from maxpm target report <deploy id>
 #             (scripts/release/release_notes.py: the report's summary, or before it is written the 'changed' line of
@@ -97,6 +99,7 @@ main() {
   local wait_s="${RELEASE_WAIT:-3600}" poll="${RELEASE_POLL:-30}"
   local deploy="${MAXPM_DEPLOY:-}" approved="${MAXPM_APPROVED:-}" remote=origin
   local step="" scratch="" wt="" HOOK_YES=76
+  local project="${RELEASE_PROJECT:-maximizepm}"
 
   step_start() {  # step_start <name> <kind>
     step="$1"
@@ -105,6 +108,12 @@ main() {
   step_end() {  # step_end passed|failed|skipped
     [ -n "$step" ] && echo "::step end $step $1 at=$(date -u +%FT%TZ)"
     step=""
+  }
+  fix_item() {  # fix_item <title> <context>: a failure that does not stop the release becomes a fix item (#6499)
+    local found=()
+    [ -n "$deploy" ] && found=(--found-during "$deploy")
+    "$maxpm" -q add "$project" "$1" ${found[@]+"${found[@]}"} --context "$2" \
+      || echo "github-release: could not add the fix item '$1'; the release goes on"
   }
   cleanup() {
     if [ -n "$wt" ] && [ -d "$wt" ]; then
@@ -330,7 +339,13 @@ PY
   echo "github-release: started the draft build of v$new at $commit"
   step_end passed
   python3 "$here/downloads.py" watch --tag "v$new" --sha "$commit" --since "$since" --wait "$wait_s" --poll "$poll" \
+    --noted "$scratch/noted" \
     || fail "the draft build of v$new failed; nothing is public. Fix the build: the next run of this hook builds again"
+  local job job_url
+  while read -r job job_url; do  # a GitHub job that reports only failed: a fix item, and the release goes on (#6499)
+    fix_item "Fix the GitHub job $job that failed in the build of v$new" \
+      "The job $job of the workflow desktop-release failed at $commit: $job_url. It reports only, so the release went on (mark 2026-11-20)."
+  done < <(cat "$scratch/noted" 2>/dev/null)
 
   # ---- draft
   step_start draft check
