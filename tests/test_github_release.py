@@ -242,7 +242,7 @@ class Script(unittest.TestCase):
             notes = f.read()
         self.assertTrue(notes.startswith("MaximizePM 1.4.0 ships 4 tasks."), notes)
         self.assertIn("MaximizePM-1.4.0-arm64.dmg", notes)
-        steps = ["check", "version", "test", "commit", "push", "build", "build-checks", "build-mac", "build-mac-intel",
+        steps = ["check", "version", "commit", "test", "push", "build", "build-checks", "build-mac", "build-mac-intel",
                  "build-publish", "draft", "notes"]
         for name in steps:
             self.assertIn(f"::step end {name} passed ", r.stdout)
@@ -348,17 +348,51 @@ class Script(unittest.TestCase):
         self.assertEqual(r.returncode, 76, r.stdout)
         self.assertIn("v1.3.1", self.releases())
 
-    def test_a_failed_test_stops_before_any_commit_or_push(self):
+    def test_a_failed_test_stops_before_any_push_and_the_next_run_keeps_the_version(self):
+        """#6492: the version commit comes before the tests. When they fail, nothing goes to origin; main keeps the
+        commit, and the next run releases that version with no second raise."""
         before = self.git("rev-parse", "HEAD")
         r = self.run_script(RELEASE_TEST_CMD="echo 'FAILED (failures=1)'; false")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("::step end test failed", r.stdout)
         self.assertIn("the tests failed", r.stdout)
-        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertIn("nothing was pushed", r.stdout)
+        raised = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.git("rev-parse", "HEAD^"), before)
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "Release v1.4.0 (deploy #6047)")
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
-        self.assertNotEqual(self.origin_ref("refs/heads/main"), before)
+        self.assertNotIn(self.origin_ref("refs/heads/main"), (before, raised))
         self.assertEqual(self.git("tag", "-l", "v1.4.0"), "")
         self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+        self.assertEqual(self.releases(), {})
+        r = self.run_script()
+        self.assertEqual(r.returncode, 76, r.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD"), raised)
+        self.assertEqual(self.origin_ref("refs/heads/main"), raised)
+
+    def test_main_that_moves_during_the_commit_gets_the_release_commit_on_top(self):
+        """#6492: deploy #6211 failed when a session merged into main while the release ran. A merge between the
+        version commit and the fast-forward makes the release commit again on the new main; the tests then run the
+        merged commit too, and it goes out."""
+        hook = os.path.join(self.repo, ".git", "hooks", "post-commit")
+        mark = os.path.join(self.tmp, "merged-once")
+        # The first commit of the release (in its worktree) makes another session's merge into main.
+        _write(hook, "#!/bin/sh\n"
+                     f"[ -e '{mark}' ] && exit 0\n"
+                     f"touch '{mark}'\n"
+                     "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\n"
+                     f"cd '{self.repo}' && echo late > late.txt && git add late.txt"
+                     " && git commit --quiet -m 'merged while the release ran'\n", stat.S_IXUSR)
+        r = self.run_script(RELEASE_TEST_CMD="test -f late.txt && grep -q 1.4.0 pyproject.toml")
+        self.assertEqual(r.returncode, 76, r.stdout)
+        self.assertIn("main moved while the release committed", r.stdout)
+        self.assertIn("1 commit(s) came into main after the check", r.stdout)
+        head = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "Release v1.4.0 (deploy #6047)")
+        self.assertEqual(self.git("log", "-1", "--format=%s", "HEAD^"), "merged while the release ran")
+        self.assertEqual(self.origin_ref("refs/heads/main"), head)
+        self.assertEqual(self.releases(), {"v1.4.0": {"draft": True, "sha": head}})
+        self.assertEqual(self.steps(r.stdout)[:4], ["check", "version", "commit", "test"])
 
     def test_the_tests_run_without_the_hooks_maxpm_variables(self):
         out = os.path.join(self.tmp, "env.txt")

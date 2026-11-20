@@ -28,12 +28,18 @@
 #   version   the new version, from the version of pyproject.toml: when origin has its tag, one minor (or patch) more;
 #             when origin does not, an earlier run raised it and stopped before its tag: that version goes again with
 #             no second raise
-#   test      a detached worktree at main with the new version in pyproject.toml, river/__init__.py,
-#             desktop/package.json and its lock; python3 -m unittest discover -s tests -t . runs there, with no MAXPM_
+#   commit    'Release vX.Y.Z (deploy #<id>)' in a detached worktree, on top of main as it is at this step: the new
+#             version in pyproject.toml, river/__init__.py, desktop/package.json and its lock. Then main of the main
+#             tree moves forward to it (merge --ff-only, the one git change the main tree takes). Sessions merge into
+#             main all day (#6492: deploy #6211 failed when main moved during its 3 minutes of tests), so the commit
+#             comes before the tests: the window is the second between the commit and the fast-forward, and when
+#             main moved in it, the step makes the commit again on the new main (at most 5 tries). Merges after it
+#             go on top of the release commit and wait for the next release
+#   test      python3 -m unittest discover -s tests -t . in that worktree, at the release commit, with no MAXPM_
 #             variable of the hook and without the browser tests, as the desktop-release workflow runs them (mark
-#             2026-11-12). The tests run the tree that goes out: the pin and the commits after it on main
-#   commit    'Release vX.Y.Z (deploy #<id>)' on that worktree, then main of the main tree forward to it (merge
-#             --ff-only, the one git change the main tree takes)
+#             2026-11-12). The tests run the tree that goes out: the pin and the commits after it on main. When they
+#             fail, nothing is pushed; main keeps the version commit, and the next run releases that version with no
+#             second raise
 #   push      git push origin <commit>:refs/heads/main (no tag)
 #   build     starts the workflow desktop-release for the commit (gh workflow run, with tag and sha); each of its jobs
 #             is a step build-<job> (checks, mac, mac-intel, publish) with its link (scripts/release/downloads.py
@@ -231,7 +237,7 @@ PY
     if [ -n "$approved" ]; then
       echo "github-release: dry run: it would push the tag v$new at $commit and publish the draft of v$new"
     else
-      echo "github-release: dry run: it would test main with the version $new, commit 'Release v$new (deploy #${deploy:-none})' when the version changes, move main to it, push it to $remote main, build the downloads as a draft of v$new, write its notes and ask for the person's yes; the tag comes after the yes"
+      echo "github-release: dry run: it would commit 'Release v$new (deploy #${deploy:-none})' on main when the version changes, move main to it, test it, push it to $remote main, build the downloads as a draft of v$new, write its notes and ask for the person's yes; the tag comes after the yes"
     fi
     return 0
   fi
@@ -243,13 +249,8 @@ PY
 
 # ---- before the yes: test, commit, push main, build the draft, write its notes
 prepare() {
-  # ---- test
-  step_start test test
-  scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
-  wt="$scratch/tree"
-  git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
-  if [ "$new" != "$cur" ]; then
-    python3 - "$wt" "$cur" "$new" <<'PY' || fail "could not write the version $new"
+  bump() {  # bump: the new version in the four files of the worktree
+    python3 - "$wt" "$cur" "$new" <<'PY'
 import json, re, sys
 d, old, new = sys.argv[1:4]
 def sub(path, pattern, repl, count=1):
@@ -267,8 +268,42 @@ lock = json.load(open(f"{d}/desktop/package-lock.json", encoding="utf-8"))
 if lock["version"] != new or lock["packages"][""]["version"] != new:
     sys.exit("desktop/package-lock.json: the two version lines are not those of the package")
 PY
+  }
+
+  # ---- commit: on top of main as it is now; the tests come after it (#6492)
+  step_start commit build
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
+  wt="$scratch/tree"
+  git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
+  if [ "$new" != "$cur" ]; then
+    local try base made=""
+    for try in 1 2 3 4 5; do
+      base="$(git rev-parse --verify --quiet refs/heads/main)" || fail "the branch main is gone"
+      git merge-base --is-ancestor "$head" "$base" \
+        || fail "main went back from $head to $base while the release ran; the release never force-moves main"
+      git -C "$wt" checkout --quiet --detach "$base" || fail "git checkout of main $base in $wt failed"
+      bump || fail "could not write the version $new on main $base (a commit after the check changed a version file?)"
+      git -C "$wt" commit --quiet -m "Release v$new (deploy #${deploy:-none})" -- \
+        pyproject.toml river/__init__.py desktop/package.json desktop/package-lock.json \
+        || fail "git commit of the version $new failed"
+      commit="$(git -C "$wt" rev-parse HEAD)" || fail "no commit"
+      if git merge --quiet --ff-only "$commit"; then
+        made=1
+        break
+      fi
+      echo "github-release: main moved while the release committed (merge --ff-only $commit refused, try $try of 5); it commits again on the new main"
+      sleep "$try"
+    done
+    [ -n "$made" ] || fail "main moved at each of 5 tries to move it to the release commit; the next run starts again"
+    [ "$base" = "$head" ] \
+      || echo "github-release: $(git rev-list --count "$head..$base") commit(s) came into main after the check; they go out too, and the tests run them"
   fi
-  echo "github-release: $test_cmd (in $wt, version $new)"
+  echo "github-release: main is at $commit (v$new)"
+  step_end passed
+
+  # ---- test: the commit that goes out
+  step_start test test
+  echo "github-release: $test_cmd (in $wt, at $commit, version $new)"
   (
     local v
     for v in $(compgen -e); do
@@ -276,20 +311,7 @@ PY
     done
     export MAXPM_DB="$scratch/test-queue.db" MAXPM_NO_BROWSER=1
     cd "$wt" && eval "$test_cmd"
-  ) || fail "the tests failed at main $head with the version $new; nothing was committed or pushed"
-  step_end passed
-
-  # ---- commit
-  step_start commit build
-  if [ "$new" != "$cur" ]; then
-    git -C "$wt" commit --quiet -m "Release v$new (deploy #${deploy:-none})" -- \
-      pyproject.toml river/__init__.py desktop/package.json desktop/package-lock.json \
-      || fail "git commit of the version $new failed"
-    commit="$(git -C "$wt" rev-parse HEAD)" || fail "no commit"
-    git merge --quiet --ff-only "$commit" \
-      || fail "main moved while the release ran (merge --ff-only $commit refused); the next run starts again"
-  fi
-  echo "github-release: main is at $commit (v$new)"
+  ) || fail "the tests failed at $commit (v$new); nothing was pushed. Fix them on main: the next run releases v$new with no second raise"
   step_end passed
 
   # ---- push: main only; the tag comes after the person's yes
