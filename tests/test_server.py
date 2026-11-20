@@ -4038,6 +4038,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIn(z, ids())
         self.assertIn("done by mark] yes", core.item_show(self.c, z)["notes"])
 
+    @timing.local_only("real tmux server and process timing")
     def test_with_a_real_tmux_server(self):
         """The same commands against tmux itself, on a server of its own (never the user's)."""
         import shutil
@@ -5824,6 +5825,7 @@ class StateCache(unittest.TestCase):
             self.assertIsNot(c, a)
             self.assertIn("New work", [i["title"] for i in c["items"]])
 
+    @timing.local_only("multi-thread cache timing")
     def test_a_poll_during_a_build_waits_for_it(self):
         gate, built = threading.Event(), []
         real = core.state
@@ -6499,6 +6501,7 @@ class ServeOnATakenPort(unittest.TestCase):
         fake.isatty.return_value = tty
         return mock.patch.object(sys, "stdin", fake)
 
+    @timing.local_only("process and port handoff timing")
     def test_a_serve_with_no_terminal_waits_and_takes_the_port_when_the_other_ends(self):
         first = self._first()
         port = first.server_port
@@ -6643,6 +6646,7 @@ class KillPane(unittest.TestCase):
         self.assertIsNone(server.pane_process(self.c, "other-2"))  # its pane ended
         self.assertIsNone(server.pane_process(self.c, "nobody"))
 
+    @timing.local_only("live child process and ps timing")
     def test_end_now_ends_the_pane_s_process_group_of_an_agent_with_no_recorded_process(self):
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
@@ -6810,6 +6814,7 @@ class Ops(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"fewer than {n} runs ended")
 
+    @timing.local_only("wall-clock subprocess and thread timing")
     def test_the_loop_step_starts_each_due_check_in_a_thread_and_never_waits_for_it(self):
         took = timing.limit(1)
         slow = f"{sys.executable} -c 'import time; time.sleep({took}); print(\"SLOW OK\")'"

@@ -91,6 +91,7 @@ class Describe(Env):
         self.assertEqual(self.a.read_models(), got)
         self.assertEqual(len(calls), 1)
 
+    @timing.local_only("wall-clock latency and background thread timing")
     def test_a_page_build_never_waits_for_the_cli_and_an_old_list_stands_while_a_thread_reads(self):
         # #5638: `opencode models` took 470 ms of the page's build once in ten minutes.
         import threading

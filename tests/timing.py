@@ -7,6 +7,22 @@ a time bound that goes around them (a line can say why it is safe with a '# timi
 """
 import os
 import time
+import unittest
+
+
+def skip_local_only():
+    """True on GitHub Actions (MAXPM_SKIP_LOCAL_ONLY=1, or GITHUB_ACTIONS=true with it unset; #6504).
+    Tests marked with local_only() still run on a developer's machine."""
+    raw = os.environ.get("MAXPM_SKIP_LOCAL_ONLY")
+    if raw is not None:
+        return raw.strip().lower() not in ("", "0", "false", "no")
+    return bool(os.environ.get("GITHUB_ACTIONS"))
+
+
+def local_only(reason):
+    """Skip a test on GitHub Actions; still runs locally (#6504). For tests that depend on wall-clock latency,
+    load, thread timing, live child processes, real Chrome, or DNS."""
+    return unittest.skipIf(skip_local_only(), f"local only ({reason})")
 
 
 def _scale():

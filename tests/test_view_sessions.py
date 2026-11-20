@@ -11,7 +11,7 @@ from unittest import mock
 from pathlib import Path
 
 from river import core, server, sessions
-from tests import proc_after_exec
+from tests import proc_after_exec, timing
 from river.agents import codex as codex_agent
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -547,6 +547,7 @@ class Adopt(Base):
         self.assertIn(f" resume {TID} -m ", cmd)
         self.assertIn("model_reasoning_effort=low", cmd)
 
+    @timing.local_only("live child process and ps timing")
     def test_a_resume_keeps_the_model_the_session_ran_on(self):
         """#5064: the manager's row had no model, its resume had no --model, and Claude Code took its own default
         (Fable). The resume takes the model of its command line, else of its transcript; with none it refuses."""
@@ -663,6 +664,7 @@ class Adopt(Base):
                    if r["key"] == "effort")
         self.assertEqual((row["value"], row["source"]), ("high", "changed now"))
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_keeps_the_settings_the_session_runs_with(self):
         """#5274: a restart took the profile's defaults for every setting the person did not change (Amp started with
         --visibility private came back without it). Now it keeps what the running command line shows, and changes
@@ -687,6 +689,7 @@ class Adopt(Base):
         self.assertIn("--permission-mode acceptEdits", line)  # kept, not the default
         self.assertIn("--remote-control", line)  # kept, not the default off
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_takes_the_folder_from_the_process_when_the_transcript_names_none(self):
         # #5262: Grok's and Copilot's logs have no cwd field, and Restart answered 'the transcript of ag does not name
         # its folder'. The folder of the agent's own process is the session's folder.
@@ -3314,6 +3317,7 @@ class AdapterFolder(Base):
         self.assertEqual(tail["cwd"], "/tmp/proj")
         self.assertEqual(sessions.head_cwd("claude", self.log), None)  # an adapter with no chat_cwd: no head read
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_with_new_settings_of_a_quiet_copilot_session(self):
         import subprocess
         from tests.test_server import FakeTmux

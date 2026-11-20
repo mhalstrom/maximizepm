@@ -3784,6 +3784,7 @@ class Takeover(Base):
 class Upgrade(Base):
     """connect() runs SCHEMA and the migrations once for each schema id, not on every command (#5396)."""
 
+    @timing.local_only("wall-clock lock timing")
     def test_a_connect_writes_nothing_while_another_command_holds_the_write_lock(self):
         path = self.c.execute("PRAGMA database_list").fetchone()[2]
         holder = sqlite3.connect(path, isolation_level=None)
@@ -3852,6 +3853,7 @@ class Upgrade(Base):
             line = f.read().splitlines()[-1]
         self.assertRegex(line, r"held=\d+\.\ds pid=\d+ .* thread=MainThread in item_add$")
 
+    @timing.local_only("wall-clock lock timing")
     def test_needs_you_and_a_command_take_no_write_lock_when_nothing_changes(self):
         core.project_add(self.c, "a")
         core.register(self.c, "mark", human=True)
@@ -4954,6 +4956,7 @@ class ReleaseReview(Base):
         res = core.review_pass(self.c, self.review, None, "rev", runner=lambda c, d: R(0))
         self.assertEqual((res["status"], res["review_cmd"]), ("done", "make test"))
 
+    @timing.local_only("live child process timeout")
     def test_review_cmd_past_review_timeout_is_stopped_with_its_children(self):
         # A gate that runs past review_timeout stops, with the processes it started, and the error names
         # the setting; the reviewer's lease stays renewed while it runs (#1142).
@@ -9919,6 +9922,7 @@ class Hooks(Base):
         self.assertIn("does not exist", h["output"])
         self.assertEqual(self.runs(), [])
 
+    @timing.local_only("live child process timeout")
     def test_a_hook_past_hook_timeout_is_stopped_with_its_children(self):
         pidfile = os.path.join(self.dir.name, "child.pid")
         slow = self.script("slow.py", "import subprocess, sys\n"
@@ -12930,6 +12934,7 @@ class Ops(Base):
         self.assertEqual((run["status"], run["timed_out"]), ("unknown", 1))
         self.assertIn("timeout 30s", run["summary"])
 
+    @timing.local_only("live child process timeout")
     def test_a_real_command_past_its_timeout_stops_and_counts_as_unknown(self):
         core.ops_add(self.c, "site", "slow", "cmd", {"command": f"{sys.executable} -c 'import time; time.sleep(30)'",
                                                     "timeout": "1s", "every": "1m", "fail_after": 1}, actor="boss")
@@ -13236,6 +13241,7 @@ class Ops(Base):
 
     # ---- the outside switch (#5435)
 
+    @timing.local_only("wall-clock thread timing")
     def test_serve_beats_to_the_outside_address_once_each_interval_and_a_failure_is_logged_not_retried(self):
         sent = []
         state = dict(core.OPS_DEADMAN)
@@ -15149,6 +15155,7 @@ class RunLog(Base):
         self.assertEqual(g["why"], "space")
         self.assertEqual(set(json.loads(g["row"])) - set(core.GONE_SHORT), set())
 
+    @timing.local_only("wall-clock lock timing")
     def test_run_log_skips_a_locked_or_missing_queue(self):
         with mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "none", "q.db")}):
             core.log_run(["list"], core.iso(core.now()), 1, 0, "list")  # no error, no file

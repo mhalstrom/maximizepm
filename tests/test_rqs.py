@@ -320,6 +320,7 @@ class Publish(Base):
         self.assertIn('<body><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg></body>', f["content"])
         self.assertNotIn("<?xml", f["content"])
 
+    @timing.local_only("wall-clock latency and background thread timing")
     def test_the_page_op_answers_at_once_and_the_publish_runs_in_a_thread(self):
         self.connect()
         t0 = time.perf_counter()

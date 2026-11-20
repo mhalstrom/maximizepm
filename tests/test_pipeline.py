@@ -524,6 +524,7 @@ class Runner(RunnerBase):
         self.passes()
         self.assertIn("no new JUnit report", self.runs()["test"]["errors"])
 
+    @timing.local_only("live child process timeout")
     def test_stage_timeout_stops_the_command(self):
         core.config_set(self.c, "stage_timeout", "1s")
         define.stage_set(self.c, "app", "build", run="sleep 30")
@@ -582,6 +583,7 @@ class Runner(RunnerBase):
         self.runner.serve_pass(self.c)
         self.assertEqual(self.runs()["build"]["errors"], "maxpm serve stopped while it ran")
 
+    @timing.local_only("live child process timing")
     def test_stop_a_running_command_and_a_wait_at_the_gate(self):
         self.runner.SYNC["on"] = False
         define.stage_set(self.c, "app", "build", run="sleep 30")
@@ -1248,6 +1250,7 @@ class Emergency(RunnerBase):
         self.assertEqual([x["change"] for x in self.audit("operators")][-1],
                          "agents may be operators of pipeline app")
 
+    @timing.local_only("live child process timing")
     def test_stop_ends_a_running_stage_after_its_step_and_resume_lets_it_go_on(self):
         self.runner.SYNC["on"] = False
         define.stage_set(self.c, "app", "build", run="printf '::step start one\\n'; sleep 1; printf '::step end one\\n'; "
@@ -1814,6 +1817,7 @@ class DefaultPipelines(Base):
         with self.assertRaisesRegex(core.RiverError, "has no stage downloads"):
             store.stage_versions(self.c, "web-prod", "downloads")
 
+    @timing.local_only("live hook process timing")
     def test_the_steps_show_while_the_hook_runs(self):
         import threading
         dep = self.release("bbbbbbb", "Another change")
@@ -1878,6 +1882,7 @@ class DefaultPipelines(Base):
         self.assertEqual(d["stages"][2]["last_run"]["item"], approval)
         self.assertIsNone(d["envs"][0]["rev"])
 
+    @timing.local_only("100 ms latency budget")
     def test_ten_releases_read_under_100_ms(self):
         for n in range(12):
             d = self.release(f"{n:07x}", f"Change {n}")
@@ -2669,6 +2674,7 @@ class PulumiDelivery(Base):
 
 
 class Speed(Base):
+    @timing.local_only("100 ms latency budget")
     def test_each_read_under_100_ms(self):
         """Policy p147: a pipeline with 400 runs, 2000 steps and 10800 test results reads fast."""
         self.toolscaled()

@@ -8,7 +8,7 @@ from pathlib import Path
 import struct
 
 from river import core, server
-from tests import timing
+from tests import chrome as _chrome, timing
 from tests.test_view_sessions import TmuxBase, claude_line
 
 
@@ -2296,7 +2296,7 @@ try {
         import threading
         from unittest import mock
         from river import annotate, browser
-        if not browser.chrome_path():
+        if not _chrome() or not browser.chrome_path():
             self.skipTest("no Chrome on this computer")
         body = (b"<title>Pricing</title><style>body{font:16px system-ui;margin:24px} .plan{border:1px solid #ccc;"
                 b"padding:16px;margin:12px 0;width:260px} button{font-size:16px;width:70px;white-space:nowrap;overflow:"

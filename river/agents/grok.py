@@ -113,11 +113,32 @@ SEEN_DEFAULT_EFFORT = {"grok-4.7": "high"}
 def _toml_file(path):
     """Parse a TOML file into a dict, or {} when missing, unreadable, or invalid."""
     try:
-        import tomllib
-        got = tomllib.loads(path.read_text(encoding="utf-8"))
-        return got if isinstance(got, dict) else {}
-    except (ImportError, OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return {}
+    try:
+        import tomllib
+        got = tomllib.loads(text)
+        return got if isinstance(got, dict) else {}
+    except ImportError:
+        pass
+    except ValueError:
+        return {}
+    # Python 3.10 has no tomllib: parse [section] headers and string key = "value" lines (#6504).
+    out, cur = {}, None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        m = re.match(r"^\[([A-Za-z0-9_.-]+)\]\s*(?:#.*)?$", s)
+        if m:
+            cur = out.setdefault(m.group(1), {})
+            continue
+        m = (re.match(r'^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*(?:#.*)?$', s)
+             or re.match(r"^([A-Za-z0-9_-]+)\s*=\s*'([^']*)'\s*(?:#.*)?$", s))
+        if m:
+            (out if cur is None else cur)[m.group(1)] = m.group(2)
+    return out
 
 
 def _sandbox_profile(cfg):

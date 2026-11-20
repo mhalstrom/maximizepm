@@ -96,6 +96,13 @@ class Contract(Home):
         (self.gh / "requirements.toml").write_text('[sandbox]\nprofile = "strict"\n', encoding="utf-8")
         got = grok.config_settings({"GROK_HOME": str(self.gh), "GROK_SANDBOX": "read-only"})
         self.assertEqual(got["sandbox"], "strict")
+        # Python 3.10 has no tomllib: the fallback parser reads [ui] and [sandbox] the same way (#6504).
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            got = grok.config_settings({"GROK_HOME": str(self.gh)})
+            self.assertEqual((got["permission_mode"], got["sandbox"]), ("auto", "strict"))
+            (self.gh / "requirements.toml").unlink()
+            got = grok.config_settings({"GROK_HOME": str(self.gh)})
+            self.assertEqual((got["permission_mode"], got["sandbox"]), ("auto", "workspace"))
 
     def test_settings_dialog_shows_grok_sandbox_without_command_line_flag(self):
         from river import sessions

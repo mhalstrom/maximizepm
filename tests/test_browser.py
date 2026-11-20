@@ -1086,6 +1086,7 @@ class Passkey(Base):
             b.passkey("done")
         self.assertEqual(log[-1], ("open", "https://myaccount.google.com/"))  # the next real page, not the blank one
 
+    @timing.local_only("background timer thread timing")
     def test_a_session_s_request_opens_no_window_and_a_window_closes_by_itself(self):
         b, st, log = self.fake()
         b.passkey("get")  # nobody used the panel: a session meets the passkey page
@@ -1107,6 +1108,7 @@ class Passkey(Base):
         self.assertEqual(log, [])
         self.assertIsNone(b.passkey_at)
 
+    @timing.local_only("background timer thread timing")
     def test_a_window_whose_page_asks_for_no_passkey_closes_soon(self):
         b, st, log = self.fake()
         b.person_at = time.time()
@@ -1463,6 +1465,7 @@ class Routes(Base):
         self.assertEqual(self._keys(got), ["h", "i", "\r", "x"])
         self.assertEqual(out, {"ok": True, "error": None})
 
+    @timing.local_only("thread and INPUT_GAP timing")
     def test_numbered_batches_go_in_the_panes_order(self):
         # #5651: the pane sends each batch at once; a later one can come first (another thread of serve, the relay's
         # pool). It waits for the ones before it, and a batch that never comes is passed after INPUT_GAP.
@@ -1703,6 +1706,7 @@ class SharpWhenStill(Base):
         self.b._event("Page.screencastFrame", {"sessionId": 1, "data": base64.b64encode(data).decode(),
                                                "metadata": {"deviceWidth": 500, "deviceHeight": 400}}, "s1")
 
+    @timing.local_only("SHARP_QUIET timer thread timing")
     def test_no_sharp_frame_while_the_page_moves(self):
         b = self.b
         for i in range(10):  # a scroll: new frames one after the other, each one shown at once
@@ -1720,6 +1724,7 @@ class SharpWhenStill(Base):
         timing.wait_for(lambda: b.frame.get("sharp"), 10, "the next sharp frame")
         self.assertEqual(len(self.shots), 2)
 
+    @timing.local_only("SHARP_QUIET timer thread timing")
     def test_the_echo_of_the_screenshot_before_its_reply_keeps_the_sharp_frame(self):
         """#5706: the screenshot's repaint can send its echo frame before the screenshot's reply comes (a loaded
         computer). The echo is no change: the screenshot stays the sharp frame. Before, each echo threw the screenshot
@@ -1745,6 +1750,7 @@ class ManyPolls(Base):
             b.frame = {"seq": b.seq, "data": base64.b64encode(data).decode(), "w": 500, "h": 400}
             b.cond.notify_all()
 
+    @timing.local_only("multi-thread poll timing")
     def test_each_poll_gets_the_next_change(self):
         b = browser.Browser("web")
         self.put(b, b"one")
