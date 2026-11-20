@@ -5389,7 +5389,7 @@ class Wait(Base):
         for b in (core.go(self.c, self.dir.name, "w"), core.go(self.c, self.dir.name, "w", focus=f"item:{i}")):
             text = b["why"] + b.get("focus_note", "")
             self.assertEqual(b["role"], "idle")
-            self.assertIn(f"your question #{q}".upper() if b.get("focus_note") else f"your question #{q}", text)
+            self.assertIn(f"mark's answer to your question #{q}", text)
             self.assertIn(f"the answer gives #{i} back to you in maxpm wait", text)
             self.assertNotIn("tell the user", text)
             self.assertNotIn("widens your scope", text)

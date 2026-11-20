@@ -25233,8 +25233,8 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             except RiverError as e:
                 q = _own_question_wait(conn, f["id"], actor)
                 brief["focus_note"] = (
-                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}. IT WAITS ON {q['to_agent']}'S ANSWER "
-                    f"TO YOUR QUESTION #{q['id']}" + ANSWER_IN_WAIT.format(item=f["id"]) + "." if q else
+                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}. It waits on {q['to_agent']}'s answer "
+                    f"to your question #{q['id']}" + ANSWER_IN_WAIT.format(item=f["id"]) + "." if q else
                     f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
                     f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
             else:
