@@ -88,6 +88,26 @@ button.srow-it { cursor: pointer; }
 }
 .sess-badge { display: inline-flex; flex: none; }  /* the ! badge of the opened session (#6438) */
 .sess-badge:empty { display: none; }
+/* The background tasks of a session (#6454, components/bgTasks.js): on its row the count in the shape of the ! badge,
+   in the working color; in the head a clock button with the count, whose list opens in a card under it. */
+.tbadge { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: var(--sp-0); font-size: var(--fs-xs);
+  font-weight: 700; padding: var(--hair) calc(var(--sp-2) + var(--hair)); border-radius: var(--r-pill); background: var(--prog); color: var(--panel); }
+.srow-h .tbadge { box-sizing: border-box; }
+.tclock { width: var(--sp-4); height: var(--sp-4); flex: none; }
+.sess-tasks { position: relative; flex: none; display: inline-flex; }
+.sess-tbtn { color: var(--muted); }
+.sess-tcard { display: none; }
+.sess-tasks.open .sess-tcard { display: block; position: absolute; top: 100%; left: 0; z-index: 7; width: max-content;
+  min-width: var(--w-l); max-width: min(calc(var(--w-l) * 2), calc(100vw - var(--sp-7))); max-height: var(--h-pre); overflow: auto;
+  margin-top: var(--sp-1); padding: var(--sp-3) var(--sp-4); box-sizing: border-box; background: var(--panel);
+  border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-pop); }
+.bgt-h { font-size: var(--fs-s); font-weight: 600; margin-bottom: var(--sp-2); }
+.bgt-sub { color: var(--muted); margin-top: var(--sp-4); }
+.bgt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.bgt { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--sp-3); align-items: baseline; font-size: var(--fs-m); }
+.bgt-w { overflow-wrap: anywhere; }
+.bgt-t { grid-column: 2; font-size: var(--fs-s); color: var(--muted); }
+.bgt-end .bgt-w, .bgt-wait .bgt-w { color: var(--muted); }
 .sess-st { display: inline-flex; align-items: center; gap: var(--sp-2); flex: none; font-size: var(--fs-s); color: var(--muted); white-space: nowrap; }
 /* Stop beside the state (#5547): ends the running turn now, as Esc in its terminal. */
 .sess-stw { white-space: nowrap; }

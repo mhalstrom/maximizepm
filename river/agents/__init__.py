@@ -418,6 +418,11 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #     st["ttl"] the cache lifetime the log shows ("1h", "5m"; None: the cache_ttl setting), st["model"];
 #   chat_texts(raw) -> [(text, time, how)]: the texts of one log line (bytes) where the Artifacts tab looks for files
 #     and links; how is "wrote" for the path of a CHAT["file_tools"] call, else "named". Tool results are left out.
+#   background_scan(path, start, st) -> end: fold the complete lines of the log from byte start on (new_lines) into
+#     st (a dict, {} at first; the reader keeps its own keys there) and return the byte after the last one. Its tasks
+#     are st["tasks"]: {task id: {"id", "kind" ("command" or "subagent"), "at" (start, datetime), "what" (a short
+#     description), "command", "end" (datetime, None while it runs), "status"}}: the background commands and
+#     subagents that the agent CLI started (core.session_tasks, #6454). Only for an agent with LAUNCH["background"].
 #   chat_limits(lines) -> [{"name", "used_percent", "window_minutes", "resets_at"}, ..., {"name": "credits",
 #     "text"}] | None: the plan limits that the log says last (Codex: the rate_limits of its token_count events), for
 #     the Usage panel (#5224); None when the agent writes none to its log (they show only on its screen).
@@ -631,7 +636,7 @@ PARTS = {
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
                                                         "chat_settings", "chat_cache_line", "chat_texts",
-                                                        "chat_limits")},
+                                                        "chat_limits", "background_scan")},
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook", "project_hooks",
                                                            "hook_answer")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings", "screen_limits", "limit_stop",
@@ -642,6 +647,25 @@ PARTS = {
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard")},
     "update": {"data": ("UPDATE", UPDATE_KEYS), "functions": ()},
 }
+
+def new_lines(path, start, chunk=1 << 22):
+    """(offset, end, text) of each complete line of the file from byte start on: where it starts, the byte after its
+    newline, and its text. A last line with no newline yet is left for the next read. It reads chunk bytes at a time:
+    a first read of a log of 280 MB holds no copy of the whole file."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        rest, pos = b"", start
+        while True:
+            got = f.read(chunk)
+            if not got:
+                return
+            got = rest + got
+            cut = got.rfind(b"\n") + 1
+            rest = got[cut:]
+            for line in got[:cut].split(b"\n")[:-1]:
+                yield pos, pos + len(line) + 1, line.decode("utf-8", "replace")
+                pos += len(line) + 1
+
 
 BUILTIN = ("claude", "codex", "antigravity", "pi", "copilot", "hermes", "grok", "opencode", "goose", "aider", "amp", "cursor")
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -1115,6 +1139,14 @@ class Adapter:
         if f is None or not session_ref:
             return None
         return f(session_ref, root=root) if root else f(session_ref)
+
+    def background_scan(self, path, start, st):
+        """The byte after the last line that the module's background_scan read into st, or None without the reader
+        or for an agent with no background commands (LAUNCH['background'] false: Codex)."""
+        f = self._fn("background_scan")
+        if f is None or not (self.launch or {}).get("background"):
+            return None
+        return f(path, start, st)
 
     def chat_settings(self, lines):
         f = self._fn("chat_settings")

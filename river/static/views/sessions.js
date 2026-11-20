@@ -36,6 +36,7 @@ import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 import { sessionsLine, dotOf } from "./sessionsLine.js";
 import { openBrowserRow } from "./browsers.js";
 import { openListSettings } from "../components/listSettings.js";
+import { taskBadge, taskListHtml, runningTasks, taskWords, CLOCK_SVG } from "../components/bgTasks.js";
 
 const PICKED = "river.session";
 const FOLD = "river.sessFold";  // "1": the person folded the list of sessions (#5626)
@@ -245,7 +246,7 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || waitsOf(s).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${dotOf(s)}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${taskBadge(s.tasks)}${waitBadge(s)}<span class="dot ${dotOf(s)}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
       <span class="srow-acts">${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</span>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
@@ -414,6 +415,18 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
     closeOn: [$("#sessMenu")], outside: $("#sessMenu") });
   const headMore = (open) => more.set(open);
+  // The background tasks of the opened session (#6454): the clock in the head opens their list under it.
+  makeMenu($("#sessTasksBtn"), $("#sessTasks"), { cls: "open", outside: $("#sessTasksCard") });
+  function drawTasks(row) {
+    const tasks = row && row.tasks, box = $("#sessTasks");
+    box.classList.toggle("hidden", !tasks || !tasks.length);
+    if (!tasks || !tasks.length) { box.classList.remove("open"); return; }
+    const n = runningTasks(tasks).length, btn = $("#sessTasksBtn");
+    putHtml(btn, n ? taskBadge(tasks) : CLOCK_SVG);
+    btn.title = n ? taskWords(n) : "Background tasks";
+    btn.setAttribute("aria-label", btn.title);
+    putHtml($("#sessTasksCard"), taskListHtml(tasks));
+  }
 
   async function refresh() {
     if (document.hidden || !isShown()) return;
@@ -474,6 +487,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     // The ! badge of the opened session in its head too (#6438): on a phone the head is all that shows of it.
     const open = agent && list.find(x => x.name === agent);
     putHtml($("#sessBadge"), open ? waitBadge(open, false) : "");
+    drawTasks(open);
     fit();
     autoWait();
   }

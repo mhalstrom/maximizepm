@@ -1535,6 +1535,96 @@ class BackgroundWork(Base):
         core.config_set(self.c, "busy_max", "0s")
         self.assertEqual(self.what(), [])
 
+    def test_the_list_keeps_each_task_with_its_end_and_reads_only_new_lines(self):
+        """#6454: the Sessions tab and maxpm who list each task with its start, its end and its status; a read after
+        the first one reads only the lines written since."""
+        from river import agents
+        cl = agents.load()["claude"]
+        use = self.tr.background(self.at(1), "b1", "cargo test -p server", "Run the server tests")
+        got = core.session_tasks(cl, self.tr.path)
+        self.assertEqual([(x["id"], x["what"], x["command"], x["end"]) for x in got],
+                         [("b1", "Run the server tests", "cargo test -p server", None)])
+        size = os.path.getsize(self.tr.path)
+        self.tr.ended(self.at(5), "b1", use, "failed")
+        self.tr.background(self.at(6), "b2", "maxpm --as ag wait", "Wait for work")
+        reads = []
+        real = agents.new_lines
+        with mock.patch.object(agents, "new_lines", lambda p, s: (reads.append(s), real(p, s))[1]):
+            got = core.session_tasks(cl, self.tr.path)
+        self.assertEqual(reads, [size])
+        self.assertEqual([(x["id"], x["end"], x["status"]) for x in got],
+                         [("b1", self.at(5).replace(microsecond=0), "failed"), ("b2", None, None)])
+        # The rows: the one that runs (a wait, flagged), then the ended ones newest first; a wait that ended goes.
+        rows = core.task_rows(got, core.now(), timedelta(hours=4))
+        self.assertEqual([(r["id"], r["wait"], r["end"] is None) for r in rows], [("b2", True, True), ("b1", False, False)])
+        # A new file in its place (a new inode, or a shorter one) is read again from the start.
+        os.replace(self.tr.path, self.tr.path + ".old")
+        self.tr.background(self.at(7), "b3", "npm test", "Run the page tests")
+        self.assertEqual([x["id"] for x in core.session_tasks(cl, self.tr.path)], ["b3"])
+
+    def test_serve_stores_the_tasks_of_each_session_and_who_shows_them(self):
+        from river import cli
+        core.record_claude_session(self.c, "ag", self.SID)
+        self.c.execute("UPDATE agents SET pid=?, host=?, agent_type='claude-code' WHERE name='ag'",
+                       (os.getpid(), core.this_host()))
+        use = self.tr.background(self.at(1), "b1", "cargo test", "Run the server tests")
+        self.tr.ended(self.at(3), "b1", use)
+        self.tr.background(self.at(4), "b2", "make gate", "Run the full gate")
+        self.tr.background(self.at(4), "b3", "maxpm --as ag inbox --wait", "Wait for messages")
+        got = core.record_tasks(self.c)
+        self.assertEqual([(r["id"], r["wait"]) for r in got["ag"]], [("b2", False), ("b3", True), ("b1", False)])
+        ag = next(g for g in core.who(self.c) if g["name"] == "ag")
+        self.assertEqual([r["id"] for r in ag["tasks"]], ["b2", "b3", "b1"])
+        lines = cli.tasks_lines(ag["tasks"], ended=True)
+        self.assertEqual(lines[0], "runs 1 background task now:")
+        self.assertIn("command: Run the full gate", lines[1])
+        self.assertEqual(lines[2], "waits in the background: Wait for messages")
+        self.assertEqual(lines[3], "ended background tasks (the last 1):")
+        self.assertIn("(completed): command: Run the server tests", lines[4])
+        self.assertEqual(cli.tasks_lines(ag["tasks"])[-1], "waits in the background: Wait for messages")
+        # An agent CLI with no reader of them (Codex): no list at all, not an empty one.
+        self.c.execute("UPDATE agents SET agent_type='codex' WHERE name='ag'")
+        self.assertIsNone(core.record_tasks(self.c)["ag"])
+        self.assertIsNone(next(g for g in core.who(self.c) if g["name"] == "ag")["tasks"])
+        self.assertEqual(cli.tasks_lines(None), [])
+        # A list that maxpm serve has not read lately counts as unknown.
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        core.record_tasks(self.c)
+        late = core.now() + core.SHELLS_FRESH
+        with mock.patch.object(core, "now", lambda: late):
+            self.assertIsNone(next(g for g in core.who(self.c) if g["name"] == "ag")["tasks"])
+
+    def test_agy_tasks_come_from_its_transcript(self):
+        from river import agents
+        ag = agents.load()["antigravity"]
+        conv = "0de5f79c-1111-4222-8333-444444444444"
+        path = os.path.join(self.dir.name, "transcript_full.jsonl")
+        stamp = "Created At: 2026-11-20T10:00:00-08:00\nCompleted At: 2026-11-20T10:00:00-08:00\n"
+        steps = [
+            {"type": "GENERIC", "source": "MODEL", "step_index": 4, "created_at": "2026-11-20T18:00:05Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-4\nTask Description: "
+                                "python3 -m unittest discover\nTask logs are available at: file:///x/task-4.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 6, "created_at": "2026-11-20T18:01:00Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-6\nTask Description: "
+                                "maxpm wait\nTask logs are available at: file:///x/task-6.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 8, "created_at": "2026-11-20T18:01:30Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-8\nTask Description: "
+                                "cargo build\nTask logs are available at: file:///x/task-8.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 10, "created_at": "2026-11-20T18:02:00Z",
+             "content": stamp + f'Task "{conv}/task-8" cancelled.'},
+            {"type": "SYSTEM_MESSAGE", "source": "SYSTEM", "step_index": 12, "created_at": "2026-11-20T18:09:30Z",
+             "content": "The following is a <SYSTEM_MESSAGE>.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T18:09:00Z "
+                        f'sender={conv}/task-4 priority=MESSAGE_PRIORITY_HIGH content=Task id "{conv}/task-4" finished '
+                        "with result:\nCommand exited with code 1.\n\nCommand output:\nFAILED\n</SYSTEM_MESSAGE>"},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(json.dumps(s) + "\n" for s in steps))
+        got = core.session_tasks(ag, path)
+        self.assertEqual([(x["id"].split("/")[1], x["what"], x["end"] and core.iso(x["end"]), x["status"]) for x in got],
+                         [("task-4", "python3 -m unittest discover", "2026-11-20T18:09:00Z", "failed"),
+                          ("task-6", "maxpm wait", None, None),
+                          ("task-8", "cargo build", "2026-11-20T18:02:00Z", "cancelled")])
+
 
 class Usage(Base):
     """The token cost of each item, from the Claude Code transcripts of the sessions that held it (#1102)."""

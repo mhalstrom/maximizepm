@@ -2709,7 +2709,8 @@ def wake_loop(stop):
 def shells_loop(stop):
     """The thread of maxpm serve that reads the shell commands of each session (core.record_shells) every
     shells_every (#5830): a pass of the loop comes only every notify_interval, too late to show that a session
-    runs a command now. 0s: it reads none and looks at the setting again each minute. No error ends it."""
+    runs a command now. It reads the background tasks of each session too (core.record_tasks, #6454), from the new
+    lines of its chat log. 0s: it reads none and looks at the setting again each minute. No error ends it."""
     conn = None
     while not stop.is_set():
         every = 60.0
@@ -2718,7 +2719,10 @@ def shells_loop(stop):
                 conn = core.connect()
             step = core.parse_duration(core.setting(conn, "shells_every")).total_seconds()
             if step:
-                core.record_shells(conn)
+                try:
+                    core.record_shells(conn)
+                finally:
+                    core.record_tasks(conn)
                 every = step
         except Exception:  # noqa: BLE001 - the next pass tries again, with a new connection
             try:

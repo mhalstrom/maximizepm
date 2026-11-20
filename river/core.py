@@ -1004,6 +1004,8 @@ CREATE TABLE IF NOT EXISTS agents (
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
   shells         TEXT,                       -- the shell commands that run in its session now, JSON (record_shells, #5830)
   shells_at      TEXT,                       -- when maxpm serve last read them
+  tasks          TEXT,                       -- the background tasks of its session, JSON (record_tasks, #6454)
+  tasks_at       TEXT,                       -- when maxpm serve last read them
   activity_at     TEXT,                      -- the last state report (maxpm report: its hooks or its pane)
   activity_event  TEXT,                      -- that state: report:working, report:idle, report:blocked, report:gone
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
@@ -2530,7 +2532,7 @@ def _migrate(conn):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at",
-                "shells", "shells_at"):
+                "shells", "shells_at", "tasks", "tasks_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "pid" not in acols:
@@ -16653,6 +16655,7 @@ def _agent_status(conn, a, holds, owns, pins):
     a["owns"] = [{k: r[k] for k in r.keys() if k != "owner"} for r in owns]
     a["pinned_by"] = [r["person"] for r in pins]
     a["shells"] = _shells_of(a) if a.get("kind") == "ai" else None
+    a["tasks"] = _tasks_of(a) if a.get("kind") == "ai" else None
     return a
 
 
@@ -19226,75 +19229,47 @@ def _ts(s):
 # prompt: no river command, a quiet screen, and no process newer than its last river command (or no process at
 # all for a sandboxed session, which cannot run ps). The transcript has the start of each task (the tool result)
 # and its end (a task notification with a status, or TaskStop), so serve reads it there (#1611).
-_BG_STARTS = (("command", re.compile(r"Command running in background with ID: (\w+)")),
-              ("command", re.compile(r"Command [^\n]{0,200}?moved to the background \(ID: (\w+)\)")),
-              ("subagent", re.compile(r"Async agent launched successfully.*?agentId: (\w+)", re.S)))
-_BG_NOTE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 _BG_RIVER_WAIT = re.compile(r"\bmaxpm\b[^\n;|&]*\s(wait|--wait|--watch)\b")
-_BG_CACHE = {}  # transcript path -> (size, mtime, tasks): a session that waits writes nothing
+# Chat log path -> [inode, byte read up to, the reader's state]: each read folds in only the lines written since the
+# last one (#6454: a first read of a transcript of 280 MB takes about a second, a refresh of the page cannot).
+_BG_CACHE = {}
+_BG_LOCK = None
+# The ended tasks that a session's list keeps (record_tasks), newest first.
+TASKS_ENDED = 10
 
 
-def _result_text(content):
-    if isinstance(content, str):
-        return content
-    return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") == "text")
+def _bg_wait(command):
+    """True for a river wait (maxpm wait, inbox --wait, manage --watch) and a loop that only renews the lease: these
+    are waits, not work."""
+    return bool(_BG_RIVER_WAIT.search(command) or ("maxpm" in command and "heartbeat" in command
+                                                   and "sleep" in command))
 
 
-def _background_tasks(path):
-    """The background tasks of one transcript that have a start and no end: [{id, kind (command or subagent),
-    at, what, command}]. A start counts only as the first words of a tool result, so text that quotes one (a
-    grep of another transcript) starts nothing."""
-    started, ended = {}, set()
-    with open(path, errors="replace", encoding="utf-8") as f:
-        for line in f:
-            if "<task-notification>" in line and "<status>" in line:
-                for body in _BG_NOTE.findall(line):
-                    m = re.search(r"<task-id>(\w+)</task-id>", body)
-                    if m and "<status>" in body:
-                        ended.add(m.group(1))
-            start = '"tool_result"' in line and ("background" in line or "Async agent launched" in line)
-            stop = '"TaskStop"' in line or '"KillShell"' in line
-            if not (start or stop):
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
-            parts = msg.get("content") if isinstance(msg.get("content"), list) else []
-            t = _ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
-            for x in parts:
-                if not isinstance(x, dict):
-                    continue
-                if x.get("type") == "tool_use" and x.get("name") in ("TaskStop", "KillShell"):
-                    inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                    ended.add(str(inp.get("task_id") or inp.get("shell_id") or ""))
-                elif x.get("type") == "tool_result" and d.get("type") == "user" and t is not None:
-                    text = _result_text(x.get("content")).lstrip()
-                    for kind, rx in _BG_STARTS:
-                        m = rx.match(text)
-                        if m:
-                            started[m.group(1)] = {"id": m.group(1), "kind": kind, "at": t, "use": x.get("tool_use_id"),
-                                                   "what": "", "command": ""}
-    tasks = [v for k, v in started.items() if k not in ended]
-    uses = {v["use"]: v for v in tasks if v["use"]}
-    if uses:  # what each one is: the description and the command of its tool call
-        with open(path, errors="replace", encoding="utf-8") as f:
-            for line in f:
-                if '"tool_use"' not in line or not any(u in line for u in uses):
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
-                for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
-                    if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") in uses:
-                        inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                        v = uses[x["id"]]
-                        v["command"] = str(inp.get("command") or "")
-                        v["what"] = " ".join(str(inp.get("description") or v["command"]).split())[:80]
-    return tasks
+def session_tasks(ad, path):
+    """Every background task of one chat log that the adapter's background_scan reads (agents.background_scan):
+    [{id, kind, at, what, command, end, status}], oldest first; None when the adapter has no reader (Codex: no
+    background commands) or the log cannot be read. Only the lines written since the last read are read again."""
+    global _BG_LOCK
+    if ad is None or not path:
+        return None
+    if _BG_LOCK is None:
+        import threading
+        _BG_LOCK = threading.Lock()
+    with _BG_LOCK:
+        try:
+            st = os.stat(path)
+            got = _BG_CACHE.get(str(path))
+            if not got or got[0] != st.st_ino or st.st_size < got[1]:
+                got = [st.st_ino, 0, {}]
+            if st.st_size > got[1]:
+                end = ad.background_scan(path, got[1], got[2])
+                if end is None:
+                    return None
+                got[1] = end
+            _BG_CACHE[str(path)] = got
+        except OSError:
+            return None
+        return sorted((dict(v) for v in got[2].get("tasks", {}).values()), key=lambda v: v["at"])
 
 
 def background_work(conn, agent, root=None):
@@ -19312,22 +19287,72 @@ def background_work(conn, agent, root=None):
                      (agent,)).fetchone()
     if not r or not limit.total_seconds():
         return []
+    from . import agents
+    claude = agents.load().get("claude")
     out, t = [], now()
     for path in sorted(Path(root or transcripts_root()).glob(f"*/{r['session_id']}.jsonl")):
-        try:
-            st = path.stat()
-            got = _BG_CACHE.get(str(path))
-            if not got or got[:2] != (st.st_size, st.st_mtime_ns):
-                got = _BG_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, _background_tasks(path))
-        except OSError:
-            continue
-        for task in got[2]:
-            cmd = task["command"]
-            if t - task["at"] >= limit or _BG_RIVER_WAIT.search(cmd) or ("maxpm" in cmd and "heartbeat" in cmd
-                                                                          and "sleep" in cmd):
+        for task in session_tasks(claude, path) or ():
+            if task["end"] or t - task["at"] >= limit or _bg_wait(task["command"]):
                 continue
             out.append({"id": task["id"], "kind": task["kind"], "what": task["what"], "at": iso(task["at"])})
     return out
+
+
+def task_rows(tasks, t, limit):
+    """The list of a session's background tasks that maxpm who and the Sessions tab show (#6454): the ones that run
+    (oldest first; a river wait among them with wait true), then the last TASKS_ENDED that ended (newest first; no
+    wait: the manager's watch ends every few minutes). A task with no end after busy_max (limit) is left out: its end
+    can be lost."""
+    row = lambda x: {"id": x["id"], "kind": x["kind"], "what": x["what"], "command": x["command"][:300],  # noqa: E731
+                     "at": iso(x["at"]), "end": iso(x["end"]) if x["end"] else None, "status": x.get("status"),
+                     "wait": _bg_wait(x["command"])}
+    run = [row(x) for x in tasks if not x["end"] and t - x["at"] < limit]
+    ended = [row(x) for x in sorted((x for x in tasks if x["end"]), key=lambda x: x["end"], reverse=True)
+             if not _bg_wait(x["command"])][:TASKS_ENDED]
+    return run + ended
+
+
+def record_tasks(conn):
+    """maxpm serve, with record_shells every shells_every (#6454): store the background tasks of each session on this
+    computer (task_rows of its last session's chat log) in agents.tasks, so maxpm who and the Sessions tab read them
+    with no log of their own. NULL for an agent whose CLI has no reader of them (Codex: no background commands; an
+    agent of an unknown type): the page shows no count, not 0. A row is written when its list changes, and at least
+    each half of SHELLS_FRESH. Returns {agent: rows or None}."""
+    rows = conn.execute("SELECT name, tasks, tasks_at FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
+                        (this_host(),)).fetchall()
+    t, out = now(), {}
+    limit = parse_duration(setting(conn, "busy_max")) if rows else None
+    for r in rows:
+        ad, new = state_adapter(conn, r["name"]), None
+        s = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC "
+                         "LIMIT 1", (r["name"],)).fetchone()
+        if ad is not None and s and ad.launch.get("background"):
+            try:
+                tasks = session_tasks(ad, ad.chat_path(s["session_id"]))
+            except Exception:  # noqa: BLE001 - an adapter's reader (a user module too) never stops the loop
+                tasks = None
+            new = task_rows(tasks, t, limit) if tasks is not None else None
+        out[r["name"]] = new
+        if new is None and r["tasks"] is None:
+            continue
+        text = json.dumps(new) if new is not None else None
+        if text == r["tasks"] and r["tasks_at"] and t - parse_iso(r["tasks_at"]) < SHELLS_FRESH / 2:
+            continue
+        with tx(conn):
+            conn.execute("UPDATE agents SET tasks=?, tasks_at=? WHERE name=?", (text, iso(t), r["name"]))
+    return out
+
+
+def _tasks_of(a):
+    """The background tasks of an agent row (record_tasks): a list, or None when its CLI has no reader of them or
+    maxpm serve has not read them lately."""
+    at = a.get("tasks_at")
+    if not at or a.get("tasks") is None or now() - parse_iso(at) >= SHELLS_FRESH:
+        return None
+    try:
+        return json.loads(a["tasks"])
+    except ValueError:
+        return None
 
 
 def _session_requests(sid, root=None):

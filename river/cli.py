@@ -2720,7 +2720,9 @@ def build_parser(only=None):
     x.add_argument("--goal", help="send the note to the owner of this goal")
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
-    x = sub.add_parser("who", help="who is doing what"); x.add_argument("--item", type=int); x.add_argument("--project")
+    x = sub.add_parser("who", help="who is doing what")
+    x.add_argument("name", nargs="?", help="only this session, with its ended background tasks too")
+    x.add_argument("--item", type=int); x.add_argument("--project")
     x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
     x = sub.add_parser("link", help="the page address of a session (yours by default), to give a person")
@@ -5359,8 +5361,11 @@ def dispatch(conn, a, actor):
     if c == "who":
         from . import sessions
         res = [dict(g, cache=sessions.cache_state(conn, g["name"])) if g.get("role") == "expert" else g
-               for g in core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all)]
-        if not a.all and a.item is None and a.project is None and a.file is None and not a.json:
+               for g in core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all or bool(a.name))
+               if not a.name or g["name"] == a.name]
+        if a.name and not res:
+            raise RiverError(f"no session {a.name}: maxpm who --all lists them")
+        if not a.all and not a.name and a.item is None and a.project is None and a.file is None and not a.json:
             ended = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] - len(res)
             if ended:
                 print(f"({ended} stopped or gone agent(s) that hold nothing are hidden: maxpm who --all)", file=sys.stderr)
@@ -5915,6 +5920,32 @@ def shells_lines(shells):
     return [f"runs {len(shells)} shell command{'s' if len(shells) > 1 else ''} now:"] + [
         f"  since {core.show_time(s['started'])} ({age(t - core.parse_iso(s['started']))}): {s['label']}"
         for s in shells]
+
+
+def tasks_lines(tasks, ended=False):
+    """The lines of maxpm who for the background tasks of a session (#6454): how many run, each with its start and
+    age; the river waits that run (maxpm wait, the manager's watch) in one line apart; with ended (maxpm who <name>),
+    the last ones that ended, with their start, end and status. None when its CLI has no reader of them, or when
+    maxpm serve has not read them lately (None)."""
+    if not tasks:
+        return []
+    t = core.now()
+    age = lambda d: f"{int(d.total_seconds())}s" if d.total_seconds() < 60 else core._short(d)  # noqa: E731
+    run = [x for x in tasks if not x["end"] and not x["wait"]]
+    waits = [x for x in tasks if not x["end"] and x["wait"]]
+    out = []
+    if run:
+        out.append(f"runs {len(run)} background task{'s' if len(run) > 1 else ''} now:")
+        out += [f"  since {core.show_time(x['at'])} ({age(t - core.parse_iso(x['at']))}): {x['kind']}: {x['what']}"
+                for x in run]
+    if waits:
+        out.append("waits in the background: " + "; ".join(x["what"] for x in waits))
+    done = [x for x in tasks if x["end"]] if ended else []
+    if done:
+        out.append(f"ended background tasks (the last {len(done)}):")
+        out += [f"  {core.show_time(x['at'])} to {core.show_time(x['end'])} ({x['status'] or 'ended'}): "
+                f"{x['kind']}: {x['what']}" for x in done]
+    return out
 
 
 def cache_text(c, name=None):
@@ -9534,7 +9565,8 @@ def render(a, res):
                   + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else "")
                   + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else "")
                   + (f"\n    {cache_text(ag['cache'], ag['name'])}" if "cache" in ag else "")
-                  + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells"))))
+                  + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells")))
+                  + "".join(f"\n    {x}" for x in tasks_lines(ag.get("tasks"), ended=bool(getattr(a, "name", None)))))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
         return

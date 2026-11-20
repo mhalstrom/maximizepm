@@ -403,6 +403,104 @@ def chat_path(session_ref, folder=None, root=None):
     return _s().newest(Path(root or _core.transcripts_root()).glob(f"*/{session_ref}.jsonl"))
 
 
+# Background tasks (#1611, #6454): the harness answers a Bash call with run_in_background, or one that ran into its
+# time limit, and an Agent call that runs on its own, with one of these texts at the start of the tool result. A
+# <task-notification> (a user line, an attachment, or a queue line) ends a task, and so do TaskStop and KillShell.
+_BG_STARTS = (("command", _re.compile(r"Command running in background with ID: (\w+)")),
+              ("command", _re.compile(r"Command [^\n]{0,200}?moved to the background \(ID: (\w+)\)")),
+              ("subagent", _re.compile(r"Async agent launched successfully.*?agentId: (\w+)", _re.S)))
+_BG_NOTE = _re.compile(r"<task-notification>(.*?)</task-notification>", _re.S)
+_BG_USE = _re.compile(r'"id":\s*"(toolu_\w+)"')
+_BG_TIME = _re.compile(r'"timestamp":\s*"([^"]+)"')
+# The tool calls whose input names a task: where each one's line starts, for the last ones only (a call that ran
+# into its time limit gets its result within 10 minutes). A task keeps its start and end after it ends, for the
+# list of the Sessions tab; the oldest ended ones go.
+_BG_USES_MAX = 500
+_BG_TASKS_MAX = 200
+
+
+def _bg_result_text(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") == "text")
+
+
+def _bg_end(tasks, task_id, at, status):
+    task = tasks.get(task_id)
+    if task and task["end"] is None:
+        task["end"], task["status"] = at or _core.now(), status
+
+
+def _bg_input(path, offset, use):
+    """The input of tool call `use` from its line at byte offset of the transcript, {} when it is not there."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            d = _json.loads(f.readline())
+    except (OSError, ValueError):
+        return {}
+    msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+    for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+        if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") == use:
+            return x.get("input") if isinstance(x.get("input"), dict) else {}
+    return {}
+
+
+def background_scan(path, start, st):
+    """Fold the new lines of a transcript into st (agents.background_scan): each background command and subagent,
+    its start, what it is (the description and command of its tool call) and its end. A start counts only as the
+    first words of a tool result, so text that quotes one (a grep of another transcript) starts nothing."""
+    from . import new_lines
+    tasks, uses = st.setdefault("tasks", {}), st.setdefault("uses", {})
+    end = start
+    for pos, end, line in new_lines(path, start):
+        if '"tool_use"' in line and ('"Bash"' in line or '"Agent"' in line or '"Task"' in line):
+            for u in _BG_USE.findall(line):
+                uses.pop(u, None)
+                uses[u] = pos
+            for u in list(uses)[:max(0, len(uses) - _BG_USES_MAX)]:
+                del uses[u]
+        if "<task-notification>" in line and "<status>" in line:
+            m = _BG_TIME.search(line)
+            at = _core._ts(m.group(1)) if m else None
+            for body in _BG_NOTE.findall(line):
+                tid, status = _re.search(r"<task-id>(\w+)</task-id>", body), _re.search(r"<status>(\w+)</status>", body)
+                if tid and status:
+                    _bg_end(tasks, tid.group(1), at, status.group(1))
+        begin = '"tool_result"' in line and ("background" in line or "Async agent launched" in line)
+        if not (begin or '"TaskStop"' in line or '"KillShell"' in line):
+            continue
+        try:
+            d = _json.loads(line)
+        except ValueError:
+            continue
+        msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+        t = _core._ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
+        for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+            if not isinstance(x, dict):
+                continue
+            if x.get("type") == "tool_use" and x.get("name") in ("TaskStop", "KillShell"):
+                inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                _bg_end(tasks, str(inp.get("task_id") or inp.get("shell_id") or ""), t, "stopped")
+            elif x.get("type") == "tool_result" and d.get("type") == "user" and t is not None:
+                text = _bg_result_text(x.get("content")).lstrip()
+                for kind, rx in _BG_STARTS:
+                    m = rx.match(text)
+                    if not m:
+                        continue
+                    use = x.get("tool_use_id")
+                    inp = _bg_input(path, uses.pop(use), use) if use in uses else {}
+                    command = str(inp.get("command") or "")
+                    tasks[m.group(1)] = {"id": m.group(1), "kind": kind, "at": t, "command": command,
+                                         "what": " ".join(str(inp.get("description") or command).split())[:80],
+                                         "end": None, "status": None}
+                    break
+    old = sorted((v for v in tasks.values() if v["end"]), key=lambda v: v["end"])
+    for v in old[:max(0, len(tasks) - _BG_TASKS_MAX)]:
+        del tasks[v["id"]]
+    return end
+
+
 def parse_chat_line(d):
     """The page lines of one Claude Code transcript line, and its turn state (working, idle, or None)."""
     # A compaction (#5120): Claude Code keeps the lines before it in the file and writes a compact_boundary line, then

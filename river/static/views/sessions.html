@@ -58,6 +58,12 @@
         <button class="btn" type="button" id="sessBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
         <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id"></span></h2>
         <span id="sessBadge" class="sess-badge"></span>
+        <!-- Its background tasks (#6454): a clock with the count of the ones that run; a click shows the list under it
+             (components/bgTasks.js). Hidden when its agent CLI has no reader of them. -->
+        <span id="sessTasks" class="sess-tasks hidden">
+          <button class="iconbtn sess-tbtn" type="button" id="sessTasksBtn" aria-expanded="false" aria-controls="sessTasksCard" title="Background tasks" aria-label="Background tasks"></button>
+          <div id="sessTasksCard" class="sess-tcard" aria-label="Background tasks"></div>
+        </span>
         <span id="sessState" class="sess-st"></span>
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>

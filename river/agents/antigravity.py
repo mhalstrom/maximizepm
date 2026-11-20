@@ -746,6 +746,74 @@ def chat_cache_line(raw, st):
             st["model"] = d["model"]
 
 
+# Background tasks (#6454), as agy 1.5.13 wrote them on 2026-11-20 (the footer's 'N task(s)', /tasks):
+# - start: the result of a run_command that ran past WaitMsBeforeAsync, 'Tool is running as a background task with
+#   task id: <conversation>/task-<step>' and 'Task Description: <the command>';
+# - end: a SYSTEM_MESSAGE '[Message] timestamp=<t> sender=<task id> ... content=Task id "<task id>" finished with
+#   result:' and 'Command exited with code <n>.'; the result of manage_task kill, 'Task "<task id>" cancelled.'; or
+#   the result of manage_task status with a Status other than RUNNING (DONE).
+_TASK_START = re.compile(r"\ATool is running as a background task with task id: (\S+)\s*\nTask Description: "
+                         r"(.*?)(?:\nTask logs are available at:|\Z)", re.S)
+_TASK_DONE = re.compile(r'timestamp=(\S+) sender=\S+ [^\n]*?content=Task id "([^"]+)" finished with result:'
+                        r'(?:\s*Command exited with code (\d+))?')
+_TASK_CANCEL = re.compile(r'\ATask "([^"]+)" cancelled\.')
+_TASK_STATUS = re.compile(r"\ATask: (\S+)\nStatus: (\w+)")
+_TASKS_MAX = 200
+
+
+def _time(text):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def background_scan(path, start, st):
+    """Fold the new steps of a transcript into st (agents.background_scan): each background command, its start, the
+    command, and its end with its status (completed, failed: exit code not 0, cancelled, or the Status of a
+    manage_task status)."""
+    from . import new_lines
+    tasks = st.setdefault("tasks", {})
+
+    def finish(tid, at, status):
+        task = tasks.get(tid)
+        if task and task["end"] is None:
+            from datetime import datetime, timezone
+            task["end"], task["status"] = at or datetime.now(timezone.utc), status
+
+    end = start
+    for _pos, end, line in new_lines(path, start):
+        if "/task-" not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or not isinstance(d.get("content"), str):
+            continue
+        at = _time(d.get("created_at"))
+        if d.get("type") == "GENERIC" and d.get("source") == "MODEL" and at:
+            text = _STAMPS.sub("", d["content"])
+            m = _TASK_START.match(text)
+            if m:
+                command = m.group(2).strip()
+                tasks[m.group(1)] = {"id": m.group(1), "kind": "command", "at": at, "command": command,
+                                     "what": " ".join(command.split())[:80], "end": None, "status": None}
+            elif _TASK_CANCEL.match(text):
+                finish(_TASK_CANCEL.match(text).group(1), at, "cancelled")
+            elif _TASK_STATUS.match(text) and _TASK_STATUS.match(text).group(2) != "RUNNING":
+                m = _TASK_STATUS.match(text)
+                finish(m.group(1), at, "completed" if m.group(2) == "DONE" else m.group(2).lower())
+        elif d.get("type") == "SYSTEM_MESSAGE":
+            for t, tid, code in _TASK_DONE.findall(d["content"]):
+                finish(tid, _time(t) or at, "failed" if code and code != "0" else "completed")
+    old = sorted((v for v in tasks.values() if v["end"]), key=lambda v: v["end"])
+    for v in old[:max(0, len(tasks) - _TASKS_MAX)]:
+        del tasks[v["id"]]
+    return end
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # 7. State: the screen
 # ---------------------------------------------------------------------------------------------------------------

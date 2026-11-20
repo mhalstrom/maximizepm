@@ -1527,6 +1527,85 @@ try {
 '''
         self.assertEqual(self.drive(driver, "/you"), {"ok": True})
 
+    def _tasks(self, size):
+        """#6454: the session row counts the background tasks that run (not a river wait), and the clock in the head
+        of the opened session lists them, the ended ones too. MAXPM_TASK_SHOTS=<folder>: screenshots of each step."""
+        import base64
+        import socket
+        import urllib.request
+        from datetime import timedelta
+        from unittest import mock
+        from river import browser
+        t = core.now()
+        at = lambda m: core.iso(t - timedelta(minutes=m))  # noqa: E731
+        rows = [{"id": "b2", "kind": "command", "what": "Run the full test suite", "command": "python3 -m unittest",
+                 "at": at(6), "end": None, "status": None, "wait": False},
+                {"id": "a1", "kind": "subagent", "what": "Review the pricing commits", "command": "", "at": at(3),
+                 "end": None, "status": None, "wait": False},
+                {"id": "b3", "kind": "command", "what": "Wait for work", "command": "maxpm --as ag wait", "at": at(2),
+                 "end": None, "status": None, "wait": True},
+                {"id": "b1", "kind": "command", "what": "Build the desktop app", "command": "npm run build",
+                 "at": at(40), "end": at(31), "status": "completed", "wait": False}]
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET tasks=?, tasks_at=? WHERE name='ag'", (json.dumps(rows), core.iso(t)))
+        # maxpm serve's own read would find no log of ag and write its empty list over the fixture's.
+        patched = mock.patch.object(core, "record_tasks", lambda conn: {})
+        patched.start()
+        self.addCleanup(patched.stop)
+        shots, tag, cdp_port = os.environ.get("MAXPM_TASK_SHOTS"), size.replace(",", "x"), None
+        if shots:  # a free port for the test browser's own CDP: never a Chrome of the person
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                cdp_port = s.getsockname()[1]
+
+        def shot(name):
+            def go():
+                if not shots:
+                    return
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                tabs = json.loads(opener.open(f"http://127.0.0.1:{cdp_port}/json").read())
+                ws = browser.WS(next(x for x in tabs if x["type"] == "page" and x["url"].startswith("http://127.0.0.1:")
+                                     and ("/sessions/ag" in x["url"] or x["url"].endswith("/__frame")))[
+                    "webSocketDebuggerUrl"])
+                ws.send(json.dumps({"id": 1, "method": "Page.captureScreenshot", "params": {"format": "png"}}))
+                while True:
+                    m = json.loads(ws.recv())
+                    if m.get("id") == 1:
+                        break
+                ws.close()
+                Path(shots, f"{tag}-{name}.png").write_bytes(base64.b64decode(m["result"]["data"]))
+            return go
+        driver = r'''try {
+  await until(() => window.__appReady && q('#sessions [data-session="ag"] .tbadge') && !q("#sessTasks").classList.contains("hidden"),
+              "the row's count and the head's clock");
+  document.head.insertAdjacentHTML("beforeend", "<style>.dlg, dialog { display: none !important; }</style>");
+  const badge = q('#sessions [data-session="ag"] .tbadge');
+  const out = { row: badge.textContent.trim(), title: badge.title, head: q("#sessTasksBtn").textContent.trim() };
+  await fetch("/__step/row");
+  q("#sessTasksBtn").click();
+  await until(() => q("#sessTasks").classList.contains("open"), "the list open");
+  const card = q("#sessTasksCard"), box = card.getBoundingClientRect();
+  out.rows = [...card.querySelectorAll(".bgt")].map(r => r.querySelector(".chip").textContent + ": " + r.querySelector(".bgt-w").textContent);
+  out.head_line = card.querySelector(".bgt-h").textContent;
+  out.ended = card.querySelector(".bgt-end .bgt-t").textContent.includes("completed");
+  out.fits = box.left >= 0 && box.right <= innerWidth + 1;
+  await fetch("/__step/list");
+  document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  out.closes = !q("#sessTasks").classList.contains("open");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        return self.drive(driver, "/sessions/ag", size=size, steps={"row": shot("1-row"), "list": shot("2-list")},
+                          flags=(f"--remote-debugging-port={cdp_port}",) if shots else ())
+
+    def test_background_tasks_at_desktop_and_phone_width(self):
+        for size in ("1280,900", "390,844"):
+            with self.subTest(size=size):
+                self.assertEqual(self._tasks(size), {
+                    "row": "2", "title": "2 background tasks", "head": "2", "head_line": "2 background tasks run now",
+                    "rows": ["command: Run the full test suite", "subagent: Review the pricing commits",
+                             "wait: Wait for work", "command: Build the desktop app"],
+                    "ended": True, "fits": True, "closes": True})
+
     def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
         """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
         side panel shows its address to copy in place of a frame; on the computer of maxpm serve it is a frame."""
