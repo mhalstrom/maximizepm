@@ -983,7 +983,7 @@ def _tmux(*args, check=True):
     except (OSError, subprocess.SubprocessError) as e:
         raise RiverError(f"tmux {args[0]}: {e}")
     if r.returncode:
-        why = (r.stderr or r.stdout).strip()
+        why = (r.stderr or r.stdout).strip() or _exit_words(r.returncode)
         # A sandboxed session (Claude Code's sandbox, Codex's) cannot reach the tmux socket at all.
         if "Operation not permitted" in why or "Permission denied" in why:
             raise RiverError(f"tmux {args[0]}: {why}. A sandbox around this session blocks the tmux socket: run "
@@ -992,6 +992,18 @@ def _tmux(*args, check=True):
             raise RiverError(f"tmux {args[0]}: {why}")
         return None
     return r.stdout.rstrip("\n")
+
+
+def _exit_words(code):
+    """How a program that printed nothing ended: 'stopped by SIGSEGV' or 'exit status 1'. A tmux that crashed at its
+    server start printed nothing, and the start error said only 'tmux new-session: ' (#6240)."""
+    import signal
+    if code < 0:
+        try:
+            return f"stopped by {signal.Signals(-code).name} (it printed nothing)"
+        except ValueError:
+            return f"stopped by signal {-code} (it printed nothing)"
+    return f"exit status {code} (it printed nothing)"
 
 
 def _tmux_env():

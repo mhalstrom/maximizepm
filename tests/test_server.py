@@ -4495,6 +4495,19 @@ class SetupGuide(unittest.TestCase):
         self.assertIsNone(core.bundled_tmux())
         self.assertEqual(server._tmux_cmd(), ["/opt/homebrew/bin/tmux"])
 
+    def test_a_tmux_that_crashes_with_no_output_names_its_signal(self):
+        """#6240: the app's tmux crashed at its first server start and printed nothing, so the start error said only
+        'tmux new-session: '. It now names the signal, or the exit status."""
+        import sys
+        old = server._tmux_cmd
+        self.addCleanup(setattr, server, "_tmux_cmd", old)
+        server._tmux_cmd = lambda: [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGSEGV)"]
+        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: stopped by SIGSEGV \(it printed nothing\)$"):
+            server._tmux("new-session", "-d")
+        server._tmux_cmd = lambda: [sys.executable, "-c", "raise SystemExit(3)"]
+        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: exit status 3 \(it printed nothing\)$"):
+            server._tmux("new-session", "-d")
+
     def test_install_tmux_is_one_click_on_a_mac_and_a_command_on_linux(self):
         """#6237: without the app's tmux and with no tmux, the setup guide has the step Install tmux. On a Mac a
         Terminal window runs brew install tmux, after Homebrew's own installer when brew is missing; Linux gets the

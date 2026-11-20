@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const pkg = require("../package.json");
-const { SOURCES, ARCHES, jemallocEnv } = require("../scripts/build-tmux");
+const { SOURCES, ARCHES, jemallocEnv, weakImports, NEWER_THAN_MIN } = require("../scripts/build-tmux");
 
 test("both package steps build tmux for both chips", () => {
   for (const step of ["predist", "predist:signed"]) {
@@ -23,6 +23,18 @@ test("every source is pinned by sha256 and ships its license", () => {
     assert.match(s.sha256, /^[0-9a-f]{64}$/, name);
     assert.ok(s.license, name);
   }
+});
+
+test("configure may not use pipe2 or dup3, and the build stops on any other unguarded weak import (#6240)", () => {
+  assert.deepStrictEqual(NEWER_THAN_MIN, { ac_cv_func_pipe2: "no", ac_cv_func_dup3: "no" });
+  // nm -um of the tmux that stopped at its first server start on macOS 26.
+  const nm = [
+    "                 (undefined) external _malloc (from libSystem)",
+    "                 (undefined) weak external _malloc_default_purgeable_zone (from libSystem)",
+    "                 (undefined) weak external _pipe2 (from libSystem)",
+  ].join("\n");
+  assert.deepStrictEqual(weakImports(nm), ["pipe2"]);
+  assert.deepStrictEqual(weakImports(nm.split("\n").slice(0, 2).join("\n")), []);
 });
 
 test("tmux links all of jemalloc, so its zone code replaces the calloc of macOS", () => {

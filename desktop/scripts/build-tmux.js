@@ -9,6 +9,7 @@
 const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const SOURCES = {
@@ -28,7 +29,7 @@ const ARCHES = { "mac-arm64": { arch: "arm64", host: "aarch64-apple-darwin" },
   "mac-x64": { arch: "x86_64", host: "x86_64-apple-darwin" } };
 const MIN_MACOS = "12.0";  // the oldest macOS that Electron 45 runs on
 // The stamp of a finished build: the pins and the flags; a change of either builds again.
-const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color", LG_PAGE, "force_load"])).digest("hex");
+const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color", LG_PAGE, "force_load", "no-weak"])).digest("hex");
 
 const top = path.join(__dirname, "..", "build", "tmux");
 
@@ -49,6 +50,21 @@ function source(name) {
   const got = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   if (got !== s.sha256) { fs.rmSync(file); throw new Error(`sha256 mismatch for ${s.url}: got ${got}, want ${s.sha256}`); }
   return file;
+}
+
+// Functions that a newer SDK has but MIN_MACOS does not. configure finds a function by a link against the SDK, not by
+// its availability, so it would use them: the macOS 27 SDK has pipe2 and dup3 (macOS 27 and later only), libevent
+// used pipe2, and on macOS 26 tmux stopped with a call to address 0 at its first server start (#6240).
+const NEWER_THAN_MIN = { ac_cv_func_pipe2: "no", ac_cv_func_dup3: "no" };
+
+// Weak imports that the code checks for NULL before the call: jemalloc's zone.c (zone_init).
+const GUARDED_WEAK = ["malloc_default_purgeable_zone"];
+
+// The unguarded weak imports in the output of nm -um: lines such as "(undefined) weak external _pipe2 (from libSystem)".
+function weakImports(nmOut) {
+  return nmOut.split("\n").filter((l) => /\(undefined\) weak external /.test(l))
+    .map((l) => l.replace(/^.*weak external (\S+).*$/, "$1").replace(/^_/, ""))
+    .filter((name) => !GUARDED_WEAK.includes(name));
 }
 
 // tmux finds jemalloc only with pkg-config: these two variables stand in for it. On macOS jemalloc takes malloc and
@@ -73,7 +89,8 @@ function buildOne(key) {
   const flags = `-arch ${a.arch} -mmacosx-version-min=${MIN_MACOS} -O2`;
   const env = { ...process.env, CC: "clang", CFLAGS: flags, MACOSX_DEPLOYMENT_TARGET: MIN_MACOS,
     // No pkg-config: the libraries come from the prefix only, never from Homebrew's.
-    PKG_CONFIG: "false", PKG_CONFIG_PATH: "", CPPFLAGS: `-I${prefix}/include`, LDFLAGS: `-arch ${a.arch} -L${prefix}/lib` };
+    PKG_CONFIG: "false", PKG_CONFIG_PATH: "", CPPFLAGS: `-I${prefix}/include`, LDFLAGS: `-arch ${a.arch} -L${prefix}/lib`,
+    ...NEWER_THAN_MIN };
   const host = ["--build=" + (process.arch === "arm64" ? "aarch64" : "x86_64") + "-apple-darwin", "--host=" + a.host];
 
   const u = path.join(work, SOURCES.utf8proc.dir);
@@ -113,11 +130,26 @@ function buildOne(key) {
   // jemalloc replaces the malloc zone only when its zone code is in the program (see jemallocEnv).
   if (!/zone_register/.test(execFileSync("nm", [exe], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })))
     throw new Error(`tmux ${key} has no jemalloc zone code: its malloc and calloc would be the system's`);
-  // The build for this Mac's own chip starts (jemalloc's page size, the libraries): tmux -V prints its version.
+  // A weak import is a function that the SDK has and an older macOS may not: on that macOS it is NULL, and the call
+  // stops the program (pipe2 in libevent did, #6240). Every function the program calls must be on MIN_MACOS.
+  const weak = weakImports(execFileSync("nm", ["-um", exe], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }));
+  if (weak.length) throw new Error(`tmux ${key} calls functions newer than macOS ${MIN_MACOS}: ${weak.join(", ")}; `
+    + "add them to NEWER_THAN_MIN in build-tmux.js");
+  // The build for this Mac's own chip starts a server (libevent, jemalloc's page size, the libraries), as an agent's
+  // start does; tmux -V alone starts no server. Its socket is in a short temporary folder (a socket path has at most
+  // 104 characters, and the work folder of a CI runner is long).
   if ((process.arch === "arm64" ? "arm64" : "x86_64") === a.arch) {
-    const v = execFileSync(exe, ["-V"], { encoding: "utf8" }).trim();
-    if (!v.startsWith("tmux ")) throw new Error(`tmux ${key} -V printed ${v}`);
-    console.log(`tmux ${key}: ${v} starts`);
+    const sock = fs.mkdtempSync(path.join(os.tmpdir(), "tmuxcheck-"));
+    const run = { encoding: "utf8", env: { ...process.env, TMUX_TMPDIR: sock }, timeout: 15000 };
+    try {
+      execFileSync(exe, ["-L", "buildcheck", "-f", "/dev/null", "new-session", "-d", "sleep 5"], run);
+      const s = execFileSync(exe, ["-L", "buildcheck", "list-sessions", "-F", "#{session_windows}"], run).trim();
+      if (s !== "1") throw new Error(`tmux ${key}: the check's server listed ${JSON.stringify(s)}, not one session`);
+      console.log(`tmux ${key}: ${execFileSync(exe, ["-V"], run).trim()} starts a server`);
+    } finally {
+      try { execFileSync(exe, ["-L", "buildcheck", "kill-server"], { ...run, stdio: "ignore" }); } catch (e) { /* none ran */ }
+      fs.rmSync(sock, { recursive: true, force: true });
+    }
   }
 
   fs.rmSync(out, { recursive: true, force: true });
@@ -140,4 +172,4 @@ if (require.main === module) {
   } catch (e) { console.error(e.message); process.exit(1); }
 }
 
-module.exports = { SOURCES, ARCHES, jemallocEnv };
+module.exports = { SOURCES, ARCHES, jemallocEnv, weakImports, NEWER_THAN_MIN };
