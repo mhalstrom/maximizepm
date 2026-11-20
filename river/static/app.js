@@ -649,16 +649,17 @@ function hostHtml() {
     : p.enable && p.enable.url ? `<div>Tailscale on ${esc(r.target)} waits for one approval:
         <a href="${esc(p.enable.url)}" target="_blank" rel="noopener">${esc(p.enable.url)}</a>. Then press Set up again.</div>`
     : `<div>Tailscale does not run on ${esc(r.target)}: install it there, sign in, and press Set up again.</div>`;
-  const sg = hostSign;
-  const sign = !sg ? "" : sg.signed_in ? `<div>${sg.agent === "claude" ? "Claude Code" : "Codex"} is signed in on ${esc(r.target)}.</div>`
+  // The agents that sign in on a host come from the server (agentlogin.AGENTS, #6255): a button and a name for each.
+  const agents = r.signin || [];
+  const sg = hostSign, name = sg && ((agents.find(a => a.agent === sg.agent) || {}).name || sg.agent);
+  const sign = !sg ? "" : sg.signed_in ? `<div>${esc(name)} is signed in on ${esc(r.target)}.</div>`
     : `<div>Open <a href="${esc(sg.url)}" target="_blank" rel="noopener">the sign-in page</a> and sign in.
-        ${sg.code ? `Type this code there: <b>${esc(sg.code)}</b>. Codex finishes by itself.` : ""}</div>`
+        ${sg.code ? `Type this code there: <b>${esc(sg.code)}</b>. ${esc(name)} finishes by itself.` : ""}</div>`
       + (sg.paste ? `<div class="su-track"><input id="suHostCode" placeholder="the code that the page shows">
           <button class="btn primary" data-su="hostcode">Send code</button></div>` : "");
   return `<ul class="su-steps">${lines}</ul>${moved}${page}
     <div>Sign the agents in there, once each:
-      <button class="btn" data-su="hostsignin" data-agent="claude">Claude Code</button>
-      <button class="btn" data-su="hostsignin" data-agent="codex">Codex</button></div>${sign}`;
+      ${agents.map(a => `<button class="btn" data-su="hostsignin" data-agent="${esc(a.agent)}">${esc(a.name)}</button>`).join("\n      ")}</div>${sign}`;
 }
 function renderSetup(st) {
   // The first run is a short path in order (you, river for agents, a folder, an agent, a first task, Start);
@@ -893,7 +894,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
     else if (k === "hostsignin") hostSign = await act("host_signin", { target: hostTarget, agent: b.dataset.agent });
     else if (k === "hostcode") {
       const code = $("#suHostCode").value.trim(); if (!code) return toast("Paste the code from the sign-in page first", true);
-      hostSign = await act("host_signin", { target: hostTarget, agent: "claude", code });
+      hostSign = await act("host_signin", { target: hostTarget, agent: hostSign.agent, code });
     }
     else if (k === "relay") await connectRelay();
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }

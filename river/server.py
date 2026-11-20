@@ -5461,6 +5461,9 @@ def host_setup_op(conn, args, who=None):
     res = host.setup(conn, str(args.get("target") or "").strip(), do_move=bool(args.get("move")))
     url = (res.get("phone") or {}).get("url")
     res["qr"] = tailnet.qr_svg(url) if url else None
+    # The agents that sign in there with no browser (#6255): the page draws a button for each one.
+    from . import agentlogin
+    res["signin"] = [{"agent": k, "name": v["name"]} for k, v in agentlogin.AGENTS.items()]
     return res
 
 
