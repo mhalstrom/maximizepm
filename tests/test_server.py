@@ -4501,8 +4501,9 @@ class SetupGuide(unittest.TestCase):
         import sys
         old = server._tmux_cmd
         self.addCleanup(setattr, server, "_tmux_cmd", old)
-        server._tmux_cmd = lambda: [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGSEGV)"]
-        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: stopped by SIGSEGV \(it printed nothing\)$"):
+        # SIGTERM, not SIGSEGV: a crash of Python opens the macOS dialog 'Python quit unexpectedly' at each run (#6244).
+        server._tmux_cmd = lambda: [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
+        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: stopped by SIGTERM \(it printed nothing\)$"):
             server._tmux("new-session", "-d")
         server._tmux_cmd = lambda: [sys.executable, "-c", "raise SystemExit(3)"]
         with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: exit status 3 \(it printed nothing\)$"):
