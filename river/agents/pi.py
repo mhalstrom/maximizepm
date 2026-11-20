@@ -201,6 +201,9 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): pi -p answers one request and exits; npm publishes its versions.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "npm": "@earendil-works/pi-coding-agent"}
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Folders

@@ -41,6 +41,19 @@ os.environ["CODEX_HOME"] = os.path.join(_queue_dir, "codex")
 
 from river import core, dictation, server  # noqa: E402
 
+
+# #6430: a pass of maxpm serve reads the agent CLIs' versions (river/agentupdate.py). In a test it finds no agent
+# program and asks no registry (a full run asked x.ai and formulae.brew.sh), unless the test sets the fakes itself.
+from river import agentupdate  # noqa: E402
+
+
+def _no_network(url, timeout):
+    raise OSError("the tests ask no registry")
+
+
+agentupdate.WHICH = lambda exe: None
+agentupdate.FETCH = _no_network
+
 REAL_HOME_DB = core.HOME_DB  # the default of a real run, for the test of the default (DbLocation)
 REAL_QUEUE = Path(server._main_db())  # the person's queue, in the real home folder (a test may change HOME)
 core.HOME_DB = Path(_queue_dir, "home", "maxpm.db")

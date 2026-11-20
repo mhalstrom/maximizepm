@@ -1792,6 +1792,10 @@ def restart_blocked(conn):
     stages = pipeline_runner.running_text()  # #6114: a restart would end the stage's command
     if stages:
         return stages
+    from . import agentupdate
+    ups = agentupdate.running_text()  # #6430: a restart would end an agent CLI's update halfway
+    if ups:
+        return ups
     runs = core.hooks_running(conn, serve=SERVE_PROCESS["id"], boot=_boot_iso())
     return core.hooks_running_text(runs) if runs else None
 
@@ -5852,6 +5856,15 @@ def release_status(conn):
     return release.status(conn)
 
 
+def _agent_update(conn, a, who):
+    """Update now of the dialog '<Agent> is out of date': one agent (agent), or each of agents (Update all)."""
+    from . import agentupdate
+    names = [a["agent"]] if a.get("agent") else list(a.get("agents") or [])
+    if not names:
+        raise RiverError("name the agent to update: {agent: <id>}")
+    return [agentupdate.request(conn, n, who) for n in names]
+
+
 def release_update(conn, restart=None):
     """The one button of the bar: the app swaps its code and starts again; a clone runs the git Update."""
     from . import release
@@ -6561,6 +6574,14 @@ OPS = {
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),
     "release_update": lambda c, a, who: release_update(c),  # the bar of a new version (#5601)
+    # The agent CLIs' versions (#6430): the dialog '<Agent> is out of date' and Settings > Agents.
+    "agent_update": lambda c, a, who: _agent_update(c, a, who),
+    "agent_update_cancel": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).cancel(c, a["agent"], who),
+    "agent_update_later": lambda c, a, who: [__import__("river.agentupdate", fromlist=["x"]).later(c, x, who)
+                                             for x in ([a["agent"]] if a.get("agent") else a.get("agents") or [])],
+    "agent_update_auto": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).set_auto(
+        c, a["agent"], bool(a.get("on")), who),
+    "agent_update_check": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).check_soon(c),
     "release_download": lambda c, a, who: __import__("river.release", fromlist=["x"]).download_shell(c),
     "release_check": lambda c, a, who: (__import__("river.release", fromlist=["x"]).check(c, force=True),
                                         release_status(c))[1],
@@ -7156,6 +7177,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/agents":  # each agent's describe part, the parts it supports, and its setup texts (#5184)
             from . import agents
             return self._send(200, agents.page_list())
+        if path == "/api/agent-versions":  # each agent CLI's installed and newest version, and its update (#6430)
+            from . import agentupdate
+            conn = core.connect()
+            try:
+                return self._send(200, agentupdate.status(conn))
+            finally:
+                conn.close()
         if path == "/api/setup":
             conn = core.connect()
             try:

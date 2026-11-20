@@ -401,6 +401,21 @@ body:has(#relDlg:not(.hidden)) .relbar { visibility: hidden; }  /* the dialog sa
 #relDlg { --dlg-w: var(--w-dlg-m); }
 .rel-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
 .rel-box > p { margin: var(--sp-2) 0; }
+/* An agent CLI that is out of date (#6430, components/agentUpdate.js): its dialog, and the list of Settings > Agents.
+   A row: the name and versions, its state, its buttons; on a narrow box the state and buttons go under the name. */
+#auDlg { --dlg-w: var(--w-dlg-m); }
+.au-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
+.au-box > p { margin: var(--sp-2) 0; }
+.au-rows { display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-3) 0; }
+.au-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-4); padding: var(--sp-3);
+  border: var(--hair) solid var(--line); border-radius: var(--r-m); }
+.au-name { flex: 1 1 var(--w-l); min-width: 0; overflow-wrap: anywhere; }
+.au-st { flex: 2 1 var(--w-l); min-width: 0; overflow-wrap: anywhere; }
+.au-st:empty { display: none; }
+.au-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-left: auto; }
+.au-fail { border-color: var(--warn); }
+.au-fail .au-st { color: var(--warn); }
+.au-done { border-color: var(--done); }
 .rel-notes { max-height: var(--h-pre); overflow: auto; border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-3) var(--sp-5); margin: var(--sp-4) 0; font-size: var(--fs-m); }
 .rel-notes h2, .rel-notes h3 { font-size: var(--fs-base); margin: var(--sp-4) 0 var(--sp-2); }
 .rel-notes ul { padding-left: var(--sp-7); margin: var(--sp-2) 0; }

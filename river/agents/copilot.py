@@ -739,6 +739,10 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): copilot -p answers one request and exits; copilot update downloads its newest version; npm
+# publishes its versions.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["update"], "npm": "@github/copilot"}
+
 
 def write_mcp_config(path=None, remove=False):
     """Add (or, with remove, take out) MaximizePM's MCP server in Copilot's own list, $COPILOT_HOME/mcp-config.json

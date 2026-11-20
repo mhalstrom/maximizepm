@@ -17,6 +17,7 @@ import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { installMics } from "./components/dictate.js";
 import { showRelease, openRelease } from "./components/releaseUpdate.js";
+import { poll as agentVersions } from "./components/agentUpdate.js";
 import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
@@ -1172,6 +1173,8 @@ $("#searchBtn").onclick = () => { headerOpen(null); openSearch(); };
   header.addEventListener("focusin", () => header.classList.remove("hdr-hide"));
 }
 checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUpdate().catch(() => {}); }, 30 * 60 * 1000);
+// An agent CLI that is out of date opens its dialog (#6430); the part polls api/agent-versions itself.
+agentVersions().catch(() => {});
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.
 setInterval(() => {
   if (document.hidden || updateMode !== "update") return;  // hidden, or already asking for a restart

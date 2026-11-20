@@ -1023,6 +1023,10 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): agy --print answers one request and exits. Homebrew's cask antigravity-cli has the newest version
+# also for an agy from Google's script.
+UPDATE = {"smoke": ["--print", "Reply OK", "--model", "{model}"], "cask": "antigravity-cli"}
+
 
 def write_mcp_config(path=None, remove=False):
     """Add (or, with remove, take out) MaximizePM's MCP server in agy's MCP file, ~/.gemini/config/mcp_config.json

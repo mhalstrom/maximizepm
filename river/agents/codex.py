@@ -764,6 +764,10 @@ SETUP = {
     "no_link": "A Codex session has no web link, and this one runs in no tmux pane here",
 }
 
+# 12. Update (#6430): codex exec answers one request and exits; outside a git folder it needs --skip-git-repo-check.
+# Codex 0.159.1 refused gpt-6.2-sol with a ChatGPT account until 0.171.0 (2026-11-20).
+UPDATE = {"smoke": ["exec", "--skip-git-repo-check", "-m", "{model}", "Reply OK"], "npm": "@openai/codex"}
+
 
 def _toml_block(entry):
     """The [mcp_servers.maxpm] tables for an entry. A JSON string is also a valid TOML basic string."""

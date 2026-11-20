@@ -795,3 +795,6 @@ def read_commands(folder):
 SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.hermes/skills",
          "voice": "/voice on: Hermes listens and speaks (its own voice mode)",
          "open_link": None}
+
+# 12. Update (#6430): hermes update updates its own install (a git folder); no newest version can be read before it.
+UPDATE = {"self": ["update"]}

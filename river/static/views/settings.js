@@ -11,6 +11,7 @@ import { labelOf, programOf } from "./settingLabels.js";
 import { loadAgents } from "../components/agents.js";
 import { modelChoices } from "../components/modelPick.js";
 import { effortsFor } from "../components/launchDialog.js";
+import { versionsHtml, wireVersions, onVersions, versionsNow } from "../components/agentUpdate.js";
 
 const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -19,7 +20,8 @@ export const GROUPS = [
   ["credentials", "Credentials", ""],
   ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
     (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
-      || has("launch_agents", "agent_rules", "agent_order", "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
+      || has("launch_agents", "agent_rules", "agent_order", "agent_update_check", "agent_auto_update",
+             "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
              "prompt_wait", "stuck_after")(k)],
   ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
     (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)
@@ -86,7 +88,8 @@ export function renderSettings() {
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
   $("#setProviders").classList.toggle("hidden", current !== "agents");
-  if (current === "agents") renderProviders();
+  $("#setVersions").classList.toggle("hidden", current !== "agents");
+  if (current === "agents") { renderProviders(); renderVersions(); }
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
     .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
@@ -139,6 +142,19 @@ function provField(i, k, p) {
 // rows again while a field or a list has focus. A button with focus does not stop it (#6393: after a click on Add
 // provider, an arrow or ✕ the focus stays on that button, and the list kept its old rows until a reload). After a
 // save, saveOrder draws the rows at once (force) and puts the focus back on the same control.
+// The agent CLIs' versions (#6430): drawn again with each poll of the part while Settings > Agents shows.
+let versionsOff = null;
+function renderVersions() {
+  const host = $("#setVersions");
+  const draw = (s) => {
+    if (host.classList.contains("hidden")) return;
+    const html = versionsHtml(s);
+    if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+  };
+  wireVersions(host, () => draw(versionsNow()));
+  if (!versionsOff) versionsOff = onVersions(draw);
+  draw(versionsNow());
+}
 function renderProviders(force) {
   const host = $("#setProviders"), a = document.activeElement;
   if (!force && host.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT")) return;

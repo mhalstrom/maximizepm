@@ -638,6 +638,10 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): aider --message answers one request and exits (--no-git: the test folder is no repository);
+# PyPI publishes aider-chat. Its installer puts it in a uv tool, which uv updates.
+UPDATE = {"smoke": ["--message", "Reply OK", "--model", "{model}", "--no-git", "--yes-always"], "pypi": "aider-chat"}
+
 
 # How each command works from the page (#5220, #5291). Aider is a line-based program: a command prints its answer into
 # the terminal. From its own descriptions (on this Mac it waited at its .gitignore question first): /model and

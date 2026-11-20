@@ -954,3 +954,8 @@ def read_commands(folder):
 # Grok reads AGENTS.md and CLAUDE.md (and Agents.md, AGENT.md, CLAUDE.local.md) in each folder: the AGENTS.md that
 # MaximizePM's setup writes for every agent reaches it too, so a second file would say the same twice.
 SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.grok/skills", "voice": None, "open_link": None}
+
+# 12. Update (#6430): grok update --check --json prints {"currentVersion", "latestVersion", ...} (grok 1.0.89);
+# grok update --version <v> installs one; grok -p answers one request and exits.
+UPDATE = {"smoke": ["-p", "Reply OK", "-m", "{model}"], "self": ["update", "--version", "{version}"],
+          "self_check": ["update", "--check", "--json"], "self_read": r'"latestVersion"\s*:\s*"([^"]+)"'}

@@ -943,6 +943,11 @@ SETUP = {
     "no_link": "This session has no Remote Control link and runs in no tmux pane here",
 }
 
+# 12. Update (#6430): the native build installs a given version (claude install <version>); npm publishes the same
+# versions. claude -p answers one request and exits.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["install", "{version}"],
+          "npm": "@anthropic-ai/claude-code"}
+
 
 def desktop_config_path():
     """Where the Claude desktop app keeps its MCP servers."""

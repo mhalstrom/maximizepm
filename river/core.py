@@ -534,6 +534,12 @@ DEFAULT_SETTINGS = {
     # maxpm serve asks GitHub for the latest MaximizePM release once a day (river/release.py): a newer version shows
     # a bar on the page and a line in the manager's briefing, with its notes and the Update button. off: no request.
     "update_check": "on",
+    # maxpm serve reads the installed and the newest version of each agent CLI when it starts and then once a day
+    # (river/agentupdate.py, #6430): a newer version opens the page's dialog '<Agent> is out of date'. off: no check.
+    "agent_update_check": "on",
+    # The agents that maxpm serve updates with no click when a newer version is out (all, or names: codex,claude-code),
+    # each when no session of it runs, with the smoke test after it. Empty (the default): only Update now updates.
+    "agent_auto_update": "",
     # While this computer is connected to the relay (maxpm connect), maxpm serve keeps it from idle sleep
     # (macOS caffeinate -i), so the tunnel answers while the person is away. The display still sleeps; the cost
     # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
@@ -3338,7 +3344,12 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "cost_limit":
         from . import cost
         cost.parse_limit(value)
-    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
+    elif key == "agent_auto_update" and value.strip() != "all":
+        bad = [n for n in re.split(r"[,\s]+", value) if n and _adapters().find(n) is None]
+        if bad:
+            raise RiverError(f"agent_auto_update: no agent {', '.join(bad)}; all, or names of {', '.join(_adapters().ids())}")
+    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check",
+                 "agent_update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -4276,6 +4287,7 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
     provs = agent_providers(conn, project_id, model=model)
     none = {"model": None, "effort": None, "pos": None, "note": None}
     skip = None
+    from . import agentupdate  # an agent whose update is queued or runs takes no new session (#6430)
     if agent is None and provs and provs[0]["set"]:
         why = None
     else:
@@ -4289,6 +4301,9 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
         if not plat:
             return {**none, "label": keep}
         aid = _limit_adapter_id(plat)
+        held = agentupdate.hold(conn, plat)  # its update is queued or runs (#6430)
+        if explicit and held:
+            raise RiverError(f"{held}: pick another agent, or start it again when Settings > Agents shows the update done")
         if explicit:
             lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
             if lim:
@@ -4310,11 +4325,11 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
         lim = agent_is_limited(conn, plat, model=run, project_id=project_id)
         full = slots and skip is not None and skip["full"]
         refused = skip["refused"] if skip is not None else None
-        if not lim and not full and not refused:
+        if not lim and not full and not refused and not held:
             got = skip if skip is not None and not model else None
             return {**none, "label": keep, **({"model": got["model"], "effort": got["effort"], "pos": got["pos"]}
                                               if got else {})}
-        why = (f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
+        why = (held if held else f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
                else refused if refused else f"{skip['name']} has {_slots_text(skip)}")
     skipped = []
     for p in provs:
@@ -4322,6 +4337,10 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
             continue
         if p["refused"]:
             skipped.append(p["refused"])
+            continue
+        held_p = agentupdate.hold(conn, p["platform"])
+        if held_p:
+            skipped.append(held_p)
             continue
         if p["limited"] or (slots and p["full"]):
             why_lim = f" ({p['limit_reason']})" if p.get("limit_reason") else ""

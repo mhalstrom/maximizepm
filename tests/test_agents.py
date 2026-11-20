@@ -155,6 +155,7 @@ class Contract(Env):
             COMMANDS=[{"name": "compact", "description": "compact the chat", "hint": ""}],
             read_commands=lambda folder: [{"name": "mine", "description": "", "hint": "<x>"}],
             SETUP={"instructions": "AGENTS.md", "skills_dir": None, "voice": None, "open_link": None},
+            UPDATE={"smoke": ["-p", "Reply OK"], "npm": "@earendil-works/pi-coding-agent"},
         )
         self.assertEqual(agents.check(m, "pi"), [])
         a = agents.Adapter(m, "test")

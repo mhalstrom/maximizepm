@@ -193,6 +193,9 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): opencode run answers one request and exits; opencode upgrade [version] updates its own install.
+UPDATE = {"smoke": ["run", "--model", "{model}", "Reply OK"], "self": ["upgrade", "{version}"]}
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Folders

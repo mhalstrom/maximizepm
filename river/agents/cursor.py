@@ -189,6 +189,9 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): cursor-agent -p answers one request and exits; cursor-agent update updates its own install.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["update"]}
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Folders

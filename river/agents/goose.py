@@ -780,3 +780,7 @@ SETUP = {
     "voice": None,
     "open_link": "Cmd-click the link in the terminal.",
 }
+
+# 12. Update (#6430): goose run -t answers one request and exits (its model comes from its config); goose update
+# updates its own install; Homebrew's formula block-goose-cli has its newest version.
+UPDATE = {"smoke": ["run", "-t", "Reply OK"], "self": ["update"], "brew": "block-goose-cli"}

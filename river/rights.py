@@ -123,7 +123,9 @@ OPS.update({op: LEAD for op in (
     "pipeline_rollback", "pipeline_stop", "pipeline_release", "pipeline_transition", "pipeline_block", "pipeline_unblock",
     "pipeline_delay", "pipeline_disable", "pipeline_enable", "pipeline_pass", "pipeline_freeze",
     "pipeline_account_check", "pipeline_move_back", "pipeline_trigger",
-    "runner_add", "runner_check", "runner_allow", "runner_stop")})
+    "runner_add", "runner_check", "runner_allow", "runner_stop",
+    # #6430: an update changes the agent CLI of every session on this computer; a person or the manager decides it
+    "agent_update", "agent_update_cancel", "agent_update_later", "agent_update_auto", "agent_update_check")})
 OPS.update({op: ONLY_PERSON for op in (
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",

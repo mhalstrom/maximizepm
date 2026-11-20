@@ -19,6 +19,7 @@ Each part is optional unless it is marked required; the page shows only what an 
  9. Resume: resume_command().
 10. Commands: COMMANDS, and optionally read_commands(folder).
 11. Setup: SETUP, and optionally write_mcp_config().
+12. Update: UPDATE (how to read its version, update it and test it; river/agentupdate.py).
 
 The loader refuses a module without a valid DESCRIBE. A module without build_command loads (the built-in claude and
 codex modules have only their describe part until #5181), but no start path can start it: Adapter.build_command
@@ -598,6 +599,23 @@ SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
               "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
               "no_link": (str, type(None))}
 
+# 12. Update (#6430). UPDATE = {
+#      "version":    the arguments that print the installed version (default ["--version"]),
+#      "smoke":      the arguments of one short request that is not interactive and must answer OK, the test after an
+#                    update ({model}: the id of the agent's default model; with none, the word and the flag before it
+#                    go), or None: the version command is the test,
+#      "self":       the arguments of the CLI's own update command, for a program that no package manager installed
+#                    ({version}: the version to install; with none, its newest), or None,
+#      "self_check": the arguments of the CLI's own check for a newer version, and "self_read" a regex whose group 1
+#                    reads the newest version from its output,
+#      "npm", "pypi", "brew", "cask": the package where the vendor publishes the same versions, for the newest version
+#                    of a program that updates itself (Claude Code: npm @anthropic-ai/claude-code),
+#    }
+# A program that npm, Homebrew, uv or pipx installed updates with that package manager: river/agentupdate.py reads the
+# method from where the program is (install_of), and these keys only add to it.
+UPDATE_KEYS = {"version": (list, tuple), "smoke": (list, tuple, type(None)), "self": (list, tuple, type(None)),
+               "self_check": (list, tuple), "self_read": str, "npm": str, "pypi": str, "brew": str, "cask": str}
+
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
     "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models", "context_window"), "required": True},
@@ -618,6 +636,7 @@ PARTS = {
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard")},
+    "update": {"data": ("UPDATE", UPDATE_KEYS), "functions": ()},
 }
 
 BUILTIN = ("claude", "codex", "antigravity", "pi", "copilot", "hermes", "grok", "opencode", "goose", "aider", "amp", "cursor")
@@ -806,6 +825,15 @@ def check(module, mid=None):
             out.append(f"COMMANDS[{i}]['setting'] is {c['setting']!r}, which is no setting of the Settings dialog")
     if getattr(module, "SETUP", None) is not None:
         out += _shape("SETUP", module.SETUP, SETUP_KEYS, ("instructions",))
+    up = getattr(module, "UPDATE", None)
+    if up is not None:
+        out += _shape("UPDATE", up, UPDATE_KEYS)
+        if isinstance(up, dict):
+            if isinstance(up.get("self_read"), str):
+                out += _regex("UPDATE['self_read']", up["self_read"])
+            for k in ("version", "smoke", "self", "self_check"):
+                if isinstance(up.get(k), (list, tuple)) and not all(isinstance(w, str) for w in up[k]):
+                    out.append(f"UPDATE[{k!r}] holds a word that is no str")
     for part in PARTS.values():
         for f in part["functions"]:
             v = getattr(module, f, None)
@@ -842,6 +870,7 @@ class Adapter:
         self.input = dict(getattr(m, "INPUT", None) or {})
         self.commands = list(getattr(m, "COMMANDS", None) or ())
         self.setup = getattr(m, "SETUP", None)
+        self.update = getattr(m, "UPDATE", None)
 
     def __repr__(self):
         return f"<Adapter {self.id} ({self.source})>"

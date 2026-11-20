@@ -82,7 +82,8 @@ export const LABELS = {
   // Advanced
   serve_port: "Port of the page", serve_reload: "Restart serve after a code change", serve_reload_min: "Least time between restarts",
   serve_runners: "Fast commands (runners)", serve_loop_process: "Run the loop in its own process", tidy_every: "Close finished panes every",
-  update_check: "Look for a new version", relay_keep_awake: "Keep this computer awake for the relay", connect_within: "A started session must connect within",
+  update_check: "Look for a new version", agent_update_check: "Look for new agent versions",
+  agent_auto_update: "Agents that update by themselves",relay_keep_awake: "Keep this computer awake for the relay", connect_within: "A started session must connect within",
   setup_done: "Setup guide finished", cache_ttl: "Prompt cache lasts", sample_every: "Record session states every", sample_keep: "Keep session states for",
   db_max_size: "Largest queue file", folder_max_size: "Largest queue folder", archive_after: "Archive closed items after",
   archive_max_size: "Largest archive", space_ops_after: "Keep check runs at least", space_notices_after: "Keep notices at least",

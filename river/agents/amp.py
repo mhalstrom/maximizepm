@@ -558,6 +558,10 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): amp -x answers one request and exits; amp update updates its own install; npm publishes its
+# versions.
+UPDATE = {"smoke": ["-x", "Reply OK"], "self": ["update"], "npm": "@sourcegraph/amp"}
+
 
 def settings_file():
     """Amp's settings file: $AMP_SETTINGS_FILE, else amp/settings.json in $XDG_CONFIG_HOME or ~/.config."""

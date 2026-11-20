@@ -544,6 +544,13 @@ def release_check(conn):
         release.loop_step(conn)
 
 
+def agent_versions(conn):
+    """maxpm serve only: the versions of the agent CLIs and their updates (river/agentupdate.py)."""
+    if SERVE_PORT.get("port"):
+        from . import agentupdate
+        agentupdate.serve_pass(conn)
+
+
 def loop(stop, interval_s=None):
     """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
     No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
@@ -600,6 +607,7 @@ def loop(stop, interval_s=None):
                 server.probe_usage,  # Claude Code and agy with no session: /usage in a hidden pane (#6364)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
+                agent_versions,  # at the start, then once a day: each agent CLI's versions; queued updates (#6430)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []
