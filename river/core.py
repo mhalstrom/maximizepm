@@ -16406,6 +16406,26 @@ def claim(conn, item_id, actor=None):
     return item_show(conn, item_id)
 
 
+def _already_closed(conn, it):
+    """Why done or drop refuses an item that is closed already (#6277): names its status, who closed it and when."""
+    st = it["status"]
+    ev = conn.execute("SELECT actor, at FROM events WHERE item_id=? AND change LIKE ? ORDER BY id DESC LIMIT 1",
+                      (it["id"], st + "%")).fetchone()
+    who = ev["actor"] if ev and ev["actor"] else None
+    at = it["closed_at"] or (ev["at"] if ev else None)
+    when = show_time(at, setting(conn, "timezone")) if at else ""
+    if st == "done" and approval(conn, it["id"]) is not None and who and _is_person(conn, who):
+        verb = "approved it"
+    elif st == "dropped":
+        verb = "dropped it"
+    else:
+        verb = "closed it"
+    detail = f"{who} {verb}" if who else ("dropped" if st == "dropped" else "closed")
+    if when:
+        detail += f" at {when}"
+    return f"#{it['id']} is {st} already: {detail}" if (who or when) else f"#{it['id']} is {st} already"
+
+
 def _close(conn, item_id, status, actor, output=None, note=None, force=None):
     # The close check (_close_check) weighs words by the queue's word table. It is read here, before the write lock:
     # after an edit of a title it counts the words of every work item again, 0.27 s on 5,600 items (#5419).
@@ -16413,7 +16433,7 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
     with tx(conn):
         it = _item(conn, item_id)
         if it["status"] in CLOSED_STATES:
-            raise RiverError(f"item {item_id} is already {it['status']}")
+            raise RiverError(_already_closed(conn, it))
         # Done means everything it waits on is done: a deploy never goes out past an open review or
         # an unfinished item it ships. Other items can be closed anyway with a reason (--force).
         waits = _open_prereqs(conn, it["id"]) if status == "done" else []
@@ -16787,17 +16807,20 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
     checked before the close. proof: the arguments of done_proof (#5988; the CLI passes them, a person's page
     close does not)."""
+    it = _item(conn, item_id)
+    if it["status"] in CLOSED_STATES:
+        raise RiverError(_already_closed(conn, it))
     changed = check_changed(changed) if changed else None
     proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
         try:
-            _ship_check(conn, _item(conn, item_id))
+            _ship_check(conn, it)
         except RiverError as e:
             raise RiverError(f"{e}; #{item_id} stays open (close it without --ship when it does not ship)") from None
-    why = _approval_close_refusal(conn, _item(conn, item_id), actor)  # #5957: only the person's yes, on its day
+    why = _approval_close_refusal(conn, it, actor)  # #5957: only the person's yes, on its day
     if why:
         raise RiverError(why)
-    pick = _tries_choice(conn, _item(conn, item_id), output)  # a Look card of tries names the one to keep (#5996)
+    pick = _tries_choice(conn, it, output)  # a Look card of tries names the one to keep (#5996)
     res = _close(conn, item_id, "done", actor, output, note, force)
     if pick:
         res["merge_task"] = _tries_picked(conn, res, *pick, actor)

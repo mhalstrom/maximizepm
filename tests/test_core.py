@@ -6252,6 +6252,38 @@ class Approvals(Base):
         i = self.c.execute("SELECT MAX(id) FROM items").fetchone()[0]
         self.assertEqual(core.approval(self.c, i)["once"], 1)
 
+    def test_done_on_a_closed_approval_says_it_is_done_already_with_who_and_when(self):
+        """#6277: done on a closed approval says who closed it and when, not 'only the person approves it'."""
+        clock = [core.parse_iso("2026-11-20T06:41:06Z")]
+        with mock.patch.object(core, "now", lambda: clock[0]):
+            g = core.goal_add(self.c, "a", "studies", "studies are done", "each study has a canvas", "w1")
+            prop = g["proposal"]
+            core.done(self.c, prop, actor="mark")
+            for caller in ("w1", "mark"):
+                with self.assertRaises(RiverError) as cm:
+                    core.done(self.c, prop, actor=caller, proof={})
+                self.assertEqual(str(cm.exception), f"#{prop} is done already: mark approved it at Fri 6:41 UTC")
+                self.assertNotIn("only the person approves it", str(cm.exception))
+            clock[0] = core.parse_iso("2026-11-20T06:45:00Z")
+            i2 = core.item_add(self.c, "a", "Approve: delete old host", doer="human", actor="w1",
+                               approve_once=True)["id"]
+            core.drop(self.c, i2, actor="mark", note="keep it")
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, i2, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{i2} is dropped already: mark dropped it at Fri 6:45 UTC")
+            clock[0] = core.parse_iso("2026-11-20T06:50:00Z")
+            plain = self.add("a", "plain task")
+            core.done(self.c, plain, "ok", actor="w1")
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, plain, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{plain} is done already: w1 closed it at Fri 6:50 UTC")
+            legacy = self.add("a", "legacy closed")
+            with core.tx(self.c):
+                self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(clock[0]), legacy))
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, legacy, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{legacy} is done already: closed at Fri 6:50 UTC")
+
 
 class Pause(Base):
     """#5962 (policies p79 and p136): maxpm pause stops every working session, holds every new session, changes no
