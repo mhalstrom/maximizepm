@@ -172,6 +172,12 @@ SETTINGS = [
      "text": "Write MaximizePM's hooks into the project's .agents/hooks.json at each start: the push guard before a "
              "shell command, the turn's start and end, and waiting messages at a turn's end. Off takes them out.",
      "flag": [], "live": None, "read": None},
+    {"key": "prompt", "label": "Prompt", "kind": "text", "default": "go",
+     "text": "The first prompt, used with the MaximizePM skill.",
+     "flag": ["-i", "{value}"], "live": None, "read": None},
+    {"key": "skill_prompt", "label": "MaximizePM skill", "kind": "toggle", "default": "on",
+     "text": "Include the MaximizePM skill when starting a queue session.",
+     "flag": [], "live": None, "read": None},
 ]
 
 # 3. Effort: --effort low|medium|high|xhigh|max, the same names as MaximizePM's levels. /effort opens a menu in the
@@ -183,8 +189,8 @@ EFFORT = {"levels": ["low", "medium", "high", "xhigh", "max"], "map": {}, "flag"
 # 4. Launch
 # ---------------------------------------------------------------------------------------------------------------
 
-# No session name on the command line (/rename in the session), no system prompt file, no hooks file on the command
-# line (the project's .agents/hooks.json instead, behind activity_hooks: project_hooks), no fork flag.
+# No session name on the command line (/rename in the session), no hooks file on the command line (the project's
+# .agents/hooks.json instead, behind activity_hooks: project_hooks), no fork flag. The skill goes in the first prompt.
 # No extra folder: a folder that --add-dir names becomes where its shell commands run (#6278, build_command);
 # --conversation <id> resumes.
 # Background: agy runs a command that lasts more than a few seconds as a background task (its footer: '1 task(s)')
@@ -270,10 +276,13 @@ def note_applies(settings):
     return (settings.get("mode") or "").strip() in ("", "auto") and not _on(settings.get("skip_permissions"))
 
 
+SKILL_SEPARATOR = "\n\nMaximizePM skill instructions for this session\n\n"
+
+
 def build_command(name, folder, model, effort, settings, prompt):
     """agy [--conversation <id>] [--model M] [--effort E] [--mode M] [--dangerously-skip-permissions] [--sandbox]
-    --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE when note_applies]. agy has no flag for a session
-    name. -i runs the first prompt and keeps the session open."""
+    --settings <SETTINGS_JSON> <args> [-i <prompt>]. The first prompt includes the packaged skill when enabled and
+    MAXPM_NOTE when note_applies. agy has no flag for a session name. -i keeps the session open."""
     s = settings
     words = ["agy"] + (["--conversation", s["resume"]] if s.get("resume") else [])
     # One way to set the level (#6256): --effort with the model's id. agy refuses an id with a level and an --effort
@@ -297,7 +306,19 @@ def build_command(name, folder, model, effort, settings, prompt):
     # need no queue folder in the workspace: they run outside agy's sandbox (BypassSandbox and SETTINGS_JSON).
     words += ["--settings", session_settings(s.get("read_dirs") or (), s.get("secret_files") or ())]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
-    words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}" if note_applies(s) else prompt] if prompt else []
+    if prompt:
+        if _on(s.get("skill_prompt")) and not s.get("resume"):
+            from ..core import GUIDES, RiverError
+
+            path = GUIDES / "maxpm" / "SKILL.md"
+            try:
+                skill = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RiverError(f"cannot read the MaximizePM skill at {path}: {exc}") from exc
+            prompt += SKILL_SEPARATOR + skill.strip()
+        if note_applies(s):
+            prompt += "\n\n" + MAXPM_NOTE
+        words += ["-i", prompt]
     return words
 
 
@@ -388,6 +409,7 @@ def parse_command(words):
             for note in (MAXPM_NOTE,) + _OLD_NOTES:
                 if nxt.endswith("\n\n" + note):
                     prompt = nxt[:-len(note) - 2]
+            prompt = prompt.partition(SKILL_SEPARATOR)[0]
             i += 2
         else:
             return None

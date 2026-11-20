@@ -70,6 +70,17 @@ class Contract(Home):
 
 
 class Launch(Home):
+    def test_queue_profile_starts_with_go_and_keeps_the_command_note(self):
+        c = core.connect()
+        self.addCleanup(c.close)
+        options = core.profile_options(c, "antigravity")
+        self.assertEqual(options["prompt"], "go")
+        argv = antigravity.build_command(None, None, None, None, options, options["prompt"])
+        skill = (core.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8").strip()
+        self.assertEqual(argv[-2:], ["-i", "go" + antigravity.SKILL_SEPARATOR + skill + "\n\n" + antigravity.MAXPM_NOTE])
+        self.assertEqual(antigravity.parse_command(argv)["prompt"], "go")
+        self.assertFalse((antigravity.data_dir() / "skills").exists())
+
     def test_a_start_with_every_setting(self):
         argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash", "high",
                                          {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
