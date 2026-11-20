@@ -3674,6 +3674,10 @@ class Upgrade(Base):
 
     def test_several_threads_open_a_new_queue_file_at_once(self):
         # serve's first start on a new queue: its threads connected at once and one stopped at the WAL pragma (#6243).
+        import tests as _tests
+        old = _tests.USE_TEMPLATE_DB
+        _tests.USE_TEMPLATE_DB = False
+        self.addCleanup(setattr, _tests, "USE_TEMPLATE_DB", old)
         for n in range(8):
             path = os.path.join(self.dir.name, f"new{n}.db")
             errors = []

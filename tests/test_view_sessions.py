@@ -1798,16 +1798,12 @@ try {
             except PermissionError:
                 self.skipTest("no local port here")
             httpd.daemon_threads = True
+            from tests import open_tab
             threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            chrome = subprocess.Popen([
-                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-                f"http://127.0.0.1:{httpd.server_address[1]}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                ran = got.wait(30)
+                with open_tab(f"http://127.0.0.1:{httpd.server_address[1]}/"):
+                    ran = got.wait(30)
             finally:
-                chrome.kill()
-                chrome.wait()
                 httpd.shutdown()
                 httpd.server_close()
         self.assertTrue(ran, "browser test did not report")
@@ -1999,7 +1995,10 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
     if not _chrome():
         test.skipTest("no Chrome on this computer")
     window, frame = _chrome_window(size)
-    page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
+    fast_poll = b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);})();</script>'
+    app_tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
+    page = server.page_html("/sessions/ag").replace(app_tag, fast_poll + app_tag).replace(
+        b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
     got, result = threading.Event(), {}
 
     class H(server.Handler):
@@ -2029,17 +2028,13 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
         except PermissionError:
             test.skipTest("no local port here")
         httpd.daemon_threads = True
+        from tests import open_tab
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        chrome = subprocess.Popen([
-            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", f"--window-size={window}", f"--user-data-dir={test.dir.name}/browser",
-            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else '/sessions/ag?as=mark'}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        url = f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else '/sessions/ag?as=mark'}"
         try:
-            ran = got.wait(wait)
+            with open_tab(url, window=window):
+                ran = got.wait(wait)
         finally:
-            chrome.kill()
-            chrome.wait()
             httpd.shutdown()
             httpd.server_close()
     test.assertTrue(ran, "browser test did not report")
@@ -2705,7 +2700,7 @@ try {
     check(q("#newCodeBar").textContent.includes("MaximizePM was updated."), "the bar's text");
     // #6184: a line under the top bar that pushes the tab down, never over the message box of the chat.
     check(q("#newCodeBar").parentElement === q("#pageNotes"), "the bar in the line under the top bar");
-    await sleep(6000);
+    await sleep(600);
     const bar = q("#newCodeBar").getBoundingClientRect(), lay = q("#sessLayout").getBoundingClientRect();
     const box = q("#sessText").getBoundingClientRect();
     check(bar.top >= q("header").getBoundingClientRect().bottom - 1 && bar.bottom <= lay.top + 1, "the bar above the tab");
@@ -2713,7 +2708,7 @@ try {
     check(+sessionStorage.getItem("loads") === 1, "no reload by itself");
     q("#newCodeBar button").click();
   } else {
-    await sleep(3000);
+    await sleep(600);
     post({ loads: +sessionStorage.getItem("loads"), bar: !!q("#newCodeBar") });
   }
 } catch (e) { post({ error: String(e.stack || e) }); }
@@ -2735,7 +2730,7 @@ try {
     post({ error: "no reload for another state shape" });
   } else {
     await until(() => q("#newCodeBar"), "the bar after the one reload");
-    await sleep(5000);
+    await sleep(600);
     post({ loads: +sessionStorage.getItem("loads"), text: q("#newCodeBar span").textContent });
   }
 } catch (e) { post({ error: String(e.stack || e) }); }

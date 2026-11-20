@@ -1115,7 +1115,11 @@ class Browser:
                 pass
         self._hook_passkeys(s)
         self.call("Network.setBlockedURLs", {"urls": ["file://*", "chrome://*", "chrome-extension://*"]}, session=s)
-        self._fit()
+        self._attaching = True
+        try:
+            self._fit()
+        finally:
+            self._attaching = False
         self.cast_quality = self._cast_quality()
         cast = {"format": "jpeg", "quality": self.cast_quality, "everyNthFrame": 1}
         try:
@@ -1163,7 +1167,8 @@ class Browser:
             self.cast_quality = q
             self.call("Page.stopScreencast", session=self.session)
             self.call("Page.startScreencast", {"format": "jpeg", "quality": q, "everyNthFrame": 1}, session=self.session)
-        self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
+        if not getattr(self, "_attaching", False):
+            self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
 
     def _page_size(self):
         """The page's size in CSS pixels: the fixed size when one holds (#5885), else the panel's (None: no panel)."""

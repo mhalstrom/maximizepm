@@ -18,8 +18,20 @@ core.connect refuses the real queue file outright."""
 import atexit
 import os
 import shutil
+import socketserver
 import tempfile
 from pathlib import Path
+
+# #6341: socketserver.serve_forever defaults to poll_interval=0.5s, so every test's httpd.shutdown() waited up to
+# 0.5s. Polling at 20ms keeps shutdown near-instant without busy-waiting.
+_orig_serve_forever = socketserver.BaseServer.serve_forever
+
+
+def _fast_serve_forever(self, poll_interval=0.02):
+    return _orig_serve_forever(self, poll_interval=poll_interval)
+
+
+socketserver.BaseServer.serve_forever = _fast_serve_forever
 
 _queue_dir = tempfile.mkdtemp(prefix="maxpm-tests-")
 atexit.register(shutil.rmtree, _queue_dir, True)
@@ -33,13 +45,37 @@ REAL_HOME_DB = core.HOME_DB  # the default of a real run, for the test of the de
 REAL_QUEUE = Path(server._main_db())  # the person's queue, in the real home folder (a test may change HOME)
 core.HOME_DB = Path(_queue_dir, "home", "maxpm.db")
 _connect = core.connect
+USE_TEMPLATE_DB = True
+_TEMPLATE_LOCK = __import__("threading").Lock()
+_TEMPLATE_DB = Path(_queue_dir, "_template.db")
+
+
+def _ensure_template():
+    if _TEMPLATE_DB.exists():
+        return
+    c = _connect(_TEMPLATE_DB)
+    try:
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        c.close()
 
 
 def _test_connect(path=None):
     p = Path(path) if path else core.db_path()
-    if p.expanduser().resolve() == REAL_QUEUE:
+    if str(path) != ":memory:" and p.expanduser().resolve() == REAL_QUEUE:
         raise AssertionError(f"a test opened the real queue {REAL_QUEUE}; give it a temporary database (#6000)")
-    return _connect(path)
+    if USE_TEMPLATE_DB and str(path) != ":memory:":
+        with _TEMPLATE_LOCK:
+            if not p.exists():
+                _ensure_template()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(_TEMPLATE_DB, p)
+    conn = _connect(path)
+    try:
+        conn.execute("PRAGMA synchronous=OFF")
+    except Exception:
+        pass
+    return conn
 
 
 core.connect = _test_connect
@@ -146,12 +182,129 @@ def chrome():
     if os.environ.get("MAXPM_NO_BROWSER"):
         return None
     for c in (os.environ.get("MAXPM_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-              "/Applications/Chromium.app/Contents/MacOS/Chromium",
+              "/Applications/Chromium.app/Contents/Chromium",
               "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
               *(shutil.which(n) for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"))):
         if c and os.path.exists(c):
             return c
     return None
+
+
+class _SharedChrome:
+    """One headless Chrome kept across page tests (#6341): each test opens an isolated BrowserContext + tab over CDP
+    instead of cold-booting a new Chrome process."""
+
+    def __init__(self):
+        self.proc = None
+        self.ws = None
+        self.seq = 0
+        self.profile = None
+
+    def _start(self):
+        import json
+        import subprocess
+        import time
+        import urllib.request
+        exe = chrome()
+        if not exe:
+            return False
+        if self.proc is not None and self.proc.poll() is None and self.ws is not None:
+            return True
+        self.close()
+        self.profile = tempfile.mkdtemp(prefix="maxpm-chrome-", dir=_queue_dir)
+        self.proc = subprocess.Popen([
+            exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", "--autoplay-policy=no-user-gesture-required",
+            "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
+            f"--user-data-dir={self.profile}", "about:blank",
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        port_file = Path(self.profile) / "DevToolsActivePort"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        end = time.monotonic() + 15
+        ws_url = None
+        while time.monotonic() < end:
+            if self.proc.poll() is not None:
+                break
+            try:
+                port = int(port_file.read_text(encoding="utf-8").split()[0])
+                with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=2) as r:
+                    ws_url = json.loads(r.read())["webSocketDebuggerUrl"]
+                    break
+            except (OSError, ValueError, KeyError, IndexError):
+                time.sleep(0.02)
+        if not ws_url:
+            self.close()
+            raise RuntimeError("shared headless Chrome did not open its debugging port")
+        self.ws = _browser.WS(ws_url)
+        return True
+
+    def _call(self, method, params=None, session=None):
+        import json
+        self.seq += 1
+        cid = self.seq
+        msg = {"id": cid, "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        self.ws.send(json.dumps(msg))
+        while True:
+            got = json.loads(self.ws.recv())
+            if got.get("id") == cid:
+                if "error" in got:
+                    raise RuntimeError(f"CDP {method}: {got['error']}")
+                return got.get("result", {})
+
+    def close(self):
+        ws, self.ws = self.ws, None
+        if ws is not None:
+            try:
+                ws.close()
+            except OSError:
+                pass
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.wait(5)
+            except OSError:
+                pass
+
+
+_SHARED_CHROME = _SharedChrome()
+atexit.register(_SHARED_CHROME.close)
+
+
+def open_tab(url, window=None):
+    """Context manager: open url in a fresh isolated BrowserContext + tab of the shared headless Chrome (#6341)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        _SHARED_CHROME._start()
+        ctx = tid = None
+        try:
+            ctx = _SHARED_CHROME._call("Target.createBrowserContext")["browserContextId"]
+            tid = _SHARED_CHROME._call("Target.createTarget", {"url": "about:blank", "browserContextId": ctx})["targetId"]
+            sid = _SHARED_CHROME._call("Target.attachToTarget", {"targetId": tid, "flatten": True})["sessionId"]
+            w, h = (int(x) for x in window.split(",")) if window else (800, 600)
+            _SHARED_CHROME._call("Emulation.setDeviceMetricsOverride", {
+                "width": w, "height": h, "deviceScaleFactor": 1, "mobile": False,
+            }, session=sid)
+            _SHARED_CHROME._call("Page.navigate", {"url": url}, session=sid)
+            yield
+        except Exception:
+            if ctx is None:
+                _SHARED_CHROME.close()
+            raise
+        finally:
+            try:
+                if tid:
+                    _SHARED_CHROME._call("Target.closeTarget", {"targetId": tid})
+                if ctx:
+                    _SHARED_CHROME._call("Target.disposeBrowserContext", {"browserContextId": ctx})
+            except Exception:
+                _SHARED_CHROME.close()
+
+    return _cm()
 
 
 def proc_after_exec(pid, want, wait=5.0):

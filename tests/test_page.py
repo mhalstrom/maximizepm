@@ -48,6 +48,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         window, frame = _chrome_window(size)
         got, result = threading.Event(), {}
         tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
+        fast_poll = b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);})();</script>'
         drive = (b'<script type="module">import "./app.js"; window.__appReady = true;</script>'
                  b'<script type="module" src="/__drive.js"></script>')
 
@@ -65,7 +66,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
                 page = server.page_html(self.path.split("?")[0])
                 if page is not None:
                     assert tag in page
-                    return self._send(200, page.replace(tag, tag + drive), "text/html; charset=utf-8")
+                    return self._send(200, page.replace(tag, fast_poll + tag + drive), "text/html; charset=utf-8")
                 return super().do_GET()
 
             def do_POST(self):
@@ -85,20 +86,30 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         httpd.daemon_threads = True
         httpd.handle_error = lambda request, address: None  # Chrome ends while it still polls: a dropped connection
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        chrome = subprocess.Popen([
-            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-            # The driver's clicks are no person's: no autoplay rule may hold an AudioContext (the microphone tests).
-            "--autoplay-policy=no-user-gesture-required",
-            *([f"--window-size={window}"] if window else []), *flags,
-            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            ran = got.wait(timing.limit(40))  # a slow GitHub macOS runner took longer (#5705)
-        finally:
-            chrome.kill()
-            chrome.wait()
-            httpd.shutdown()
-            httpd.server_close()
+        url = f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"
+        if flags:
+            chrome = subprocess.Popen([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+                # The driver's clicks are no person's: no autoplay rule may hold an AudioContext (the microphone tests).
+                "--autoplay-policy=no-user-gesture-required",
+                *([f"--window-size={window}"] if window else []), *flags, url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                ran = got.wait(timing.limit(40))  # a slow GitHub macOS runner took longer (#5705)
+            finally:
+                chrome.kill()
+                chrome.wait()
+                httpd.shutdown()
+                httpd.server_close()
+        else:
+            from tests import open_tab
+            try:
+                with open_tab(url, window=window):
+                    ran = got.wait(timing.limit(40))
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
         self.assertTrue(ran, "browser test did not report")
         self.assertNotIn("error", result, result.get("error"))
         return result
@@ -1015,7 +1026,7 @@ try {
   await until(() => window.__appReady && q("#sessYouRow .srow"), "Sessions, the first page");
   q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
   const out = { moved: [], hovered: {} };
-  const look = async (where) => { await sleep(700); const [n, m] = sweep(where); out.hovered[where] = n; out.moved.push(...m); };
+  const look = async (where) => { await sleep(200); const [n, m] = sweep(where); out.hovered[where] = n; out.moved.push(...m); };
   for (const tab of [...document.querySelectorAll("nav button[data-tab]")].map(b => b.dataset.tab)) {
     q(`nav button[data-tab="${tab}"]`).click();
     await until(() => !q("#tab-" + tab).classList.contains("hidden"), "the tab " + tab);
@@ -1060,7 +1071,7 @@ try {
   await until(() => window.__appReady && q("#sessCol .msg, #sessCol .bubble, #sessCol > *"), "the chat of ag");
   await document.fonts.ready;
   // The page settles first (its fonts, the first answers): the frame of the chat stays the same for longer than a poll.
-  for (let last = "", still = 0; still < 2500; ) {
+  for (let last = "", still = 0; still < 500; ) {
     const r = q("#sessBody").getBoundingClientRect(), now = `${r.top},${r.height},${q("#sessBody").scrollTop}`;
     still = now === last ? still + 100 : 0; last = now; await sleep(100);
   }
@@ -1431,15 +1442,15 @@ try {
   await until(() => window.__appReady && open(), "the dialog opens by itself for the prompt");
   check(q("#waitList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
   q("#waitDismiss").click();
-  await sleep(7000);  // two refreshes of the Sessions tab
+  await until(() => q("#sessWait [data-wait-open]"), "the wait line links to the dialog");
+  await sleep(600);  // several refreshes of the Sessions tab (150 ms in tests)
   check(!open(), "Dismiss keeps the same prompt closed");
-  check(q("#sessWait [data-wait-open]"), "the wait line links to the dialog");
   check(!q("#sessWait").textContent.includes("type the answer below"), "no text about typing the answer below");
   await fetch("/__step/question");
   await until(open, "a new question opens it again");
   check(q("#waitList").textContent.includes("Push the header?"), "it shows the question");
   q("#waitDismiss").click();
-  await sleep(4000);
+  await sleep(600);
   check(!open(), "and Dismiss keeps it closed");
   q("#sessWait [data-wait-open]").click();
   check(open(), "Answer it opens it");

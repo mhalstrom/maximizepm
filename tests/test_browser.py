@@ -1047,7 +1047,7 @@ class Passkey(Base):
         self.assertEqual(len(log), 3)
         log.clear()
         st["url"] = "https://myaccount.google.com/"  # after the touch the page goes on
-        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 0), mock.patch.object(browser, "PASSKEY_SETTLE", 0):
             b.passkey("done")
         self.assertEqual(log, [("hide", 4242), ("start", False, None), ("Storage.setCookies", ["sid"]),
                                ("open", st["url"])])  # hidden first, at once; then back into the panel
@@ -1082,7 +1082,7 @@ class Passkey(Base):
         log.clear()
         seen = iter(["https://accounts.google.com/challenge/pk?2", "about:blank", "https://myaccount.google.com/"])
         b.info = lambda: {"url": next(seen, "https://myaccount.google.com/")}
-        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 0), mock.patch.object(browser, "PASSKEY_SETTLE", 0):
             b.passkey("done")
         self.assertEqual(log[-1], ("open", "https://myaccount.google.com/"))  # the next real page, not the blank one
 
@@ -1243,7 +1243,13 @@ class Reattach(Base):
         self.state("ag2", taken.getsockname()[1])
         self.state("ag3", self.free_port(), pid=2 ** 22 + 7)  # its Chrome ended: nothing to do
         killed = []
-        self.addCleanup(lambda: [b.proxy.server_close() for b in browser.BROWSERS.values() if b.proxy])
+        def _close_proxies():
+            for b in browser.BROWSERS.values():
+                if b.proxy:
+                    b.proxy.shutdown()
+                    b.proxy.server_close()
+                    b.proxy = None
+        self.addCleanup(_close_proxies)
         with mock.patch.object(browser.Browser, "_kill", lambda b, pid: killed.append(pid)):  # the pid is this test's
             got = browser.reattach()
             self.assertEqual(got, [("web", "ag1", "proxy"), ("web", "ag2", "stopped")])

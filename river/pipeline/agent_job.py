@@ -711,9 +711,9 @@ def _isolate(email):
         'agent() { python3 -I "$PRIV/gate.py" "$MAXPM_UID" "$WORK/home" "$@" < /dev/null; }',
         "# The agent's user changes nothing of this checkout and reads nothing of its .git (a remote may hold a token).",
         "chmod -R go-w . 2>/dev/null; chmod -R go-rwx .git 2>/dev/null",
-        '{ grep -q "^maxpm-agent:" /etc/passwd || echo "maxpm-agent:x:$MAXPM_UID:$MAXPM_UID::$WORK/home:/bin/sh" '
+        '[ "$(id -u)" = 0 ] && { grep -q "^maxpm-agent:" /etc/passwd || echo "maxpm-agent:x:$MAXPM_UID:$MAXPM_UID::$WORK/home:/bin/sh" '
         ">> /etc/passwd; } 2>/dev/null",
-        '{ grep -q "^maxpm-agent:" /etc/group || echo "maxpm-agent:x:$MAXPM_UID:" >> /etc/group; } 2>/dev/null',
+        '[ "$(id -u)" = 0 ] && { grep -q "^maxpm-agent:" /etc/group || echo "maxpm-agent:x:$MAXPM_UID:" >> /etc/group; } 2>/dev/null',
         'mkdir -p "$WORK/home"',
         'git clone -q --no-hardlinks --no-checkout . "$WORK/repo" 2> "$PRIV/clone.err" && '
         'git -C "$WORK/repo" checkout -q --detach "$FAILED" 2>> "$PRIV/clone.err"',

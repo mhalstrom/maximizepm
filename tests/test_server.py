@@ -5948,6 +5948,8 @@ class StaticFiles(unittest.TestCase):
         for p in files:
             for n in re.findall(r"^export (?:async )?function (\w+)", p.read_text(encoding="utf-8"), re.M):
                 exports.setdefault(n, set()).add(p)
+        decl_rx = re.compile(r"(?:function\s+|const\s+|let\s+|var\s+)(\w+)\b")
+        call_rx = re.compile(r"(?<![\w.$])(\w+)\s*\(")
         missing = []
         for p in files:
             s = p.read_text(encoding="utf-8")
@@ -5955,10 +5957,10 @@ class StaticFiles(unittest.TestCase):
             imported = set()
             for m in re.finditer(r"import\s*\{([^}]*)\}\s*from", s):
                 imported |= {x.strip().split(" as ")[-1].strip() for x in m.group(1).split(",") if x.strip()}
-            for n, where in exports.items():
-                if p in where or n in imported or re.search(r"(?:function\s+|const\s+|let\s+|var\s+)" + n + r"\b", s):
-                    continue
-                if re.search(r"(?<![\w.$])" + n + r"\s*\(", code):
+            defined = imported | set(decl_rx.findall(s))
+            called = set(call_rx.findall(code))
+            for n in sorted(called & exports.keys()):
+                if p not in exports[n] and n not in defined:
                     missing.append(f"{p.relative_to(server.STATIC)}: {n}")
         self.assertEqual(missing, [])
 
