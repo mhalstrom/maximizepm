@@ -216,10 +216,19 @@ whether to move them into `AGENTS.md` and delete `CLAUDE.md` (`--move` or
 `--no-move` answers in advance; with no terminal it moves them). `--file <path>`
 adds the block to that file instead.
 Running `maxpm init` again adds the block where it is missing and leaves an
-existing block as it is. Then add work and start agents:
+existing block as it is.
+
+When the work is already written down, give `maxpm init` the plan:
+`maxpm init --plan plan.md` sets up the folder and adds every line of the
+outline as an item, and a line waits on the lines indented under it (the same
+file that `maxpm add <project> --from plan.md` takes; `--dry-run` there shows
+the items first). A plan with an error stops before the folder changes.
+
+Then add work and start agents:
 
 ```sh
 maxpm add <project> "first item" --doer ai
+maxpm add <project> --from plan.md      # or a whole outline at once
 # open Claude Code (or another agent) in the folder and say: go
 maxpm serve --open    # watch the page at http://127.0.0.1:8765
 ```

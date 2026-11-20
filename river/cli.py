@@ -2296,6 +2296,9 @@ def build_parser(only=None):
     x.add_argument("--move", action="store_true", default=None,
                    help="move the rules in CLAUDE.md to AGENTS.md and delete CLAUDE.md (the default with no terminal)")
     x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md as it is")
+    x.add_argument("--plan", metavar="FILE",
+                   help="add every line of a plan file (an outline) to the project as an item, as maxpm add --from "
+                        "does; - reads it from stdin")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -4200,6 +4203,10 @@ def link_folder(conn, here, project=None, description="", actor=None):
 def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
+    plan = None
+    if args.plan:  # read and check the plan first: a plan with an error leaves the folder as it was
+        plan = sys.stdin.read() if args.plan == "-" else Path(args.plan).expanduser().read_text(encoding="utf-8")
+        core.parse_plan(plan)
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
     # AGENTS.md for every agent (Claude Code, Codex, OpenCode, ...); an old CLAUDE.md gives its rules to it (#6024).
     if args.file:
@@ -4217,7 +4224,15 @@ def init_folder(args):
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     lines += look_setup_lines(shown, core.look_setup(conn, shown))
-    lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
+    if plan is not None:
+        rows = core.add_plan(conn, shown, plan, args.actor)["items"]
+        ids = [r["id"] for r in rows]
+        lines.append(f"{shown}: {len(ids)} item(s) added from the plan (#{min(ids)} to #{max(ids)}); "
+                     f"maxpm list --project {shown} shows them")
+        lines.append("next: open an agent here and say go")
+    else:
+        lines.append(f"next: add work (maxpm add {shown} \"...\", or a whole plan: maxpm add {shown} --from plan.md) "
+                     f"or open an agent here and say go")
     print("\n".join(lines))
     return 0
 
