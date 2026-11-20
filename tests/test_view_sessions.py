@@ -359,6 +359,20 @@ class Sessions(Base):
         self.assertEqual(v["entries"], [])
         self.assertIn("No chat of nobody on this computer: MaximizePM does not know which agent it runs yet", v["note"])
 
+    def test_a_session_at_a_prompt_before_its_first_turn_says_so(self):
+        # #6242: Claude Code in a new folder stands at its trust question before it writes a chat: the view says that
+        # it waits at a prompt, with the prompt's state, not that a maxpm command records its log.
+        core.plain_make(self.c, "fresh", "started by the page")
+        trust = {"question": "Quick safety check: Is this a project you created or one you trust?",
+                 "options": ["No, exit", "Yes, I trust this folder"], "fixed": True}
+        v = sessions.view(self.c, "fresh", None, self.root, self.croot, prompt=trust, pane=True)
+        self.assertEqual((v["entries"], v["state"]), ([], "prompt"))
+        self.assertEqual(v["note"], "No chat of fresh yet: it waits at a prompt in its terminal, before its first turn.")
+        self.assertIn("No chat of fresh on this computer", sessions.view(self.c, "fresh", None, self.root, self.croot)["note"])
+        cards = sessions.views(self.c, {"fresh": "%1"}, self.root, self.croot, prompts={"fresh": trust}, ended_panes=set())
+        self.assertEqual([(c["state"], [w["kind"] for w in c["waiting"]]) for c in cards if c["name"] == "fresh"],
+                         [("prompt", ["prompt"])])
+
     def test_the_note_of_a_missing_chat_names_the_agent_and_why(self):
         # #5257: the note names the agent whose log MaximizePM looked for, and why it found none.
         core.register(self.c, "gm")

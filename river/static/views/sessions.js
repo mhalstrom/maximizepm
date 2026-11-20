@@ -288,6 +288,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The tab of the list (#5883), kept in this browser; loaded: the first draw ran (the tab's view shows at load).
   let tab = TABS[store(TAB)] ? store(TAB) : "agents", loaded = false;
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
+  let reading = false;  // a read of the open session is under way: a second one would add its lines twice
   // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
   let waiting = [];
   const drawPend = (rows) => { waiting = rows; drawWaiting($("#sessPend"), rows); };
@@ -533,6 +534,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     clearTimeout(timer);
     if (!agent) return;
     if (document.hidden || !isShown()) { timer = setTimeout(poll, 3000); return; }
+    reading = true;
     try {
       await loadAgents();  // the head asks it about the session's agent
       const r = await fetch(`api/session?agent=${encodeURIComponent(agent)}${cursor != null ? "&cursor=" + cursor : ""}`);
@@ -572,7 +574,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       // a poll while the person types moves nothing (#5111).
       if (first || (atEnd && j.entries.length)) body.scrollTop = body.scrollHeight;
       if (first) moreAbove();
-    } catch (e) { /* the next poll tries again */ }
+    } catch (e) { /* the next poll tries again */ } finally { reading = false; }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
 
@@ -655,10 +657,11 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // prompt that runs nothing (no tool, no command) is a menu: a slash command's (#5220), not a permission prompt.
   function waitLine(j) {
     const w = $("#sessWait"), all = (list.find(x => x.name === agent) || {}).waiting || [], waits = all.map(x => x.kind);
-    const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command && !p.ask;
+    // A question that takes only one of its options (Claude Code's folder trust question, #5904) is no menu (#6242).
+    const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command && !p.ask && !p.fixed;
     // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253; Claude
     // Code's question dialog, #6234).
-    const what = p && p.ask ? "It asks you a question in its terminal."
+    const what = p && (p.ask || p.fixed) ? "It asks you a question in its terminal."
       : menu ? "It shows a menu in its terminal."
       : waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
       : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
@@ -1114,6 +1117,14 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
+  // A hidden page reads nothing, and the desktop app's window counts as hidden while another window covers it. When
+  // it shows again, the list and the open session are read at once, not at the next timer: a session started while
+  // it was covered showed 'No session runs' and 'Reading the transcript…' (#6242).
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !isShown()) return;
+    refresh();
+    if (!reading) poll();
+  });
   return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
            showArts: (byPerson = true) => showPane("arts", byPerson),
            showCost: (byPerson = true) => showPane("cost", byPerson),

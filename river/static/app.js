@@ -1196,6 +1196,8 @@ refresh().finally(() => { booting = false; }).then(openFromUrl).then(maybeSetup)
   if (boot) { boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`; boot.className = "boot-note load-err"; boot.setAttribute("role", "alert"); }
 });
 setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
+// A page that shows again reads the state at once (#6242): the desktop app's window is hidden while another covers it.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh().catch(() => {}); });
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.
 setInterval(() => { if (document.hidden) needsYou.pollNeedsYou().catch(() => {}); }, 15000);
 

@@ -892,9 +892,12 @@ def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=Fals
     kind, path = transcript(conn, agent, root, croot)
     if not path:  # a session in a pane still gets the text bar
         key, label = pane_state(conn, a, None, prompt, pane)
+        # A prompt before its first turn (Claude Code's trust question in a new folder, #6242): the chat says so, not
+        # that a maxpm command records its log.
+        note = (f"No chat of {agent} yet: it waits at a prompt in its terminal, before its first turn."
+                if prompt else no_log_note(conn, agent, root, croot))
         return {"agent": agent, "transcript": None, "entries": [], "cursor": None, "turn": None, "state": key,
-                "state_label": label, "session_url": a.get("session_url"),
-                "note": no_log_note(conn, agent, root, croot)}
+                "state_label": label, "session_url": a.get("session_url"), "note": note}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = pane_state(conn, a, turn, prompt, pane)
