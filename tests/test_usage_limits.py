@@ -457,6 +457,54 @@ class LimitStopModelGroup(unittest.TestCase):
         self._stop(None)
         self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-medium"))
 
+    def test_a_short_gemini_stop_while_claude_is_full_ends_at_its_own_reset(self):
+        # #6441, the live row of 2026-11-20: the probe at 19:28:55Z read Gemini 5-hour at 0% used and Claude and GPT
+        # 5-hour full until 22:04:55Z; at 19:40:32Z a Gemini session stopped with 'Resets in 26s'. The stop limited all
+        # of agy until 22:04:55Z, so no agy session started and the usage list showed Gemini at its limit.
+        self.t0 = datetime(2026, 11, 20, 19, 28, 55, tzinfo=timezone.utc)
+        core.record_agent_limit(self.conn, "antigravity", limited=True, source="probe", windows=[
+            {"name": "Gemini models: weekly", "used_percent": 73.3, "remaining_percent": 26.7,
+             "resets_at": "2026-11-27T04:39:55Z"},
+            {"name": "Gemini models: 5-hour", "used_percent": 0.0, "remaining_percent": 100.0, "resets_at": None},
+            {"name": "Claude and GPT models: weekly", "used_percent": 50.7, "remaining_percent": 49.3,
+             "resets_at": "2026-11-27T17:04:55Z"},
+            {"name": "Claude and GPT models: 5-hour", "used_percent": 100.0, "remaining_percent": 0.0,
+             "resets_at": "2026-11-20T22:04:55Z"}])
+        self.t0 = datetime(2026, 11, 20, 19, 40, 32, tzinfo=timezone.utc)
+        with mock.patch.object(self, "STOP", "⚠ Individual quota reached. Please upgrade your subscription to "
+                                             "increase your limits. Resets in 26s."):
+            self._stop("gemini-4-neon")
+        row = self.conn.execute("SELECT limited FROM agent_limits WHERE agent_type='antigravity'").fetchone()
+        self.assertEqual(row["limited"], 0)  # the group windows hold the limit, each with its own reset
+        # While both groups are full, the whole agent waits for the first reset: the Gemini stop's, not Claude's.
+        st = core.agent_limit_status(self.conn, "antigravity")
+        self.assertTrue(st["limited"])
+        self.assertEqual(st["resets_at"], "2026-11-20T19:40:58Z")
+        lines = {x["name"]: x for x in core.agent_usage(self.conn, "antigravity")["lines"]}
+        self.assertEqual((lines["Gemini models"]["limited"], lines["Gemini models"]["resets_at"]),
+                         (True, "2026-11-20T19:40:58Z"))
+        self.assertEqual(lines["Claude and GPT models"]["resets_at"], "2026-11-20T22:04:55Z")
+        # After the stop's 26 seconds: Gemini runs again, Claude and GPT wait for 22:04:55Z.
+        self.t0 = datetime(2026, 11, 20, 19, 41, 30, tzinfo=timezone.utc)
+        self.assertFalse(core.agent_limit_status(self.conn, "antigravity")["limited"])
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon"))
+        lim = core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-medium")
+        self.assertEqual(lim["resets_at"], "2026-11-20T22:04:55Z")
+        lines = {x["name"]: x for x in core.agent_usage(self.conn, "antigravity")["lines"]}
+        self.assertFalse(lines["Gemini models"]["limited"])
+        self.assertTrue(lines["Claude and GPT models"]["limited"])
+        # The provider entries of the usage list: the Gemini entry is free, the Claude entry at its limit.
+        core.config_set(self.conn, "agent_order", "antigravity model gemini-4-neon max 4, "
+                                                  "antigravity model claude-opus-5-5-medium")
+        ents = {p["model"]: p for p in core.agent_providers(self.conn)}
+        self.assertFalse(ents["gemini-4-neon"]["limited"])
+        self.assertTrue(ents["claude-opus-5-5-medium"]["limited"])
+        self.assertEqual(ents["claude-opus-5-5-medium"]["resets_at"], "2026-11-20T22:04:55Z")
+        it = core.item_add(self.conn, "app", "A Gemini task")
+        core.config_set(self.conn, "launch_agents", "Claude Code=@claude-code; Antigravity CLI=@antigravity")
+        t = core.launch_target(self.conn, item=it["id"], agent="Antigravity CLI", model="gemini-4-neon")
+        self.assertEqual(t["platform"], "antigravity")
+
 
 class LimitStopHandbackAndRestart(unittest.TestCase):
     def setUp(self):
@@ -628,7 +676,10 @@ class UsageProbe(unittest.TestCase):
         self.assertEqual(got, ["claude", "antigravity"])
         rows = {r["agent_type"]: r for r in core.agent_limits_list(self.conn)}
         self.assertEqual((rows["claude"]["remaining_pct"], rows["claude"]["source"]), (78.0, "probe"))
-        self.assertTrue(rows["antigravity"]["limited"])
+        # The screen shows only the Gemini group, at 0% left: it limits the Gemini models, not all of agy (#6441).
+        self.assertFalse(rows["antigravity"]["limited"])
+        self.assertTrue(rows["antigravity"]["groups"][0]["full"])
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon"))
         self.assertFalse(rows["codex"]["known"])  # Codex: its log, not a probe
         for pane in ("%usage-claude", "%usage-antigravity"):
             line = self.typed[pane].splitlines()[0]

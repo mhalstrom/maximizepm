@@ -3782,12 +3782,12 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
     win_list = list(windows) if windows else None
     if win_list:
         full =[w for w in win_list if (w.get("used_percent") or 0) >= 100]
-        groups = {_window_group(w.get("name")) for w in win_list}
         full_groups = {_window_group(w.get("name")) for w in full}
-        if limited and full and None not in full_groups and full_groups != groups:
+        if limited and full and None not in full_groups:
+            # Only model groups are full: their windows hold the limit, each with its own reset, and
+            # _format_limit_row limits the whole agent while every group is full (#6441: a Gemini stop that ended in
+            # 26s kept all of agy limited until the Claude and GPT 5-hour reset, 2h 24m later).
             limited = False
-        if group_stop and len(groups) < 2:
-            limited = False  # only the stopped group is known: the other groups may have quota left
     rem_pct = used_pct = None
     if win_list:
         pcts = [float(w["remaining_percent"]) for w in win_list if w.get("remaining_percent") is not None]
@@ -3862,6 +3862,19 @@ def _format_limit_row(row, cur_now=None):
             rem = round(min(pcts), 1)
             used = round(100.0 - rem, 1)
     groups = _limit_groups(windows, row["updated_at"], cur_now)
+    resets_at, resets_text = (None, None) if expired else (resets_at, row["resets_text"])
+    reason = row["reason"] if active_limited else None
+    if not active_limited and len(groups) >= 2 and all(g["full"] for g in groups):
+        # Every model group is full now (#6441): the whole agent waits for the first group that resets.
+        def _at(g):
+            try:
+                return parse_iso(g["resets_at"])
+            except (ValueError, TypeError):
+                return cur_now + DEFAULT_LIMIT_COOLDOWN
+        first = min(groups, key=_at)
+        active_limited = True
+        resets_at, resets_text = first["resets_at"], first["resets_text"]
+        reason = "every model group at its limit: " + ", ".join(g["name"] for g in groups)
     return {
         "agent_type": row["agent_type"],
         "label": ad.label if ad is not None else row["agent_type"],
@@ -3869,9 +3882,9 @@ def _format_limit_row(row, cur_now=None):
         "limited": active_limited,
         "remaining_pct": 0.0 if active_limited else rem,
         "used_pct": 100.0 if active_limited else used,
-        "resets_at": None if expired else resets_at,
-        "resets_text": None if expired else row["resets_text"],
-        "reason": row["reason"] if active_limited else None,
+        "resets_at": resets_at,
+        "resets_text": resets_text,
+        "reason": reason,
         "windows": windows,
         "groups": groups,
         "source": row["source"],
@@ -4191,6 +4204,8 @@ def agent_providers(conn, project_id=None, model=None):
             "run_effort": p["effort"] or (agent_default(conn, ad, "effort", project_id) if ad else None),
             "max": p["max"], "used": used[i], "full": p["max"] is not None and used[i] >= p["max"],
             "limited": bool(lim), "until": _until_text(lim).strip() if lim else "",
+            # The reset of this entry's own limit (#6441): its model group's window, not the agent row's reset.
+            "resets_at": lim.get("resets_at") if lim else None, "resets_text": lim.get("resets_text") if lim else None,
             "limit_reason": lim["reason"] if lim and lim.get("model") else None,  # a model group's window (#6370)
             "remaining_pct": 0.0 if lim else _entry_usage(conn, stats[p["agent"]], runs[i]),
             # #6429: the agent refused this entry's model (or the account) at a session's turn, within the hold.

@@ -481,7 +481,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const rows = provs.map(p => {
       const r = byId[p.agent] || { known: false, agent_type: p.agent };
       return { ...r, label: p.name, limited: p.limited, remaining_pct: p.remaining_pct, prov: p,
-               resets_at: p.limited ? r.resets_at : null, resets_text: p.limited ? (p.until || r.resets_text) : null };
+               // #6441: the reset of the entry's own model group, not the reset of the agent's row.
+               resets_at: p.limited ? p.resets_at : null, resets_text: p.limited ? p.resets_text : null };
     }).concat(lims.filter(r => !provs.some(p => p.agent === r.agent_type)));
     host.classList.toggle("hidden", !rows.length);
     if (!rows.length) return;
