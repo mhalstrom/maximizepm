@@ -474,7 +474,9 @@ def _release_link(conn, dep_id, checks):
         (dep_id,))]
     texts.append((conn.execute("SELECT output FROM items WHERE id=?", (dep_id,)).fetchone() or [""])[0] or "")
     url = next((m.group(0) for x in texts for m in [_GH_RELEASE.search(x)] if m), None)
-    tag = url.rsplit("/", 1)[1] if url else next((m.group(0) for x in texts for m in [_TAG.search(x)] if m), None)
+    tag = url.rsplit("/", 1)[1] if url else None
+    if not tag or tag.startswith("untagged-"):  # #6516: a draft has no tag yet; its version is the one the hook printed
+        tag = next((m.group(0) for x in texts for m in [_TAG.search(x)] if m), None)
     if tag and not url:
         repo = next((c.get("repo") for c in checks if c.get("repo")), None)
         url = f"https://github.com/{repo}/releases/tag/{tag}" if repo else None
@@ -500,6 +502,8 @@ def latest_release(conn, name, releases, deps, checks):
         fix = conn.execute("SELECT id, status, title FROM items WHERE found_during=? AND title LIKE 'Fix the failed "
                            "deploy%' ORDER BY id DESC LIMIT 1", (d["id"],)).fetchone()
         tag, url = _release_link(conn, d["id"], checks)
+        if url and tag and d["status"] == "done" and "/releases/tag/untagged-" in url:
+            url = url.rsplit("/", 1)[0] + "/" + tag  # #6516: published, the draft's page is the release of its tag
         return {"deploy": d["id"], "status": d["status"], "closed_at": d["closed_at"], "runs": r["runs"],
                 "fix": dict(fix) if fix and fix["status"] not in core.CLOSED_STATES else None,
                 "tag": tag, "url": url}

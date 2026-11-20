@@ -1681,6 +1681,23 @@ class DefaultPipelines(Base):
                        "exit_code, seconds, output) VALUES ('web-prod',?,'make it',?,?,?,?,?,?,60,'last line')",
                        (event, dep, rev, at, at, at, code))
 
+    def test_a_draft_names_its_version_not_untagged(self):
+        """#6516: GitHub names a draft release untagged-<id> until its tag is pushed; the release card names the
+        version that the hook printed, and links the draft."""
+        dep = self.release("aaaaaaa", "A change")
+        at = core.iso(core.now())
+        self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, item_id, rev, queued_at, started_at, "
+                       "ended_at, exit_code, seconds, output) VALUES ('web-prod','deploy','make it',?,?,'aaaaaaa',?,?,?,"
+                       "?,60,?)", (dep, dep, at, at, at, core.HOOK_YES, "github-release: v1.5.0 is prepared\n  the "
+                                   "draft: https://github.com/o/r/releases/tag/untagged-3f2a"))
+        self.assertEqual(self.targets._release_link(self.c, dep, []),
+                         ("v1.5.0", "https://github.com/o/r/releases/tag/untagged-3f2a"))
+        latest = self.targets.default_pipeline(self.c, "web-prod")["latest"]
+        self.assertEqual((latest["tag"], latest["url"]), ("v1.5.0", "https://github.com/o/r/releases/tag/untagged-3f2a"))
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (at, dep))  # published
+        latest = self.targets.default_pipeline(self.c, "web-prod")["latest"]
+        self.assertEqual(latest["url"], "https://github.com/o/r/releases/tag/v1.5.0")
+
     def test_the_running_release_comes_before_newer_cancelled_ones(self):
         """#6516 (mark 2026-11-20): the deploy card showed 'deploy #6498 cancelled' while release #6211 ran, and three
         cancelled rows sat above it in Versions in deploy."""
@@ -1704,6 +1721,15 @@ class DefaultPipelines(Base):
         self.assertEqual([(r["item"], r["state"]) for r in rows],
                          [(run, "running"), *[(i, "cancelled") for i in reversed(gone)], (live, "passed")])
         self.assertTrue(rows[-1]["live"])
+        self.assertEqual(p["latest"]["deploy"], run)  # the release card of the target's page
+        # A newer release, cut while this one runs: the cards still show the running one.
+        newer = self.c.execute("INSERT INTO items(project_id, title, kind, target, status, rank, created_at, cut_at, "
+                               "cut_rev) VALUES ((SELECT id FROM projects WHERE name='web'), 'Deploy web-prod new', "
+                               "'deploy', 'web-prod', 'open', 0, ?, ?, 'ccccccc')", (old, core.iso(core.now()))).lastrowid
+        p = self.targets.default_pipeline(self.c, "web-prod")
+        self.assertEqual((p["latest"]["deploy"], next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
+                          ["item"]), (run, run))
+        self.c.execute("UPDATE items SET status='dropped' WHERE id=?", (newer,))
         # Nothing runs: the newest release that is not cancelled.
         self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(core.now()), run))
         deploy = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]

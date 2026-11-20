@@ -42,6 +42,8 @@ function steps(L) {
     ? { state: t.yes ? "queued" : "passed", started_at: t.started_at, ended_at: null, item: t.yes || t.approval } : null);
   if (a) out.push({ name: "approve", state: a.state, started_at: a.started_at, ended_at: a.ended_at, item: a.item, approve: a.state === "queued" });
   add((t || {}).step_list);
+  // Before the hook's run after the yes: its Tag and Publish steps wait (github-release.sh prints these names).
+  if (t) for (const name of ["tag", "publish"]) if (!out.some(x => x.name === name)) out.push({ name, state: "queued" });
   const w = runs.watch;
   if (w && w.state !== "skipped") out.push({ name: "checks", state: w.state, started_at: w.started_at, ended_at: w.ended_at,
     note: w.errors, watch: true });
