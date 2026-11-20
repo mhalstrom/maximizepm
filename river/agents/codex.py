@@ -141,6 +141,27 @@ def read_effort_levels(model):
     return (codex_models() or {}).get(model) if model else None
 
 
+def _has_maxpm_mcp():
+    """True when ~/.codex/config.toml (or $CODEX_HOME/config.toml) defines [mcp_servers.maxpm].
+    Codex 0.171.0 refuses -c mcp_servers.maxpm.enabled=false when no mcp_servers.maxpm table exists
+    ('invalid transport in mcp_servers.maxpm'), so build_command adds the override only when the entry is there."""
+    import re
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+        return isinstance(data.get("mcp_servers"), dict) and "maxpm" in data["mcp_servers"]
+    except ImportError:
+        pass
+    except ValueError:
+        return False
+    return bool(re.search(r'^\s*\[\s*mcp_servers\.(?:maxpm|"maxpm"|\'maxpm\')\s*\]', text, re.M))
+
+
 def build_command(name, folder, model, effort, settings, prompt):
     """codex [resume <id>] [-m M] [-c model_reasoning_effort=E] [--sandbox S] [--ask-for-approval A] --add-dir <queue
     folder> [--no-daemon] <args> <prompt>. Codex has no flag for a session name. Codex 0.159 ends at start, in a
@@ -161,6 +182,13 @@ def build_command(name, folder, model, effort, settings, prompt):
     words += ["--ask-for-approval", s["approval"]] if s.get("approval") else []
     words += ["--add-dir", river_dir()]
     words += profile
+    # Disable a configured maxpm MCP server (e.g. from setup-agent --chatgpt-desktop, which pins MAXPM_DB to the main
+    # queue and sets MAXPM_CHAT=1) so the session uses the shell maxpm with its own token and queue (#6443).
+    # Measured 2026-11-20 with codex-cli 0.171.0: -c mcp_servers.maxpm.enabled=false sets enabled=false and prevents
+    # spawning the server when [mcp_servers.maxpm] is in config.toml, but fails at bootstrap ('invalid transport') when
+    # the table is absent, so emit it only when config.toml defines mcp_servers.maxpm.
+    if _has_maxpm_mcp() and "mcp_servers.maxpm.enabled" not in s.get("args", ""):
+        words += ["-c", "mcp_servers.maxpm.enabled=false"]
     if ("--no-daemon" in codex_flags() and "--no-daemon" not in s.get("args", "")
             and "--no-daemon" not in (s.get("noflags") or ())):
         words.append("--no-daemon")

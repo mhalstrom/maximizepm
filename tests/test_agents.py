@@ -1674,3 +1674,35 @@ class CodexWorktreeTrust(unittest.TestCase):
         # A project linked to a folder inside a repository's main folder (#6432): Codex trusts the repository root.
         self.assertEqual(codex._trust_root(os.path.join(repo, "app")), repo)
         self.assertEqual(shlex.split(codex.trust_workspace(repo, "codex hi")).count("-c"), 1)
+
+
+class CodexMcpDisable(Env):
+    """#6443: when ~/.codex/config.toml has [mcp_servers.maxpm] (from setup-agent --chatgpt-desktop), Codex starts
+    and resumes disable it with -c mcp_servers.maxpm.enabled=false so the session uses the shell maxpm with its own
+    token and queue; without that entry, the flag is omitted (Codex 0.171.0 refuses it with 'invalid transport')."""
+
+    def test_launch_and_resume_disable_maxpm_mcp_only_when_configured(self):
+        from river.agents import codex
+        ch = Path(self.tmp.name) / "codex_home"
+        ch.mkdir()
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(ch)}):
+            # No config.toml: no override.
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.build_command("w", None, None, None, {}, "go"))
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.resume_command("tid", None, None, {"prompt": "go"}))
+            # Other MCP server only: no override.
+            (ch / "config.toml").write_text('[mcp_servers.other]\ncommand = "echo"\n', encoding="utf-8")
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.build_command("w", None, None, None, {}, "go"))
+            # With [mcp_servers.maxpm] (as written by setup-agent --chatgpt-desktop): both launch and resume disable it.
+            codex.write_mcp_config(ch / "config.toml")
+            launch = codex.build_command("w", None, "gpt-6-luna", None, {}, "go")
+            resume = codex.resume_command("tid", "gpt-6-luna", None, {"prompt": "go"})
+            for words in (launch, resume):
+                idx = words.index("mcp_servers.maxpm.enabled=false")
+                self.assertEqual(words[idx - 1], "-c")
+            # An explicit override in args is respected.
+            custom = codex.build_command("w", None, None, None,
+                                         {"args": "-c mcp_servers.maxpm.enabled=true"}, "go")
+            self.assertNotIn("mcp_servers.maxpm.enabled=false", custom)
