@@ -6920,6 +6920,32 @@ class StartThatStops(unittest.TestCase):
         self.assertIn(f"Claude Code asks first whether it may trust {work}: answer 'Yes, I trust this folder'",
                       out.getvalue())
 
+    def test_a_start_in_a_folder_with_no_rules_file_says_so(self):
+        """#6411: agents worked in toolscaled-local with no AGENTS.md (no secret file rules, no build folder). The
+        reply of a start names the file that the agent reads; a file in the folder or above it, or Claude Code's old
+        CLAUDE.md, counts."""
+        work = Path(self.dir.name, "repo", "sub")
+        work.mkdir(parents=True)
+        if server.missing_instructions(work, "codex") is None:
+            self.skipTest("a folder above the test folder holds an AGENTS.md")
+        t = {"project": "shop", "path": str(work), "session_title": "x", "command": "agy go", "platform": "antigravity"}
+        server._open_terminal(t, {})
+        self.assertEqual(t["no_instructions"], "AGENTS.md")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.print_trust({**t, "agent": "Antigravity"})
+        self.assertIn(f"{work} and the folders above it have no AGENTS.md, the rules file that Antigravity reads",
+                      out.getvalue())
+        Path(work.parent, "CLAUDE.md").write_text("rules\n")
+        self.assertIsNone(server.missing_instructions(work, "claude-code"))  # its old file, one folder above
+        self.assertEqual(server.missing_instructions(work, "codex"), "AGENTS.md")  # Codex does not read CLAUDE.md
+        Path(work.parent, "AGENTS.md").write_text("rules\n")
+        t = {"project": "shop", "path": str(work), "session_title": "y", "command": "agy go", "platform": "antigravity"}
+        server._open_terminal(t, {})
+        self.assertIsNone(t["no_instructions"])
+        self.assertIsNone(server.missing_instructions(work, None))  # no agent known: nothing to say
+
 
 class Exhibits(unittest.TestCase):
     """#5956 (policy g3): a person's Look or Approve card carries the thing itself: the screenshot of a page it names

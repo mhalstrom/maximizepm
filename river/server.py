@@ -835,6 +835,8 @@ def _open_terminal(t, env, runner=None, conn=None):
         line = f"cd {shlex.quote(t['path'])} && " + (f"{assign} " if assign else "") + t["command"]
     if platform == "claude-code" and claude_untrusted(t["path"], env):
         t["trust"] = str(t["path"])  # the reply says that Claude Code asks first (#5892); MaximizePM answers nothing
+    if platform and t.get("path"):
+        t["no_instructions"] = missing_instructions(t["path"], platform)  # the reply says so (#6411)
     if runner:
         runner(line)
         return
@@ -880,6 +882,22 @@ def claude_untrusted(folder, env=None):
         if isinstance(got, dict) and got.get("hasTrustDialogAccepted"):
             return False
     return True
+
+
+def missing_instructions(folder, platform):
+    """The instruction file that the agent reads (its adapter's SETUP["instructions"], AGENTS.md) when neither it nor
+    the file it read before (SETUP["replaces"], Claude Code's CLAUDE.md) is in the folder or a folder above it; else
+    None (#6411). An agent started there works with only the maxpm briefing and policies: no secret file rules, no
+    build folder. None also for an agent with no adapter or no SETUP."""
+    ad = core._adapters().find(platform) if platform else None
+    setup = getattr(ad, "setup", None) or {}
+    names = [n for n in (setup.get("instructions"), setup.get("replaces")) if n]
+    if not names or not folder:
+        return None
+    here = Path(str(folder)).expanduser()
+    if any(Path(p, n).is_file() for p in (here, *here.parents) for n in names):
+        return None
+    return names[0]
 
 
 def hold_first_prompt(pane, kind, prompt):

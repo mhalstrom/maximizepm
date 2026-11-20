@@ -5950,6 +5950,11 @@ def print_trust(res):
         print(f"  Claude Code asks first whether it may trust {res['trust']}: answer 'Yes, I trust this folder' in the "
               f"question card on the Sessions tab (or in its pane). 'No, exit' ends the session, and its item goes "
               f"back to the queue.")
+    if res.get("no_instructions"):
+        # #6411: an agent there has no project rules (secret files, the build folder), only the briefing.
+        print(f"  {res.get('path') or res.get('folder')} and the folders above it have no "
+              f"{res['no_instructions']}, the rules file that {res.get('agent') or 'the agent'} reads: write the "
+              f"project's rules there (maxpm init adds the work queue block)")
 
 
 def _fault_lines(f, r):
