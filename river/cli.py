@@ -2462,6 +2462,12 @@ def build_parser(only=None):
     x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
                                          "and item); --message then types a message into it at once (a person, or the manager)")
     x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
+    x = sub.add_parser("approve", help="answer the prompt in a session's terminal (allow a file read, a command, an edit; "
+                                       "the manager or a person): maxpm approve <session> <option number>, or --text "
+                                       "\"<what to do instead>\"")
+    x.add_argument("agent", help="the session")
+    x.add_argument("option", type=int, nargs="?", help="the number of the option, as the prompt lists it (1: the first)")
+    x.add_argument("--text", help="what the session does instead (the prompt's 'No, and tell ... what to do')")
     x = sub.add_parser("relay", help="hand a person's own words to a session word for word, as the person's prompt "
                        "(the manager or a person): maxpm relay <session> \"<words>\" --from <person>")
     x.add_argument("agent", help="the session")
@@ -4842,6 +4848,8 @@ def dispatch(conn, a, actor):
     if c == "interrupt":
         # maxpm serve types the keys: a sandboxed session cannot reach tmux, and the page does the same (#5547).
         return ask_server(conn, "agent_interrupt", {"agent": a.agent, "text": a.message}, actor)
+    if c == "approve":  # #6282: serve types the answer, as the card on the page does
+        return ask_server(conn, "prompt_approve", {"agent": a.agent, "option": a.option, "text": a.text}, actor)
     if c == "relay":  # #5964 (policy p148): serve types the person's words, as the page's message box does
         return ask_server(conn, "relay", {"agent": a.agent, "text": a.text, "person": a.person}, actor)
     if c == "stop":
@@ -9009,6 +9017,10 @@ def render(a, res):
     if c == "relay":
         print(f"{res['person']}'s words go to {res['agent']} as {res['person']}'s prompt"
               + (" when its turn ends" if res.get("waiting") else "") + f" (relayed by {res.get('relayed_by')})")
+        return
+    if c == "approve":
+        print(f"{res['agent']}: {res.get('question') or 'its prompt'} -> {res.get('picked')}"
+              + (f", then: {res['text']}" if res.get("text") else ""))
         return
     if c == "interrupt":
         sent = res.get("sent")

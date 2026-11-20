@@ -18694,7 +18694,15 @@ def _hold_question(conn, mid):
     person, about = q["to_agent"], (f" about #{q['item_id']}" if q["item_id"] is not None else "")
     conn.execute("UPDATE messages SET held_for=?, held_until=? WHERE id=?",
                  (boss, iso(now() + parse_duration(hold)), mid))
-    if q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
+    if q["kind"] == "alert" and q["body"].startswith(PROMPT_NOTE):  # a prompt in a session's pane (#6282)
+        body = (f"{q['from_agent']} waits at a prompt in its terminal (alert #{mid}{about}): {full_text(q['body'])}. "
+                f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: maxpm "
+                f"approve {q['from_agent']} <option number> (or --text \"<what to do instead>\"). Approve a read of a "
+                f"file that is no secret in the project's folders or in a folder the task names, and an edit or a "
+                f"command that the task needs. Send on to {person} a secret, a deletion, a push, a payment, a sign-in "
+                f"to an account, or what you cannot judge: maxpm forward {mid} [--note \"<what you add>\"]. With neither "
+                f"within {hold} (question_hold), {person} gets it.")
+    elif q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
         body = (f"{q['from_agent']} alerts {person} (alert #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Do what it asks when {person} is not needed, "
                 f"then close it: maxpm forward {mid} --drop --note \"<what you did>\". Else send it on to {person}: "
@@ -18710,6 +18718,35 @@ def _hold_question(conn, mid):
     if q["item_id"] is not None:
         _event(conn, q["item_id"], "maxpm", f"{q['kind']} #{mid} to {person} held for the manager {boss} ({hold})")
     return {"manager": boss, "alert": alert, "body": body, "hold": hold}
+
+
+def prompt_hold_manager(conn, agent):
+    """The active manager that a prompt in agent's pane goes to first (#6282), or None: the person gets it at once (no
+    active manager, question_hold 0s, the agent is the manager, or an expert, whose person talks with it)."""
+    hold = setting(conn, "question_hold", agent=agent)
+    if parse_duration(hold).total_seconds() <= 0:
+        return None
+    boss = active_manager(conn)
+    if not boss or boss == agent:
+        return None
+    r = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
+    return None if r and r["role"] in ("manager", "expert") else boss
+
+
+def prompt_held(conn, agent, prompt=None):
+    """The manager that the prompt in agent's pane waits for now (#6282), or None: the person sees its card. Held:
+    the pane watcher's alert about it is held for the manager (held_for), or there is no alert yet (prompt_wait) and
+    a new one would be held. Not held: the CLI's own question to the person (prompt['ask']), the auto mode
+    classifier's prompt (prompt['why'], policy p3), and a prompt whose alert went to the person (forwarded, or its
+    question_hold ended)."""
+    if prompt and (prompt.get("ask") or prompt.get("why") or prompt.get("elsewhere")):
+        return None
+    rows = conn.execute("SELECT held_for FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+                        "WHERE m.kind='alert' AND m.from_agent=? AND m.read_at IS NULL AND m.body LIKE ?",
+                        (agent, PROMPT_NOTE + "%")).fetchall()
+    if rows:
+        return rows[0]["held_for"] if all(r["held_for"] for r in rows) else None
+    return prompt_hold_manager(conn, agent)
 
 
 def _unhold_question(conn, q, why=None):

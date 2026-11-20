@@ -208,6 +208,17 @@ ends the session, and tell the user.
   you. Read the screen (`maxpm view`, or the Terminal button). Send the person
   an alert with the question and the keys when only a person can answer it;
   else stop the agent and launch again.
+- **A prompt held for you** ("<agent> waits at a prompt in its terminal (alert
+  #<id>) ... It comes to you first"): a session's approval prompt (allow a
+  file read, a command, an edit) comes to you before the person, as a person
+  item does (#6282). Answer it when the person is not needed:
+  `maxpm approve <agent> <option number>`, or `--text "<what to do
+  instead>"`. Approve a read of a file that is no secret in the project's
+  folders or in a folder the task names, and an edit or a command that the
+  task needs. Send on to the person a secret, a deletion, a push, a payment, a
+  sign-in to an account, or what you cannot judge: `maxpm forward <id>`. With
+  neither within `question_hold` (10m), the person gets it. MaximizePM never
+  holds the auto mode classifier's prompt: that one needs the person (p3).
 - **An activity alert to you** ("<agent> stands still: ..."): the Claude Code
   hooks of a session that MaximizePM started say that it holds an item and
   waits on a permission prompt, ended its turn at its prompt, or reported

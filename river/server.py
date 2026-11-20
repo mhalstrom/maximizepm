@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import gc
 import gzip
 import hmac
@@ -2966,7 +2967,7 @@ def watch_prompts(conn):
     {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
     "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids, procs, asks = {}, {}, {}, {}, {}
+    waiting, states, ids, procs, asks, whys = {}, {}, {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     terminals = agent_terminals(conn)
     for agent in [a for a in STILL if a not in terminals or a in stopped]:
@@ -2995,6 +2996,7 @@ def watch_prompts(conn):
                                     "ORDER BY id", (agent,)).fetchone()
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
+                whys[agent] = parts.get("why")
                 STILL.pop(agent, None)
                 if q is not None and parts.get("command"):  # a permission prompt for a command (#5959)
                     asks[agent] = parts
@@ -3041,8 +3043,13 @@ def watch_prompts(conn):
                 if link:
                     conn.execute("UPDATE agents SET session_url=? WHERE name=?", (link, agent))
             to = [manager] if q is None and manager and manager != agent else people
+            # #6282: a prompt that the manager may answer (a file read, a command, an edit) goes to it first, as a
+            # person item does: the person's alert is held for question_hold. Not the classifier's (policy p3).
+            hold = q is not None and not whys.get(agent) and core.prompt_hold_manager(conn, agent)
             for person in to:
-                core._send(conn, "alert", agent, body, to=person, item_id=held)
+                mid = core._send(conn, "alert", agent, body, to=person, item_id=held)
+                if hold and person in people:
+                    core._hold_question(conn, mid)
             if to:  # with no person in the queue yet, the first one who registers gets it
                 st["told"] = body
                 told.append(agent)
@@ -3821,11 +3828,17 @@ def send_keys(pane, keys):
     return len(keys)
 
 
+# Set only inside prompt_approve (#6282): the active manager answers a session's prompt, so each typing step of
+# prompt_answer takes the manager as it takes a person. Nothing else lets an agent type into another agent's pane.
+_MANAGER_ANSWERS = contextvars.ContextVar("maxpm_manager_answers", default=False)
+
+
 def _typing_pane(conn, agent, who, shell=False, manager=False):
     """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane. shell: the pane
     may show only a shell (the Terminal tab, where a person types keys into the pane on purpose); the message box,
     the answer card and the settings never type into a shell (#5298). manager: the active manager may type too
     (maxpm interrupt, #5547)."""
+    manager = manager or _MANAGER_ANSWERS.get()
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
     if row and row["kind"] != "human" and not (manager and who == core.active_manager(conn)):
         raise RiverError("only a person or the manager types into an agent's terminal" if manager
@@ -4758,6 +4771,37 @@ def _menu_keys(at, n, row=False, key="Enter"):
     more, less = ("Right", "Left") if row else ("Down", "Up")
     last = {"key": "Enter"} if key == "Enter" else {"text": key}
     return [{"key": more if n > at else less}] * abs(n - at) + [last]
+
+
+def prompt_approve(conn, agent, option=None, text=None, who=None):
+    """maxpm approve <session> <option> [--text] (#6282, mark 2026-11-20: six 'Allow access to this file?' cards of
+    agy sessions reached him, 'the type of issue you should be able to resolve for me'): the active manager (or a
+    person) answers the prompt that a session's pane shows now, as the card on the page does. option: the number of
+    an option as the prompt lists it (1 is the first); text: what the agent does instead (the prompt's 'No, and tell
+    ... what to do differently'). Never the auto mode classifier's prompt (policy p3): that one needs the person."""
+    if not who or not (core._is_person(conn, who) or who == core.active_manager(conn)):
+        raise RiverError("only the active manager or a person answers a session's prompt")
+    if option is None and not (text or "").strip():
+        raise RiverError(f"name an option: maxpm approve {agent} <number>, or say what to do instead: --text \"...\"")
+    token = _MANAGER_ANSWERS.set(True)
+    try:
+        pane = _typing_pane(conn, agent, who)
+        p = pane_prompts(conn, {agent: pane}).get(agent)
+        if not p:
+            raise RiverError(f"{agent} waits at no prompt in its terminal now; nothing to answer")
+        if p.get("why"):
+            raise RiverError(f"{agent} waits at the auto mode classifier's prompt ({p['why'][:120]}): it needs the "
+                             f"person (policy p3); send it on: maxpm forward <the alert's id>")
+        pick = None
+        if option is not None:
+            if not isinstance(option, int) or not 1 <= option <= len(p["options"]):
+                raise RiverError(f"the prompt of {agent} has the options 1 to {len(p['options'])}: "
+                                 + "; ".join(f"{n} = {o}" for n, o in enumerate(p["options"], 1)))
+            pick = option - 1
+        res = prompt_answer(conn, agent, p["sig"], pick=pick, other=text, who=who)
+    finally:
+        _MANAGER_ANSWERS.reset(token)
+    return {**res, "question": p["question"]}
 
 
 def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None, picks=None, tab=None):
@@ -6009,6 +6053,8 @@ OPS = {
                                 relay_words(c, a["agent"], a.get("text") or "", a.get("person"), who))[1],
     "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
                                           session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
+    "prompt_approve": lambda c, a, who: (_same_queue(a.get("db")),  # maxpm approve (#6282), as agent_interrupt
+                                         prompt_approve(c, a["agent"], a.get("option"), a.get("text"), who))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),

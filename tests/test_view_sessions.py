@@ -1206,6 +1206,81 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 """
 
 
+class ManagerFirst(TmuxBase):
+    """#6282 (mark 2026-11-20: six agy 'Allow access to this file?' cards reached him: 'the type of issue you should be
+    able to resolve for me'): a session's prompt goes to the active manager first, as a person item does. The
+    person's card and alert wait question_hold; the manager answers with maxpm approve, or forwards it."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mgr")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        core.config_set(self.c, "prompt_wait", "0s")
+        self.addCleanup(server.PROMPTS.clear)
+
+    def card(self):
+        (c,) = [x for x in self.cards() if x["name"] == "ag"]
+        return c
+
+    def test_the_manager_answers_first_and_the_person_gets_what_it_leaves(self):
+        c = self.card()
+        self.assertEqual([w["kind"] for w in c["waiting"]], [])  # no card for the person, also before the alert
+        self.assertEqual(c["doing"], "Waits at a prompt: the manager mgr answers it first")
+        self.assertEqual(server.watch_prompts(self.c)["told"], ["ag"])
+        (alert,) = self.c.execute("SELECT * FROM messages WHERE from_agent='ag' AND to_agent='mark'").fetchall()
+        self.assertEqual(alert["held_for"], "mgr")
+        (boss,) = self.c.execute("SELECT body FROM messages WHERE to_agent='mgr' AND reply_to=?", (alert["id"],)).fetchall()
+        self.assertIn("maxpm approve ag <option number>", boss["body"])
+        self.assertIn(f"maxpm forward {alert['id']}", boss["body"])
+        self.assertEqual(core.needs_you(self.c, "mark"), [])
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], [])
+        # Only the active manager or a person answers; the option must be one of the prompt's.
+        core.register(self.c, "other")
+        with self.assertRaisesRegex(core.RiverError, "only the active manager or a person"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 1}, "other")
+        with self.assertRaisesRegex(core.RiverError, "the options 1 to 3: 1 = 1. Yes"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 4}, "mgr")
+        self.pane["keys"].clear()
+        r = server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 2}, "mgr")
+        self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
+        self.pane["keys"].clear()
+        server.OPS["prompt_approve"](self.c, {"agent": "ag", "text": "push to a branch first"}, "mgr")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])
+        # The prompt is gone: its alert closes, and the manager's alert with it.
+        self.pane["screen"] = "❯ \n"
+        server.watch_prompts(self.c)
+        core.sync_needs_you(self.c)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='mgr' AND read_at IS NULL")
+                         .fetchone()[0], 0)
+        # A prompt that the manager leaves: after question_hold the person gets its card and its alert.
+        self.pane["screen"] = PERMISSION
+        server.PROMPTS.clear()
+        server.watch_prompts(self.c)
+        with core.tx(self.c):
+            self.c.execute("UPDATE messages SET held_until='2000-01-01T00:00:00Z' WHERE held_for='mgr'")
+        core.sync_needs_you(self.c)
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        self.assertEqual(len(core.needs_you(self.c, "mark")), 1)
+
+    def test_an_expert_s_prompt_and_the_classifier_s_go_to_the_person(self):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='expert' WHERE name='ag'")
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role=NULL WHERE name='ag'")
+        # Policy p3: the auto mode classifier's prompt needs the person; maxpm approve refuses it.
+        self.pane["screen"] = PERMISSION.replace(" Do you want to proceed?",
+                                                 " Auto mode held this command for the server-side classifier to review\n"
+                                                 " Do you want to proceed?")
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        with self.assertRaisesRegex(core.RiverError, "policy p3"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 1}, "mgr")
+        server.watch_prompts(self.c)
+        self.assertEqual([r["held_for"] for r in self.c.execute(
+            "SELECT held_for FROM messages WHERE from_agent='ag' AND to_agent='mark'")], [None])
+
+
 class AskDialog(TmuxBase):
     """#6234 (mark 2026-11-19): an expert showed Claude Code's AskUserQuestion dialog with four questions, and the
     Sessions page said 'Answer it', but the click opened nothing: the page read no prompt from the pane. The card now

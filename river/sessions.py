@@ -826,6 +826,10 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         # The override of pane_state only after a read of the panes (prompts given), not with no read at all.
         key, label = pane_state(conn, a, tail["turn"], prompt,
                                 prompts is not None and bool((terminals or {}).get(a["name"])), waiting)
+        # #6282: a prompt that waits for the manager first shows no card to the person (as a held question, #5307).
+        boss = core.prompt_held(conn, a["name"], prompt) if prompt else None
+        if boss:
+            prompt, label = None, f"waits at a prompt: the manager {boss} answers it first"
         if not path and not a.get("pid") and key not in ("stopping", "answer", "prompt"):
             # It ran no maxpm command and wrote no transcript: not working (#4621). Its pane shows a shell: it ended.
             # A prompt that the pane watcher reported (maxpm report --state blocked) waits on the person, also before
