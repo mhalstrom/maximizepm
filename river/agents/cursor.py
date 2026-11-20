@@ -351,6 +351,25 @@ def build_command(name, folder, model, effort, settings, prompt):
     return argv
 
 
+def trust_workspace(folder, command, env=None):
+    """Add --trust to the start of a worktree that MaximizePM made (#6416, as #6339 for the other CLIs), so Cursor
+    starts there without 'Do you trust the contents of this directory?'. In an interactive start, cursor-agent
+    2026.11.19 writes its own trust marker for each workspace folder that has none when --trust is on, and then skips
+    the question. A folder that MaximizePM did not make gets no call and keeps the question."""
+    import shlex
+    if not folder or not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if not words or "--trust" in words:
+        return command
+    # The flag goes after the program word, also when variables (A=1 cursor-agent ...) come first.
+    at = next((i for i, w in enumerate(words) if Path(w).name in ("cursor-agent", "agent")), 0)
+    return shlex.join(words[:at + 1] + ["--trust"] + words[at + 1:])
+
+
 def parse_command(words):
     """A hand-written cursor-agent command that a profile builds exactly: --model {model}, the flags of SETTINGS with
     a known value, and one prompt. Anything else (print mode, an API key, a fixed model, a worktree): None."""

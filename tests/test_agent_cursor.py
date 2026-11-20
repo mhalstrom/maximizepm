@@ -123,6 +123,38 @@ class Launch(Env):
         self.assertIsNone(self.a.parse_command(["cursor-agent", "--model", "auto", "hi"]))  # a fixed model
         self.assertIsNone(self.a.parse_command(["agent", "hi"]))  # the Grok CLI's name
 
+    def test_trust_workspace_adds_the_trust_flag_once(self):
+        """#6416: --trust goes after the program word, once; a command that has it already stays as it is."""
+        self.assertEqual(cursor.trust_workspace("/wt", "cursor-agent --model auto 'run go'"),
+                         "cursor-agent --trust --model auto 'run go'")
+        self.assertEqual(cursor.trust_workspace("/wt", "A=1 cursor-agent go"), "A=1 cursor-agent --trust go")
+        self.assertEqual(cursor.trust_workspace("/wt", "cursor-agent --trust go"), "cursor-agent --trust go")
+        self.assertEqual(cursor.trust_workspace("", "cursor-agent go"), "cursor-agent go")
+
+    def test_a_worktree_made_by_maxpm_starts_cursor_with_trust(self):
+        """#6416: a worktree that MaximizePM made starts cursor-agent with --trust; the project's own folder (shared,
+        not made by MaximizePM) keeps Cursor's trust question."""
+        import subprocess
+        c = core.connect()
+        self.addCleanup(c.close)
+        root = str(self.root / "web")
+        os.makedirs(root)
+        for a in (("init", "-q", "-b", "main"), ("commit", "-q", "--allow-empty", "-m", "first")):
+            subprocess.run(["git", "-C", root, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                           capture_output=True)
+        core.project_add(c, "web", path=root)
+        core.config_set(c, "launch_agents", "Cursor=@cursor")
+        add = lambda title: core.item_add(c, "web", title)["id"]
+        t = server.dispatch_item(c, add("shared"), agent="Cursor", runner=lambda line: None)
+        self.assertNotIn("--trust", shlex.split(t["command"]))
+        core.unregister(c, t["session_name"])
+        core.config_set(c, "workspace", "worktree", project="web")
+        sent = []
+        t = server.dispatch_item(c, add("in a worktree"), agent="Cursor", runner=sent.append)
+        self.assertTrue(t["workspace"])
+        self.assertIn("--trust", shlex.split(t["command"]))
+        self.assertTrue(sent[-1].endswith(t["command"]))
+
     def test_a_built_command_parses_back(self):
         s = {"force": "on", "sandbox": "enabled", "mode": "ask"}
         argv = self.a.build_command(None, None, None, None, s, "go")
