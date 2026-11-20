@@ -8,6 +8,9 @@ build/
 desktop/node_modules/
 desktop/out/
 desktop/build/
+push-worker/node_modules/
+push-worker/.wrangler/
+push-worker/.dev.vars
 river/bin/
 .DS_Store
 .playwright-mcp/
