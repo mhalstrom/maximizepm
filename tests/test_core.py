@@ -3757,15 +3757,17 @@ class Prompts(Base):
         p = core.prompt_for(self.c, h)
         from pathlib import Path
         folder = Path(self.dir.name).resolve()
-        for part in (f"cd {folder} && maxpm --as mark show {h}", "docs/policy.md", "It blocks: #",
-                     f"maxpm --as mark done {h} --output", "takeover"):
+        # No --as mark: maxpm refuses a person's name inside a session (#6442).
+        for part in (f"cd {folder} && maxpm show {h}", "docs/policy.md", "It blocks: #",
+                     f"maxpm done {h} --output", "takeover"):
             self.assertIn(part, p)
         allp = core.prompt_for_all(self.c, "mark")
         self.assertIn("1. Item #", allp)
         # The agent that goes through the list (#5103): one at a time, read first, record each answer.
         for part in ("Never two in one dialog or message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
             self.assertIn(part, allp)
-        self.assertIn(f"maxpm --as mark answer {q['id']}", allp)
+        self.assertIn(f"maxpm answer {q['id']}", allp)
+        self.assertNotIn("--as mark", p + allp)
         core.done(self.c, h, "approved", "mark")
         self.assertIn("Nothing", core.prompt_for_all(self.c, "nobody"))
 
@@ -7184,7 +7186,7 @@ class EscalationOptions(Base):
 
 class NeedsYouDialog(Base):
     """#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to use the question
-    asking modal'. The needs-you session puts each decision with maxpm --as <person> forward (the page's dialog), and
+    asking modal'. The needs-you session puts each decision with maxpm forward (the page's dialog), and
     the person's answer there comes back to it as a notice, so it goes on to the next one."""
 
     OPTS = ["Blue: calm, the color of the logo", "Red: loud, for the sale week"]
@@ -7210,7 +7212,7 @@ class NeedsYouDialog(Base):
         core.message(self.c, "question", "Which font?", to="mark", item=x, actor="w1")
         for p in (core.prompt_for_all(self.c, "mark"),
                   core.prompt_for(self.c, core.item_list(self.c, project="a")[0]["id"], "mark")):
-            for part in ("maxpm --as mark forward --item <id> --question", "--recommend <label>",
+            for part in ("maxpm forward --item <id> --question", "--recommend <label>",
                          "maxpm inbox --wait", "record nothing", "Decision <n> of <total>"):
                 self.assertIn(part, p)
 
@@ -7242,6 +7244,32 @@ class NeedsYouDialog(Base):
         self.assertIn(f"question #{q['id']} from w1: Blue", self.notices()[0])
         self.assertEqual(self.c.execute("SELECT choice FROM messages WHERE kind='answer' AND to_agent='w1'")
                          .fetchone()["choice"], "Blue")
+
+    def test_the_session_forwards_for_its_person_without_as(self):
+        # #6442: the needs-you session ran plain 'maxpm forward' (no --as mark), was refused, and asked in the chat.
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        core.forward(self.c, item=i, actor="you-1", options=self.OPTS, recommend="Blue", question="Banner color?")
+        d = core.item_show(self.c, i)["decision"]
+        self.assertEqual((d["by"], d["options"][0]["label"]), ("you-1", "Blue"))
+        core.done(self.c, i, None, actor="mark", choice="Blue")
+        self.assertIn("[choice: Blue]", self.notices()[0])
+        # The one-item helper that the page opens for a person's item acts for that person too.
+        j = core.item_add(self.c, "a", "Decide the font", doer="human", actor="mark")["id"]
+        core.register(self.c, "help-1")
+        self.assertEqual(core.go(self.c, self.dir.name, actor="help-1", focus=f"help:{j}@mark")["role"], "helper")
+        core.forward(self.c, item=j, actor="help-1", options=self.OPTS, recommend="Red")
+        self.assertEqual(core.item_show(self.c, j)["decision"]["by"], "help-1")
+        # The helper records an answer from its chat under its own name: no notice to itself.
+        core.done(self.c, j, None, actor="help-1", choice="Red")
+        self.assertEqual(self.notices("help-1"), [])
+        # Any other session still leaves it to the manager or the person.
+        with self.assertRaisesRegex(RiverError, "only the manager forwards"):
+            core.forward(self.c, item=j, actor="w1", question="Which font?")
+
+    def test_the_steps_name_the_option_limits(self):
+        core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")
+        self.assertIn(f"a label of at most {core.DECISION_LABEL_MAX} characters, a line of at most "
+                      f"{core.DECISION_DETAIL_MAX}", core.prompt_for_all(self.c, "mark"))
 
     def test_the_manager_s_decision_and_an_ended_session_get_no_notice(self):
         core.manage(self.c, self.dir.name, "boss")

@@ -17398,7 +17398,9 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
                 raise RiverError(f"refused: #{item_id} still waits on {ids} (maxpm blockers {item_id}). Finish those "
                                  f"first, or close it anyway with a reason: maxpm done {item_id} --force \"<why>\"")
             _event(conn, it["id"], actor, f"done while {ids} still open: {force.strip()}")
-        if it["doer"] == "human" and _is_ai(conn, actor):
+        # The needs-you session and the one-item helper record what the person said in their chat (#6442): no
+        # takeover. An approval stays the person's own (_approval_close_refusal, before this).
+        if it["doer"] == "human" and _is_ai(conn, actor) and not helper_person(conn, actor):
             if not (note or "").strip():
                 raise RiverError(f"#{item_id} is for a person; to mark it {status} as an agent, say why the user "
                                  f"no longer needs to do it: maxpm {'done' if status == 'done' else 'drop'} {item_id} "
@@ -17476,7 +17478,7 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
         said = output or note  # with a choice, the output starts with its label (decision_choice)
         _tell_asker(conn, it, f"{actor or 'The person'} answered #{it['id']} {it['title']} ({status})"
                     + (f": {said}" if said else "") + (f" [choice: {choice}]" if choice else "")
-                    + ". It is closed; record nothing. Go on to the next one.", it["id"])
+                    + ". It is closed; record nothing. Go on to the next one.", it["id"], actor)
     return res
 
 
@@ -19574,6 +19576,17 @@ def _is_person(conn, name):
     return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (name,)).fetchone())
 
 
+def helper_person(conn, name):
+    """The person whose items session name goes through with them (#6442): the needs-you session (role assistant)
+    or the one-item helper (role helper), from its assistant_for, else the first person. None for any other agent."""
+    r = conn.execute("SELECT role, assistant_for FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone() \
+        if name else None
+    if not r or r["role"] not in ("assistant", "helper"):
+        return None
+    person = r["assistant_for"] or _person(conn)
+    return person if _is_person(conn, person) else None
+
+
 def _item_stands(conn, sender, item_id):
     """Inside a tx, at the send. True when MaximizePM knows that the item of a message from sender stands
     still: the sender blocked it or released it in the last BLOCKED_WINDOW. With no item on the message: an
@@ -19958,13 +19971,14 @@ def decision_choice(decision, choice, text=None):
     return got, f"{got}: {text}" if text else got
 
 
-def _tell_asker(conn, row, text, item_id=None):
+def _tell_asker(conn, row, text, item_id=None, actor=None):
     """After the commit (#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to
     use the question asking modal'): the person answered, in the page's dialog, a decision that a session put for
-    them (decision_of(row)["by"], maxpm --as <person> forward): that session gets a notice, into its chat when its
-    platform has native_message, so it goes on to the next one. Not when that session recorded the answer itself."""
+    them (decision_of(row)["by"], maxpm forward in that session, #6442): that session gets a notice, into its chat
+    when its platform has native_message, so it goes on to the next one. Not when that session recorded the answer
+    itself (its token, or actor: its own name)."""
     by = (decision_of(row) or {}).get("by")
-    if not by or by == TOKEN_AGENT.get():
+    if not by or by in (TOKEN_AGENT.get(), actor):
         return
     a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (by,)).fetchone()
     if not a or _agent_state(conn, a) in ("stopped", "gone"):
@@ -20003,11 +20017,17 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, opt
     if (msg_id is None) == (item is None):
         raise RiverError("name what to forward: a held message (maxpm forward <message-id>) or a held person item "
                          "(maxpm forward --item <item-id>)")
+    helper = None
     if not (_is_manager(conn, actor) or _is_person(conn, actor)):
-        raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
+        # The needs-you session and the one-item helper act for their person (#6442: plain maxpm forward was refused
+        # there, and the session asked in the chat instead of the dialog).
+        person = helper_person(conn, actor)
+        if not person:
+            raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
+        helper, actor = actor, person
     note = note.strip() if note and note.strip() else None
     decision = decision_parse(options, recommend, question)
-    own = TOKEN_AGENT.get()
+    own = helper or TOKEN_AGENT.get()
     if decision and own and own != actor and _is_person(conn, actor):
         # A session that goes through the list with the person (#6436: the needs-you session, or the one-item helper)
         # puts each decision as the person; the person's answer in the dialog then comes back to it (_tell_asker).
@@ -20174,7 +20194,7 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False, cho
         _deliver_answer(conn, q, mid, actor, body.strip(), for_person, choice)
     if q["from_agent"] != (decision_of(q) or {}).get("by"):  # an asker that put it gets the answer itself
         _tell_asker(conn, q, f"{actor} answered question #{q['id']} from {q['from_agent']}: {body.strip()}. It is "
-                    f"closed and the asker has the answer; record nothing. Go on to the next one.", q["item_id"])
+                    f"closed and the asker has the answer; record nothing. Go on to the next one.", q["item_id"], actor)
     return message_show(conn, mid)
 
 
@@ -22652,8 +22672,8 @@ def _item_prompt_section(conn, a, ann, person, n=None):
         if text.strip():
             lines.append(f"   {label}: {text.strip()}")
     cd = f"cd {p['path']} && " if p["path"] else ""
-    lines.append(f"   Read it first: {cd}maxpm --as {person} show {a['id']}")
-    lines.append(f"   Record the result: maxpm --as {person} done {a['id']} --output \"<what was decided or done>\"")
+    lines.append(f"   Read it first: {cd}maxpm show {a['id']}")
+    lines.append(f"   Record the result: maxpm done {a['id']} --output \"<what was decided or done>\"")
     return "\n".join(lines)
 
 
@@ -22675,11 +22695,12 @@ into one table. If they ask what something means, explain it, then ask the same 
 # The decision goes into the page's dialog (#6436, mark 2026-11-20: 'the needs you agent that helps go through action
 # items also needs to use the question asking modal'): maxpm forward puts the options on the item or question, the
 # page opens its card with them, and the person's answer there closes it and comes back to the session (_tell_asker).
-DIALOG_STEPS = """Put the decision itself in the dialog on {person}'s MaximizePM page, not in the chat:
-     maxpm --as {person} forward --item <id> --question "<one short sentence>" \\
+DIALOG_STEPS = """Put the decision itself in the dialog on {person}'s MaximizePM page, not in the chat
+   (run maxpm with no --as: your session acts for {person}):
+     maxpm forward --item <id> --question "<one short sentence>" \\
        --option "<label>: <one line: what happens>" --option "<label>: ..." --recommend <label>
-   2 to 4 options, your recommendation among them. A question (not an item): maxpm --as {person} forward
-   <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
+   2 to 4 options, your recommendation among them; a label of at most 60 characters, a line of at most 200.
+   A question (not an item): maxpm forward <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
    --question "<what to do>"; the dialog then shows a text box. The page shows the dialog to them.
    Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
    background command). The answer in the dialog closes the item or question, and MaximizePM sends you a
@@ -22751,7 +22772,7 @@ def prompt_for_all(conn, person=None):
     parts += [_item_prompt_section(conn, a, ann, person, n) for n, a in enumerate(items, 1)]
     for n, q in enumerate(qs, len(items) + 1):
         parts.append(f"{n}. Question #{q['id']} from {q['from_agent']}" + (f" about #{q['item_id']}" if q["item_id"] else "")
-                     + f": {q['body']}\n   Answer it: maxpm --as {person} answer {q['id']} \"<answer>\"")
+                     + f": {q['body']}\n   Answer it: maxpm answer {q['id']} \"<answer>\"")
     parts.append(LIST_STEPS.format(person=person))
     return "\n\n".join(parts)
 
@@ -25235,7 +25256,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         person = _person(conn, person or None)
         brief.update(role="helper", item=None, help_prompt=prompt_for_all(conn, person),
                      why=f"the page opened this session to work through what waits on {person}, with them")
-        _set_role_note(conn, actor, "helper", None)
+        _set_role_note(conn, actor, "helper", None, person)
         return brief
     if role is None and fid.isdigit() and int(fid) in annotate(conn, closed=False):
         f = item_show(conn, int(fid))
@@ -25243,7 +25264,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             person = _person(conn, person or None)
             brief.update(role="helper", item=None, help_prompt=prompt_for(conn, f["id"], person),
                          why=f"the page opened this session to do #{f['id']} together with {person}")
-            _set_role_note(conn, actor, "helper", f["id"])
+            _set_role_note(conn, actor, "helper", f["id"], person)
             return brief
         # Start or Dispatch opened this session for one item: claim it, or say why not.
         if kind == "item" and f["status"] in OPEN_STATES and f["assignee"] != actor:
@@ -25509,9 +25530,13 @@ def _deploy_brief(conn, item):
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
 
 
-def _set_role_note(conn, actor, role, item_id):
+def _set_role_note(conn, actor, role, item_id, person=None):
+    """person: a helper's person (#6442), whom its maxpm forward acts for (helper_person)."""
     note = f"role: {role}" + (f" on #{item_id}" if item_id else "")
     with tx(conn):
+        if person:
+            conn.execute("UPDATE agents SET assistant_for=? WHERE name=? AND COALESCE(role, '') NOT IN "
+                         "('expert', 'assistant', 'plain')", (person, actor))
         # A role with work ends a wait; idle keeps the wait clock, so wait_max counts from the first wait.
         keep = role in ("idle", "waiting")
         # An expert stays an expert when a person has it claim an item (#4955), and an assistant an assistant (#5110);
