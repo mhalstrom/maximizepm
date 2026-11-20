@@ -530,6 +530,45 @@ class LimitStopHandbackAndRestart(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         self.assertIn("uncommitted work", launched[0][0]["custom_prompt"])
 
+    def test_a_stop_before_the_claim_starts_the_pushed_item_on_the_fallback(self):
+        # #6418: agy answered its first prompt with its limit, so the session never claimed the item serve pushed to
+        # it. Before, serve only sent an alert and the item lay open after connect_within.
+        core.register(self.conn, "app-new1")
+        with core.tx(self.conn):
+            self.conn.execute("UPDATE agents SET agent_type='antigravity' WHERE name='app-new1'")
+        it = core.item_add(self.conn, "app", "Implement feature Y")
+        other = core.item_add(self.conn, "app", "Implement feature Z")
+        core.scope_start(self.conn, "app-new1", [f"tasks:{it['id']}"], "Dispatch started this session for it")
+        core.push(self.conn, it["id"], "app-new1", "Dispatch", "mark")
+        launched = []
+
+        def fake_kill(conn, agent, reason, actor=None, by_serve=False):
+            return core._killed(conn, agent, reason, actor or "maxpm", pid=None, killed=True)
+
+        screen = {"ended": False, "running": "antigravity", "tty": None, "target": "maxpm:app-new1",
+                  "text": "Individual quota reached. Resets in 3h15m2s\n? for shortcuts\n"}
+        with mock.patch.object(server, "agent_terminals", return_value={"app-new1": "%1"}), \
+             mock.patch.object(server, "_pane_screen", return_value=screen), \
+             mock.patch.object(server, "_pane_session_id", return_value=None), \
+             mock.patch.object(server, "_pane_process", return_value=None), \
+             mock.patch.object(server, "kill_agent", side_effect=fake_kill), \
+             mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", side_effect=lambda t, env, r, c: launched.append((t, env))):
+            res = server.watch_prompts(self.conn)
+
+        rr = res["limit_restarts"][0]
+        self.assertEqual((rr["agent"], rr["item_id"], rr["fallback"]), ("app-new1", it["id"], "Claude Code"))
+        new = rr["restarted"]
+        self.assertEqual(core.item_show(self.conn, it["id"])["reserved_for"], new)
+        self.assertIsNone(core.item_show(self.conn, other["id"])["reserved_for"])
+        self.assertIsNotNone(self.conn.execute("SELECT stop_at FROM agents WHERE name='app-new1'").fetchone()[0])
+        # It did no work, so the new session starts the item as a Dispatch does: no prompt to continue a diff.
+        self.assertEqual(len(launched), 1)
+        self.assertFalse(launched[0][0].get("custom_prompt"))
+        self.assertEqual(launched[0][1]["MAXPM_FOCUS"], f"item:{it['id']}")
+        events = [r["change"] for r in self.conn.execute("SELECT change FROM events WHERE item_id=?", (it["id"],))]
+        self.assertTrue(any(f"started {new}" in e and "take it" in e for e in events))
+
 
 class UsageProbe(unittest.TestCase):
     """#6364: with no session of Claude Code or agy, maxpm serve opens the agent in a hidden pane, types /usage, reads

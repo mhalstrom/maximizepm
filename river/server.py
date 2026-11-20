@@ -3213,6 +3213,9 @@ def _handle_limit_stops(conn, limit_hits):
         held = [dict(r) for r in conn.execute(
             "SELECT id, title, project_id, tier, model FROM items WHERE assignee=? AND status IN ('in_progress','held') "
             "ORDER BY id", (agent,)).fetchall()]
+        claimed = bool(held)
+        if not held and ag["role"] not in ("manager", "expert"):
+            held = _unclaimed_work(conn, agent)  # #6418: it stopped at its first prompt, before its claim
         msg = hit.get("message") or f"{ad.label} usage limit reached"
         reset_part = f" (resets {hit['resets_text'] or hit['resets_at']})" if (hit.get("resets_text") or hit.get("resets_at")) else ""
         if ag["role"] in ("manager", "expert") or not held:
@@ -3251,9 +3254,10 @@ def _handle_limit_stops(conn, limit_hits):
             out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "reason": "no fallback"})
             continue
         _fb_id, fb_label, _entry = fb  # dispatch_item picks the entry again (#6361): its model and effort run
+        # A session that never claimed its item did no work: the new one starts it as a plain Dispatch does.
         cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at its {ad.label} usage limit"
                        f"{reset_part} ({msg}). Check git status and git diff in this folder and continue the "
-                       f"uncommitted work.")
+                       f"uncommitted work.") if claimed else None
         try:
             started = dispatch_item(conn, primary["id"], agent=fb_label, actor="maxpm",
                                     prompt=cont_prompt, reuse_workspace_from=agent, auto_agent=True)
@@ -3272,10 +3276,27 @@ def _handle_limit_stops(conn, limit_hits):
         new_name = started.get("session_name") or started.get("pushed_to")
         with core.tx(conn):
             core._event(conn, primary["id"], "maxpm",
-                        f"started {new_name} ({fb_label}) to continue uncommitted work after {agent} hit "
+                        f"started {new_name} ({fb_label}) to "
+                        + ("continue uncommitted work" if claimed else "take it") + f" after {agent} hit "
                         f"{ad.label} usage limit{reset_part}")
         out.append({"agent": agent, "item_id": primary["id"], "restarted": new_name, "fallback": fb_label})
     return out
+
+
+def _unclaimed_work(conn, agent):
+    """The open items that a session has but did not claim yet (#6418): pushed to it (reserved_for), or a task of its
+    scope (tasks:<id>) that nobody holds and that is reserved for no other session. A session that stops at its usage
+    limit at its first prompt (agy) has such an item: serve started it for that item and it never ran maxpm go."""
+    rows = conn.execute("SELECT id, title, project_id, tier, model FROM items WHERE reserved_for=? AND status='open' "
+                        "ORDER BY id", (agent,)).fetchall()
+    out = {r["id"]: dict(r) for r in rows}
+    ids = [i for p in core.agent_scope(conn, agent) or [] if p["kind"] == "tasks" for i in p["value"]]
+    for i in ids:
+        r = conn.execute("SELECT id, title, project_id, tier, model FROM items WHERE id=? AND status='open' "
+                         "AND assignee IS NULL AND (reserved_for IS NULL OR reserved_for=?)", (i, agent)).fetchone()
+        if r:
+            out.setdefault(r["id"], dict(r))
+    return [out[k] for k in sorted(out)]
 
 
 # The agents whose usage maxpm serve reads with a probe (#6364). They write no limits to a log (Codex
