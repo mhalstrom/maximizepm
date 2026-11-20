@@ -466,6 +466,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 # screen_settings(lines) -> {setting key: value}: optional, the settings that the session's screen shows now (agy's
 # footer: mode, model and effort, #6260), from the plain lines of its pane; {} when the screen shows none. The Settings
 # dialog of a session takes them before the chat log's (chat_settings): the screen shows a change at once.
+# model_group(model) -> str | None: optional, the quota group of a model when the agent counts its usage per group of
+# models (agy: 'Gemini models', 'Claude and GPT models', #6382), named as screen_limits names its windows
+# ('<group>: 5-hour'). A limit stop of a session then limits only its model's group; None: the whole agent.
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
 #      "process_args": optional: a regex that finds the agent in the command line (ps args) of a process on the
@@ -604,7 +607,7 @@ PARTS = {
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook", "project_hooks",
                                                            "hook_answer")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings", "screen_limits", "limit_stop",
-                                                             "latest_limits")},
+                                                             "latest_limits", "model_group")},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
@@ -1116,6 +1119,14 @@ class Adapter:
         except Exception:  # noqa: BLE001 - a reader of a screen: none, not a loop error
             return None
         return _norm_limits(got) if got else None
+
+    def model_group(self, model):
+        """The quota group of `model` (#6382), or None without the reader or for a model of no group."""
+        f = self._fn("model_group")
+        try:
+            return (f(model) or None) if f and model else None
+        except Exception:  # noqa: BLE001 - a reader of a name: the whole agent counts
+            return None
 
     def latest_limits(self, root=None):
         """The plan limits that the agent wrote last to any of its logs (#6348: Codex), in the shape of chat_limits,

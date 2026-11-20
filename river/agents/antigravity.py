@@ -657,6 +657,18 @@ def screen_limits(lines, now=None):
     return out or None
 
 
+def model_group(model):
+    """The quota group of a model, named as screen_limits names it (#6382): agy counts the Gemini models in one group
+    and the Claude and GPT models in another, each with its own 5-hour and weekly limit (the Orchestrator's id starts
+    with gemini-). None for another model: its limit stop then limits all of agy."""
+    m = (model or "").strip().lower()
+    if m.startswith("gemini"):
+        return "Gemini models"
+    if m.startswith(("claude", "gpt")):
+        return "Claude and GPT models"
+    return None
+
+
 def chat_requests(session_ref, root=None):
     """(requests, fork) of a conversation for maxpm usage: each model step of its transcript is one model call, keyed
     by its step ('s<step>'), with its time and its token counts. agy writes no prompt cache, and no conversation starts

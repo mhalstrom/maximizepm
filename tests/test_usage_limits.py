@@ -374,6 +374,86 @@ class ModelGroupLimits(unittest.TestCase):
         self.assertIn("Gemini models: 5-hour at 0% left", str(ctx.exception))
 
 
+class LimitStopModelGroup(unittest.TestCase):
+    """#6382: an agy session that stops at its limit limits only the model group of its own model."""
+    STOP = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h50m."
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = _db(self.tmp.name)
+        self.t0 = datetime(2026, 11, 20, 17, 52, 0, tzinfo=timezone.utc)
+        self.p_now = mock.patch.object(core, "now", side_effect=lambda: self.t0)
+        self.p_now.start()
+        self.addCleanup(self.p_now.stop)
+        p = mock.patch.object(server, "LIMIT_SEEN", {})
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+
+    def _stop(self, model, footer=None):
+        """watch_prompts reads a pane of an agy worker that shows agy's limit-stop message."""
+        core.register(self.conn, "agy-w")
+        with core.tx(self.conn):
+            self.conn.execute("UPDATE agents SET agent_type='antigravity', model=? WHERE name='agy-w'", (model,))
+        it = core.item_add(self.conn, "app", "Build feature")
+        core.claim(self.conn, it["id"], "agy-w")
+        text = self.STOP + "\n? for shortcuts" + (" " * 40 + footer if footer else "") + "\n"
+        screen = {"ended": False, "running": "antigravity", "tty": None, "target": "maxpm:agy-w", "text": text}
+
+        def fake_kill(conn, agent, reason, actor=None, by_serve=False):
+            return core._killed(conn, agent, reason, actor or "maxpm", pid=None, killed=True)
+        with mock.patch.object(server, "agent_terminals", return_value={"agy-w": "%1"}), \
+             mock.patch.object(server, "_pane_screen", return_value=screen), \
+             mock.patch.object(server, "_pane_session_id", return_value=None), \
+             mock.patch.object(server, "_pane_process", return_value=None), \
+             mock.patch.object(server, "kill_agent", side_effect=fake_kill), \
+             mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", return_value={}):
+            server.watch_prompts(self.conn)
+        return it
+
+    def test_a_gemini_stop_leaves_the_claude_models_free(self):
+        self._stop(None, footer="auto · Gemini 4 Neon · high")  # the model from agy's footer
+        it = core.item_add(self.conn, "app", "Another feature")
+        st = core.agent_limit_status(self.conn, "antigravity")
+        self.assertFalse(st["limited"])
+        self.assertEqual([w["name"] for w in st["windows"]], ["Gemini models: limit stop"])
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-medium"))
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gpt-oss-120b-medium"))
+        lim = core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high")
+        self.assertEqual(lim["resets_at"], "2026-11-20T19:42:00Z")
+        # The case of 2026-11-20: a launch with a Claude model starts; one with a Gemini model is refused.
+        core.config_set(self.conn, "launch_agents", "Claude Code=@claude-code; Antigravity CLI=@antigravity")
+        t = core.launch_target(self.conn, item=it["id"], agent="Antigravity CLI", model="claude-opus-5-5-medium")
+        self.assertEqual(t["platform"], "antigravity")
+        with self.assertRaises(core.RiverError) as ctx:
+            core.launch_target(self.conn, item=it["id"], agent="Antigravity CLI", model="gemini-4-neon-high")
+        self.assertIn("Gemini models: limit stop at 0% left", str(ctx.exception))
+        # The group's limit ends at its reset.
+        self.t0 += timedelta(hours=1, minutes=51)
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high"))
+
+    def test_the_model_the_session_declared_counts_with_no_footer(self):
+        self._stop("claude-opus-5-5-medium")
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon"))
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity", model="gpt-oss-120b-medium"))
+
+    def test_the_whole_agent_when_usage_shows_the_other_group_full(self):
+        at = core.iso(self.t0 + timedelta(hours=3))
+        core.record_agent_limit(self.conn, "antigravity", windows=[
+            {"name": "Gemini models: 5-hour", "used_percent": 40.0, "remaining_percent": 60.0, "resets_at": at},
+            {"name": "Claude and GPT models: 5-hour", "used_percent": 100.0, "remaining_percent": 0.0,
+             "resets_at": at}])
+        self._stop("gemini-4-neon")
+        self.assertTrue(core.agent_limit_status(self.conn, "antigravity")["limited"])
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity"))
+
+    def test_no_model_known_limits_the_whole_agent(self):
+        self._stop(None)
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-medium"))
+
+
 class LimitStopHandbackAndRestart(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

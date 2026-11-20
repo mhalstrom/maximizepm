@@ -3588,17 +3588,61 @@ def _full_group_windows(windows, read_at=None, cur_now=None):
     return out
 
 
+def _limit_group(conn, aid, model):
+    """The quota group of `model` in agent `aid` (#6382): the group of a window the agent showed before whose
+    provider words the model has ('Claude and GPT models' for opus), else the adapter's model_group; None when the
+    agent counts no groups or the model is of none."""
+    words = _model_words(conn, model)
+    r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    try:
+        prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
+    except ValueError:
+        prev = []
+    for w in prev:
+        g = _window_group(w.get("name"))
+        if g and g & words:
+            return w["name"].split(":", 1)[0].strip()
+    ad = _adapters().find(aid)
+    return ad.model_group(model) if ad is not None else None
+
+
 def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
-                       reason=None, source="screen"):
+                       reason=None, source="screen", model=None):
     """Record an agent type's remaining usage or limit-stop state (#6348).
     When `limited` is True and `resets_at` is None, sets a default cooldown (DEFAULT_LIMIT_COOLDOWN) so launches
     avoid the exhausted agent until it resets.
     A window of one model group at 0% left (agy's 'Gemini models: 5-hour') does not limit the whole agent while
-    another group has quota left (#6370): agent_is_limited with the launch's model checks those windows."""
+    another group has quota left (#6370): agent_is_limited with the launch's model checks those windows.
+    `model`: the model of a session that stopped at its limit (#6382). When the agent counts its quota per model group
+    (_limit_group), the stop adds a full window '<group>: limit stop' to the windows read before, and limits the whole
+    agent only when they show every group full."""
     aid = _limit_adapter_id(agent_type)
     if not aid:
         return None
     t = now()
+    group_stop = None
+    if limited and model and not windows:
+        group_stop = _limit_group(conn, aid, model)
+    if group_stop:
+        r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+        try:
+            prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
+        except ValueError:
+            prev = []
+        for w in prev:
+            try:
+                gone = bool(w.get("resets_at")) and parse_iso(w["resets_at"]) <= t
+            except (ValueError, TypeError):
+                gone = False
+            if gone and w.get("used_percent") is not None:
+                # A window whose reset passed started again: it does not count as full (as in _format_limit_row).
+                w.update(used_percent=0.0, remaining_percent=100.0, resets_at=None, resets_text=None)
+        stop_w = {"name": f"{group_stop}: limit stop", "used_percent": 100.0, "remaining_percent": 0.0,
+                  "resets_at": resets_at or iso(t + DEFAULT_LIMIT_COOLDOWN),
+                  "resets_text": resets_text or (None if resets_at else "in 30m")}
+        windows = [w for w in prev if w.get("name") != stop_w["name"]] + [stop_w]
+        reason = f"{group_stop}: {reason}" if reason else None
+        resets_at = resets_text = None  # the reset of the group's window; the row's comes from the windows
     win_list = list(windows) if windows else None
     if win_list:
         full =[w for w in win_list if (w.get("used_percent") or 0) >= 100]
@@ -3606,6 +3650,8 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
         full_groups = {_window_group(w.get("name")) for w in full}
         if limited and full and None not in full_groups and full_groups != groups:
             limited = False
+        if group_stop and len(groups) < 2:
+            limited = False  # only the stopped group is known: the other groups may have quota left
     rem_pct = used_pct = None
     if win_list:
         pcts = [float(w["remaining_percent"]) for w in win_list if w.get("remaining_percent") is not None]

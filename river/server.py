@@ -3034,7 +3034,8 @@ def watch_prompts(conn):
                 LIMIT_SEEN[agent] = hit.get("message")
                 core.record_agent_limit(conn, ad.id, limited=True, resets_at=hit.get("resets_at"),
                                         resets_text=hit.get("resets_text"), reason=hit.get("message"),
-                                        source="limit_stop")
+                                        source="limit_stop",
+                                        model=_limit_model(conn, agent, ad, plain_text.splitlines()))
                 limit_hits[agent] = (ad, hit, pane)
                 STILL.pop(agent, None)
                 continue
@@ -3166,6 +3167,23 @@ def _end_at_prompt(conn, waiting, asks, t):
             core.sync_needs_you(conn)
         out.append(agent)
     return out
+
+
+def _limit_model(conn, agent, ad, lines):
+    """The model of a session that stopped at its usage limit (#6382), so the limit covers only its model group (agy
+    counts Gemini apart from Claude and GPT): what its screen shows (agy's footer), else the model it declared
+    (agents.model, MAXPM_MODEL at its launch), else its held item's model, else the agent's default (agy_model)."""
+    shown = ad.screen_settings(lines).get("model")
+    if shown:
+        return shown
+    r = conn.execute("SELECT model FROM agents WHERE name=?", (agent,)).fetchone()
+    if r and r["model"]:
+        return r["model"]
+    it = conn.execute("SELECT model, project_id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                      "ORDER BY id", (agent,)).fetchone()
+    if it and it["model"]:
+        return it["model"]
+    return core.agent_default(conn, ad, "model", it["project_id"] if it else None)
 
 
 def _handle_limit_stops(conn, limit_hits):
