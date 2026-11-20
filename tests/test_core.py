@@ -2039,6 +2039,85 @@ class PlanFile(Base):
         self.assertEqual(core.add_plan(self.c, "shop", "a\n  b\n", dry_run=True)["items"][1]["parent"], 0)
         self.assertEqual(len(core.item_list(self.c, "shop")), 6)
 
+    def run_init(self, folder, *words):
+        from river import cli
+        old = os.getcwd()
+        os.chdir(folder)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, mock.patch.object(sys.stdin, "isatty", lambda: False):
+                cli.run(["init", *words])
+        finally:
+            os.chdir(old)
+        return out.getvalue()
+
+    def test_init_with_a_plan_creates_the_project_and_its_items(self):
+        # A folder with a written plan: one command links the project and adds the plan's items with their waits.
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            plan = os.path.join(d, "plan.md")
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write(self.PLAN)
+            out = self.run_init(folder, "--plan", plan)
+            ids = {i["title"]: i["id"] for i in core.item_list(self.c, "shop")}
+            self.assertEqual(len(ids), 6)
+            self.assertEqual(core.annotate(self.c)[ids["Preorder form"]]["waits_on"], [ids["Friday list"]])
+            self.assertIn("6 item(s) added from the plan", out)
+            self.assertIn("next: open an agent here and say go", out)
+            self.assertNotIn("next: add work", out)
+            with open(os.path.join(folder, "AGENTS.md"), encoding="utf-8") as f:
+                self.assertIn("maxpm go", f.read())
+
+    def test_init_with_a_bad_plan_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            plan = os.path.join(d, "plan.md")
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write("# only a heading\n")
+            from river import cli
+            old = os.getcwd()
+            os.chdir(folder)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        code = cli.run(["init", "--plan", plan])
+                    except (RiverError, SystemExit) as e:
+                        code = e
+            finally:
+                os.chdir(old)
+            self.assertTrue(code)  # an error, not a success
+            self.assertEqual(os.listdir(folder), [])
+            self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
+
+    def test_init_with_a_plan_file_it_cannot_read_says_so_in_one_line(self):
+        # A missing plan file, or a folder: one error line with the path, and nothing changes.
+        from river import cli
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            old = os.getcwd()
+            os.chdir(folder)
+            try:
+                for plan in (os.path.join(d, "no-such-plan.md"), d):
+                    # maxpm prints a RiverError as one line; an OSError would reach the person as a traceback
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RiverError) as e:
+                        cli.run(["init", "--plan", plan])
+                    self.assertIn(f"cannot read the plan file {plan}: ", str(e.exception))
+                    self.assertEqual(len(str(e.exception).splitlines()), 1)
+            finally:
+                os.chdir(old)
+            self.assertEqual(os.listdir(folder), [])
+            self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
+
+    def test_init_without_a_plan_names_the_plan_file_form(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            out = self.run_init(folder)
+            self.assertIn("maxpm add shop --from plan.md", out)
+            self.assertEqual(core.item_list(self.c, "shop"), [])
+
     def test_add_dry_run_without_a_plan_file_is_refused_and_adds_nothing(self):
         from river import cli
         core.project_add(self.c, "shop")
