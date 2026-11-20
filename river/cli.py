@@ -2927,18 +2927,34 @@ def activity_command(stdin=None, agent_id="claude"):
     import json
     conn = None
     try:
+        from . import agents
+        ad = agents.get(agent_id)
+        if ad.has("project_hooks") and not any(os.environ.get(v) for v in
+                                               getattr(ad.module, "HOOK_ENV", ("MAXPM_AGENT", core.TOKEN_ENV))):
+            # A hook in a project's hook file runs in every session of that CLI there (#6351): one that MaximizePM
+            # did not start has no MaximizePM session in its environment, and the hook does nothing.
+            return 0
         payload = json.loads((stdin or sys.stdin).read() or "{}")
         conn = core.connect()
         conn.execute("PRAGMA busy_timeout=2000")
         res = core.hook_report(conn, agent_id, payload if isinstance(payload, dict) else {})
+        if ad.has("hook_answer") and res["state"] == "idle" and res["agent"]:
+            # A CLI whose turn end takes a message (agy's Stop hook, #6351): the messages that wait go into the
+            # session now, and its turn goes on (hook_answer).
+            res["deliver"] = core.turn_end_messages(conn, res["agent"])
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
-        if res["state"] == "idle" and core.pending_waits(conn, res["agent"]):
+        if res["state"] == "idle" and not res.get("deliver") and core.pending_waits(conn, res["agent"]):
             # A message that the person sent during this turn waits (#5587): maxpm serve types it at the idle prompt.
             try:
                 ask_server(conn, "pending_deliver", {"agent": res["agent"]}, timeout=1, retries=0)
             except Exception:  # noqa: BLE001 - its next pass types it
                 pass
+        if ad.has("hook_answer"):
+            out = ad.hook_answer(res)  # the CLI's own JSON (agy: decision deny or continue)
+            if out:
+                print(out)
+            return 0
         if res.get("deny"):
             # A push or a launch while an alert is unread (#5381): Claude Code refuses the call and shows the reason.
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -4233,6 +4249,13 @@ def init_folder(args):
             move = ans.strip().lower() in ("", "y", "yes")
         lines += setup_instructions(here, True if move is None else move)
     shown = name or linked_here[0]
+    from . import agents
+    for ad in agents.load().values():
+        # A CLI that loads hooks only from the project (agy, #6351): the folder's hook file follows its setting.
+        if ad.has("project_hooks"):
+            got = core.project_hooks(conn, ad.id, here, shown)
+            if got and got["file"]:
+                lines.append(f"{ad.label}: MaximizePM's hooks in {got['file']} ({ad.config_key('activity_hooks')} on)")
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     lines += look_setup_lines(shown, core.look_setup(conn, shown))

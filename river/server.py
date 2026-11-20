@@ -810,7 +810,11 @@ def _open_terminal(t, env, runner=None, conn=None):
         ad = core._adapters().find(platform)
         if ad is not None:
             t["command"] = ad.trust_workspace(t["path"], t["command"], env)
-    assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    if platform and conn is not None and t.get("path"):
+        # A CLI that loads hooks only from the project (agy, #6351): its start folder's hook file follows the
+        # setting <prefix>activity_hooks before the agent starts.
+        core.project_hooks(conn, platform, t["path"], t.get("project"))
+    assign =" ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
     if t.get("setup"):
         # The project's own setup of a new worktree (workspace setup, #5856), with the session's variables, before the
         # agent. A failed setup is printed; the agent starts anyway, and the person and the agent see the output.

@@ -38,7 +38,7 @@ loader of the user's modules). The built-in adapters are `river/agents/claude.py
 - `DETECT` holds the process name, the idle prompt pattern, the working pattern (for example "esc to interrupt"), the patterns of each blocked screen, the text of the "tell it instead" option, and the image paste rule.
 - herdr's integrations (Apache-2.0) are a starting point for each agent's hook or plugin, changed to call `maxpm report`. maxpm never runs herdr's scripts behind a fake `HERDR_*` environment.
 
-What each agent gives for state (herdr's integration docs, 2026-11-11): Claude Code, hooks for many events (maxpm uses them now); OpenCode, a JS plugin with full state and session id; Pi, a TS extension with full state; Codex, Copilot CLI, Cursor CLI, Grok CLI, hooks that give the session id, state from the screen; Hermes, a plugin that gives the session id, state from the screen; Amp, screen only; Goose and Aider, not checked. Antigravity CLI (#6248): hooks only from files in its home or the project, so state from the screen and the session id from its environment.
+What each agent gives for state (herdr's integration docs, 2026-11-11): Claude Code, hooks for many events (maxpm uses them now); OpenCode, a JS plugin with full state and session id; Pi, a TS extension with full state; Codex, Copilot CLI, Cursor CLI, Grok CLI, hooks that give the session id, state from the screen; Hermes, a plugin that gives the session id, state from the screen; Amp, screen only; Goose and Aider, not checked. Antigravity CLI (#6248): hooks only from files in its home or the project, so state from the screen and the session id from its environment; with the setting `agy_activity_hooks` on (#6351), MaximizePM's hooks in the project's `.agents/hooks.json` add the shell command guard, each turn's start and end, and messages at a turn's end.
 
 Each part below is optional unless marked required; the page shows only what an adapter supports.
 
@@ -398,11 +398,20 @@ Exceptions (each also in `EXCEPTIONS` of the test):
 
 - Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
   session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
-  pane, which works at its prompt.
-- Antigravity CLI, `shell_guard`, no push guard: push_guard reads the queue's state when the command runs, and a
-  fixed rule cannot. agy has a PreToolUse hook, but it loads hooks only from `hooks.json` in its home or in the
-  project, and an adapter installs nothing in a CLI's home (p140); no flag adds a hook for one start. The tmux guard
-  is deny rules of the session's `--settings` instead (#6251, `antigravity.DENY_TMUX`, measured with agy 1.5.13).
+  pane, which works at its prompt. With the setting `agy_activity_hooks` on (#6351), a maxpm message that comes
+  during a turn reaches the session at the end of that turn: the Stop hook answers `{"decision": "continue",
+  "reason": <the messages>}`, and agy gives the model the text as a system message.
+
+Antigravity CLI's `shell_guard` is behind the setting `agy_activity_hooks` (off by default, mark 2026-11-20). agy
+loads hooks only from `hooks.json` in its home or in the project, and an adapter installs nothing in a CLI's home
+(p140); no flag adds a hook for one start. With the setting on, each start of an agy session (and `maxpm init`)
+writes MaximizePM's hooks under the name `maximizepm` into the start folder's `.agents/hooks.json` (and the line
+`/.agents/hooks.json` into the repository's `info/exclude`), and keeps the person's other hooks; off takes out only
+that name. The PreToolUse hook of `run_command` runs `core.tmux_guard` and `core.push_guard` and answers `{"decision":
+"deny", "reason": ...}`; PreInvocation reports working and Stop reports idle (blocked still comes from the screen: no
+event says it). A hook in an agy session that MaximizePM did not start (no `MAXPM_AGENT` or session token in its
+environment) does nothing. With the setting off, the tmux guard is deny rules of the session's `--settings` (#6251,
+`antigravity.DENY_TMUX`), and nothing refuses a push.
 
 Lists that stay as they are, as they are not a tier: `agents.ASK_FORMS` (the question forms that `river/ask_forms`
 draws, also Copilot's and OpenCode's), `vault.AGENT_PROGRAMS` (the programs of every agent), and
@@ -415,7 +424,7 @@ server, driven through the page's API and the page itself, with its desktop and 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Claude Code | pass | pass | pass (the Dispatch runs) | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | Codex | pass | pass | pass (the Dispatch runs) | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
-| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | fail before #6278 (its maxpm go ran in the queue folder, which --add-dir named); pass after it (no --add-dir) | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | not reached: the model refused the command itself (#6251) |
+| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | fail before #6278 (its maxpm go ran in the queue folder, which --add-dir named); pass after it (no --add-dir) | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | setting off: not reached, the model refused the command itself (#6251); `agy_activity_hooks` on (#6351, 2026-11-20, claude-sonnet-5-5 low in agy): a `git push` refused while an alert was unread, the alert brought in at the turn's end, working and idle from the hooks in the second of each |
 
 The runs of 2026-11-19, with Claude Code 2.1.329 (haiku, low), codex-cli 0.159.1 (gpt-6-luna, low) and agy 1.5.13
 (gemini-3.8-flash-medium). Each run: Dispatch of a worker item from the page (the agent asks the person a date format

@@ -461,5 +461,134 @@ class Setup(Home):
         self.assertEqual(a.setup["instructions"], "AGENTS.md")
 
 
+class ProjectHooks(Home):
+    """#6351: the setting agy_activity_hooks writes MaximizePM's hooks into the project's .agents/hooks.json, in the
+    shapes and with the answers that agy 1.5.13 took on 2026-11-20 (a probe hook in a tmux pane)."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        self.folder = self.home / "proj"
+        (self.folder / ".git" / "info").mkdir(parents=True)
+        core.project_add(self.c, "proj")
+        core.project_path(self.c, "proj", str(self.folder))
+        self.file = self.folder / ".agents" / "hooks.json"
+        self.mine = {"lint": {"PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "lint"}]}]}}
+
+    def report(self, payload, env):
+        import contextlib
+        import io
+        from river import cli
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(core, "agent_process", lambda: (None, None)), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "antigravity"]), 0)
+        return json.loads(out.getvalue()) if out.getvalue().strip() else None
+
+    def test_the_setting_is_off_by_default_and_on_writes_the_hooks_beside_the_persons(self):
+        self.assertEqual(core.setting(self.c, "agy_activity_hooks"), "off")
+        self.assertEqual(core.project_hooks(self.c, "antigravity", str(self.folder)), {"file": None, "on": False})
+        self.assertFalse(self.file.exists())  # off: no file is made
+        self.file.parent.mkdir()
+        self.file.write_text(json.dumps(self.mine))
+        core.config_set(self.c, "agy_activity_hooks", "on", project="proj")
+        got = core.project_hooks(self.c, "antigravity", str(self.folder))
+        self.assertEqual(got, {"file": str(self.file), "on": True})
+        data = json.loads(self.file.read_text())
+        self.assertEqual(data["lint"], self.mine["lint"])
+        ours = data["maximizepm"]
+        # Tool events wrap the handler in "hooks" with a matcher; the other events take the handler itself.
+        self.assertEqual(ours["PreToolUse"][0]["matcher"], "run_command")
+        self.assertTrue(ours["PreToolUse"][0]["hooks"][0]["command"].endswith(" report --hook antigravity"))
+        self.assertEqual(ours["Stop"][0]["type"], "command")
+        self.assertEqual(ours["PreInvocation"], ours["Stop"])
+        self.assertIn("/.agents/hooks.json", (self.folder / ".git" / "info" / "exclude").read_text())
+        before = self.file.stat().st_mtime_ns
+        core.project_hooks(self.c, "antigravity", str(self.folder))
+        self.assertEqual(self.file.stat().st_mtime_ns, before)  # the same text: not written again
+        core.config_set(self.c, "agy_activity_hooks", "off", project="proj")
+        self.assertEqual(core.project_hooks(self.c, "antigravity", str(self.folder)), {"file": None, "on": False})
+        self.assertEqual(json.loads(self.file.read_text()), self.mine)  # only MaximizePM's entry went
+
+    def test_a_file_of_only_maximizepms_hooks_goes_when_off_and_a_bad_file_is_kept(self):
+        core.config_set(self.c, "agy_activity_hooks", "on")
+        core.project_hooks(self.c, "antigravity", str(self.folder))
+        core.config_set(self.c, "agy_activity_hooks", "off")
+        core.project_hooks(self.c, "antigravity", str(self.folder))
+        self.assertFalse(self.file.parent.exists())
+        self.file.parent.mkdir()
+        self.file.write_text("[1, 2]")
+        core.project_hooks(self.c, "antigravity", str(self.folder))
+        self.assertEqual(self.file.read_text(), "[1, 2]")
+        core.config_set(self.c, "agy_activity_hooks", "on")
+        with self.assertRaisesRegex(core.RiverError, "maxpm config set agy_activity_hooks off"):
+            core.project_hooks(self.c, "antigravity", str(self.folder))
+
+    def test_each_event_is_a_hook_report(self):
+        a = agents.get("antigravity")
+        run = a.read_hook({"hookEventName": "PreToolUse", "conversationId": CID,
+                           "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}}})
+        self.assertEqual((run["run"], run["state"], run["session_id"]), ("git push origin main", None, CID))
+        self.assertIsNone(a.read_hook({"hookEventName": "PreToolUse", "toolCall": {"name": "view_file"}}))
+        first = a.read_hook({"hookEventName": "PreInvocation", "invocationNum": 0, "lastUserInput": "go"})
+        later = a.read_hook({"hookEventName": "PreInvocation", "invocationNum": 3, "lastUserInput": "go"})
+        self.assertEqual((first["state"], first["prompt"], later["prompt"]), ("working", "go", None))
+        stop = a.read_hook({"hookEventName": "Stop", "fullyIdle": True, "continuationActive": False})
+        self.assertEqual((stop["state"], stop["waits"], stop["again"]), ("idle", [], False))
+        self.assertEqual(a.read_hook({"hookEventName": "Stop", "fullyIdle": False})["waits"], ["a background command"])
+        self.assertIsNone(a.read_hook({"hookEventName": "SessionStart"}))
+
+    def test_the_hook_refuses_a_push_and_brings_messages_at_a_turn_end(self):
+        core.register(self.c, "agy1")
+        core.register(self.c, "boss")
+        core.send(self.c, "alert", "Stop: a prerequisite came first", to="agy1", actor="boss")
+        env = {"MAXPM_AGENT": "agy1"}
+        push = {"hookEventName": "PreToolUse", "conversationId": CID,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}}}
+        got = self.report(push, env)
+        self.assertEqual(got["decision"], "deny")
+        self.assertIn("push_guard", got["reason"])
+        self.assertIsNone(self.report({**push, "toolCall": {"name": "run_command",
+                                                            "args": {"CommandLine": "echo hi"}}}, env))
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='agy1'").fetchone()[0], None)
+        self.assertIsNone(self.report({"hookEventName": "PreInvocation", "invocationNum": 0, "conversationId": CID,
+                                       "lastUserInput": "go"}, env))
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='agy1'").fetchone()[0],
+                         "report:working")
+        stop = {"hookEventName": "Stop", "conversationId": CID, "fullyIdle": True, "continuationActive": False}
+        got = self.report(stop, env)
+        self.assertEqual(got["decision"], "continue")
+        self.assertIn("[maxpm alert from boss] Stop: a prerequisite came first", got["reason"])
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='agy1'").fetchone()[0],
+                         "report:idle")
+        self.assertIsNone(self.report(stop, env))  # delivered once: the next turn end brings nothing
+        m = self.c.execute("SELECT native_status, delivered_via, read_at FROM messages WHERE to_agent='agy1'").fetchone()
+        self.assertEqual((m["native_status"], m["delivered_via"], m["read_at"]), ("sent", "native", None))
+
+    def test_the_hook_does_nothing_in_a_session_maxpm_did_not_start(self):
+        core.register(self.c, "agy1")
+        core.send(self.c, "alert", "unread", to="agy1", actor="agy1")
+        env = {k: v for k, v in os.environ.items() if k not in ("MAXPM_AGENT", core.TOKEN_ENV)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(self.report({"hookEventName": "Stop", "conversationId": CID, "fullyIdle": True}, {}))
+            self.assertIsNone(self.report({"hookEventName": "PreToolUse", "toolCall": {
+                "name": "run_command", "args": {"CommandLine": "tmux kill-server"}}}, {}))
+
+    def test_a_start_writes_the_file_in_its_folder(self):
+        from river import server
+        core.config_set(self.c, "agy_activity_hooks", "on")
+        sent = []
+        server._open_terminal({"command": "agy -i go", "path": str(self.folder), "platform": "antigravity",
+                               "project": "proj"}, {"MAXPM_AGENT": "agy1"}, sent.append, self.c)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("maximizepm", json.loads(self.file.read_text()))
+        # Another agent's start leaves the folder alone.
+        self.file.unlink()
+        server._open_terminal({"command": "claude go", "path": str(self.folder), "platform": "claude-code"},
+                              {"MAXPM_AGENT": "c1"}, sent.append, self.c)
+        self.assertFalse(self.file.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

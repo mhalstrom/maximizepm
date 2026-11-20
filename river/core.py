@@ -17997,6 +17997,77 @@ def activity_hook_file():
     return hook_file(agents.get("claude"))
 
 
+def project_hooks(conn, platform, folder, project=None):
+    """Put MaximizePM's hooks into the project hook file of a CLI that loads hooks only from the project (agy's
+    .agents/hooks.json, #6351), or take them out, as the agent's setting <prefix>activity_hooks of the project says
+    (project: its name; else the project of the folder). Each start of such an agent runs it in its start folder, and
+    maxpm init in the folder. Returns {"file", "on"}, or None for an agent with no project hooks."""
+    from . import agents
+    ad = agents.find(platform) if platform else None
+    if ad is None or not ad.has("project_hooks") or not folder:
+        return None
+    pid = None
+    names = [project] if isinstance(project, str) and project else projects_for_dir(conn, folder)
+    if names and names[0]:
+        r = conn.execute("SELECT id FROM projects WHERE name=?", (names[0],)).fetchone()
+        pid = r["id"] if r else None
+    key = ad.config_key("activity_hooks")
+    on = setting(conn, key, project_id=pid) == "on"
+    try:
+        path = ad.project_hooks(folder, report_command(), on)
+    except OSError as e:
+        raise RiverError(f"cannot write {ad.label}'s hook file in {folder}: {e}; turn the hooks off: "
+                         f"maxpm config set {key} off")
+    if path:
+        _git_exclude(folder, path)
+    return {"file": path, "on": on}
+
+
+def _git_exclude(folder, path):
+    """Add a file that MaximizePM writes into a repository's folder (agy's hook file, #6351) to the repository's
+    info/exclude, so a session's commit of every new file does not take it. The repository of a worktree: its
+    commondir. Nothing outside a repository, and nothing on an error."""
+    try:
+        root = Path(folder)
+        dot = root / ".git"
+        if dot.is_file():  # a worktree: 'gitdir: <its folder in the main repository>'
+            gd = Path(dot.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+            gd = gd if gd.is_absolute() else (root / gd)
+            common = gd / (gd / "commondir").read_text(encoding="utf-8").strip() if (gd / "commondir").exists() else gd
+        elif dot.is_dir():
+            common = dot
+        else:
+            return
+        rel = "/" + Path(path).resolve().relative_to(root.resolve()).as_posix()
+        ex = common.resolve() / "info" / "exclude"
+        lines = ex.read_text(encoding="utf-8").splitlines() if ex.exists() else []
+        if rel not in lines:
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            with ex.open("a", encoding="utf-8") as fh:
+                fh.write(("\n" if lines and lines[-1] else "") + f"# MaximizePM's hook file (#6351)\n{rel}\n")
+    except (OSError, ValueError, IndexError):
+        return
+
+
+def turn_end_messages(conn, agent, limit=5):
+    """The messages that wait for an agent's session at the end of its turn (#6351, agy's Stop hook): unread messages
+    to it (or to the holder of its items) that no native delivery brought, as idle_news picks them, each as the text
+    of a native delivery. They count as delivered now (native_status 'sent'), so the next turn end and serve's idle
+    watch do not bring them again; they stay unread until the session reads its inbox."""
+    if not agent:
+        return []
+    with tx(conn):
+        rows = conn.execute(
+            f"SELECT m.id, m.kind, m.from_agent, m.body FROM messages m WHERE {_TO_ME} AND m.from_agent<>? "
+            "AND m.read_at IS NULL AND (m.native_status IS NULL OR m.native_status<>'sent') "
+            "AND (m.from_agent<>'maxpm' OR m.item_id IN (SELECT id FROM items WHERE assignee=? OR reserved_for=?)) "
+            "ORDER BY m.id LIMIT ?", (agent, agent, agent, agent, agent, limit)).fetchall()
+        for r in rows:
+            conn.execute("UPDATE messages SET native_status='sent' WHERE id=?", (r["id"],))
+        _mark_delivered(conn, [r["id"] for r in rows], "native")
+    return [_native_text(r["kind"], r["from_agent"], " ".join(r["body"].split())[:2000]) for r in rows]
+
+
 def activity_agent(conn, sid=None, env=None):
     """The agent of a hook: MAXPM_AGENT of the hook's environment when that agent is registered; else the one that
     ran a maxpm command in Claude Code session sid (agent_sessions, the newest); else None. The environment comes

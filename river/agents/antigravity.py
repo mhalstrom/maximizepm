@@ -12,7 +12,8 @@ The sources this adapter declares, one for each signal:
   folder (~/.gemini/config/hooks.json) or in the project (.agents/hooks.json); no flag of one start adds one, and
   MaximizePM puts nothing into a CLI's home (p140). The screen shows each state: a spinner line while it works, a
   menu with its question while it waits for the person, '? for shortcuts' under the input line when it waits for a
-  prompt.
+  prompt. With the setting agy_activity_hooks on (#6351, section 7b), MaximizePM writes its hooks into the project's
+  .agents/hooks.json, and they report each turn's start and end too.
 - Session id: the environment (IDENTITY). agy gives each shell command it runs ANTIGRAVITY_AGENT=1 and
   ANTIGRAVITY_CONVERSATION_ID=<the conversation's id>, so each maxpm command records the id (core.session_from_env).
 - Chat log: ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl, one JSON line for each
@@ -22,7 +23,8 @@ Guards before a command: Claude Code's PreToolUse hook refuses a push while an a
 a tmux kill-server of MaximizePM's server (core.tmux_guard). agy has a PreToolUse hook too, but it loads hooks only
 from hooks.json files in its home or the project, where an adapter installs nothing (p140). An agy session gets the
 tmux guard as deny rules of its --settings instead (SETTINGS_JSON, #6251). push_guard has no such form: it reads the
-queue's state (an unread alert, a blocked item) when the command runs, and a fixed rule cannot.
+queue's state (an unread alert, a blocked item) when the command runs, and a fixed rule cannot. With the setting
+agy_activity_hooks on (#6351), the project's hooks file has MaximizePM's PreToolUse hook, which runs both guards.
 """
 
 import json
@@ -165,6 +167,11 @@ SETTINGS = [
     {"key": "args", "label": "Other arguments", "kind": "text", "choices": [], "default": "",
      "text": "More words for the agy command line, as you type them in a shell.",
      "flag": [], "live": None, "read": None},
+    # #6351: agy reads hooks only from a file in the project, so the setting writes one there (project_hooks).
+    {"key": "activity_hooks", "label": "Activity hooks", "kind": "toggle", "choices": [], "default": "off",
+     "text": "Write MaximizePM's hooks into the project's .agents/hooks.json at each start: the push guard before a "
+             "shell command, the turn's start and end, and waiting messages at a turn's end. Off takes them out.",
+     "flag": [], "live": None, "read": None},
 ]
 
 # 3. Effort: --effort low|medium|high|xhigh|max, the same names as MaximizePM's levels. /effort opens a menu in the
@@ -176,7 +183,8 @@ EFFORT = {"levels": ["low", "medium", "high", "xhigh", "max"], "map": {}, "flag"
 # 4. Launch
 # ---------------------------------------------------------------------------------------------------------------
 
-# No session name on the command line (/rename in the session), no system prompt file, no hooks file, no fork flag.
+# No session name on the command line (/rename in the session), no system prompt file, no hooks file on the command
+# line (the project's .agents/hooks.json instead, behind activity_hooks: project_hooks), no fork flag.
 # No extra folder: a folder that --add-dir names becomes where its shell commands run (#6278, build_command);
 # --conversation <id> resumes.
 # Background: agy runs a command that lasts more than a few seconds as a background task (its footer: '1 task(s)')
@@ -718,6 +726,124 @@ DETECT = {
     "ask": QUESTION,
     "ask_form": "antigravity",
 }
+
+# ---------------------------------------------------------------------------------------------------------------
+# 7b. The project's hooks (#6351): the setting agy_activity_hooks (off by default; mark 2026-11-20 'a setting to
+# enable aggy hooks'). agy loads hooks only from ~/.gemini/config/hooks.json (its home: p140) or from the project's
+# .agents/hooks.json; no flag adds one for one start. With the setting on, each start of an agy session (and maxpm
+# init) writes MaximizePM's hooks into the start folder's .agents/hooks.json, under one name of its own (HOOK_NAME), and
+# keeps the person's other hooks in the file; with it off, the start takes out only that name.
+#
+# Measured with agy 1.5.13 on 2026-11-20 (a probe hook that logged its input, in a tmux pane):
+# - The top level maps a hook name to its events. PreToolUse and PostToolUse take [{"matcher", "hooks": [handler]}];
+#   the other events take [handler] with no "hooks" around it: agy refuses the whole file otherwise ('invalid hook:
+#   command hook must specify command', in its log only), and /hooks still lists the hooks.
+# - The hook runs in .agents with agy's environment (MAXPM_AGENT, MAXPM_TOKEN, ANTIGRAVITY_CONVERSATION_ID) and gets
+#   camelCase JSON on stdin: conversationId, cwd, hookEventName, lastUserInput; PreToolUse: toolCall {name, args}
+#   (run_command: args.CommandLine); PreInvocation: invocationNum (0 at the start of a turn); Stop: fullyIdle (no
+#   background command runs), continuationActive, terminationReason.
+# - PreToolUse answers {"decision": "deny", "reason": ...}: agy refuses the call, and the model reads 'tool call denied
+#   by pre-tool hook: <reason>'. No output lets the call run.
+# - Stop answers {"decision": "continue", "reason": ...}: the turn goes on, and the model reads the reason as a system
+#   message ('Stop hook blocked termination: <reason>').
+# - agy -p (print mode) runs no hook.
+# No event says that agy waits for a person (a permission menu, a question): the blocked state stays the screen's
+# (DETECT), and the pane watcher keeps its reports. The hooks add the exact start and end of each turn.
+# ---------------------------------------------------------------------------------------------------------------
+
+HOOK_NAME = "maximizepm"
+HOOK_FILE = Path(".agents") / "hooks.json"
+HOOK_TIMEOUT = 10
+# A hook that a session MaximizePM did not start runs: it has neither variable, and the hook ends at once (#6351).
+HOOK_ENV = ("MAXPM_AGENT", "MAXPM_TOKEN")
+
+
+def hook_entry(report):
+    """MaximizePM's events in agy's hooks.json: the shell command guard (PreToolUse of run_command), each model call
+    (PreInvocation: working) and the turn end (Stop: idle, and the messages that wait). report: the maxpm report
+    command (argv words)."""
+    handler = {"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "antigravity"]),
+               "timeout": HOOK_TIMEOUT}
+    return {"PreToolUse": [{"matcher": "run_command", "hooks": [handler]}],
+            "PreInvocation": [handler], "Stop": [handler]}
+
+
+def project_hooks(folder, report, on):
+    """Put MaximizePM's hooks into <folder>/.agents/hooks.json (on) or take them out (off), and keep every other hook
+    in the file. The file is written only when its text changes; a file that holds only MaximizePM's hooks goes when
+    they go. Returns the file's path when it holds MaximizePM's hooks now, else None. A file that is not a JSON object
+    stays as it is: on raises OSError (the start then names the setting), off leaves it."""
+    f = Path(folder) / HOOK_FILE
+    try:
+        text = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if not on:
+            return None
+        text = None
+    try:
+        data = json.loads(text) if text and text.strip() else {}
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        if on:
+            raise OSError(f"{f} is not a JSON object; MaximizePM adds its hooks only to one")
+        return None
+    want = dict(data)
+    if on:
+        want[HOOK_NAME] = hook_entry(report)
+    else:
+        want.pop(HOOK_NAME, None)
+    if want == data and text is not None:
+        return str(f) if on else None
+    if not want:
+        f.unlink(missing_ok=True)
+        try:
+            f.parent.rmdir()  # .agents, when MaximizePM's file was all it held
+        except OSError:
+            pass
+        return None
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f".hooks.json.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, f)
+    return str(f) if on else None
+
+
+def read_hook(payload):
+    """An agy hook's JSON input as a hook report (river/agents HOOK_REPORT_KEYS), or None for another event or tool."""
+    ev = str(payload.get("hookEventName") or "")
+    sid = payload.get("conversationId")
+    out = {"event": ev, "session_id": sid if isinstance(sid, str) and sid else None}
+    if ev == "PreToolUse":
+        call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else {}
+        if call.get("name") != "run_command":
+            return None
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        cmd = args.get("CommandLine")
+        out.update(state=None, run=cmd if isinstance(cmd, str) else "")
+    elif ev == "PreInvocation":
+        # The first model call of a turn carries the prompt that started it (a person's, or a message typed in).
+        first = payload.get("invocationNum") == 0
+        prompt = payload.get("lastUserInput")
+        out.update(state="working", prompt=prompt if first and isinstance(prompt, str) else None)
+    elif ev == "Stop":
+        out.update(state="idle", waits=[] if payload.get("fullyIdle") is not False else ["a background command"],
+                   again=bool(payload.get("continuationActive")))
+    else:
+        return None
+    return out
+
+
+def hook_answer(res):
+    """What `maxpm report --hook antigravity` prints for agy (JSON), or None: a refusal of the shell command
+    (res['deny']); at a turn end, the messages that wait for the session (res['deliver']) and the reminder to close
+    answered questions (res['remind']), as one system message that makes the turn go on."""
+    if res.get("deny"):
+        return json.dumps({"decision": "deny", "reason": res["deny"]})
+    said = [t for t in (res.get("deliver") or ()) if t] + ([res["remind"]] if res.get("remind") else [])
+    if said:
+        return json.dumps({"decision": "continue", "reason": "\n\n".join(said)})
+    return None
 
 # ---------------------------------------------------------------------------------------------------------------
 # 8. Input

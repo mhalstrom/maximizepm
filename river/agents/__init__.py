@@ -441,6 +441,12 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 # puts words that start with env before the command, other words right after the program); `report` is the
 # maxpm report command (a list of argv words) that each hook runs with its --state. An adapter whose state comes from
 # DETECT may have install_hooks too, for a hook before a shell command only (Codex, #6254): read_hook gives "run".
+# project_hooks(folder, report, on) -> the hook file's path | None: for a CLI that loads hooks only from a file in the
+# project (agy's .agents/hooks.json, #6351): puts MaximizePM's hooks into the start folder's file (on) or takes them
+# out (off), keeping the person's own hooks; behind the agent's setting activity_hooks (core.project_hooks).
+# hook_answer(res) -> text | None: what maxpm report --hook <id> prints for this CLI (its own JSON), from what
+# core.hook_report returned (deny, remind) and the messages that wait at a turn end (deliver: core.turn_end_messages).
+# Without it, the output is Claude Code's JSON (Codex reads the same).
 # read_hook(payload) -> a hook report (HOOK_REPORT_KEYS) | None: for a hook that passes its own input on stdin
 # (maxpm report --hook <id>; Claude Code's JSON), what that input says. None: the input is no event of this agent.
 # A hook report = {
@@ -595,7 +601,8 @@ PARTS = {
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
                                                         "chat_settings", "chat_cache_line", "chat_texts",
                                                         "chat_limits")},
-    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
+    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook", "project_hooks",
+                                                           "hook_answer")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings", "screen_limits", "limit_stop",
                                                              "latest_limits")},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
@@ -1150,6 +1157,14 @@ class Adapter:
     def install_hooks(self, folder, report):
         f = self._fn("install_hooks")
         return f(folder, list(report)) if f else None
+
+    def project_hooks(self, folder, report, on):
+        f = self._fn("project_hooks")
+        return f(folder, list(report), bool(on)) if f and folder else None
+
+    def hook_answer(self, res):
+        f = self._fn("hook_answer")
+        return f(dict(res)) if f else None
 
     def read_hook(self, payload):
         """What a hook's own input says (a hook report, HOOK_REPORT_KEYS, with a default for each key left out), or

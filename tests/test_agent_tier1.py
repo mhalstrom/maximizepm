@@ -168,8 +168,10 @@ def _jobs(a):
 
 
 def _shell_guard(a):
-    if not a.has("install_hooks") or not a.has("read_hook"):
-        return "no hook before a shell command (install_hooks and read_hook): tmux_guard and push_guard never run"
+    # install_hooks: on its command line; project_hooks: in the project's hook file, behind activity_hooks (agy, #6351).
+    if not (a.has("install_hooks") or a.has("project_hooks")) or not a.has("read_hook"):
+        return ("no hook before a shell command (install_hooks or project_hooks, and read_hook): tmux_guard and "
+                "push_guard never run")
     return None
 
 
@@ -216,7 +218,6 @@ FEATURES = {
 # (agent, feature) -> why it lacks the feature: its fix item, or why it cannot have it. The doc's section lists each.
 EXCEPTIONS = {
     ("antigravity", "native_message"): "no command, socket or flag",
-    ("antigravity", "shell_guard"): "push_guard reads the queue's state",
 }
 
 
