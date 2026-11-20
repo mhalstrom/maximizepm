@@ -146,6 +146,18 @@ cd maximizepm
 
 The command is `maxpm`.
 
+`./install.sh` needs Python 3.10 or later, and the Python of Apple's
+developer tools is 3.9. On a computer with no Python 3.10, install
+MaximizePM with its own Python instead: it downloads a MaximizePM release and
+Python 3.13, checks both by sha256, and puts them in
+`~/.local/share/maximizepm` and the command in `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mhalstrom/maximizepm/main/install-standalone.sh | sh
+```
+
+`./install.sh` names that installer when it finds no Python 3.10.
+
 `./install.sh --bin-dir DIR` picks another folder; `--no-skills` skips the
 skills. It links the skills only when `~/.claude` exists. `maxpm skills
 install` links all three, the manager's guide (`maxpm-manager`) too.

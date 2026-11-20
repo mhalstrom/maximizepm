@@ -14,8 +14,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-command -v python3 >/dev/null || { echo "python3 is required (3.10 or later)" >&2; exit 1; }
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || { echo "python3 3.10 or later is required" >&2; exit 1; }
+# No Python 3.10 here (a new Mac has 3.9): name the installer that brings its own Python (#5).
+# The printed command is one to copy and paste: the checkout's path goes in single quotes (a space in it, #10).
+quoted() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+no_python() {
+  echo "$1" >&2
+  echo "or install MaximizePM with its own Python, with no Python on this computer:" >&2
+  echo "  sh $(quoted "$ROOT/install-standalone.sh") --from $(quoted "$ROOT")" >&2
+  exit 1
+}
+command -v python3 >/dev/null || no_python "python3 is required (3.10 or later)"
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+  || no_python "python3 3.10 or later is required; this one is $(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)"
 
 mkdir -p "$BIN_DIR"
 ln -sf "$ROOT/bin/maxpm" "$BIN_DIR/maxpm"
