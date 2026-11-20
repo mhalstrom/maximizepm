@@ -15,11 +15,12 @@
 #
 # A release is one line of stages, and the tag is the last step (#6213, mark 2026-11-19: 'we actually want the tag to
 # be a final step with a manual approval'; 'this should not be a branching deploy workflow'):
-#   deploy    this script without MAXPM_APPROVED: it prepares the release, a draft, and exits 76 (HOOK_YES)
-#   approval  MaximizePM adds 'Approve release maximizepm-github: ...' for the person, with the last lines of this
-#             script (the draft's link, its commit and files); the person looks at the draft and approves it
-#   publish   this script again, with MAXPM_APPROVED (the id of the person's yes): the tag, then the draft is published
-#   watch     the target's checks, maximizepm-github/downloads with them
+#   deploy       this script without MAXPM_APPROVED: it prepares the release, a draft, and exits 76 (HOOK_YES)
+#   release tag  MaximizePM adds 'Approve release maximizepm-github: ...' for the person, with the last lines of this
+#                script (the draft's link, its commit and files); the person looks at the draft and approves it. That
+#                yes lets the release into the stage (#6516): this script again, with MAXPM_APPROVED (the id of the
+#                person's yes): the tag, then the draft is published
+#   watch        the target's checks, maximizepm-github/downloads with them
 #
 # The steps, each between '::step start' and '::step end' lines, so the pipeline of the target shows them with their
 # times (#6126). Before the yes:

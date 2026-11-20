@@ -9547,7 +9547,8 @@ class DraftRelease(DeployHook):
     def test_the_hook_prepares_the_person_approves_then_the_hook_publishes(self):
         from river.pipeline import targets
         self.draft()
-        self.assertEqual(targets.shape(self.c, "web"), ["holding", "review", "deploy", "approval", "publish", "watch"])
+        self.assertEqual(targets.shape(self.c, "web"), ["holding", "review", "deploy", "release tag", "watch"])
+        self.assertIsNone(self.stages()["release tag"], "no tag stage run before the hook prepared the release")
         self.pass_review("rev")
         self.assertEqual(core.release_yes_pass(self.c), {}, "no yes before the hook prepared the release")
         r = self.run_deploy()
@@ -9565,9 +9566,18 @@ class DraftRelease(DeployHook):
         self.assertEqual([i for i in dep["waits_on"] if core.item_show(self.c, i)["status"] != "done"], [yes])
         self.assertEqual(core._draft_yes(self.c, self.deploy, ""), yes, "one yes for each preparation")
         s = self.stages()
-        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["approval"]["item"], s["publish"]),
-                         ("passed", "queued", yes, None))
+        tag = s["release tag"]
+        # #6516: the release tag waits for the yes, with the draft's link and the person's item
+        self.assertEqual((s["deploy"]["state"], tag["state"], tag["word"], tag["yes"], tag["item"], tag["approval"],
+                          tag["draft"], tag["step_list"]),
+                         ("passed", "queued", "waits for your yes", yes, yes, yes,
+                          "https://github.example/releases/v1.5.0", []))
         self.assertEqual([x["name"] for x in s["deploy"]["step_list"]], ["push"])
+        from river.routes import pipeline as routes
+        row = next(p for p in routes.deploy(self.c, "/api/deploy")["pipelines"] if p["name"] == "web")
+        self.assertEqual([(w["stage"], w["item"]) for w in row["waits"]], [("release tag", yes)])
+        stage = next(x for x in targets.default_pipeline(self.c, "web")["stages"] if x["name"] == "release tag")
+        self.assertEqual((stage["transition"]["mode"], stage["env"], stage["tier"]), ("yes", "web", "prod"))
         with self.assertRaisesRegex(RiverError, "only the person approves it"):
             core.done(self.c, yes, "yes", "ops")
         core.done(self.c, yes, "yes", "mark")
@@ -9577,9 +9587,10 @@ class DraftRelease(DeployHook):
         with open(self.seen, encoding="utf-8") as f:
             self.assertEqual(f.read().splitlines(), ["", str(yes)])
         s = self.stages()
-        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["publish"]["state"]),
-                         ("passed", "passed", "passed"))
-        self.assertEqual([x["name"] for x in s["publish"]["step_list"]], ["tag"])
+        tag = s["release tag"]
+        self.assertEqual((s["deploy"]["state"], tag["state"], tag["word"], tag["yes"], tag["item"]),
+                         ("passed", "passed", "published", None, self.deploy))
+        self.assertEqual([x["name"] for x in tag["step_list"]], ["tag"])
 
     def test_a_failure_after_the_yes_starts_the_release_again_without_it(self):
         self.draft()
@@ -9594,7 +9605,10 @@ class DraftRelease(DeployHook):
         r = self.run_deploy()
         self.assertEqual(r[0]["deploy_end"], "failed")
         self.assertEqual(core._approvals(self.c, self.deploy), [], "the release takes a new yes")
-        self.assertEqual(self.stages()["publish"]["state"], "failed")
+        tag = self.stages()["release tag"]
+        # #6516: the tag step passed and the run failed after it
+        self.assertEqual((tag["state"], tag["word"], tag["yes"]), ("failed", "tagged", None))
+        self.assertIn("exit 3", tag["errors"])
 
     def test_without_the_setting_the_yes_still_ends_the_wait(self):
         self.draft()

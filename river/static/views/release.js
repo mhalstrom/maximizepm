@@ -37,9 +37,11 @@ function steps(L) {
   const add = (list) => { for (const x of list || []) { const i = out.findIndex(y => y.name === x.name); if (i >= 0) out.splice(i, 1); out.push(x); } };
   add((runs.build || {}).step_list);
   add((runs.deploy || {}).step_list);
-  const a = runs.approval;
+  // The person's yes: the approval stage, or the arrow into the release tag (#6516: release_approval draft).
+  const t = runs["release tag"], a = runs.approval || (t && (t.yes || t.approval)
+    ? { state: t.yes ? "queued" : "passed", started_at: t.started_at, ended_at: null, item: t.yes || t.approval } : null);
   if (a) out.push({ name: "approve", state: a.state, started_at: a.started_at, ended_at: a.ended_at, item: a.item, approve: a.state === "queued" });
-  add((runs.publish || {}).step_list);
+  add((t || {}).step_list);
   const w = runs.watch;
   if (w && w.state !== "skipped") out.push({ name: "checks", state: w.state, started_at: w.started_at, ended_at: w.ended_at,
     note: w.errors, watch: true });

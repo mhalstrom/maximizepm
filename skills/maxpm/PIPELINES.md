@@ -56,7 +56,8 @@ Deploy tab of the page.
   the version in.
 - **Default pipeline**: each deploy target owns its release flow, computed
   from its releases: holding, build (the release-cut hook), review, approval,
-  deploy (and publish with `release_approval draft`), watch. It needs no setup.
+  deploy (and release tag with `release_approval draft`: the person's yes on
+  the draft lets it in), watch. It needs no setup.
   The target's deploy hook, `release_approval`, cadence and Release now control
   every release and record what shipped; attaching a test-only GitHub source
   adds checks next to Holding without replacing the flow.

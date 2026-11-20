@@ -86,11 +86,18 @@ export async function renderPipeline(force) {
 // The release of a deploy target in one click (#6189, mark 2026-11-19: 'I cannot figure out how to deploy
 // maximizepm-github'): Approve release when its release waits for the person's yes (never a way round it), else
 // Release now when collected tasks wait for the cadence or for the release that runs (its dialog: targets.js).
+// The run of a deploy target's stage that waits for the person's yes: approval, or the release tag (#6516) whose
+// arrow is the yes on the draft. Its yes is the person's item.
+const yesStage = (D) => D.stages.find(s => s.last_run && s.last_run.yes) || null;
+const yesRun = (D) => (yesStage(D) || {}).last_run || null;
+// The draft release that the person approves (its GitHub page), as " · the draft" after a line of text.
+const draftLink = (r) => r && /^https:\/\//.test(r.draft || "")
+  ? ` · <a class="link" href="${esc(r.draft)}" target="_blank" rel="noopener noreferrer">the draft</a>` : "";
+
 export function releaseButton(D) {
   if (!D.default || !D.controls) return "";
   // D is the pipeline page's data (its approval stage's last run) or a row of the Deploy list (its waits).
-  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
-  const item = D.waits ? (D.waits[0] || {}).item : appr && appr.state === "queued" ? appr.item : null;
+  const item = D.waits ? (D.waits[0] || {}).item : (yesRun(D) || {}).yes || null;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {}).item;
   // #6193: the yes in place (one confirm, then done on the person's approval item as them); the card for its details.
   if (item) return button("Approve", { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Approve" })
@@ -106,7 +113,8 @@ export function releaseButton(D) {
 function headControls(D) {
   const first = releaseButton(D), h = (D.stages.find(s => s.holding) || {}).holding, r = h && h.release;
   const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
-  const hold = r && r.can && h.commits ? [
+  // #6516: no release from holding while a release runs (it showed 'Release all 100' under release #6211).
+  const hold = r && r.can && h.commits && !runningStage(D) ? [
     r.reviewed ? button(`Release the ${plural(r.reviewed, "reviewed commit")}`, { kind: first ? "" : "primary",
       data: { "hd-release": "reviewed", "hd-pipe": D.name, sha: r.upto, n: r.reviewed }, title: "Release the reviewed ones" }) : "",
     button(`Release all ${h.commits}`, { data: { "hd-release": "all", "hd-pipe": D.name, sha: r.last, n: h.commits }, title: "Every commit in holding" })].join("") : "";
@@ -123,8 +131,8 @@ function headControls(D) {
 function nextAt(D) {
   if (!D) return null;
   if (!D.default) { const s = yesWaits(D); return s ? "→" + s.name : null; }
-  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
-  if (appr && appr.state === "queued" && appr.item) return "approval";
+  const y = yesStage(D);
+  if (y) return y.name;
   const i = D.stages.findIndex(s => s.holding);
   return D.release && i >= 0 && D.stages[i + 1] ? "→" + D.stages[i + 1].name : null;
 }
@@ -202,9 +210,9 @@ function nextBar(D) {
   }
   const b = headControls(D);
   if (!b) return "";
-  const appr = (D.stages.find(s => s.name === "approval") || {}).last_run || {}, R = D.release;
-  const text = appr.state === "queued" && appr.item
-    ? `Approve${appr.version ? ` <span class="pl-ver">${esc(short(appr.version))}</span>` : ""}`
+  const appr = yesRun(D) || {}, R = D.release;  // #6516: approval, or the release tag's yes on the draft
+  const text = appr.yes
+    ? `Approve${appr.version ? ` <span class="pl-ver">${esc(short(appr.version))}</span>` : ""}${draftLink(appr)}`
     : R ? `Next release: ${releaseLine(D)}`  // #6198: the dialog's words
     : "Next release";
   return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}</div>`;
@@ -272,7 +280,7 @@ function stageCardOnly(s) {
   return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
-    ${r ? st(r.state, live ? "live" : null) : st("none")}
+    ${r ? st(r.state, r.word || (live ? "live" : null)) : st("none")}
     <span class="pl-meta pl-more-line">${meta}</span>
     ${s.start === "manual" ? `<span class="pl-meta">Manual</span>` : ""}
     ${s.override ? `<span class="pl-meta c-warn" title="${esc(s.override.skipped.join(", "))}">Skipped stages</span>` : ""}
@@ -465,7 +473,8 @@ function stageRunsHtml(SR) {
   // #6182 (mark 2026-11-19, the review and approval tables of toolscaled-prod): the newest RUNS_SHOWN rows, then Show
   // all; the state in its own column (no 'ran' on every row), How long it took, the task and the buttons each under a
   // heading, a release with no pin says so instead of 'deploy #N', and the columns that every row leaves empty go.
-  const all = V.allRuns === SR.stage, list = all ? SR.runs : SR.runs.slice(0, RUNS_SHOWN);
+  // #6516: the running release first (the server's order), and cancelled rows only under Show all.
+  const all = V.allRuns === SR.stage, list = all ? SR.runs : SR.runs.filter(r => r.state !== "cancelled").slice(0, RUNS_SHOWN);
   const plain = (w) => !w || w === "ran" || w === "deployed";
   const cells = list.map(r => {
     const b = [];
@@ -484,11 +493,11 @@ function stageRunsHtml(SR) {
   const hasWhy = cells.some(c => c.why), hasTask = cells.some(c => c.task), hasActs = cells.some(c => c.b.length);
   const rows = cells.map(({ r, b, why, when, task, ver }) => `<tr class="${r.live ? "live" : ""}"><td class="t-s pl-nowrap">${when ? esc(ago(when)) : ""}</td>
       <td class="mono">${ver}${r.live ? ` <span class="muted t-s">live</span>` : ""}</td>
-      <td class="pl-nowrap">${st(r.state)}${plain(r.what) ? "" : ` <span class="muted t-s">${esc(r.what)}</span>`}</td>
+      <td class="pl-nowrap">${st(r.state, r.word)}${plain(r.what) ? "" : ` <span class="muted t-s">${esc(r.what)}</span>`}</td>
       <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : r.state === "running" && when ? runFor(when) : ""}</td>
       ${hasWhy ? `<td class="t-s pl-wide">${why}</td>` : ""}${hasTask ? `<td class="t-s">${task}</td>` : ""}
       ${hasActs ? `<td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td>` : ""}</tr>`).join("");
-  const more = SR.runs.length > RUNS_SHOWN ? `<div class="t-s">${button(all ? "Show " + RUNS_SHOWN : `Show all (${SR.runs.length})`,
+  const more = all || SR.runs.length > list.length ? `<div class="t-s">${button(all ? "Show " + RUNS_SHOWN : `Show all (${SR.runs.length})`,
     { data: { "pl-allruns": SR.stage }, title: all ? "Fewer" : "All" })}</div>` : "";
   return `<div class="pl-card"><h3>Recent runs</h3>
     <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Commit</th><th>Status</th><th>Time</th>
@@ -662,7 +671,7 @@ function drawArrow() {
   // one or two short lines, the buttons in plain words, the hold options as one quiet row; the guide explains the rest.
   const i = D.stages.indexOf(s), release = D.default && i > 0 && D.stages[i - 1].holding;
   const from = i > 0 ? D.stages[i - 1].name : "start";
-  const title = release ? `Release ${D.name}` : s.name === "approval" && releaseButton(D).includes("pl-yes") ? `Approve ${D.name}`
+  const title = release ? `Release ${D.name}` : yesStage(D) === s && releaseButton(D).includes("pl-yes") ? `Approve ${D.name}`
     : `${from} → ${s.name}`;
   arrowBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-arrowclose": "1" } })}</div>`
     + arrowNow(D, s, release) + arrowOptions(s);
@@ -682,7 +691,7 @@ function releaseLine(D, h) {
 // What the transition does now, with the buttons that act on it.
 function arrowNow(D, s, release) {
   if (!release) {
-    const yes = D.default && s.name === "approval" ? releaseButton(D) : "";
+    const yes = D.default && yesStage(D) === s ? releaseButton(D) : "";
     const t = s.transition, w = (t.waiting || [])[0];
     const line = t.state !== "open" ? esc(t.state_text) : w ? `<span class="pl-ver">${esc(short(w.rev))}</span>` : esc(t.text);
     return `<div class="t-m">${line}</div>` + (yes ? `<div class="pl-bar">${yes}</div>` : "");
@@ -774,7 +783,8 @@ function detail() {
     : r.started_at ? `${esc(WORD[r.state] || r.state)} ${esc(ago(r.started_at))}` : r.queued_at ? `waiting ${esc(ago(r.queued_at))}` : "";
   const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
     + (r.fault_item ? ` · <span class="link" data-open="${r.fault_item}">fix #${r.fault_item}</span>` : "");
-  return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${item}</span></div>`
+  return head + `<div class="pl-bar">${st(r.state, r.word)}<span class="muted t-s">${when}${item}</span></div>`
+    + (r.draft || r.approval ? `<div class="t-s">${draftLink(r).replace(/^ · /, "")}${r.approval ? `${r.draft ? " · " : ""}your yes: <span class="link" data-open="${r.approval}">#${r.approval}</span>` : ""}</div>` : "")
     + stageActions(s, r)
     + (r.errors && !RAW_ERRORS.has(r.errors) ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
     + wavesHtml(s, r)

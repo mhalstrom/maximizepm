@@ -183,7 +183,7 @@ def _items_at(conn, target, stage, first):
     if stage == "deploy":
         return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open'",
                                               (target,))]
-    if stage == "publish":  # #6213: the release that the person approved waits; the deploy hook does not publish it
+    if stage == "release tag":  # #6213, #6516: the release that the person approved waits; the hook does not tag it
         return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' "
                                               "AND cut_at IS NOT NULL", (target,)) if core._person_yes(conn, d["id"])]
     return []
@@ -286,7 +286,9 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     live = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='done' AND closed_at IS NOT "
                         "NULL ORDER BY id DESC LIMIT 1", (p["target"],)).fetchone()
     out = []
-    for rel in releases:
+    # #6516 (mark 2026-11-20: three cancelled rows with no time sat above the running release): the release that runs
+    # comes first, then the others newest first; the page shows cancelled rows only under Show all.
+    for rel in sorted(releases, key=lambda x: (x["runs"].get(stage) or {}).get("state") != "running"):
         r = rel["runs"].get(stage)
         if r is None:
             continue
@@ -301,7 +303,8 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
                     "what": PURPOSE_WORDS.get(sent["purpose"]) if sent else None,  # #6182: a plain release says no 'ran'
                     "purpose": sent["purpose"] if sent else None, "by": sent["sent_by"] if sent else None,
                     "why": sent["reason"] if sent else None,  # #6182: not 'the release of deploy #N' on every row
-                    "state": r["state"], "queued_at": r["started_at"], "started_at": r["started_at"],
+                    "state": r["state"], "word": r.get("word"),  # #6516: tagged, published, waits for your yes
+                    "queued_at": r["started_at"], "started_at": r["started_at"],
                     "ended_at": r["ended_at"], "seconds": took, "errors": r["errors"], "live": is_live})
     return {"pipeline": p["name"], "stage": stage, "kind": targets.KINDS.get(stage, "deploy"), "env_id": None, "runs": out,
             "branches": [], "target": p["target"]}
@@ -367,7 +370,7 @@ def send(conn, p, stage, rev, actor=None, purpose="rerun", note=None, reason=Non
             _write_send(conn, p, stage, rv["id"], rel["cut_rev"], purpose, actor, reason,
                         note or f"opened review #{rv['id']} of release #{rel['id']} again for {rel['cut_rev']}")
         return {"pipeline": p["name"], "stage": stage, "version": rel["cut_rev"], "run": None, "item": rv["id"]}
-    yes = " (the person's own approval item)" if stage == "approval" else ""
+    yes = " (the person's own approval item)" if stage in ("approval", "release tag") else ""
     raise core.RiverError(f"the stage {stage} of deploy target {p['target']} takes no {PURPOSE_WORDS.get(purpose, purpose)}"
                           f"{yes}: send a version to deploy (maxpm pipeline rerun {p['name']} deploy --rev <commit>), "
                           f"or run again review or build of an open release")

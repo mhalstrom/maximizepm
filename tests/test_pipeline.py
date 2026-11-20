@@ -1681,6 +1681,35 @@ class DefaultPipelines(Base):
                        "exit_code, seconds, output) VALUES ('web-prod',?,'make it',?,?,?,?,?,?,60,'last line')",
                        (event, dep, rev, at, at, at, code))
 
+    def test_the_running_release_comes_before_newer_cancelled_ones(self):
+        """#6516 (mark 2026-11-20): the deploy card showed 'deploy #6498 cancelled' while release #6211 ran, and three
+        cancelled rows sat above it in Versions in deploy."""
+        from river.pipeline import target_flow
+        old = core.iso(core.now() - core.timedelta(days=1))
+        live = self.release("aaaaaaa", "Live change")
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (old, live))
+        run = self.release("bbbbbbb", "Running change")
+        self.c.execute("UPDATE items SET status='in_progress', claimed_at=? WHERE id=?", (old, run))
+        gone = []
+        for n in range(3):
+            i = self.c.execute("INSERT INTO items(project_id, title, kind, target, status, rank, created_at) VALUES "
+                               "((SELECT id FROM projects WHERE name='web'), ?, 'deploy', 'web-prod', 'dropped', 0, ?)",
+                               (f"Deploy web-prod {n}", old)).lastrowid
+            gone.append(i)
+        p = self.targets.default_pipeline(self.c, "web-prod")
+        deploy = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
+        self.assertEqual((deploy["state"], deploy["item"]), ("running", run))
+        pipe = target_flow.ensure(self.c, "web-prod")
+        rows = target_flow.stage_versions(self.c, pipe, "deploy")["runs"]
+        self.assertEqual([(r["item"], r["state"]) for r in rows],
+                         [(run, "running"), *[(i, "cancelled") for i in reversed(gone)], (live, "passed")])
+        self.assertTrue(rows[-1]["live"])
+        # Nothing runs: the newest release that is not cancelled.
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(core.now()), run))
+        deploy = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
+                      if s["name"] == "deploy")["last_run"]
+        self.assertEqual((deploy["state"], deploy["item"]), ("passed", run))
+
     def test_a_target_shows_its_releases_as_stage_runs(self):
         old = core.iso(core.now() - core.timedelta(days=2))
         d1 = self.release("aaaaaaa", "First change")
@@ -1892,10 +1921,11 @@ class DefaultPipelines(Base):
                        "VALUES (?, 'build-mac', 'build', 'passed', ?, ?)", (run, at, at))
         approval = core._draft_yes(self.c, dep, "The draft is ready")
         d = pipeline.pipeline(self.c, "/api/pipeline/web-prod")
-        self.assertEqual([s["name"] for s in d["stages"]], ["holding", "deploy", "approval", "publish", "watch"])
+        self.assertEqual([s["name"] for s in d["stages"]], ["holding", "deploy", "release tag", "watch"])
         self.assertEqual(d["stages"][1]["run"], "build the draft")
         self.assertEqual(d["stages"][1]["last_run"]["step_list"][0]["name"], "build-mac")
-        self.assertEqual(d["stages"][2]["last_run"]["item"], approval)
+        self.assertEqual((d["stages"][2]["last_run"]["yes"], d["stages"][2]["last_run"]["word"]),
+                         (approval, "waits for your yes"))
         self.assertIsNone(d["envs"][0]["rev"])
 
     @timing.local_only("100 ms latency budget")

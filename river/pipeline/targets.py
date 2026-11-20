@@ -14,9 +14,10 @@ The stages, left to right, as a target has them:
     watch    (check)   the target's checks after the release, until its last watch time (24h with none)
 With release_approval draft (#6213, maximizepm-github) the person's yes comes after the deploy, and the stages are one
 line: holding, deploy (the deploy hook's runs until it prepared the release and exited core.HOOK_YES: test, commit,
-push main, the draft build of the downloads), approval (the yes item that the hook's exit added), publish (its runs
-after the yes: the tag, the published GitHub release), watch. A target's stages never branch (mark 2026-11-19: 'this
-should not be a branching deploy workflow').
+push main, the draft build of the downloads), release tag (#6516, mark 2026-11-20: 'still missing the release tag
+stage'): the person's yes on the draft is the arrow into it, and its runs after the yes push the tag and publish the
+GitHub release; its state says waits for your yes (with the draft and the yes item), tagged, published or failed),
+watch. A target's stages never branch (mark 2026-11-19: 'this should not be a branching deploy workflow').
 
 The result has the form of store.show (name, project, stages with last_run, envs) and of store.versions (releases),
 with "default": true.
@@ -228,15 +229,13 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
                 st = "failed"
             out["review"] = _run("review", st, rv["claimed_at"], rv["closed_at"], item=rv["id"],
                                  errors="the review sent the release back with fixes" if st == "failed" else None)
-    def yes_stage():
+    if approval == "person":
         yes = core._approvals(conn, dep["id"])
         if yes:
             a = yes[0]
-            out["approval"] = _run("approval", _ITEM_STATE.get(a["status"], "queued"), a["created_at"], a["closed_at"],
-                                   item=a["id"])
-
-    if approval == "person":
-        yes_stage()
+            r = out["approval"] = _run("approval", _ITEM_STATE.get(a["status"], "queued"), a["created_at"],
+                                       a["closed_at"], item=a["id"])
+            r["yes"] = a["id"] if r["state"] == "queued" else None  # the person's item while it waits for the yes
     deploy_hooks = [h for h in hooks if h["event"] in ("deploy", "deployed")]
     after = []
     if approval == "draft":  # #6213: the runs after the person's yes, and the deployed hook, are the stage publish
@@ -256,14 +255,9 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
                          steps=_steps(conn, deploy_hooks), item=dep["id"],
                          errors=runs[-1]["note"] if runs and runs[-1]["state"] == "failed" else None)
     if approval == "draft":
-        yes_stage()
-        if after:
-            pruns = [_hook_run(h) for h in after if h["event"] == "deploy"]
-            pst = "passed" if done else pruns[-1]["state"] if pruns else "queued"
-            out["publish"] = _run("publish", pst, (pruns or [_hook_run(after[0])])[0]["started_at"],
-                                  dep["closed_at"] if done else pruns[-1]["ended_at"] if pruns and pst != "running"
-                                  else None, steps=_steps(conn, after), item=dep["id"],
-                                  errors=pruns[-1]["note"] if pruns and pst == "failed" else None)
+        tag = _tag_run(conn, dep, hooks, after)
+        if tag:
+            out[TAG] = tag
     w = _watch(conn, t, dep, next_at, checks) if checks is not None else None
     if w:
         out["watch"] = w
@@ -273,8 +267,65 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
     return out
 
 
+TAG = "release tag"  # #6516: the stage after the person's yes on a prepared release (release_approval draft)
+_DRAFT = re.compile(r"the draft: (https?://\S+)")
+
+
+def _tag_run(conn, dep, hooks, after):
+    """The release tag stage of one release (release_approval draft, #6213, #6516), or None before the deploy hook
+    prepared it. Its arrow is the person's yes on the draft: while that waits, the run is queued with the yes item
+    (yes) and the draft's link (draft, from the last lines of the prepared run). After the yes, the deploy hook's runs
+    push the tag and publish the release: word says tagged when the tag step passed and the publish has not, published
+    when the release is out, failed with the reason."""
+    prepared = [h for h in hooks if _prepared(h)]
+    pruns = [h for h in after if h["event"] == "deploy"]
+    # The newest run of the deploy hook: a preparation after a failed tag asks for a new yes (the release starts again).
+    last = next((h for h in reversed(hooks) if h["event"] == "deploy"), None)
+    again = last is not None and _prepared(last)
+    if not prepared and not pruns:
+        return None
+    m = None
+    for h in reversed(prepared):
+        m = _DRAFT.search(h["output"] or "")
+        if m:
+            break
+    draft = m.group(1) if m else None
+    yes = core._approvals(conn, dep["id"])
+    a = yes[0] if yes else None
+    steps = _steps(conn, after)
+    passed = {s["name"] for s in steps if s["state"] == "passed"}
+    word = note = None
+    waits = None
+    if dep["status"] == "done":
+        st, word = "passed", "published"
+        started, ended = (_hook_run(pruns[0])["started_at"] if pruns else dep["closed_at"]), dep["closed_at"]
+    elif dep["status"] == "dropped":
+        st, started, ended = "cancelled", None, dep["closed_at"]
+    elif pruns and (a is None or a["status"] == "done") and not again:
+        r = _hook_run(pruns[-1])
+        st, started, ended = r["state"], _hook_run(pruns[0])["started_at"], r["ended_at"] if r["state"] != "running" \
+            else None
+        if st == "queued":
+            word = "approved: the tag goes out next"
+        elif "publish" in passed or "published" in passed:
+            word = "published" if st != "failed" else None
+        elif "tag" in passed:
+            word = "tagged"
+        note = r["note"] if st == "failed" else None
+    elif a is not None and a["status"] in core.OPEN_STATES:
+        st, word, started, ended, waits = "queued", "waits for your yes", a["created_at"], None, a["id"]
+    elif a is not None and a["status"] == "done":
+        st, word, started, ended = "queued", "approved: the tag goes out next", a["closed_at"], None
+    else:  # the yes was declined or dropped: the release waits for a new preparation
+        st, started, ended = "cancelled", a["created_at"] if a else None, a["closed_at"] if a else None
+        note = "the person declined the draft" if a else None
+    out = _run(TAG, st, started, ended, steps=steps if pruns else [], item=waits or dep["id"], errors=note)
+    out.update(word=word, yes=waits, approval=a["id"] if a else None, draft=draft)
+    return out
+
+
 KINDS = {"holding": "holding", "build": "build", "review": "review", "approval": "approve", "deploy": "deploy",
-         "publish": "deploy", "watch": "check"}
+         TAG: "deploy", "watch": "check"}
 
 
 def _deploys(conn, name, limit=RELEASES):
@@ -322,8 +373,8 @@ def shape(conn, name, deps=None):
     gate = _approval_mode(conn, name, deps)
     if gate == "person":
         out.append("approval")
-    if gate == "draft":  # #6213: the deploy hook prepares the release, the person approves it, the hook publishes it
-        return out + ["deploy", "approval", "publish", "watch"]
+    if gate == "draft":  # #6213: the deploy hook prepares the release; after the person's yes it tags and publishes it
+        return out + ["deploy", TAG, "watch"]
     return out + ["deploy", "watch"]
 
 
@@ -345,6 +396,15 @@ def release_runs(conn, name, deps=None, watch_history=True):
     return out
 
 
+def current_run(releases, stage):
+    """The run of a stage that its card shows (#6516, mark 2026-11-20: the deploy card showed 'deploy #6498 cancelled'
+    while release #6211 ran): the one that runs, else the newest one not cancelled, else the newest. releases are
+    newest first."""
+    runs = [r["runs"][stage] for r in releases if stage in r["runs"]]
+    return (next((x for x in runs if x["state"] == "running"), None)
+            or next((x for x in runs if x["state"] != "cancelled"), None) or (runs[0] if runs else None))
+
+
 def default_pipeline(conn, name, watch_history=True):
     """The default pipeline of target name, in the form of store.show, with its releases newest first. Its arrows
     have the controls of the target's stored pipeline (#6176, target_flow.py) when it has one, else none set yet."""
@@ -361,24 +421,25 @@ def default_pipeline(conn, name, watch_history=True):
     cache = {}
     stages = []
     names = shape(conn, name, deps)
-    # The stage that puts a release in the target: deploy, or publish with release_approval draft (#6213: a deploy
-    # that waits for the yes is a draft, not live).
-    lands = "publish" if "publish" in names else "deploy"
+    # The stage that puts a release in the target: deploy, or the release tag with release_approval draft (#6213: a
+    # deploy that waits for the yes is a draft, not live).
+    lands = TAG if TAG in names else "deploy"
     for stage in names:
-        last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
-        # The arrow after holding is the release (#6140): the manager or the cadence makes it. The arrow into approval
-        # is the person's yes; the others are automatic. These modes come from the target's settings; the controls
-        # (a block, a delay, disabled, a window, a freeze, the fault rule) from its stored pipeline (#6176).
+        last = current_run(releases, stage)
+        # The arrow after holding is the release (#6140): the manager or the cadence makes it. The arrow into approval,
+        # and into the release tag (#6516), is the person's yes; the others are automatic. These modes come from the
+        # target's settings; the controls (a block, a delay, disabled, a window, a freeze, the fault rule) from its
+        # stored pipeline (#6176).
         mode = ("release", core.parse_cadence(t["cadence"])[0] or None) if len(stages) == 1 else \
-            ("yes", None) if stage == "approval" else ("auto", None)
+            ("yes", None) if stage in ("approval", TAG) else ("auto", None)
         arrow = transitions.plain("auto") if stage == "holding" else \
             target_flow.arrow(conn, own, rows.get(stage), stage, mode, cache)
         stages.append({"name": stage, "pos": len(stages) + 1, "kind": KINDS[stage],
                        "run": hook.get("release-cut") if stage == "build" else hook.get("deploy")
-                       if stage in ("deploy", "publish") else None, "workflow": None,
+                       if stage in ("deploy", TAG) else None, "workflow": None,
                        "env": name if stage == lands else None, "transition": arrow,
                        # #6137: the target is production
-                       "tier": "prod" if stage in ("deploy", "publish", "watch") else None,
+                       "tier": "prod" if stage in ("deploy", TAG, "watch") else None,
                        "junit": None, "last_run": last})
     live = done[0] if done else None
     env = {"name": name, "target": name, "url": None, "notes": t["description"],
@@ -426,7 +487,8 @@ def latest_release(conn, name, releases, deps, checks):
     stage runs and their steps, its fix item while it waits on one, its version tag and the GitHub release page. The
     release card on top of a target's page reads it; None when no release ran yet."""
     by_id = {d["id"]: d for d in deps}
-    for r in releases:
+    # #6516: the release whose deploy runs comes first, also when a newer one was cut after it.
+    for r in sorted(releases, key=lambda x: (x["runs"].get("deploy") or {}).get("state") != "running"):
         d = by_id.get(r["deploy"])
         if not d or d["status"] == "dropped":
             continue

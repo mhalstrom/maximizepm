@@ -446,11 +446,11 @@ def deploy(conn, path):
                     "followed": bool(p.get("followed"))})  # #6167: an outside system runs its flow
     for t in targets.default_list(conn):
         d = defaults[t["name"]]
-        approval = next((s for s in d["stages"] if s["name"] == "approval"), None)
-        r = (approval or {}).get("last_run") or {}
-        waits = ([{"stage": "approval", "rev": r.get("version"), "run": None, "item": r.get("item"),
-                   "since": r.get("started_at"), "note": "the release waits for a person's yes"}]
-                 if r.get("state") == "queued" and r.get("item") else [])
+        # The stage whose run waits for the person's yes: approval, or the release tag (#6516) whose arrow is the yes.
+        yes = next((s for s in d["stages"] if (s.get("last_run") or {}).get("yes")), None)
+        r = (yes or {}).get("last_run") or {}
+        waits = ([{"stage": yes["name"], "rev": r.get("version"), "run": None, "item": r["yes"],
+                   "since": r.get("started_at"), "note": "the release waits for a person's yes"}] if yes else [])
         out.append({"name": t["name"], "project": d["project"], "default": True, "source": {"forge": None,
                     "label": "deploy target", "state": "local"}, "held": d.get("held_reason"),
                     "held_by": d.get("held_by"), "controls": True,  # #6176
