@@ -151,9 +151,33 @@ def resume_command(session_ref, model, effort, settings, name=None):
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
 
 
+def _trust_root(folder):
+    """The folder that Codex trusts for a git worktree: the main worktree of its repository (the folder that holds the
+    common .git directory). Codex reads the worktree's .git file the same way and asks 'Trusting will apply to the
+    repository root' when only the worktree is trusted (#6415). None outside a worktree, for a bare repository, and on
+    an error."""
+    try:
+        d = Path(folder)
+        for p in (d, *d.parents):
+            dot = p / ".git"
+            if dot.is_dir():
+                return None  # the main worktree itself: its own path is the root
+            if dot.is_file():
+                gd = Path(dot.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+                gd = gd if gd.is_absolute() else (p / gd)
+                cd = gd / "commondir"
+                common = (gd / cd.read_text(encoding="utf-8").strip()) if cd.exists() else gd
+                common = Path(os.path.realpath(common))
+                return str(common.parent) if common.name == ".git" else None
+    except (OSError, IndexError, ValueError):
+        return None
+    return None
+
+
 def trust_workspace(folder, command, env=None):
     """Pass -c projects."<folder>".trust_level="trusted" for a worktree that MaximizePM made (#6339), so Codex starts
-    there without its folder trust prompt and without writing to ~/.codex/config.toml."""
+    there without its folder trust prompt and without writing to ~/.codex/config.toml. The repository's main folder
+    gets the same -c words: Codex applies trust to the repository root of a worktree (#6415)."""
     import json
     import shlex
     if not folder or not command:
@@ -164,9 +188,11 @@ def trust_workspace(folder, command, env=None):
         return command
     if not words:
         return command
-    raw = str(folder)
-    real = os.path.realpath(raw)
-    paths = [real] if real == raw else [raw, real]
+    paths = []
+    for raw in (str(folder), _trust_root(folder)):
+        for p in (raw, os.path.realpath(raw)) if raw else ():
+            if p not in paths:
+                paths.append(p)
     extra = []
     for p in paths:
         val = f'projects.{json.dumps(p)}.trust_level="trusted"'

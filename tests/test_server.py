@@ -1242,6 +1242,7 @@ class LaunchAgent(unittest.TestCase):
                 elif label == "Codex":
                     words = shlex.split(t["command"])
                     self.assertIn(f'projects.{json.dumps(wt)}.trust_level="trusted"', words)
+                    self.assertIn(f'projects.{json.dumps(root)}.trust_level="trusted"', words)  # #6415
                 elif label == "Copilot":
                     data = json.loads((chome / "config.json").read_text())
                     self.assertIn(wt, data["trustedFolders"])

@@ -1563,3 +1563,36 @@ class FixedSettings(Env):
                 server.session_setting_live(self.c, "oc", "model", "opencode/glm-5.3-flash-free")
         bad = module(DESCRIBE={**GOOD, "id": "x", "model_restart": "no"})
         self.assertIn("DESCRIBE['model_restart'] is a str", " ".join(agents.check(bad, "x")))
+
+
+class CodexWorktreeTrust(unittest.TestCase):
+    """#6415: Codex applies trust to the repository root of a worktree, so trust_workspace names the worktree and the
+    repository's main folder, also when Codex has not trusted that folder before."""
+
+    def test_a_worktree_of_an_untrusted_repository_trusts_its_root_too(self):
+        import shlex
+        import subprocess
+        from river.agents import codex
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = os.path.realpath(tmp.name)
+        repo, wt = os.path.join(base, "repo"), os.path.join(base, "repo.worktrees", "s1")
+        os.makedirs(repo)
+
+        def git(*a):
+            subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                           capture_output=True)
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        git("worktree", "add", "-q", "-b", "s1", wt, "main")
+
+        words = shlex.split(codex.trust_workspace(wt, "codex hi"))
+        trusted = [words[i + 1] for i, w in enumerate(words) if w == "-c" and "trust_level" in words[i + 1]]
+        self.assertEqual(trusted, [f'projects.{json.dumps(wt)}.trust_level="trusted"',
+                                   f'projects.{json.dumps(repo)}.trust_level="trusted"'])
+        self.assertEqual(words[-1], "hi")
+        self.assertEqual(codex._trust_root(os.path.join(wt, "sub")), repo)
+        # The main folder of a repository and a folder outside one: only the folder itself.
+        self.assertIsNone(codex._trust_root(repo))
+        self.assertIsNone(codex._trust_root(base))
+        self.assertEqual(shlex.split(codex.trust_workspace(repo, "codex hi")).count("-c"), 1)
