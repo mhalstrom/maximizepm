@@ -15,7 +15,8 @@ Update now (request) queues the update; serve runs it in a pass of its loop (ser
 that CLI runs on this computer: the update of a running CLI can break it. Until the update ends, new starts of that
 agent wait (hold, read by core.pick_provider). After the update a smoke test (UPDATE['smoke']: one short request that
 is not interactive, on the agent's default model) must answer OK. When it does not, the old version goes back (where
-the install method can install a given version) and the manager gets an alert. An update that asks for a password,
+the install method can install a given version). Every failed update adds a task that investigates it (_investigate),
+and the dialog's row links it. An update that asks for a password,
 sudo or a sign-in becomes a person's item with the command: MaximizePM types no password. The setting
 agent_auto_update names the agents that serve updates with no click; none by default (mark 2026-11-20).
 """
@@ -43,6 +44,13 @@ VERSION_TIMEOUT = 20
 UPDATE_TIMEOUT = 900
 SMOKE_TIMEOUT = 180
 ACTIVE = ("queued", "updating", "testing")  # an update in these states holds new starts of the agent
+# How long a state may last before a task investigates it (#6461, mark 2026-11-20: 'this also should have a timer so
+# if its waiting for the test we open a task to investigate'). An update command takes 10 s to 2 min (npm, brew) and
+# stops at UPDATE_TIMEOUT; a smoke test takes 5 to 30 s and stops at SMOKE_TIMEOUT: past those, the thread hangs. A
+# wait for sessions counts only while none of MaximizePM's sessions of the agent works (busy_now): a session's work
+# can take hours, and maxpm serve ends an idle one after idle_end (15m), so 30 minutes idle means that something else
+# holds the update (a person's own session, a server that is no session).
+LIMIT = {"updating": UPDATE_TIMEOUT + 120, "testing": SMOKE_TIMEOUT + 120, "queued": 30 * 60}
 OK_ANSWER = re.compile(r"\bOK\b", re.I)
 # The output of an update that waits for a person: a password, sudo, a sign-in, a folder that only another user writes.
 NEEDS_PERSON = re.compile(r"(?i)\bsudo\b|password|\bEACCES\b|permission denied|not writable|operation not permitted|"
@@ -52,6 +60,7 @@ FETCH = None  # tests: fn(url, timeout) -> bytes, in place of the network
 RUN = None  # tests: fn(argv, timeout, cwd) -> (exit code, output), in place of a process
 PS = None  # tests: fn() -> [the args of each process], in place of ps
 WHICH = None  # tests: fn(exe) -> its path or None
+KILL = None  # tests: fn(pid, signal), in place of os.kill
 SYNC = False  # tests: the check and the update run in the caller's thread
 _lock = threading.RLock()
 _threads = {}  # "check" or an adapter id -> the thread of this process that runs it
@@ -316,12 +325,28 @@ def update_argv(ad, inst, version=None):
 # ---------------------------------------------------------------------------------------------------------------
 
 def _procs():
+    """[(pid, args)] of every process here; the pid is None for a line of the PS hook with no pid."""
     if PS is not None:
-        return PS()
+        return [p if isinstance(p, tuple) else (None, p) for p in PS()]
     try:
-        return subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True, timeout=10).stdout.splitlines()
+        lines = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
+                               timeout=10).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return []
+    out = []
+    for line in lines:
+        pid, _, args = line.strip().partition(" ")
+        if pid.isdigit():
+            out.append((int(pid), args.strip()))
+    return out
+
+
+def _service(ad, args):
+    """True when the process is a background server of the CLI, no session (UPDATE['service'], a regex of its args):
+    OpenCode's shared service 'opencode serve --service' ran for 9 days, and its update waited for '1 session' with no
+    session of OpenCode (#6461)."""
+    rx = (ad.update or {}).get("service")
+    return bool(rx and re.search(rx, args))
 
 
 def _root(inst):
@@ -338,14 +363,22 @@ def _root(inst):
 
 
 def running(ad, inst, procs=None):
-    """How many processes of this install of the agent's program run on this computer now: its sessions,
-    MaximizePM's or a person's own. A program that runs on node, bun or Python counts by its script. A program named
+    """How many sessions of this install of the agent's program run on this computer now (sessions_of)."""
+    return len(sessions_of(ad, inst, procs))
+
+
+def sessions_of(ad, inst, procs=None, services=False):
+    """The processes [(pid, args)] of this install of the agent's program that run on this computer now: its
+    sessions, MaximizePM's or a person's own; with services, only its background servers (_service), which no session
+    count holds. A program that runs on node, bun or Python counts by its script. A program named
     with no folder counts when its name is the agent's (PATH finds this install); one with a folder counts when it is
     inside this install: a second install of the same CLI elsewhere (9 Codex sessions of /opt/homebrew while a test
     install in a temporary folder updated, 2026-11-20) does not hold this one's update."""
     exe, root = ad.describe["exe"], _root(inst)
-    n = 0
-    for line in _procs() if procs is None else procs:
+    out = []
+    for pid, line in _procs() if procs is None else procs:
+        if _service(ad, line) != services:
+            continue
         words = line.split()[:2]
         if not words:
             continue
@@ -358,9 +391,25 @@ def running(ad, inst, procs=None):
                 rp = os.path.realpath(w)
                 hit = rp == root or rp.startswith(root + os.sep)
             if hit:
-                n += 1
+                out.append((pid, line))
                 break
-    return n
+    return out
+
+
+def stop_services(ad, inst):
+    """After an update, stop the background servers of the old version (sessions_of with services; none runs a
+    session now, since the update waited for every session to end): the next start of the agent starts its server
+    again on the new version, and the smoke test does not talk to the old one. Returns the args of each one stopped."""
+    stopped = []
+    for pid, args in sessions_of(ad, inst, services=True):
+        if pid is None:
+            continue
+        try:
+            (KILL or os.kill)(pid, 15)
+            stopped.append(args)
+        except OSError:
+            pass
+    return stopped
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -445,6 +494,8 @@ def _set(conn, aid, **fields):
     def f(d):
         a = d["agents"].setdefault(aid, {})
         u = dict(a.get("update") or {})
+        if fields.get("state") and fields["state"] != u.get("state"):
+            u["state_at"] = time.time()  # the clock of LIMIT
         u.update(fields, at=time.time())
         a["update"] = u
         return u
@@ -487,6 +538,58 @@ def _person_item(conn, ad, argv, out):
                          short=f"Update {ad.label}"[:60], context=ctx)["id"]
 
 
+def _task_project(conn):
+    """The project of an investigate task: the one whose folder holds MaximizePM's own code, else the first project."""
+    try:
+        names = core.projects_for_dir(conn, Path(__file__).resolve().parent)
+    except (OSError, ValueError):
+        names = []
+    if names:
+        return names[0]
+    p = conn.execute("SELECT name FROM projects WHERE archived=0 ORDER BY rank, id LIMIT 1").fetchone()
+    return p["name"] if p else None
+
+
+def _investigate(conn, ad, inst, old, target, failure, output=None, step=None, priority=2, shown="Last output"):
+    """A failed update adds a task to investigate it (#6461, mark 2026-11-20: 'when we have a failure we should hand
+    that off as a task to investigate'): the agent, its versions and the failure in the title; the message, the
+    command, the output and what the install probe found in its context. One task while it is open for the same
+    agent and the same versions. Returns its id, or None when no project takes it: then the manager or the person
+    gets an alert."""
+    head = f"Investigate the failed update of {ad.label} {old or '?'} to {target or 'its newest'}:"
+    old_task = conn.execute("SELECT id FROM items WHERE status IN ('open', 'in_progress', 'held') AND "
+                            "substr(title, 1, ?)=? ORDER BY id LIMIT 1", (len(head), head)).fetchone()
+    if old_task:
+        return old_task["id"]
+    inst = inst or {}
+    real = os.path.realpath(inst["path"]) if inst.get("path") else None
+    probe = (f"how {inst.get('how') or 'unknown'}, package {inst.get('package') or 'none'}, prefix "
+             f"{inst.get('prefix') or 'none'}, program {inst.get('path') or 'not found'}"
+             + (f" (the file {real})" if real and real != inst.get("path") else ""))
+    ctx = (f"MaximizePM tried to update {ad.label} from {old or 'an unknown version'} to {target or 'its newest'}, "
+           f"and the update failed: {failure}.\n"
+           + (f"Command: {step}\n" if step else "")
+           + f"Install probe (river/agentupdate.py install_of): {probe}.\n"
+           + (f"{shown}:\n{_tail(output, 15)}\n" if output else "")
+           + f"Find the cause. When it is MaximizePM's (the install probe, the update command, the smoke test), fix "
+             f"it in river/agentupdate.py with a test. Then update {ad.label} with Update now in Settings > Agents and "
+             f"close this task with the cause. A step that needs a password, sudo or a sign-in goes to the person as "
+             f"a person's item.")
+    project = _task_project(conn)
+    if project is None:
+        _alert(conn, ctx)
+        return None
+    return core.item_add(conn, project, f"{head} {failure}"[:300], priority=priority, doer="ai", actor="maxpm",
+                         goals=[], kind="operational", short=f"Failed update of {ad.label}"[:60],
+                         context=ctx)["id"]
+
+
+def _failed(conn, ad, inst, old, target, message, output=None, step=None, priority=2):
+    """Mark the update failed, with the task that investigates it (_investigate)."""
+    task = _investigate(conn, ad, inst, old, target, message, output, step, priority)
+    return _set(conn, ad.id, state="failed", message=message, output=_tail(output) if output else None, task=task)
+
+
 def _default_model(conn, ad):
     """The id of the model a start of the agent takes when it names none, or None (the agent picks)."""
     try:
@@ -519,11 +622,16 @@ def run_update(conn, aid):
         return _set(conn, aid, state="failed", message="the program is not installed here")
     old = installed_version(ad, inst)
     target = read(conn)["agents"].get(aid, {}).get("latest")
-    argv = update_argv(ad, inst, target if newer(target, old) else None)
+    want = target if newer(target, old) else None
+    # The newest version is what an update without a version installs too: Homebrew and a self updater with no
+    # {version} cannot install a given one, and Goose 1.57.0 of Homebrew failed with 'does not know how Goose was
+    # installed' for that (#6461).
+    argv = update_argv(ad, inst, want) or (update_argv(ad, inst) if want else None)
     if argv is None:
-        return _set(conn, aid, state="failed", message=f"MaximizePM does not know how {ad.label} was installed "
-                                                        f"({inst['path']}): update it the way you installed it")
-    _set(conn, aid, state="updating", step=shlex.join(argv), started=time.time(), pid=os.getpid(), old=old)
+        return _failed(conn, ad, inst, old, target, f"MaximizePM has no update command for {ad.label} as installed "
+                                                    f"at {inst['path']}")
+    step = shlex.join(argv)
+    _set(conn, aid, state="updating", step=step, started=time.time(), pid=os.getpid(), old=old, task=None)
     code, out = _run(argv, UPDATE_TIMEOUT)
     if code != 0:
         if NEEDS_PERSON.search(out or ""):
@@ -531,16 +639,21 @@ def run_update(conn, aid):
             return _set(conn, aid, state="failed", person_item=item, output=_tail(out),
                         message="the update asks for a password, sudo or a sign-in"
                                 + (f": your item #{item} has the command" if item else ""))
-        _alert(conn, f"The update of {ad.label} failed (exit {code}): {shlex.join(argv)}. {ad.label} {old} still runs. "
-                     f"Its last lines: {_tail(out, 4)}")
-        return _set(conn, aid, state="failed", output=_tail(out), message=f"the update failed (exit {code}); "
-                                                                          f"{old} still runs")
+        return _failed(conn, ad, inst, old, target, f"the update failed (exit {code}); {old} still runs", out, step)
     inst = install_of(ad) or inst
     new = installed_version(ad, inst)
     change(conn, lambda d: d["agents"].setdefault(aid, {}).update(installed=new))
     if not newer(new, old):
+        if want:  # the command passed, but the version did not change: a stale tap, another copy first on PATH
+            return _failed(conn, ad, inst, old, target, f"the update ran, but {ad.label} is still {new or old}", out,
+                           step)
         return _set(conn, aid, state="done", new=new, output=_tail(out),
                     message=f"{ad.label} {new or old} is the newest version; nothing changed")
+    stopped = stop_services(ad, inst)
+    if stopped:
+        with core.tx(conn):
+            core._event(conn, None, "maxpm", f"stopped the old {ad.label} server after its update: {'; '.join(stopped)}"
+                                             f"; the next start of {ad.label} starts it on {new}")
     _set(conn, aid, state="testing", new=new, step="smoke test")
     ok, shown = smoke(conn, ad, inst)
     if ok:
@@ -559,9 +672,9 @@ def run_update(conn, aid):
     else:
         how = (f"MaximizePM cannot put {old} back ({inst['how']} installs only the newest)" if not back
                else f"putting {old} back failed")
-    _alert(conn, f"{ad.label} {new} failed its smoke test after the update from {old}: {shown}. {how[0].upper()}"
-                 f"{how[1:]}. Check the agent, then update it again from Settings > Agents.")
-    return _set(conn, aid, state="failed", output=shown, message=f"the test after the update failed; {how}")
+    # A new version that fails and stays is a broken agent: its task comes first.
+    return _failed(conn, ad, inst, old, target or new, f"the test after the update failed; {how}", shown, step,
+                   priority=2 if "is back" in how else 1)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -585,7 +698,7 @@ def request(conn, aid, who=None):
     if (row.get("update") or {}).get("state") in ACTIVE:
         return agent_status(conn, ad.id)
     _set(conn, ad.id, state="queued", by=who or "maxpm", message=None, output=None, person_item=None, new=None,
-         step=None, target=row.get("latest"))
+         step=None, task=None, late=None, idle_from=None, waits=0, target=row.get("latest"))
     with core.tx(conn):
         core._event(conn, None, who or "maxpm", f"asked for the update of {ad.label}"
                                                 + (f" to {row['latest']}" if row.get("latest") else ""))
@@ -642,6 +755,30 @@ def set_auto(conn, aid, on, who=None):
     return agent_status(conn, ad.id)
 
 
+def _busy(conn, ad):
+    """True when a session of MaximizePM on this agent works now (core.busy_now)."""
+    names = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND agent_type=? AND pid IS NOT "
+                                             "NULL", (core._platform_of(ad),))]
+    return bool(names) and bool(core.busy_now(conn, names))
+
+
+def _late(conn, aid, a, u, since, what, procs=()):
+    """A state past its LIMIT adds the task that investigates it (_investigate) and links it on the row; the update
+    keeps its state (a wait that ends still updates). Returns the task's id, or None."""
+    limit = LIMIT.get(u.get("state"))
+    if not limit or u.get("task") or not since or time.time() - float(since) < limit:
+        return None
+    ad = core._adapters().find(aid)
+    if ad is None:
+        return None
+    inst = install_of(ad) or {"path": a.get("path"), "how": a.get("how"), "package": a.get("package")}
+    failure = f"for {round((time.time() - float(since)) / 60)} min it {what}"
+    task = _investigate(conn, ad, inst, u.get("old") or a.get("installed"), u.get("target") or a.get("latest"),
+                        failure, "\n".join(procs) or None, u.get("step"), shown="The processes it waits for")
+    _set(conn, aid, task=task, late=failure)
+    return task
+
+
 def serve_pass(conn):
     """A pass of the loop of maxpm serve: the check when it is due (when serve starts, then once a day), an
     automatic update of an agent in agent_auto_update with a newer version, and each queued update whose agent no
@@ -657,11 +794,20 @@ def serve_pass(conn):
     started = []
     for aid, a in list(d["agents"].items()):
         u = a.get("update") or {}
-        if u.get("state") in ("updating", "testing") and aid not in _threads:
-            if u.get("pid") and u.get("pid") != os.getpid() and core.pid_alive(u["pid"]):
-                continue  # another process of serve runs it
-            _set(conn, aid, state="failed", message="the update stopped with its process; check the version and "
-                                                    "update again")
+        if u.get("state") in ("updating", "testing"):
+            if aid in _threads or (u.get("pid") and u.get("pid") != os.getpid() and core.pid_alive(u["pid"])):
+                # It runs here, or in another process of serve: past its limit, a task investigates the hang.
+                _late(conn, aid, a, u, u.get("state_at") or u.get("started") or u.get("at"),
+                      "is still updating" if u["state"] == "updating" else "is still in its smoke test")
+                continue
+            ad = core._adapters().find(aid)
+            msg = "the update stopped with its process; check the version and update again"
+            if ad is None:
+                _set(conn, aid, state="failed", message=msg)
+            else:
+                _failed(conn, ad, install_of(ad) or {"path": a.get("path"), "how": a.get("how"),
+                                                     "package": a.get("package")},
+                        u.get("old") or a.get("installed"), u.get("target") or a.get("latest"), msg, step=u.get("step"))
             continue
         if aid in auto and u.get("state") not in ACTIVE and newer(a.get("latest"), a.get("installed")) \
                 and not (u.get("state") == "failed" and u.get("target") == a.get("latest")):
@@ -674,10 +820,20 @@ def serve_pass(conn):
         if ad is None or inst is None:
             _set(conn, aid, state="failed", message="the program is not installed here")
             continue
-        n = running(ad, inst)
+        procs = sessions_of(ad, inst)
+        n = len(procs)
         if n:
+            t, fields = time.time(), {}
             if (u.get("waits") or 0) != n:
-                _set(conn, aid, state="queued", waits=n)
+                fields["waits"] = n
+            # The clock of the wait runs while no MaximizePM session of the agent works; one more write a minute.
+            if not u.get("idle_from") or (t - float(u["idle_from"]) >= 60 and _busy(conn, ad)):
+                fields["idle_from"] = t
+            if fields:
+                u = _set(conn, aid, state="queued", **fields)
+            _late(conn, aid, a, u, u.get("idle_from"),
+                  f"waits for {n} process{'es' if n > 1 else ''} of {ad.label} while no MaximizePM session of "
+                  f"{ad.label} works", [args for _, args in procs])
             continue
 
         def claim(d, aid=aid):

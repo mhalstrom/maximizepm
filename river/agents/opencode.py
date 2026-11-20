@@ -194,7 +194,10 @@ SETUP = {
 }
 
 # 12. Update (#6430): opencode run answers one request and exits; opencode upgrade [version] updates its own install.
-UPDATE = {"smoke": ["run", "--model", "{model}", "Reply OK"], "self": ["upgrade", "{version}"]}
+# The shared service that a TUI without --standalone starts (`opencode serve --service`, above) is no session: an
+# update does not wait for it, and stops it after the update (#6461).
+UPDATE = {"smoke": ["run", "--model", "{model}", "Reply OK"], "self": ["upgrade", "{version}"],
+          "service": r"\bserve\b.*--service\b"}
 
 
 # ---------------------------------------------------------------------------------------------------------------

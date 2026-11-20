@@ -610,11 +610,15 @@ SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
 #                    reads the newest version from its output,
 #      "npm", "pypi", "brew", "cask": the package where the vendor publishes the same versions, for the newest version
 #                    of a program that updates itself (Claude Code: npm @anthropic-ai/claude-code),
+#      "service":    a regex of the args of the CLI's background server, which is no session: an update does not wait
+#                    for it, and stops it after the update, so the next start runs it on the new version (OpenCode:
+#                    'opencode serve --service', #6461),
 #    }
 # A program that npm, Homebrew, uv or pipx installed updates with that package manager: river/agentupdate.py reads the
 # method from where the program is (install_of), and these keys only add to it.
 UPDATE_KEYS = {"version": (list, tuple), "smoke": (list, tuple, type(None)), "self": (list, tuple, type(None)),
-               "self_check": (list, tuple), "self_read": str, "npm": str, "pypi": str, "brew": str, "cask": str}
+               "self_check": (list, tuple), "self_read": str, "npm": str, "pypi": str, "brew": str, "cask": str,
+               "service": str}
 
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
@@ -829,8 +833,9 @@ def check(module, mid=None):
     if up is not None:
         out += _shape("UPDATE", up, UPDATE_KEYS)
         if isinstance(up, dict):
-            if isinstance(up.get("self_read"), str):
-                out += _regex("UPDATE['self_read']", up["self_read"])
+            for k in ("self_read", "service"):
+                if isinstance(up.get(k), str):
+                    out += _regex(f"UPDATE[{k!r}]", up[k])
             for k in ("version", "smoke", "self", "self_check"):
                 if isinstance(up.get(k), (list, tuple)) and not all(isinstance(w, str) for w in up[k]):
                     out.append(f"UPDATE[{k!r}] holds a word that is no str")

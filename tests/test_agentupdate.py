@@ -175,7 +175,8 @@ class Update(Base):
         self.assertIn("updated Codex 0.159.1 -> 0.171.0",
                       self.c.execute("SELECT change FROM events ORDER BY rowid DESC LIMIT 1").fetchone()[0])
 
-    def test_a_failed_smoke_test_puts_the_old_version_back_and_alerts(self):
+    def test_a_failed_smoke_test_puts_the_old_version_back_and_adds_a_task(self):
+        core.project_add(self.c, "shop")
         self.answer = (1, '{"type":"error","status":400,"message":"model not supported"}')
         au.request(self.c, "codex", "mark")
         au.serve_pass(self.c)
@@ -183,10 +184,150 @@ class Update(Base):
         self.assertEqual((r["update"]["state"], r["installed"]), ("failed", "0.159.1"))
         self.assertIn("the old version 0.159.1 is back", r["update"]["message"])
         self.assertEqual(self.ran[-2][-1], "@openai/codex@0.159.1")
-        body = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' AND kind='alert'").fetchone()[0]
-        self.assertIn("failed its smoke test", body)
-        self.assertIn("model not supported", body)
+        it = core.item_show(self.c, r["update"]["task"])
+        self.assertEqual((it["doer"], it["kind"], it["project"]), ("ai", "operational", "shop"))
+        self.assertTrue(it["title"].startswith("Investigate the failed update of Codex 0.159.1 to 0.171.0: the test"))
+        self.assertIn("model not supported", it["context"])
+        self.assertIn("how npm, package @openai/codex", it["context"])
         self.assertIsNone(au.hold(self.c, "codex"))
+
+    def test_every_failure_adds_one_task_while_it_is_open(self):
+        core.project_add(self.c, "shop")
+        self.install = (1, "npm ERR! code ETARGET\nnpm ERR! notarget No matching version found")
+        au.request(self.c, "codex", "mark")
+        self.assertIsNone(self.row()["update"].get("task"))  # a new request clears the last task link
+        au.serve_pass(self.c)
+        u = self.row()["update"]
+        self.assertEqual(u["state"], "failed")
+        it = core.item_show(self.c, u["task"])
+        self.assertIn("Codex 0.159.1 to 0.171.0: the update failed (exit 1)", it["title"])
+        self.assertIn("No matching version found", it["context"])
+        self.assertIn("@openai/codex@0.171.0", it["context"])  # the command
+        au.request(self.c, "codex", "mark")
+        au.serve_pass(self.c)
+        self.assertEqual(self.row()["update"]["task"], u["task"])  # the open task, not a second one
+        core.drop(self.c, u["task"], actor="mark", note="the npm registry was down")
+        au.request(self.c, "codex", "mark")
+        au.serve_pass(self.c)
+        self.assertNotEqual(self.row()["update"]["task"], u["task"])  # it was closed: a new one
+
+    def test_homebrew_updates_to_its_newest_and_a_version_that_does_not_change_fails(self):
+        # Goose 1.57.0 of Homebrew said 'MaximizePM does not know how Goose was installed' (#6461): the update asked
+        # brew for 1.60.2 by number, which only a rollback needs.
+        core.project_add(self.c, "shop")
+        prefix = self.root / "brew"
+        cellar = prefix / "Cellar/block-goose-cli/1.57.0/bin"
+        cellar.mkdir(parents=True)
+        (cellar / "goose").write_text("")
+        (prefix / "bin").mkdir()
+        os.symlink("../Cellar/block-goose-cli/1.57.0/bin/goose", prefix / "bin/goose")
+        self.bins["goose"] = str(prefix / "bin/goose")
+        ver = {"goose": "1.57.0"}
+        au.change(self.c, lambda d: d["agents"].setdefault("goose", {}).update(
+            installed="1.57.0", latest="1.60.2", how="brew", path=self.bins["goose"]))
+
+        def run(argv, timeout, cwd):
+            self.ran.append(argv)
+            if argv[-1] == "--version":
+                return 0, f"goose {ver['goose']}"
+            if argv[1:] == ["upgrade", "--formula", "block-goose-cli"]:
+                return 0, "Warning: block-goose-cli 1.57.0 already installed"
+            return 0, "OK"
+        au.RUN = run
+        au.request(self.c, "goose", "mark")
+        au.serve_pass(self.c)
+        self.assertIn(["brew", "upgrade", "--formula", "block-goose-cli"], [a[-4:] for a in self.ran])
+        u = self.row("goose")["update"]
+        self.assertEqual(u["state"], "failed")
+        self.assertIn("the update ran, but Goose is still 1.57.0", u["message"])
+        it = core.item_show(self.c, u["task"])
+        self.assertIn("Goose 1.57.0 to 1.60.2", it["title"])
+        self.assertIn("how brew, package block-goose-cli", it["context"])
+        self.assertIn("Cellar/block-goose-cli/1.57.0/bin/goose", it["context"])  # the file behind the link
+
+    def test_a_wait_past_its_limit_while_no_session_works_adds_a_task_and_keeps_waiting(self):
+        # mark 2026-11-20: 'this also should have a timer so if its waiting for the test we open a task to investigate'.
+        core.project_add(self.c, "shop")
+        self.ps = [f"{self.bins['codex']} resume x"]  # a person's own session, not one of MaximizePM
+        au.request(self.c, "codex", "mark")
+        au.serve_pass(self.c)
+        u = self.row()["update"]
+        self.assertEqual((u["state"], u["waits"]), ("queued", 1))
+        self.assertIsNone(u.get("task"))  # within the limit
+        au._set(self.c, "codex", idle_from=u["idle_from"] - au.LIMIT["queued"] - 1)
+        with mock.patch.object(au, "_busy", return_value=False):
+            au.serve_pass(self.c)
+        u = self.row()["update"]
+        self.assertEqual(u["state"], "queued")  # it still updates when the session ends
+        it = core.item_show(self.c, u["task"])
+        self.assertIn("min it waits for 1 process of Codex while no MaximizePM session of Codex works", it["title"])
+        self.assertIn(f"The processes it waits for:\n{self.bins['codex']} resume x", it["context"])
+        au.serve_pass(self.c)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE title LIKE 'Investigate%'").fetchone()[0], 1)
+        self.ps = []
+        au.serve_pass(self.c)
+        self.assertEqual(self.row()["update"]["state"], "done")
+
+    def test_a_working_session_holds_the_clock_of_the_wait(self):
+        self.ps = [f"{self.bins['codex']} resume x"]
+        au.request(self.c, "codex", "mark")
+        au.serve_pass(self.c)
+        old = self.row()["update"]["idle_from"] - au.LIMIT["queued"] - 1
+        au._set(self.c, "codex", idle_from=old)
+        with mock.patch.object(au, "_busy", return_value=True):
+            au.serve_pass(self.c)
+        u = self.row()["update"]
+        self.assertGreater(u["idle_from"], old + au.LIMIT["queued"])  # the clock starts again
+        self.assertIsNone(u.get("task"))
+
+    def test_an_update_or_a_test_that_hangs_past_its_limit_adds_a_task(self):
+        core.project_add(self.c, "shop")
+        au._set(self.c, "codex", state="testing", pid=os.getpid(), old="0.159.1", target="0.171.0",
+                step="smoke test")
+        au._threads["codex"] = None  # its thread runs
+        self.addCleanup(au._threads.pop, "codex", None)
+        au.serve_pass(self.c)
+        self.assertIsNone(self.row()["update"].get("task"))
+        au._set(self.c, "codex", state_at=self.row()["update"]["state_at"] - au.LIMIT["testing"] - 1)
+        au.serve_pass(self.c)
+        u = self.row()["update"]
+        self.assertEqual(u["state"], "testing")
+        self.assertIn("it is still in its smoke test", core.item_show(self.c, u["task"])["title"])
+
+    def test_a_background_server_is_no_session_and_stops_after_the_update(self):
+        # OpenCode's shared service ran for 9 days, and its update waited for '1 session' with no session (#6461).
+        prefix = self.root / "oc"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin/opencode").write_text("")
+        self.bins["opencode"] = str(prefix / "bin/opencode")
+        ad = core._adapters().find("opencode")
+        inst = au.install_of(ad)
+        procs = [(10294, "opencode serve --service"), (10300, f"{self.bins['opencode']} --session x"),
+                 (10400, "/bin/zsh -l")]
+        self.assertEqual(au.sessions_of(ad, inst, procs), [procs[1]])
+        self.assertEqual(au.sessions_of(ad, inst, procs, services=True), [procs[0]])
+        self.ps = procs[:1]
+        killed = []
+        old = au.KILL
+        au.KILL = lambda pid, sig: killed.append((pid, sig))
+        self.addCleanup(setattr, au, "KILL", old)
+        self.assertEqual(au.stop_services(ad, inst), ["opencode serve --service"])
+        self.assertEqual(killed, [(10294, 15)])
+
+    def test_no_update_command_adds_a_task(self):
+        core.project_add(self.c, "shop")
+        p = self.root / "elsewhere/bin/goose"
+        p.parent.mkdir(parents=True)
+        p.write_text("")
+        self.bins["goose"] = str(p)
+        au.change(self.c, lambda d: d["agents"].setdefault("goose", {}).update(installed="1.57.0", latest="1.60.2",
+                                                                               path=str(p)))
+        with mock.patch.object(core._adapters().find("goose"), "update", {}):
+            au.request(self.c, "goose", "mark")
+            au.serve_pass(self.c)
+        u = self.row("goose")["update"]
+        self.assertIn("no update command for Goose", u["message"])
+        self.assertIn("how unknown", core.item_show(self.c, u["task"])["context"])
 
     def test_an_update_that_asks_for_a_password_becomes_a_persons_item(self):
         core.project_add(self.c, "shop")
@@ -229,11 +370,13 @@ class Update(Base):
         self.assertIn("codex", au.auto_ids(self.c))
 
     def test_an_update_that_stopped_with_its_process_is_marked_failed(self):
-        au._set(self.c, "codex", state="updating", pid=os.getpid())
+        core.project_add(self.c, "shop")
+        au._set(self.c, "codex", state="updating", pid=os.getpid(), old="0.159.1", target="0.171.0")
         self.assertIn("updates now", au.hold(self.c, "codex"))
         au.serve_pass(self.c)
         self.assertEqual(self.row()["update"]["state"], "failed")
         self.assertIn("stopped with its process", self.row()["update"]["message"])
+        self.assertIn("Codex 0.159.1 to 0.171.0", core.item_show(self.c, self.row()["update"]["task"])["title"])
 
     def test_the_page_ops_and_route(self):
         res = server.OPS["agent_update"](self.c, {"agents": ["codex"]}, "mark")
