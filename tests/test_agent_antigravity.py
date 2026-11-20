@@ -75,8 +75,10 @@ class Launch(Home):
                                          {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
                                           "args": "--log-file /tmp/x"}, "maxpm go")
         # No --add-dir: agy runs a shell command in a folder that --add-dir names, not in its start folder (#6278).
-        allow = ["--settings", '{"permissions":{"allow":["command(maxpm)"],"deny":['
-                 '"command(tmux kill-server)","command(tmux -L maximizepm kill-server)",'
+        allow = ["--settings", '{"permissions":{"allow":["command(maxpm)","command(git status)","command(git log)",'
+                 '"command(git diff)","command(git show)","command(git remote -v)","command(ls)","command(pwd)",'
+                 '"command(cat)","command(head)","command(tail)","command(wc)","command(grep)","command(echo)"],'
+                 '"deny":["command(tmux kill-server)","command(tmux -L maximizepm kill-server)",'
                  '"command(tmux -Lmaximizepm kill-server)"]}}']
         self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash", "--effort", "high", "--mode", "plan",
                                      "--dangerously-skip-permissions", "--sandbox", *allow])
@@ -105,7 +107,7 @@ class Launch(Home):
         """#6251: agy's deny rules, as measured with agy 1.5.13 (a rule matches the first words of each command of a
         chain, after variables and env before it), agree with core.tmux_guard on the forms they cover."""
         rules = json.loads(antigravity.SETTINGS_JSON)["permissions"]
-        self.assertEqual(rules["allow"], ["command(maxpm)"])
+        self.assertEqual(rules["allow"][0], "command(maxpm)")
         self.assertIn(f"command(tmux -L {core.TMUX_SOCKET} kill-server)", rules["deny"])
 
         def denied(command):
@@ -147,6 +149,23 @@ class Launch(Home):
         # What build_command writes reads back to the same profile.
         argv = antigravity.build_command(None, None, None, None, {"mode": "auto"}, "maxpm go")
         self.assertEqual(antigravity.parse_command(argv), {"settings": {"mode": "auto"}, "prompt": "maxpm go"})
+        # A command of an older start, with only maxpm in its allow rules and the older note, reads back too (#6400).
+        old = [antigravity._OLD_SETTINGS[0] if w == antigravity.SETTINGS_JSON else w for w in argv]
+        old[-1] = "maxpm go\n\n" + antigravity._OLD_NOTES[0]
+        self.assertEqual(antigravity.parse_command(old), {"settings": {"mode": "auto"}, "prompt": "maxpm go"})
+
+    def test_the_allow_rules_name_only_read_commands(self):
+        """#6400: an allow rule passes a command before agy's safety check, which a spent Gemini quota stops. So each
+        rule is maxpm or a command that only reads; a rule matches the first words of each command of a chain."""
+        rules = json.loads(antigravity.SETTINGS_JSON)["permissions"]["allow"]
+        self.assertEqual(rules, ["command(maxpm)"] + [f"command({c})" for c in antigravity.READ_COMMANDS])
+        for c in antigravity.READ_COMMANDS:
+            with self.subTest(command=c):
+                self.assertNotRegex(c, r"^(git( remote| branch| config| push| commit| checkout| reset)?|sed|find|rm|"
+                                       r"mv|cp|tee|xargs|env|sh|bash|python3?|tmux)$")
+        # The read folders of a project add to the same rules.
+        got = json.loads(antigravity.session_settings(["/r"]))["permissions"]["allow"]
+        self.assertEqual(got, rules + ["read_file(/r)"])
 
     def test_a_command_a_profile_cannot_build_reads_back_as_none(self):
         for words in (["agy", "-p", "go"], ["agy", "--mode", "yolo", "-i", "go"], ["agy"], ["gemini", "-i", "go"],

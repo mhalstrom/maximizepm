@@ -211,7 +211,19 @@ def _on(value):
 # kill-server with no server of its own ('tmux -f <file> kill-server').
 DENY_TMUX = ["command(tmux kill-server)", "command(tmux -L maximizepm kill-server)",
              "command(tmux -Lmaximizepm kill-server)"]
-SETTINGS_JSON = json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":"))
+# The read commands that a session runs with no question (#6400). In auto mode agy sends each command that its fixed
+# rules do not pass (a command run with BypassSandbox, or in the sandbox a chain with 'echo ---' or 'git remote -v')
+# to a safety check that calls a Gemini model. When the Gemini 5-hour quota is spent, that call fails ('Individual
+# quota reached', in agy's log) and agy asks the person: 'Reason: the auto-run safety check did not complete', also in
+# a Claude session. An allow rule passes the command before that check. Measured with agy 1.5.13 on 2026-11-20 while
+# the Gemini quota was spent: chains of these commands, also with BypassSandbox and after a maxpm command, ran with no
+# question; 'echo hi > <file outside the workspace>' with BypassSandbox still asked, so a redirect is not allowed.
+READ_COMMANDS = ["git status", "git log", "git diff", "git show", "git remote -v", "ls", "pwd", "cat", "head", "tail",
+                 "wc", "grep", "echo"]
+ALLOW = ["command(maxpm)"] + [f"command({c})" for c in READ_COMMANDS]
+SETTINGS_JSON = json.dumps({"permissions": {"allow": ALLOW, "deny": DENY_TMUX}}, separators=(",", ":"))
+# The --settings of older starts, which parse_command reads back too.
+_OLD_SETTINGS = (json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":")),)
 
 
 def session_settings(read_dirs=(), secret_files=()):
@@ -222,7 +234,7 @@ def session_settings(read_dirs=(), secret_files=()):
     2026-11-20 with agy 1.5.13: a session read a read folder's Cargo.toml with no question and was refused its .env."""
     if not read_dirs:
         return SETTINGS_JSON
-    allow = ["command(maxpm)"] + [f"read_file({d})" for d in read_dirs]
+    allow = ALLOW + [f"read_file({d})" for d in read_dirs]
     deny = DENY_TMUX + [f"write_file({d})" for d in read_dirs] + [f"read_file({f})" for f in secret_files]
     return json.dumps({"permissions": {"allow": allow, "deny": deny}}, separators=(",", ":"))
 
@@ -233,10 +245,17 @@ def session_settings(read_dirs=(), secret_files=()):
 # models; accept-edits, plan, and --dangerously-skip-permissions (also in auto mode) had it with none, so a Claude
 # model there said 'run_command doesn't have a BypassSandbox parameter' and ran maxpm without it, which worked. The note
 # goes only where the parameter can be, and says 'when' for a default mode that agy's own settings may change.
-MAXPM_NOTE = ("When your run_command tool has a BypassSandbox parameter, set it to true for each maxpm command: agy's "
-              "sandbox cannot run maxpm, and this session allows maxpm with no question.")
-_OLD_NOTES = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
-              "allows maxpm with no question.",)
+# It asks for each maxpm command in a call of its own (#6400): with the older note the model ran chains such as
+# 'maxpm now ...; maxpm show N; git log | head' with BypassSandbox, and outside the sandbox each command that no allow
+# rule names goes to agy's safety check (READ_COMMANDS). Measured with agy 1.5.13 on 2026-11-20: with this note the
+# model ran maxpm alone and the other commands in the sandbox in 3 of 3 chats.
+MAXPM_NOTE = ("Run each maxpm command in a run_command call of its own, with BypassSandbox set to true when run_command "
+              "has that parameter: agy's sandbox cannot run maxpm, and this session allows maxpm with no question. Run "
+              "other commands in the sandbox, in calls without maxpm.")
+_OLD_NOTES = ("When your run_command tool has a BypassSandbox parameter, set it to true for each maxpm command: agy's "
+              "sandbox cannot run maxpm, and this session allows maxpm with no question.",
+              "Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
+              "allows maxpm with no question.")
 
 
 def note_applies(settings):
@@ -355,7 +374,7 @@ def parse_command(words):
         elif t == "--add-dir" and nxt is not None and (  # an old start's queue folder (#6278: no longer added)
                 nxt == "{maxpm_dir}" or os.path.realpath(os.path.expanduser(nxt)) == os.path.realpath(river_dir())):
             i += 2
-        elif t == "--settings" and nxt == SETTINGS_JSON:
+        elif t == "--settings" and nxt in (SETTINGS_JSON,) + _OLD_SETTINGS:
             i += 2
         elif t in ("-i", "--prompt-interactive") and nxt is not None and prompt is None:
             prompt = nxt
