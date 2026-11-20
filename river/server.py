@@ -3178,7 +3178,7 @@ def _handle_limit_stops(conn, limit_hits):
         if not ag or ag["stop_at"] is not None:
             continue
         held = [dict(r) for r in conn.execute(
-            "SELECT id, title, project_id, tier FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+            "SELECT id, title, project_id, tier, model FROM items WHERE assignee=? AND status IN ('in_progress','held') "
             "ORDER BY id", (agent,)).fetchall()]
         msg = hit.get("message") or f"{ad.label} usage limit reached"
         reset_part = f" (resets {hit['resets_text'] or hit['resets_at']})" if (hit.get("resets_text") or hit.get("resets_at")) else ""
@@ -3203,7 +3203,7 @@ def _handle_limit_stops(conn, limit_hits):
             continue
         PROMPTS.pop(agent, None)
         primary = held[0]
-        fb = core.fallback_agent(conn, ad.id, project_id=primary["project_id"])
+        fb = core.fallback_agent(conn, ad.id, project_id=primary["project_id"], model=primary.get("model"))
         if fb is None:
             manager = core.active_manager(conn)
             to = [manager] if manager else [

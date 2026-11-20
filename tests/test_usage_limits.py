@@ -312,6 +312,68 @@ class FallbackAndLaunchAvoidance(unittest.TestCase):
         self.assertEqual(su["limits"][0]["remaining_percent"], 0.0)
 
 
+class ModelGroupLimits(unittest.TestCase):
+    """#6370: agy's quota is per model group. Gemini at 0% blocks only a launch of a Gemini model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = _db(self.tmp.name)
+        self.t0 = datetime(2026, 11, 20, 17, 35, 0, tzinfo=timezone.utc)
+        self.p_now = mock.patch.object(core, "now", side_effect=lambda: self.t0)
+        self.p_now.start()
+
+    def tearDown(self):
+        self.p_now.stop()
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _windows(self, gemini_5h=0.0, claude_5h=99.3):
+        at = core.iso(self.t0 + timedelta(hours=2, minutes=5))
+        def w(name, rem):
+            return {"name": name, "remaining_percent": rem, "used_percent": round(100 - rem, 1),
+                    "resets_at": at, "resets_text": "in 2h 5m"}
+        return [w("Gemini models: weekly", 26.1), w("Gemini models: 5-hour", gemini_5h),
+                w("Claude and GPT models: weekly", 100.0), w("Claude and GPT models: 5-hour", claude_5h)]
+
+    def test_one_empty_group_limits_only_its_models(self):
+        # The real agy /usage of 2026-11-20 17:35Z: watch_prompts passes limited=True when any window is full.
+        st = core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._windows(), source="screen")
+        self.assertFalse(st["limited"])
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity"))  # no model known: the agent is free
+        for model in ("claude-opus-5-5-high", "opus", "gpt-oss-120b-medium"):
+            self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model=model), model)
+        lim = core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high")
+        self.assertEqual(lim["reason"], "Gemini models: 5-hour at 0% left")
+        self.assertEqual(lim["resets_at"], "2026-11-20T19:40:00Z")
+        # agy's own default model (agy_model) counts when the launch names none.
+        core.config_set(self.conn, "agy_model", "gemini-4-neon")
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity"))
+
+    def test_every_group_empty_limits_the_whole_agent(self):
+        st = core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._windows(claude_5h=0.0))
+        self.assertTrue(st["limited"])
+        self.assertIsNotNone(core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-high"))
+
+    def test_the_group_limit_ends_at_its_reset(self):
+        core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._windows())
+        self.t0 += timedelta(hours=2, minutes=6)
+        self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high"))
+
+    def test_fallback_and_launch_use_the_model_of_the_launch(self):
+        core.config_set(self.conn, "launch_agents", "Claude Code=@claude-code; Antigravity=@antigravity")
+        core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._windows())
+        # Claude Code at its limit: agy takes a Claude model, not a Gemini one.
+        self.assertEqual(core.fallback_agent(self.conn, "claude", model="claude-opus-5-5-high")[0], "antigravity")
+        self.assertIsNone(core.fallback_agent(self.conn, "claude", model="gemini-4-neon-high"))
+        it = core.item_add(self.conn, "app", "Build feature")
+        t = core.launch_target(self.conn, item=it["id"], agent="Antigravity", model="claude-opus-5-5-high")
+        self.assertEqual(t["platform"], "antigravity")
+        self.assertNotIn("fallback_why", t)
+        with self.assertRaises(core.RiverError) as ctx:
+            core.launch_target(self.conn, item=it["id"], agent="Antigravity", model="gemini-4-neon-high")
+        self.assertIn("Gemini models: 5-hour at 0% left", str(ctx.exception))
+
+
 class LimitStopHandbackAndRestart(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

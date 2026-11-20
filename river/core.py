@@ -3545,16 +3545,67 @@ def _limit_adapter_id(agent_type):
     return ad.id if ad is not None else (agent_type or "").strip().lower()
 
 
+_GROUP_WINDOW = re.compile(r"^\s*(.+?)\s+models\s*:", re.I)
+
+
+def _window_group(name):
+    """The model group a usage window covers, as a frozenset of provider words, or None for a window of every model
+    (#6370). agy has one window per group and limit: 'Gemini models: 5-hour' -> {'gemini'}, 'Claude and GPT models:
+    weekly' -> {'claude', 'gpt'}."""
+    m = _GROUP_WINDOW.match(name or "")
+    if not m:
+        return None
+    words = {w for w in re.split(r"\s*(?:,|\band\b|&|/)\s*", m.group(1).lower()) if w.strip()}
+    return frozenset(w.strip() for w in words) or None
+
+
+def _model_words(conn, model):
+    """The words of a model that name its provider (#6370): the parts of its id (claude-opus-5-5-high -> claude), and
+    for a model_ladder name its family (opus -> claude)."""
+    m = (model or "").strip().lower()
+    words = {x for x in re.split(r"[^a-z0-9]+", m) if x}
+    fam, _ = _family(parse_ladder(setting(conn, "model_ladder")), m)
+    if fam:
+        words.add(fam.lower())
+    return words
+
+
+def _full_group_windows(windows, read_at=None, cur_now=None):
+    """The windows of a model group that are at 0% left (#6370). A window that names no reset time counts for
+    DEFAULT_LIMIT_COOLDOWN after its reading (`read_at`), as a whole-agent limit does."""
+    cur_now = cur_now or now()
+    out = []
+    for w in windows or ():
+        if _window_group(w.get("name")) is None or (w.get("used_percent") or 0) < 100:
+            continue
+        if not w.get("resets_at") and read_at:
+            try:
+                if parse_iso(read_at) + DEFAULT_LIMIT_COOLDOWN <= cur_now:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        out.append(w)
+    return out
+
+
 def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
                        reason=None, source="screen"):
     """Record an agent type's remaining usage or limit-stop state (#6348).
     When `limited` is True and `resets_at` is None, sets a default cooldown (DEFAULT_LIMIT_COOLDOWN) so launches
-    avoid the exhausted agent until it resets."""
+    avoid the exhausted agent until it resets.
+    A window of one model group at 0% left (agy's 'Gemini models: 5-hour') does not limit the whole agent while
+    another group has quota left (#6370): agent_is_limited with the launch's model checks those windows."""
     aid = _limit_adapter_id(agent_type)
     if not aid:
         return None
     t = now()
     win_list = list(windows) if windows else None
+    if win_list:
+        full =[w for w in win_list if (w.get("used_percent") or 0) >= 100]
+        groups = {_window_group(w.get("name")) for w in win_list}
+        full_groups = {_window_group(w.get("name")) for w in full}
+        if limited and full and None not in full_groups and full_groups != groups:
+            limited = False
     rem_pct = used_pct = None
     if win_list:
         pcts = [float(w["remaining_percent"]) for w in win_list if w.get("remaining_percent") is not None]
@@ -3651,10 +3702,28 @@ def agent_limit_status(conn, agent_type):
     return _format_limit_row(r) if r else None
 
 
-def agent_is_limited(conn, agent_type):
-    """Return the limit status dict if `agent_type` is currently at its usage limit (before reset), else None."""
+def agent_is_limited(conn, agent_type, model=None, project_id=None):
+    """Return the limit status dict if `agent_type` is currently at its usage limit (before reset), else None.
+    `model`: the model of the launch (a CLI id or a model_ladder name; None: the agent's own default setting). A
+    window of one model group at 0% left limits only a launch of a model of that group (#6370: agy with Gemini at 0%
+    still runs Claude and GPT models); with no model known, only a limit of the whole agent counts."""
     st = agent_limit_status(conn, agent_type)
-    return st if st and st["limited"] else None
+    if not st:
+        return None
+    if st["limited"]:
+        return st
+    full = _full_group_windows(st["windows"], st["updated_at"])
+    if not full:
+        return None
+    if not model:
+        ad = _adapters().find(agent_type)
+        model = (agent_default(conn, ad, "model", project_id) or ad.describe.get("default_model")) if ad else None
+    words = _model_words(conn, model) if model else set()
+    hit = next((w for w in full if _window_group(w["name"]) & words), None)
+    if hit is None:
+        return None
+    return {**st, "limited": True, "remaining_pct": 0.0, "used_pct": 100.0, "resets_at": hit.get("resets_at"),
+            "resets_text": hit.get("resets_text"), "reason": f"{hit['name']} at 0% left", "model": model}
 
 
 def agent_limits_list(conn):
@@ -3696,13 +3765,13 @@ def record_log_limits(conn):
     return out
 
 
-def fallback_agent(conn, agent_type, project_id=None):
+def fallback_agent(conn, agent_type, project_id=None, model=None):
     """The agent that takes over from `agent_type` at its usage limit (#6348): the first agent of agent_order, other
-    than `agent_type`, that is not at its limit and has a launch entry. Returns (adapter_id, launch_label), or None
-    when the list names no such agent."""
+    than `agent_type`, that is not at its limit for `model` (agent_is_limited) and has a launch entry. Returns
+    (adapter_id, launch_label), or None when the list names no such agent."""
     aid = _limit_adapter_id(agent_type)
     for cur in parse_agent_order(setting(conn, "agent_order", project_id=project_id)):
-        if cur == aid or agent_is_limited(conn, cur):
+        if cur == aid or agent_is_limited(conn, cur, model=model, project_id=project_id):
             continue
         ad = _adapters().find(cur)
         plat = (ad.describe.get("platform") or ad.id) if ad is not None else cur
@@ -3720,9 +3789,10 @@ def _until_text(lim):
     return ""
 
 
-def pick_available_agent(conn, agent, project_id=None, explicit=False):
+def pick_available_agent(conn, agent, project_id=None, explicit=False, model=None):
     """Ensure a new launch picks no agent that is at its usage limit until its reset time (#6348).
-    `agent`: a launch_agents label (or None for the first entry).
+    `agent`: a launch_agents label (or None for the first entry). `model`: the model of the launch, when it is
+    known; a model group at its limit counts only for a model of that group (#6370).
     Returns (chosen_label, fallback_note_or_None). Raises RiverError if the agent is limited and explicit=True,
     or if no non-limited fallback is available."""
     entries = launch_entries(conn, project_id)
@@ -3733,16 +3803,19 @@ def pick_available_agent(conn, agent, project_id=None, explicit=False):
     plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
     if not plat:
         return pick[0], None
-    lim = agent_is_limited(conn, plat)
+    lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
     if not lim:
         return pick[0] if agent is not None else agent, None
     until = _until_text(lim)
+    # A model group at its limit (#6370): name the group, so the person can pick a model of another group.
+    what = f"{lim['label']} ({lim['reason']})" if lim.get("model") else lim["label"]
     if explicit:
-        raise RiverError(f"{lim['label']} is at its usage limit{until}; pick another agent or wait until it resets")
-    fb = fallback_agent(conn, plat, project_id=project_id)
+        raise RiverError(f"{what} is at its usage limit{until}; pick another agent"
+                         + (" or model" if lim.get("model") else "") + " or wait until it resets")
+    fb = fallback_agent(conn, plat, project_id=project_id, model=model)
     if fb is not None:
-        return fb[1], f"{lim['label']} is at its usage limit{until}; using {fb[1]}"
-    raise RiverError(f"{lim['label']} is at its usage limit{until}, and no fallback agent is available")
+        return fb[1], f"{what} is at its usage limit{until}; using {fb[1]}"
+    raise RiverError(f"{what} is at its usage limit{until}, and no fallback agent is available")
 
 
 def _levels(value):
@@ -22988,7 +23061,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         return {"project": p["name"], "path": p["path"] or None,
                 "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
                 "ready": len(pool), "why": why}
-    agent, fallback_why = pick_available_agent(conn, agent, project_id=p["id"], explicit=explicit_agent)
+    agent, fallback_why = pick_available_agent(conn, agent, project_id=p["id"], explicit=explicit_agent,
+                                               model=model or top.get("model"))
     p = start_folder(conn, p, folder, actor)
     plat = _launch_platform(conn, p["id"], agent)
     if model:
@@ -23114,7 +23188,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
     manager_autocompact): claude --autocompact, unless the profile's args already name one."""
     agents = launch_entries(conn, project_id)
-    agent, _ = pick_available_agent(conn, agent, project_id=project_id, explicit=agent is not None)
+    agent, _ = pick_available_agent(conn, agent, project_id=project_id, explicit=agent is not None, model=model)
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
         raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
