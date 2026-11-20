@@ -2717,6 +2717,12 @@ def build_parser(only=None):
     x = sub.add_parser("who", help="who is doing what"); x.add_argument("--item", type=int); x.add_argument("--project")
     x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
+    x = sub.add_parser("link", help="the page address of a session (yours by default), to give a person")
+    x.add_argument("name", nargs="?", help="the session; default: you")
+    g = x.add_mutually_exclusive_group()
+    g.add_argument("--browser", action="store_true", help="its Browser (a sign-in step)")
+    g.add_argument("--changes", action="store_true", help="its Changes")
+    x.add_argument("--phone", action="store_true", help="also the address on a phone (Tailscale, else the relay)")
     sub.add_parser("heartbeat", help="renew your leases")
     x = sub.add_parser("report", help="for an agent's hook, plugin or pane rule: the session's state now "
                                       "(docs/agent-adapters.md); maxpm release says that it ended")
@@ -5345,6 +5351,15 @@ def dispatch(conn, a, actor):
             if ended:
                 print(f"({ended} stopped or gone agent(s) that hold nothing are hidden: maxpm who --all)", file=sys.stderr)
         return res
+    if c == "link":
+        from . import notify
+        name = a.name or actor
+        if not name:
+            raise RiverError("name the session: maxpm link <session> (maxpm who lists them)")
+        if not conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+            raise RiverError(f"no session named {name}; maxpm who --all lists them")
+        url = notify.page_url(conn, terminal=name, browser=a.browser, changes=a.changes)
+        return {"session": name, "url": url, "phone": notify.remote_page(url) if a.phone else None}
     if c == "heartbeat":
         if actor == _session_self(conn):  # a command as another agent records no process for it (#5576)
             _record_process(conn, actor)
@@ -9507,6 +9522,12 @@ def render(a, res):
                   + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells"))))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
+        return
+    if c == "link":
+        print(res["url"])
+        if a.phone:
+            print(f"on a phone: {res['phone']}" if res["phone"] else
+                  "on a phone: none (Tailscale does not serve the page and the relay is not connected: maxpm phone)")
         return
     if c == "phone":
         from . import tailnet

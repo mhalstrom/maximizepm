@@ -713,6 +713,8 @@ becomes code or a setting: add a task for it.
 - `maxpm blockers <id>`: the tree of open work an item waits on, with holders.
 - `maxpm search "<words>"`: items in any state that hold every word.
 - `maxpm capacity`: ready work versus active sessions.
+- `maxpm link [<session>] [--browser] [--phone]`: the page address of a session (or of its Browser) to give a
+  person; never build one by hand.
 - `maxpm usage`: the token cost of each done item, read from the Claude Code
   transcripts of the sessions that held it, and the medians for fresh and
   forked sessions. `maxpm show <id>` has the item's usage line.

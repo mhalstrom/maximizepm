@@ -78,7 +78,7 @@ COMMANDS = {
     "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
     "give": ANY, "split": ANY, "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
     "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "release-changes": ONLY_PERSON, "inbox": ANY, "thread": ANY,
-    "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "heartbeat": ANY,
+    "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "link": ANY, "heartbeat": ANY,
     "report": ANY, "capacity": ANY, "host": ONLY_PERSON, "agent-login": ONLY_PERSON, "phone": ONLY_PERSON,
     "config": {"get": ANY, "set": LEAD, "unset": LEAD},
     "serve": ANY,  # serve --restart: sessions run it after a commit (AGENTS.md)
@@ -89,7 +89,7 @@ COMMANDS = {
 READS = {"plugin list", "plugin show", "project show", "project list","canvas list", "canvas show", "canvas comments", "goal list", "goal show",
          "ops list", "ops show", "ops history", "target show", "target list", "target report", "artifacts", "search", "duplicates",
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
-         "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who",
+         "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who", "link",
          "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
          "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding", "pipeline keys", "pipeline permissions",

@@ -4991,6 +4991,38 @@ class ProjectArchive(Base):
         self.c = core.connect(self.path)
 
 
+class SessionLink(Base):
+    """#6425: maxpm link prints the page address of a session, of its Browser or of its Changes, so an agent gives a
+    person a link that works instead of one it built by hand."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "w1")
+
+    def cli(self, *words):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(list(words))
+        return out.getvalue()
+
+    def test_the_link_of_a_session_and_of_its_browser(self):
+        port = core.serve_port_now(self.c)
+        self.assertEqual(self.cli("--as", "w1", "link"), f"http://127.0.0.1:{port}/sessions/w1\n")
+        self.assertEqual(self.cli("link", "w1", "--browser"), f"http://127.0.0.1:{port}/sessions/w1/browser\n")
+        self.assertEqual(self.cli("link", "w1", "--changes"), f"http://127.0.0.1:{port}/sessions/w1/changes\n")
+
+    def test_an_unknown_session_is_refused(self):
+        from river import cli
+        a = cli.build_parser().parse_args(["link", "nobody"])
+        with self.assertRaisesRegex(RiverError, "no session named nobody; maxpm who --all lists them"):
+            cli.dispatch(self.c, a, "mark")
+        a = cli.build_parser().parse_args(["link"])
+        with self.assertRaisesRegex(RiverError, r"name the session: maxpm link <session>"):
+            cli.dispatch(self.c, a, None)
+
+
 class ProjectNewFolder(Base):
     """#6236: maxpm project add --path and project path with a folder that does not exist: the error names
     --create, and --create makes the folder before it links the project."""

@@ -11,7 +11,7 @@ import { drawBell, wireBell } from "./components/notifyBell.js";
 import { drawPause, wirePause } from "./components/pauseButton.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
-import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
+import { openInPanel, onPanel, onPageView, pageView, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { browserOpens, openBrowser } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
@@ -1016,10 +1016,12 @@ async function openArtifact(session, id) {
   openInPanel(target, session);
 }
 window.addEventListener("popstate", openFromUrl);
+// A link to a view of this page (a session, its Browser, an item; #6425): a new history entry, shown as at a load.
+onPageView((url) => { if (url !== location.pathname + location.search) history.pushState(null, "", url); return openFromUrl(); });
 // A link to a session's file or page anywhere on the page (#4689): the Sessions tab, that session, its side panel.
 window.riverOpenInPanel = async (session, target) => {
   // A page with the person's own sign-in opens in a new tab in the click itself, before an await can lose it (#5804).
-  if (ownSignIn(target)) return openInPanel(target, session);
+  if (ownSignIn(target) || pageView(target)) return openInPanel(target, session);  // a view of this page: its address
   // A link in the item drawer (its Artifacts, #6208): the drawer closes, so the panel it opens is not behind it.
   if (drawer.isOpen()) { drawer.close(); openItem = null; }
   if (tab !== "sessions") await setTab("sessions");

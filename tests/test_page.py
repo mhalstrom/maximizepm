@@ -1472,6 +1472,33 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
 
+    def test_a_link_to_a_view_of_the_page_goes_there(self):
+        """#6425 (mark: 'we need to be able to link to sessions in maxpm directly'): a link in a chat to the page
+        itself (http://127.0.0.1:<port>/sessions/<name>/browser, the address maxpm link prints) showed the whole page
+        in a frame of the side panel. Now the page goes to that view, as a new history entry; another local page, or
+        an address of serve that is no view (api/...), still opens in the panel."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  const { openInPanel, pageView } = await import("/components/sidePanel.js");
+  const here = "http://127.0.0.1:" + location.port;
+  check(pageView(here + "/sessions/ag/browser") === "/sessions/ag/browser", "a session's Browser is a view");
+  check(pageView(location.origin + "/?item=3") === "/?item=3", "an item is a view");
+  check(pageView(here + "/api/state") === null, "api/state is no view");
+  check(pageView(here + "/") === null, "the bare root opens nothing new");
+  check(pageView("http://127.0.0.1:9/sessions/ag") === null, "another port is another program");
+  check(pageView("https://example.com/sessions/ag") === null, "an outside site is no view");
+  openInPanel(here + "/plan/items", "ag");
+  await until(() => location.pathname === "/plan/items" && !q("#tab-plan").classList.contains("hidden"), "Plan's items show");
+  openInPanel(location.origin + "/sessions/ag", "ag");
+  await until(() => location.pathname === "/sessions/ag" && !q("#tab-sessions").classList.contains("hidden"), "back on the session");
+  check(!q("#spBody iframe"), "no frame of the page in the side panel");
+  history.back();
+  await until(() => location.pathname === "/plan/items", "Back returns to Plan");
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+        self.assertEqual(self.drive(driver, "/sessions/ag", size="390,844"), {"ok": True})  # p57
+
     def test_a_collapsed_row_on_a_phone_lists_only_the_columns_with_a_value(self):
         """#5085: at 390 px an item table puts the columns that do not fit under each row; a column with no value
         (no due date, nothing it waits on, no goal, anyone may do it) is left out there."""
