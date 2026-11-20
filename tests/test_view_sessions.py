@@ -541,7 +541,10 @@ class Adopt(Base):
             self.c.execute("UPDATE agents SET pid_cmd='codex -m x -c model_reasoning_effort=low' WHERE name='ag'")
         core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex")
         cmd = core.resume_command(self.c, "ag", "codex", TID)["command"]
-        self.assertTrue(cmd.startswith(f"codex resume {TID} -m "), cmd)
+        # The guard's hook flags (-c hooks.PreToolUse, -c hooks.state, #6254) come before the subcommand, as Codex's
+        # global options do (#6284).
+        self.assertTrue(cmd.startswith("codex -c 'hooks.PreToolUse="), cmd)
+        self.assertIn(f" resume {TID} -m ", cmd)
         self.assertIn("model_reasoning_effort=low", cmd)
 
     def test_a_resume_keeps_the_model_the_session_ran_on(self):
@@ -917,8 +920,15 @@ class Waiting(TmuxBase):
         r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "pick": 1}, "mark")
         self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
         self.pane["keys"].clear()
-        r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"}, "mark")
+        from unittest import mock
+        with mock.patch.object(server.time, "sleep", lambda s: self.tmux.calls.append(["sleep"])):
+            r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"},
+                                            "mark")
         self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])
+        # The Enter goes a moment after the text, in a tmux command of its own: Codex took a text with its Enter as
+        # one paste, and the Enter stayed in its input line (#6259).
+        steps = [("sleep" if c == ["sleep"] else c[-1]) for c in self.tmux.calls if c[:1] in (["send-keys"], ["sleep"])]
+        self.assertEqual(steps[-3:], ["push to a branch first", "sleep", "Enter"])
         # A prompt that changed since the person read it gets no keys.
         self.pane["keys"].clear()
         self.pane["screen"] = PERMISSION.replace("git push origin main", "rm -rf build")
@@ -1080,6 +1090,36 @@ CODEX_UNANSWERED = """  Submit with unanswered questions?
   › 1. Proceed  Submit with 1 unanswered question
     2. Go back  Return to the first unanswered question
   Press enter to confirm or esc to go back
+"""
+# Codex's question of Default mode (request_user_input_async, #6258), as codex-cli 0.159.1 showed it on 2026-11-20:
+# closed while its turn goes on, and open (shift+←) with two questions left.
+CODEX_QUEUED_CLOSED = """• Which color?
+  • Red
+  • Green
+• Working (21s • esc to interrupt)
+• Queued follow-up inputs
+  ? 2 questions · 12s
+    shift+← to answer
+› Ask Codex to do anything
+  GPT-6-Luna low · ~/notes
+  ? for shortcuts
+"""
+CODEX_QUEUED_OPEN = """• Working (21s • esc to interrupt)
+• Queued follow-up inputs
+  1 of 2
+  Which color for the
+  button?
+  › 1. Red
+    2. Green
+    3. Other
+  enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question
+"""
+CODEX_QUEUED_TYPED = """• Queued follow-up inputs
+  Which size?
+    1. Small
+    2. Large
+  › 3. Huge
+  enter submit   ctrl+] skip   shift+→ main prompt
 """
 CRULE = "─" * 100
 COPILOT_TWO = f""" ○ Asking user Waiting for response                     27s
@@ -1315,6 +1355,50 @@ class AskForms(TmuxBase):
             self.answer(w, other="later")
         self.answer(w, pick=1)
         self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+    def test_codex_opens_its_closed_question_once_and_answers_it(self):
+        # #6258: Codex's Default mode asks while its turn goes on and shows the question closed; the page said
+        # 'working' and showed no card. MaximizePM opens it (shift+←) once, and the card answers it.
+        self.kind("codex")
+        fake = self.tmux
+
+        def runner(a):
+            if a[:1] == ["send-keys"] and a[-1] == "S-Left":
+                self.pane["screen"] = CODEX_QUEUED_OPEN
+            return fake(a)
+        server.TMUX_RUNNER = runner
+        server._ASK_OPENED.clear()
+        w = self.card(CODEX_QUEUED_CLOSED)
+        a = w["ask"]
+        self.assertEqual(self.pane["keys"], ["S-Left"])
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["question"], a["at"], a["multi"]),
+                         (["Question 1 of 2"], "Which color for the button?", 0, False))
+        self.assertEqual(([o["label"] for o in a["options"]], [bool(o.get("text")) for o in a["options"]]),
+                         (["Red", "Green", "Other"], [False, False, True]))
+        self.pane["keys"].clear()
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+        r = self.answer(self.card(CODEX_QUEUED_OPEN), other="Blue")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Blue", ["Down", "Down", "Blue", "Enter"]))
+        with self.assertRaisesRegex(core.RiverError, "write your own answer"):
+            self.answer(self.card(CODEX_QUEUED_OPEN), pick=2)
+        # A text typed on Other: a new text takes its place, and a pick of it sends it.
+        w = self.card(CODEX_QUEUED_TYPED)
+        self.assertEqual((w["ask"]["tabs"][0]["header"], w["ask"]["options"][2]["typed"]), ("Question", "Huge"))
+        self.answer(w, other="Tiny")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 4 + ["Tiny", "Enter"])
+        r = self.answer(self.card(CODEX_QUEUED_TYPED), pick=2)
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Huge", ["Enter"]))
+        # The person went back to the main prompt in the terminal: the same closed question stays closed.
+        self.pane["screen"] = CODEX_QUEUED_CLOSED
+        self.pane["keys"].clear()
+        self.assertEqual([x["kind"] for x in self.cards()[0]["waiting"]], [])
+        self.assertEqual(self.pane["keys"], [])
+        # After a screen with no question, a closed question opens again.
+        self.pane["screen"] = "› Ask Codex to do anything\n"
+        self.cards()
+        self.card(CODEX_QUEUED_CLOSED)
+        self.assertEqual(self.pane["keys"], ["S-Left"])
 
     def test_copilot_answers_with_tab_space_and_its_input_box(self):
         self.kind("copilot")

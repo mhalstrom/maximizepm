@@ -406,6 +406,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      the dialog and answers it on its own card (#6234). "": none,
 #      "ask_form":     how that dialog is drawn and answered: "claude" (server._ask_dialog), or a form of
 #                      river/ask_forms: "codex", "copilot", "opencode" (#6235),
+#      "ask_open":     {"line": a regex of the line that shows a question closed, "keys": the tmux keys that open
+#                      it}, or None. Codex's Default mode shows a question closed ('? 1 question', 'shift+← to
+#                      answer'); MaximizePM opens each one once, so that the page reads it (#6258),
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -418,7 +421,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "fixed": str, "ask": str, "ask_form": str}
+               "fixed": str, "ask": str, "ask_form": str, "ask_open": (dict, type(None))}
 ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity")
 DETECT_LAYOUT = {
     "menu": "❯›",
@@ -439,6 +442,7 @@ DETECT_LAYOUT = {
     "fixed": r"(?i)\btrust\b",
     "ask": "",
     "ask_form": "claude",
+    "ask_open": None,
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
@@ -654,6 +658,13 @@ def check(module, mid=None):
             for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args", "ask"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
+            if isinstance(det.get("ask_open"), dict):
+                op = det["ask_open"]
+                if not isinstance(op.get("line"), str) or not op.get("keys") or \
+                        not all(isinstance(k, str) for k in op.get("keys") or ()):
+                    out.append("DETECT['ask_open'] needs a 'line' regex and a list of 'keys'")
+                else:
+                    out += _regex("DETECT['ask_open']['line']", op["line"])
             if isinstance(det.get("ask_form"), str) and det["ask_form"] not in ASK_FORMS:
                 out.append(f"DETECT['ask_form'] is {det['ask_form']!r}, not one of {', '.join(ASK_FORMS)}")
             if isinstance(det.get("item"), str):

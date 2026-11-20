@@ -1,6 +1,6 @@
 """The question dialogs of the agent CLIs other than Claude Code, read from a tmux pane and answered with the CLI's
 keys (#6235). Claude Code's AskUserQuestion dialog is read in server._ask_dialog (#6234); this module reads the same
-kind of dialog of Codex (request_user_input, in Plan mode), Copilot (ask_user), OpenCode (question) and Antigravity
+kind of dialog of Codex (request_user_input in Plan mode, request_user_input_async in Default mode), Copilot (ask_user), OpenCode (question) and Antigravity
 CLI (ask_question, #6248). An adapter
 names its form in DETECT['ask_form'] and the dialog's first line in DETECT['ask'].
 
@@ -93,7 +93,7 @@ def _rub(typed):
     return [{"key": "BSpace"}] * len(typed or "")
 
 
-# Codex (request_user_input, Plan mode only). One question at a time, under 'Question 1/2 (2 unanswered)' ('Question
+# Codex (request_user_input, Plan mode). One question at a time, under 'Question 1/2 (2 unanswered)' ('Question
 # 2/2' with no count when each question has an answer):
 #     Which color for the button?
 #     › 1. Red (Recommended)  Use red for the button.
@@ -106,12 +106,58 @@ def _rub(typed):
 # Enter on the last question while another one has no answer asks first: 'Submit with unanswered questions?',
 # '1 unanswered question', '› 1. Proceed  Submit with 1 unanswered question', '2. Go back  Return to the first
 # unanswered question', 'Press enter to confirm or esc to go back'.
+#
+# The question of Default mode (request_user_input_async, #6258, Codex 0.159.1, measured 2026-11-20): Codex asks it while
+# its turn goes on and puts it under 'Queued follow-up inputs', closed: '? 1 question · 12s' and 'shift+← to answer'
+# (DETECT['ask_open'] opens it). Open, it shows one question at a time, with '1 of 2' over it while more than one
+# is left, the options and a last one 'Other', and a key line at the end:
+#     Which color for the button?
+#     › 1. Red
+#       2. Green
+#       3. Other
+#     enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question
+# Enter answers the marked option, and the next question shows at once, open. A text typed on 'Other' takes the place
+# of its label ('› 3. Blue'), and Enter sends it. The key line is the anchor: the form is read upwards from it.
 class Codex:
-    anchor = r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$"
+    anchor = (r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$"
+              r"|^\s*enter submit\s+ctrl\+\] skip\b")
     _OPT = re.compile(r"^\s*(›\s*)?(\d+)\.\s+(.*?)(?:\s{2,}(\S.*))?$")
     _HINT = re.compile(r"\benter to submit\b|\btab to add notes\b|\bclear notes\b|\bPress enter to confirm\b")
+    _QUEUED = re.compile(r"^\s*enter submit\s+ctrl\+\] skip\b")
+    _OF = re.compile(r"^\s*(\d+) of (\d+)\s*$")
+
+    def _queued(self, rows, t):
+        """The open question of Default mode (request_user_input_async), read upwards from its key line rows[t]."""
+        opts, n = [], t - 1
+        while n >= 0 and (o := self._OPT.match(rows[n])):
+            opts.insert(0, o)
+            n -= 1
+        question, k, total = [], 1, 1
+        while n >= 0 and rows[n].strip() and not rows[n].lstrip().startswith(("•", "›", "└")):
+            if (m := self._OF.match(rows[n])):
+                k, total = int(m.group(1)), int(m.group(2))
+                break
+            question.insert(0, rows[n].strip())
+            n -= 1
+        if len(opts) < 2 or not question:
+            return None
+        out, at = [], None
+        for i, o in enumerate(opts):
+            if o.group(1):
+                at = i
+            label, last = o.group(3).strip(), i == len(opts) - 1
+            # The last option takes the person's own text: 'Other', or the text typed on it.
+            out.append(_opt(int(o.group(2)), label, i, (o.group(4) or "").strip(), text=last,
+                            typed="" if not last or label == "Other" else label))
+        header = f"Question {k} of {total}" if total > 1 else "Question"
+        ask = _dialog([{"header": header, "done": False, "submit": False}], " ".join(question), out, at, 0, n + 1,
+                      rows)
+        ask["notes"], ask["queued"] = False, True
+        return ask
 
     def read(self, rows, t):
+        if self._QUEUED.match(rows[t]):
+            return self._queued(rows, t)
         m = re.search(r"Question (\d+)/(\d+)", rows[t])
         k, total = (int(m.group(1)), int(m.group(2))) if m else (1, 0)
         question, opts, at, notes, end = [] if m else [rows[t].strip()], [], None, None, False
@@ -152,6 +198,11 @@ class Codex:
 
     def answer(self, ask, pick, text, picks):
         at, box = _need_at(ask), _box_of(ask, text)
+        if ask.get("queued"):  # Default mode: the text goes on 'Other' in place of its label (or of a text there)
+            if text:
+                return _move(at, box["stop"]) + _rub(box.get("typed")) + _typed(text) + [{"key": "Enter"}], text
+            o = _one(ask, pick)
+            return _move(at, o["stop"]) + [{"key": "Enter"}], o.get("typed") or o["label"]
         if text and ask.get("notes") and at == box["stop"]:  # its notes box is open: the new text in place of the old
             return _rub(box.get("typed")) + _typed(text) + [{"key": "Enter"}], text
         # An open notes box closes first (Tab), and a moment passes: a second Tab right after it was lost.

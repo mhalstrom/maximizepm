@@ -2362,7 +2362,9 @@ def _layout(detect=None):
     from . import agents
     d = {**agents.DETECT_LAYOUT, **{k: v for k, v in (detect or {}).items() if k in agents.DETECT_LAYOUT}}
     tell = (detect or {}).get("tell_instead") or r"(?i)\bno\b.*\btell\b"
-    key = (*sorted(d.items()), tell)
+    op = d.pop("ask_open", None) or {}
+    opener = (op.get("line"), tuple(op.get("keys") or ())) if op.get("line") else None
+    key = (*sorted(d.items()), tell, opener)
     got = _LAYOUTS.get(key)
     if got is None:
         # An option's line: its indent, then the mark where DETECT['item'] puts it ("{mark}": first; Grok: after the
@@ -2375,7 +2377,8 @@ def _layout(detect=None):
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
                                "fixed": d["fixed"] and re.compile(d["fixed"]),
-                               "ask": d["ask"] and re.compile(d["ask"]), "ask_form": d["ask_form"]}
+                               "ask": d["ask"] and re.compile(d["ask"]), "ask_form": d["ask_form"],
+                               "ask_open": opener and (re.compile(opener[0]), list(opener[1]))}
     return got
 
 
@@ -4657,6 +4660,37 @@ def _ask_form_answer(conn, agent, pane, form, ask, pick, other, picks, tab, who)
     return {"agent": agent, "pane": pane, "picked": picked, "text": text}
 
 
+# The panes whose closed question (DETECT['ask_open']) MaximizePM opened: {pane: the line over the opener ('? 1
+# question', its time left out)}. Each closed question opens once: when the person goes back to the main prompt
+# in the terminal (Codex: shift+→), it stays closed there; the entry goes when the pane shows no question at all.
+_ASK_OPENED = {}
+ASK_OPEN_PAUSE = 0.5  # seconds for the CLI to draw the question after the keys that open it
+
+
+def _ask_opened(pane, tail, layout, ask):
+    """(tail, ask) of a pane, with its closed question opened (DETECT['ask_open'], #6258): Codex's Default mode asks
+    with request_user_input_async while its turn goes on and shows the question closed, '? 1 question · 12s' over
+    'shift+← to answer'. MaximizePM sends the keys that open it, once for each closed question, and reads the pane
+    again, so that the page shows the question's card. The keys only move the focus to the question: the text that
+    the person typed in the CLI's input box stays there."""
+    rx, keys = layout["ask_open"]
+    at = next((n for n, x in enumerate(tail) if rx.match(x)), None)
+    if at is None:
+        if ask is None:
+            _ASK_OPENED.pop(pane, None)
+        return tail, ask
+    if ask is not None:
+        return tail, ask
+    mark = re.sub(r"\s*·.*$", "", tail[at - 1]).strip() if at else ""
+    if _ASK_OPENED.get(pane) == mark:
+        return tail, ask
+    _ASK_OPENED[pane] = mark
+    _tmux("send-keys", "-t", pane, *keys, check=False)
+    time.sleep(ASK_OPEN_PAUSE)
+    tail = _prompt_tail(_plain(_pane_texts([pane]).get(pane) or ""))
+    return tail, _ask_read(tail, layout)
+
+
 def pane_prompts(conn, terminals):
     """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
@@ -4677,6 +4711,8 @@ def pane_prompts(conn, terminals):
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
         rx, layout, _ = _pane_rule(conn, agent, *procs.get(pane, (None, None)))
         ask = _ask_read(tail, layout) if layout.get("ask") else None
+        if layout.get("ask_open"):
+            tail, ask = _ask_opened(pane, tail, layout, ask)
         if ask:  # the CLI's own question dialog (#6234): its card shows each part and answers with its keys
             out[agent] = _ask_prompt(pane, ask)
             continue
@@ -4753,7 +4789,11 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None, p
         # #5904: Esc or the pick can end the CLI (Claude Code's trust question: 'No, exit'); the text then went to the
         # shell. Look again before the text goes.
         _agent_in_pane(agent, pane, f"after {opts[n] if n is not None else 'Escape'}")
-        terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        # The Enter a moment after the text: Codex takes characters that come fast as a paste, and an Enter with them
+        # stayed in its input line (#6259, Codex 0.159.1: 'No, and tell Codex what to do differently').
+        terminal_keys(conn, agent, [{"text": text}], who)
+        time.sleep(PROMPT_PAUSE)
+        terminal_keys(conn, agent, [{"key": "Enter"}], who)
         core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):

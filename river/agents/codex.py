@@ -125,8 +125,13 @@ DETECT = {
     # The request_user_input dialog of Plan mode (#6235): 'Question 1/2 (2 unanswered)', the question, numbered
     # options with a description, 'None of the above' with notes, and the question before a submit with unanswered
     # questions; read and answered by river/ask_forms.
-    "ask": r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$",
+    # The question of Default mode (request_user_input_async, #6258) is read by its key line 'enter submit   ctrl+]
+    # skip ...': it has no header. Codex shows it closed while its turn goes on ('? 1 question · 12s', 'shift+← to
+    # answer'); MaximizePM opens it (ask_open) so that the page can read it.
+    "ask": r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$"
+           r"|^\s*enter submit\s+ctrl\+\] skip\b",
     "ask_form": "codex",
+    "ask_open": {"line": r"^\s*shift\+← to answer\s*$", "keys": ["S-Left"]},
 }
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
