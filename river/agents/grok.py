@@ -110,10 +110,29 @@ EFFORT = {
 SEEN_DEFAULT_EFFORT = {"grok-4.7": "high"}
 
 
+def _toml_file(path):
+    """Parse a TOML file into a dict, or {} when missing, unreadable, or invalid."""
+    try:
+        import tomllib
+        got = tomllib.loads(path.read_text(encoding="utf-8"))
+        return got if isinstance(got, dict) else {}
+    except (ImportError, OSError, ValueError):
+        return {}
+
+
+def _sandbox_profile(cfg):
+    """The [sandbox] profile string of a parsed Grok TOML file, or ""."""
+    sb = cfg.get("sandbox")
+    val = sb.get("profile") if isinstance(sb, dict) else None
+    return val.strip() if isinstance(val, str) else ""
+
+
 def config_settings(env=None):
-    """What a Grok session takes when nothing names it (#6280): the model of its cache when it lists one (grok-4.7 on
-    2026-11-20), that model's default effort (its reasoning_effort: high), and [ui] permission_mode of
-    ~/.grok/config.toml (ask). Grok's config named no sandbox: Grok's own default stays unknown."""
+    """What a Grok session takes when nothing names it (#6280, #6315): the model of its cache when it lists one
+    (grok-4.7 on 2026-11-20), that model's default effort (its reasoning_effort: high), [ui] permission_mode of
+    ~/.grok/config.toml, and its sandbox profile (requirements.toml pin, else GROK_SANDBOX, else [sandbox] profile of
+    ~/.grok/config.toml, else 'off', per ~/.grok/docs/user-guide/18-sandbox.md)."""
+    env = os.environ if env is None else env
     cache = _models_cache(env)
     got = {}
     if len(cache) == 1:
@@ -125,19 +144,26 @@ def config_settings(env=None):
         # and the default effort the cache gave it then.
         model = DESCRIBE["models"][0]
         got = {"model": model, "effort": SEEN_DEFAULT_EFFORT.get(model)}
+    home = grok_home(env)
     try:
-        text = (grok_home(env) / "config.toml").read_text(encoding="utf-8")
+        text = (home / "config.toml").read_text(encoding="utf-8")
     except OSError:
         text = ""
-    m = re.search(r'^\s*permission_mode\s*=\s*"([^"]+)"', text, re.M)
-    if m:
-        got["permission_mode"] = m.group(1)
+    cfg = _toml_file(home / "config.toml")
+    ui = cfg.get("ui")
+    pm = ui.get("permission_mode") if isinstance(ui, dict) else None
+    if not isinstance(pm, str) or not pm:
+        m = re.search(r'^\s*permission_mode\s*=\s*"([^"]+)"', text, re.M)
+        pm = m.group(1) if m else None
+    if pm:
+        got["permission_mode"] = pm
+    req = _toml_file(home / "requirements.toml")
+    got["sandbox"] = _sandbox_profile(req) or (env.get("GROK_SANDBOX") or "").strip() or _sandbox_profile(cfg) or "off"
     return got
 
 
-# Where the Settings dialog reads each setting of a running session (#6280). The sandbox has no source when the
-# command line names none: #6280's fix item.
-SETTINGS_READ = {"model": ("config",), "effort": ("config",), "permission_mode": ("config",)}
+# Where the Settings dialog reads each setting of a running session (#6280, #6315).
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "permission_mode": ("config",), "sandbox": ("config",)}
 
 
 def read_effort_levels(model):

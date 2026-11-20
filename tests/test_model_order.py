@@ -260,7 +260,7 @@ READERS = {"chat": "chat_settings", "screen": "screen_settings", "config": "conf
 
 # (agent, setting) -> the fix item of a setting that the Settings dialog cannot read yet when the command line names
 # none. The test fails when one of them has a source now.
-SETTINGS_EXCEPTIONS = {("grok", "sandbox"): "#6315"}
+SETTINGS_EXCEPTIONS = {}
 
 
 def settings_problems(a):
