@@ -1606,6 +1606,41 @@ try {
                              "wait: Wait for work", "command: Build the desktop app"],
                     "ended": True, "fits": True, "closes": True})
 
+    def test_a_manager_forwarded_decision_shows_in_the_manager_panel_and_badge(self):
+        """#6472: a decision the manager forwarded (with decision.by = manager, or an older one with no decision.by)
+        shows in the manager session's #sessAsk panel with the ! badge on the manager row and in Your action items."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='ag'")
+        it1 = core.item_add(self.c, "site", "Approve built-in manager policies", doer="human")["id"]
+        it2 = core.item_add(self.c, "site", "Approve docs row", doer="human")["id"]
+        d1 = core.decision_parse(["A: Ship all three", "B: Ship with changes"], "A", "Ship built-in policies?")
+        d2 = core.decision_parse(["A: Approve", "B: Skip"], "A", "Commit docs row?")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET decision=?, held_for='' WHERE id=?", (json.dumps(dict(d1, by="ag")), it1))
+            self.c.execute("UPDATE items SET decision=?, held_for='' WHERE id=?", (json.dumps(d2), it2))
+            core.sync_needs_you(self.c)
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#sessMgr [data-session='ag'] .wbadge"), "the ! badge on the manager row");
+  check(q("#sessMgr [data-session='ag'] .wbadge").textContent.trim() === "! 2", "manager row badge counts both forwarded decisions");
+  await until(() => !q("#sessAsk").classList.contains("hidden") && q("#sessAskList").textContent.includes("Ship built-in policies?"), "manager panel shows forwarded decisions");
+  check(q("#sessAskList").textContent.includes("Commit docs row?"), "legacy decision without by also shows in manager panel");
+  check(q("#sessBadge .wbadge").textContent.trim() === "! 2", "manager head badge counts both");
+  check(!dlg(), "no dialog over the page");
+  // Clicking Your action items shows both items, and clicking one opens the manager panel.
+  q("#sessYouRow [data-you]").click();
+  await until(() => !q("#sessYou").classList.contains("hidden") && document.querySelectorAll("#needsYou [data-nyt]").length >= 2, "Your action items lists both");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "click opens manager session with panel");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1280,900", "390,844"):
+            self.assertEqual(self.drive(driver, "/sessions/ag", size=size), {"ok": True})
+
     def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
         """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
         side panel shows its address to copy in place of a frame; on the computer of maxpm serve it is a frame."""

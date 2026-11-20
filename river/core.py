@@ -20006,7 +20006,7 @@ def _tell_asker(conn, row, text, item_id=None, actor=None):
     if not by or by in (TOKEN_AGENT.get(), actor):
         return
     a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (by,)).fetchone()
-    if not a or _agent_state(conn, a) in ("stopped", "gone"):
+    if not a or a["role"] == "manager" or _agent_state(conn, a) in ("stopped", "gone"):
         return
     with tx(conn):
         mid = _send(conn, "notice", "maxpm", text, to=by, item_id=item_id)
@@ -20053,10 +20053,15 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, opt
     note = note.strip() if note and note.strip() else None
     decision = decision_parse(options, recommend, question)
     own = helper or TOKEN_AGENT.get()
-    if decision and own and own != actor and _is_person(conn, actor):
-        # A session that goes through the list with the person (#6436: the needs-you session, or the one-item helper)
-        # puts each decision as the person; the person's answer in the dialog then comes back to it (_tell_asker).
-        decision["by"] = own
+    if decision:
+        if own and own != actor and _is_person(conn, actor):
+            # A session that goes through the list with the person (#6436: the needs-you session, or the one-item helper)
+            # puts each decision as the person; the person's answer on the card then comes back to it (_tell_asker).
+            decision["by"] = own
+        elif _is_manager(conn, actor):
+            # The manager forwards a decision (#6472): the page shows it in the manager session's panel (#sessAsk)
+            # with the ! badge on the manager row, and in Your action items.
+            decision["by"] = actor
     if decision and drop:
         raise RiverError("--drop closes the alert; options are for what the person decides")
     with tx(conn):
@@ -22720,15 +22725,16 @@ into one table. If they ask what something means, explain it, then ask the same 
 # The decision goes into the page's dialog (#6436, mark 2026-11-20: 'the needs you agent that helps go through action
 # items also needs to use the question asking modal'): maxpm forward puts the options on the item or question, the
 # page opens its card with them, and the person's answer there closes it and comes back to the session (_tell_asker).
-DIALOG_STEPS = """Put the decision itself in the dialog on {person}'s MaximizePM page, not in the chat
-   (run maxpm with no --as: your session acts for {person}):
+DIALOG_STEPS = """Put the decision itself in the Waits for you card above {person}'s message box in this session, not in the chat
+   (run maxpm with no --as: your session acts for {person}; run it even when the item already has options, so the card
+   shows in this session):
      maxpm forward --item <id> --question "<one short sentence>" \\
        --option "<label>: <one line: what happens>" --option "<label>: ..." --recommend <label>
    2 to 4 options, your recommendation among them; a label of at most 60 characters, a line of at most 200.
    A question (not an item): maxpm forward <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
-   --question "<what to do>"; the dialog then shows a text box. The page shows the dialog to them.
+   --question "<what to do>"; the card then shows a text box. Point {person} to the card below the chat, not "a dialog".
    Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
-   background command). The answer in the dialog closes the item or question, and MaximizePM sends you a
+   background command). The answer on the card closes the item or question, and MaximizePM sends you a
    notice with the choice and the person's words; record nothing for it. When the page is not open (they
    talk with you in a terminal only), ask in the chat in the form below instead, and record the answer
    yourself with the "record the result" command (add --choice <label> when they picked an option):
@@ -22758,10 +22764,10 @@ LIST_STEPS = """How to go through the list with {person}:
 3. """ + DIALOG_STEPS + "\n".join(
     "   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
 4. When the answer asks for a change, add the work (maxpm add "<title>" --found-during <id> --context "<what they
-   said>"); a dialog answer closed this one already. When they want it dropped, drop it with the reason.
+   said>"); an answer on the card closed this one already. When they want it dropped, drop it with the reason.
    If you can do the step yourself without them, say so; with their yes, take it over:
    maxpm --as <your-agent-name> takeover <id> --note "<how>".
-5. Then the next one, as soon as the answer comes. Never two in one dialog or message. When they want to skip one,
+5. Then the next one, as soon as the answer comes. Never two in one card or message. When they want to skip one,
    leave it open and go on; when they want to stop, say in one line what is left.
 Ask before anything that uses their accounts, money, or sends something in their name.
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""

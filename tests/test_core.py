@@ -3854,7 +3854,7 @@ class Prompts(Base):
         allp = core.prompt_for_all(self.c, "mark")
         self.assertIn("1. Item #", allp)
         # The agent that goes through the list (#5103): one at a time, read first, record each answer.
-        for part in ("Never two in one dialog or message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
+        for part in ("Never two in one card or message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
             self.assertIn(part, allp)
         self.assertIn(f"maxpm answer {q['id']}", allp)
         self.assertNotIn("--as mark", p + allp)
@@ -7303,8 +7303,10 @@ class NeedsYouDialog(Base):
         for p in (core.prompt_for_all(self.c, "mark"),
                   core.prompt_for(self.c, core.item_list(self.c, project="a")[0]["id"], "mark")):
             for part in ("maxpm forward --item <id> --question", "--recommend <label>",
-                         "maxpm inbox --wait", "record nothing", "Decision <n> of <total>"):
+                         "maxpm inbox --wait", "record nothing", "Decision <n> of <total>",
+                         "Waits for you card"):
                 self.assertIn(part, p)
+            self.assertNotIn("the dialog on", p)
 
     def test_an_item_answered_in_the_dialog_tells_the_session_that_put_it(self):
         i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
@@ -7366,7 +7368,9 @@ class NeedsYouDialog(Base):
         i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
         self.as_session("boss")
         core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Blue")
-        self.assertNotIn("by", core.item_show(self.c, i)["decision"])
+        # #6472: the manager's forwarded decision names the manager (so its session panel and badge show it),
+        # while _tell_asker still sends the manager no 'Go on to the next one' notice.
+        self.assertEqual(core.item_show(self.c, i)["decision"]["by"], "boss")
         core.TOKEN_AGENT.set(None)
         core.done(self.c, i, None, actor="mark", choice="Blue")
         j = core.item_add(self.c, "a", "Decide the font", doer="human", actor="mark")["id"]

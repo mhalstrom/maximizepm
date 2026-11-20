@@ -23,6 +23,7 @@ const browserOf = (body) => { const m = /\/sessions\/([^/\s?#]+)\/browser\b/.exe
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
 export let NY = [], nySig = "";
+let nyDecSig = "";
 const nyOpen = new Set();
 export function humanActor() { const a = S && S.agents.find(x => x.name === actor()); return a && a.kind === "human" ? a.name : null; }
 
@@ -34,26 +35,39 @@ export async function pollNeedsYou() {
   // itself. The count of Your action items, the session's row and the bell say it came; the asking session shows it in
   // its own view.
   renderNeedsYou(); notifyNew();
+  const ds = JSON.stringify(NY.map(e => [e.id, e.decision || null]));
+  if (ds !== nyDecSig) { nyDecSig = ds; document.dispatchEvent(new CustomEvent("maxpm-needs-you")); }
 }
 
-// What waits for the person in a session (#6438): its prompts and questions (s.waiting, api/sessions), and the
-// decisions it put to the person as the person (#6436: the needs-you session, maxpm --as <person> forward;
-// decision.by), from Needs you, as {kind: "card", id, e}. A question of its own is in its list already. The row's
+const liveAgent = (n) => {
+  const a = n && S && (S.agents || []).find(x => x.name === n);
+  return a && a.kind !== "human" && !["gone", "stopped"].includes(a.state) ? a.name : null;
+};
+const activeManager = () => {
+  const a = S && (S.agents || []).find(x => x.role === "manager" && !["gone", "stopped"].includes(x.state));
+  return a ? a.name : null;
+};
+
+// What waits for the person in a session (#6438, #6472): its prompts and questions (s.waiting, api/sessions), and the
+// decisions it put to the person (decision.by: the manager, the needs-you session, or a one-item helper), from Needs
+// you, as {kind: "card", id, e}. A decision with no live decision.by (forwarded before #6472 or by an ended session)
+// shows in the active manager session so it is never lost. A question of its own is in its list already. The row's
 // badge, its dot and its panel count the same.
 export function waitsOf(s) {
   const own = s.waiting || [];
-  const put = NY.filter(e => e.decision && e.decision.by === s.name
+  const put = NY.filter(e => e.decision
+    && (e.decision.by === s.name || (s.role === "manager" && (!e.decision.by || (S && !liveAgent(e.decision.by)))))
     && !own.some(w => w.kind === "question" && w.id === e.message_id));
   return [...own, ...put.map(e => ({ kind: "card", id: e.id, e }))];
 }
 
-// The live agent session that asks (#6438): the one that put the decision as the person (#6436, decision.by), else
-// the asker of a question. A click on the line opens that session's view with it. None (MaximizePM, a person, an
-// ended session, a person item no session put): the card.
+// The live agent session that asks (#6438, #6472): the one that put the decision (decision.by), else for a question
+// the asker, else for a forwarded decision with no live decision.by the active manager. A click on the line opens that
+// session's view with it. None (MaximizePM, a person, an ended session, a plain person item): the card.
 function askingSession(e) {
-  const live = (n) => { const a = n && S && (S.agents || []).find(x => x.name === n);
-    return a && a.kind !== "human" && !["gone", "stopped"].includes(a.state) ? a.name : null; };
-  return live(e.decision && e.decision.by) || (e.kind === "item" ? null : live(e.from_agent));
+  return liveAgent(e.decision && e.decision.by)
+    || (e.kind === "item" ? null : liveAgent(e.from_agent))
+    || (e.decision ? activeManager() : null);
 }
 
 // An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE), or for a manager that

@@ -488,6 +488,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const open = agent && list.find(x => x.name === agent);
     putHtml($("#sessBadge"), open ? waitBadge(open, false) : "");
     drawTasks(open);
+    if (agent) waitLine(lastRead && lastRead.agent === agent ? lastRead : {});
     fit();
     autoWait();
   }
@@ -697,6 +698,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     poll();
   }
 
+  document.addEventListener("maxpm-needs-you", () => { if (listRead) draw(); });
   document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it. A
