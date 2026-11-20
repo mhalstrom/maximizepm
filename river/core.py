@@ -22645,11 +22645,12 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
                              f"maxpm config set launch_agents \"...; {platform_spec(top['agent'])['label']}=@{top['agent']}\"")
-    if preview and not p["path"] and not folder:  # Start names this work; its dialog asks for the folder (#5894)
-        return {"project": p["name"], "path": None, "item": {"id": top["id"], "title": top["title"],
-                                                             "agent": top["agent"]}, "ready": len(pool), "why": why}
+    if preview:  # the page's Next line: the item and project only, never builds the command or walks read_dirs (#6342)
+        return {"project": p["name"], "path": p["path"] or None,
+                "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
+                "ready": len(pool), "why": why}
     p = start_folder(conn, p, folder, actor)
-    plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
+    plat = _launch_platform(conn, p["id"], agent)
     if model:
         # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
         ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"],
@@ -22751,6 +22752,16 @@ def _start_next(conn):
     except RiverError:
         return None
     return {**t["item"], "project": t["project"], "why": t["why"]}
+
+
+def _launch_platform(conn, project_id, agent):
+    """The adapter id of the chosen launch_agents entry (None for a custom command)."""
+    agents = launch_entries(conn, project_id)
+    pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
+    if pick is None:
+        raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
+    prof = parse_profile(pick[1])
+    return prof[0] if prof else None
 
 
 def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,

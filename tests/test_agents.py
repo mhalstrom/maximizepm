@@ -1296,6 +1296,31 @@ class ReadDirs(Env):
         self.assertNotIn("--disallowedTools", core._launch_agent_cmd(self.c, pid, "Claude Code")["command"])
         self.assertNotIn("maxpm_read_dirs", core._launch_agent_cmd(self.c, pid, "Codex")["command"])
 
+    def test_state_preview_does_not_scan_read_dirs_and_launch_scans_once(self):
+        # #6342: core.state -> _start_next -> launch_target(preview=True) must not build the launch command or walk
+        # read_dirs, and a real launch_target must scan read_dirs only once (not twice).
+        rd = Path(self.tmp.name, "read").resolve()
+        rd.mkdir()
+        (rd / ".env").write_text("x", encoding="utf-8")
+        proj = Path(self.tmp.name, "proj")
+        proj.mkdir()
+        core.project_add(self.c, "p", path=str(proj))
+        core.config_set(self.c, "read_dirs", str(rd), project="p")
+        core.config_set(self.c, "default_agent", "antigravity")
+        it = core.item_add(self.c, "p", "do work")["id"]
+        calls = []
+        real = core.secret_files
+        core.secret_files = lambda dirs: (calls.append(list(dirs)), real(dirs))[1]
+        try:
+            st = core.state(self.c, closed=False)
+            self.assertEqual((st["start_next"]["id"], st["start_next"]["project"]), (it, "p"))
+            self.assertEqual(calls, [])
+            t = core.launch_target(self.c, item=it)
+            self.assertIn(f"read_file({rd}/.env)", t["command"])
+            self.assertEqual(len(calls), 1)
+        finally:
+            core.secret_files = real
+
 
 class Setup(Env):
     """#5184: the setup part. The MCP config writers, the instruction file names, the voice and the web link texts
