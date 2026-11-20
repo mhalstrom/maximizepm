@@ -386,9 +386,35 @@ server, driven through the page's API and the page itself, with its desktop and 
 
 | Agent | Setup (install, check, sign-in) | Start, with its settings | Chat | Message box | States (working, idle, blocked, trust, approval) | Question card | / list | Stop | Resume after a stop | Roles (manager, reviewer) | Shell guard |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Claude Code | not run yet (#6253) | | | | | | | | | | |
-| Codex | not run yet (#6253) | | | | | | | | | | |
-| Antigravity CLI | not run yet (#6253) | | | | | | | | | | tmux guard only (deny rules, #6251) |
+| Claude Code | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| Codex | pass | pass | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
+| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | not reached: the model refused the command itself (#6251) |
+
+The runs of 2026-11-19, with Claude Code 2.1.329 (haiku, low), codex-cli 0.159.1 (gpt-6-luna, low) and agy 1.5.13
+(gemini-3.8-flash-medium). Each run: Dispatch of a worker item from the page (the agent asks the person a date format
+with its own question tool, writes a line, commits and runs `maxpm done`), the trust question and an approval menu
+answered on the page, a reply through the message box, `/mo` and Tab to `/model`, which opens the Settings dialog, a
+Stop during a long reply, a restart with a changed setting (its chat goes on), then Start manager and a Dispatch of
+the release's review item (the reviewer passes it). Shell guard: Claude Code and Codex (after #6254, in a second run)
+refused a bare `tmux kill-server` with the guard's reason. agy (after #6251, with the deny rules in its start
+command) did not call its tool: its model refused the command twice by itself, so the run did not reach the rule. Screenshots: Setup, the question card, the Settings dialog and the Sessions tab, at desktop width
+and 390 px. Also found: the Settings dialog's row labels overlap their selects (#6262).
+
+Open gaps, each with its fix item:
+
+- Codex, question card: #6258. codex-cli 0.159.1 asks a question during a running turn as one line, '? 1 question',
+  with 'shift+← to answer'; the page shows working and no card.
+- Codex, an approval answered with "No, and tell Codex what to do differently" and a text: #6259. The text stays in
+  Codex's input line until an Enter.
+- Antigravity CLI, start with an effort: #6260. `--effort` with `--model` makes agy 1.5.13 start on its default model;
+  its model ids carry the effort.
+- Antigravity CLI, state after a Stop: #6261. The transcript's last step reads as working and wins over the screen,
+  which shows idle; the Settings restart then refuses until another turn ends.
+
+- Antigravity CLI, first `maxpm go` (#6278): each run started in a scratch project, not in biggestriver. Claude Code
+  and Codex reached their item with only the trust card answered on the page. agy's first start ran `maxpm go` in
+  the `--add-dir` folder (the queue's folder) and found no project; a second start, with the queue folder beside the
+  project, reached its item.
 
 ## Tests in maxpm (step 5)
 
