@@ -6057,6 +6057,10 @@ def render_go(b):
         out += [f"WORKTREE: you work in {w['path']}, on the branch {w['branch']} of {w['repo']}. Commit there, and merge "
                 f"the branch the way the project's rules say. When your session has ended and the branch is in the "
                 f"HEAD of {w['repo']}, maxpm serve removes the worktree; unmerged work stays.", ""]
+    if b.get("build_dir"):
+        out += [f"BUILDS: a build outside the checkout's own target (a clean copy, an export, a test copy) goes to "
+                f"CARGO_TARGET_DIR=$MAXPM_BUILD_DIR/<name> ({b['build_dir']}), never to a scratch folder. maxpm serve "
+                f"removes that folder, and any build folder in your scratchpad, when your session has ended.", ""]
     if b.get("help_prompt"):
         out += [b["help_prompt"], "",
                 f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\"."]

@@ -137,6 +137,8 @@ from river.pipeline import targets as _targets  # noqa: E402
 _targets.SYNC_HOLD["on"] = True  # holding is read in the test's own thread, never after its database is gone (#6140)
 core.LOGIN_PATH_RUNNER = lambda: None  # a test never starts the person's login shell (#5611); a test sets its own
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
+# A test that starts a pane of a real tmux server makes the session's build folder (#6398): never in ~/Projects.
+core.DEFAULT_SETTINGS["session_builds"] = os.path.join(_queue_dir, "session-builds")
 from river import tailnet as _tailnet  # noqa: E402
 # A test never asks the person's Tailscale (#5860): a phone notice's link went to this Mac's tailnet name when
 # tailscale serve forwarded the page here. Tests of Tailscale set their own fake (tests/test_tailnet.py).

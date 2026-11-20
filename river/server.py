@@ -838,11 +838,19 @@ def _open_terminal(t, env, runner=None, conn=None):
     if runner:
         runner(line)
         return
-    token = None
+    token, pane_env = None, {}
     if conn is not None and env.get("MAXPM_AGENT"):
         r = conn.execute("SELECT role FROM agents WHERE name=?", (env["MAXPM_AGENT"],)).fetchone()
         token = core.token_new(conn, env["MAXPM_AGENT"], role=r["role"] if r else None)
-    t["tmux_pane"], pid = _tmux_open(t, env, line, {core.TOKEN_ENV: token} if token else None)
+        pane_env[core.TOKEN_ENV] = token
+    if env.get("MAXPM_AGENT"):
+        # #6398: the session's own build folder, outside every scratchpad, in the pane's environment like the token
+        # (the typed line stays short); serve removes it when the session ended (river/scratch.py).
+        from . import scratch
+        d = scratch.build_dir(conn, env["MAXPM_AGENT"], make=TMUX_RUNNER is None)
+        if d is not None:
+            pane_env[scratch.ENV] = str(d)
+    t["tmux_pane"], pid = _tmux_open(t, env, line, pane_env or None)
     if token and t["tmux_pane"]:
         core.token_bind(conn, token, t["tmux_pane"], pid)
     if t.get("first_prompt") and t.get("platform") and t["tmux_pane"]:
@@ -1147,7 +1155,8 @@ def _tmux_open(t, env, line, pane_env=None):
     own login shell and river types the command line into it, as Terminal's do script does: the shell's PATH finds
     the agent CLI, and the pane stays (with what the agent printed) after the agent ends. Nothing takes
     the keyboard: a person who answers a prompt in another pane keeps typing there. pane_env goes into the
-    environment of this pane alone (tmux -e; never tmux's global environment): the session's token (#5972)."""
+    environment of this pane alone (tmux -e; never tmux's global environment): the session's token (#5972) and its
+    build folder (#6398)."""
     name = t.get("session_title") or t["project"]
     new = ["-c", t["path"], *(x for k, v in (pane_env or {}).items() for x in ("-e", f"{k}={v}")),
            "-P", "-F", "#{pane_id} #{pane_pid}"]

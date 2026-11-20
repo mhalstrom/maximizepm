@@ -481,6 +481,11 @@ DEFAULT_SETTINGS = {
     # session has ended and its branch is merged or has no commit (workspace_sweep); else maxpm workspace list says why.
     "workspace": "shared",
     "workspace_setup": "",
+    # session_builds (#6398, mark 2026-11-20: 'builds are not allowed to be in the scratch folder'): each session that
+    # maxpm starts gets <session_builds>/<session>/ as MAXPM_BUILD_DIR, for a build outside the checkout's own target
+    # (a clean copy, an export). maxpm serve removes it, and the Cargo targets in the session's Claude Code
+    # scratchpad, once the session ended (river/scratch.py).
+    "session_builds": "~/Projects/.session-builds",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
@@ -24585,6 +24590,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
              "chat": chat}
 
     brief["workspace"] = workspace_of(conn, actor)  # its own git worktree (#5856), or None
+    from . import scratch
+    bd = scratch.build_dir(conn, actor)
+    brief["build_dir"] = str(bd) if bd is not None and bd.is_dir() else None  # #6398: made when maxpm started it
     stop = stop_request(conn, actor)
     if stop:
         holds = [item_show(conn, r["id"]) for r in conn.execute(
