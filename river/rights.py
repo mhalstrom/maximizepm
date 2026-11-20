@@ -128,6 +128,7 @@ OPS.update({op: LEAD for op in (
     "agent_update", "agent_update_cancel", "agent_update_later", "agent_update_auto", "agent_update_check")})
 OPS.update({op: ONLY_PERSON for op in (
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
+    "device_remove",  # #6471: Remove a paired phone in Settings
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
     "relay_disconnect", "release_changes", "release_download", "release_now", "release_agent", "release_update", "rqs_connect", "session_interrupt",
     "session_pin", "session_restart", "session_send", "session_setting", "session_upload",

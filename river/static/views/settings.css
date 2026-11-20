@@ -44,6 +44,11 @@
 .prov-add { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
 .prov-add select { background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s);
   padding: var(--sp-1) var(--sp-2); }
+/* #6471: paired phones in Settings > Notifications; wraps cleanly at 390 px phone width. */
+.dev-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4);
+  padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }
+.dev-main { flex: 1; min-width: var(--w-l); overflow-wrap: anywhere; }
+.dev-acts { display: flex; gap: var(--sp-2); align-items: center; }
 .cred-adds { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-6) 0 var(--sp-3); }
 .set-scoped > summary { cursor: pointer; font-weight: 600; padding-left: 0; }
 @media (max-width: 759px) {  /* a phone: one row of tabs that scrolls sideways, each at the size of a tap */

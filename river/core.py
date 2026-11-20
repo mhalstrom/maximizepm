@@ -1201,6 +1201,19 @@ CREATE TABLE IF NOT EXISTS notifications (
   UNIQUE (event_id, channel)
 );
 
+-- Paired phones (#6471, plan: canvas phone-app-plan): each device that scanned the setup guide's QR pairing code.
+-- push_token and key are used by the 'app' notice channel (#6469); dead_at marks a token the push Worker refused.
+CREATE TABLE IF NOT EXISTS devices (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  platform    TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+  push_token  TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  paired_at   TEXT NOT NULL,
+  last_seen   TEXT NOT NULL,
+  dead_at     TEXT
+);
+
 -- Who held which item when (#1102): the trigger below keeps it for every path that changes an item's
 -- status or assignee, so the token usage of a session can be charged to the item its agent held.
 CREATE TABLE IF NOT EXISTS holds (
@@ -2366,6 +2379,17 @@ def graph_version(conn):
 def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     _pipeline_migrate(conn)  # the pipeline package's own tables (#6113)
+    # Paired phones (#6471, plan: canvas phone-app-plan).
+    conn.execute("""CREATE TABLE IF NOT EXISTS devices (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      platform    TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      push_token  TEXT NOT NULL,
+      key         TEXT NOT NULL,
+      paired_at   TEXT NOT NULL,
+      last_seen   TEXT NOT NULL,
+      dead_at     TEXT
+    )""")
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
     # The scope of a session (#5973).
@@ -24634,7 +24658,80 @@ def state(conn, closed=True):
             "WHERE closed_at IS NULL ORDER BY id DESC")],
         "agent_limits": agent_limits_list(conn),
         "providers": agent_providers(conn),
+        "devices": device_list(conn),
     }
+
+
+# ---------------------------------------------------------------- paired phones (#6471)
+DEVICE_PLATFORMS = ("ios", "android")
+
+
+def _device_public(r):
+    return {"id": r["id"], "name": r["name"], "platform": r["platform"],
+            "paired_at": r["paired_at"], "last_seen": r["last_seen"], "dead_at": r["dead_at"]}
+
+
+def device_pair(conn, name, platform, push_token, key):
+    """Store a paired phone after its QR pairing code checked out (#6471). Re-pairing a device with the same
+    platform and push_token updates its name, key and timestamps and clears dead_at."""
+    plat = (platform or "").strip().lower()
+    if plat not in DEVICE_PLATFORMS:
+        raise RiverError("platform must be 'ios' or 'android'")
+    token = (push_token or "").strip() if isinstance(push_token, str) else ""
+    if not token or len(token) > 1024:
+        raise RiverError("push_token is required (at most 1024 characters)")
+    k = (key or "").strip() if isinstance(key, str) else ""
+    if not k or len(k) < 16 or len(k) > 512 or any(c.isspace() for c in k):
+        raise RiverError("key is required (16 to 512 non-whitespace characters)")
+    label = (name or "").strip() if isinstance(name, str) else ""
+    if not label:
+        label = "iPhone" if plat == "ios" else "Android"
+    label = label[:120]
+    ts = iso(now())
+    with tx(conn):
+        existing = conn.execute("SELECT id FROM devices WHERE platform=? AND push_token=?", (plat, token)).fetchone()
+        if existing:
+            conn.execute("UPDATE devices SET name=?, key=?, paired_at=?, last_seen=?, dead_at=NULL WHERE id=?",
+                         (label, k, ts, ts, existing["id"]))
+            did = existing["id"]
+        else:
+            did = conn.execute(
+                "INSERT INTO devices (name, platform, push_token, key, paired_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+                (label, plat, token, k, ts, ts)).lastrowid
+        row = conn.execute("SELECT id, name, platform, paired_at, last_seen, dead_at FROM devices WHERE id=?",
+                           (did,)).fetchone()
+    return _device_public(row)
+
+
+def device_list(conn, include_secrets=False):
+    """Every paired phone, oldest first. include_secrets adds push_token and key for the app notice channel (#6469)."""
+    cols = "id, name, platform, push_token, key, paired_at, last_seen, dead_at" if include_secrets \
+        else "id, name, platform, paired_at, last_seen, dead_at"
+    return [dict(r) for r in conn.execute(f"SELECT {cols} FROM devices ORDER BY id")]
+
+
+def device_remove(conn, device_id):
+    """Delete a paired phone by id (Remove in Settings, #6471)."""
+    with tx(conn):
+        row = conn.execute("SELECT id, name, platform FROM devices WHERE id=?", (device_id,)).fetchone()
+        if not row:
+            raise RiverError(f"no paired device #{device_id}")
+        conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+    return {"id": row["id"], "name": row["name"], "platform": row["platform"], "removed": True}
+
+
+def device_touch(conn, device_id):
+    """Record that a paired phone was seen now."""
+    ts = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE devices SET last_seen=?, dead_at=NULL WHERE id=?", (ts, device_id))
+
+
+def device_mark_dead(conn, device_id):
+    """Mark a paired phone's push token dead when the push Worker reports it (#6469)."""
+    ts = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE devices SET dead_at=? WHERE id=?", (ts, device_id))
 
 
 # ---------------------------------------------------------------- policies (#5308)

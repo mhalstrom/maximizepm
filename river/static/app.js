@@ -822,8 +822,9 @@ function renderSetup(st) {
   // Serve or HTTPS is not on for the tailnet (#5865): tailscale serve waits for the person's approval at a link.
   const en = tn.enable, said = en && en.text ? ` Tailscale says: “${esc(en.text)}”` : "";
   more.push(extra(!!tn.serving, "Your phone",
-    tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code.
-        Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>`
+    tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code to pair the app.
+        Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>${tn.pair_code
+          ? `<div class="su-pair"><span class="muted t-s">Pairing code expires in 10 minutes.</span> <button class="btn" data-su="recheck">New code</button></div>` : ""}`
       : !tn.installed ? "See your sessions and answer them from your phone, free, over Tailscale: a private network of your own devices. Install Tailscale here and on your phone, and sign in on both with the same account."
       : !tn.running ? "Tailscale is installed. Open it and sign in, then check again."
       : tn.https === false ? `HTTPS certificates are off for your tailnet. Open <a href="${esc(tn.https_admin)}" target="_blank" rel="noopener">${esc(tn.https_admin)}</a>,

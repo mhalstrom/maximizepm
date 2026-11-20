@@ -24,4 +24,6 @@ OPS = {
                                                       a.get("project") or None, bool(a.get("no_project")),
                                                       a.get("role"), a.get("items"), who, a.get("adds_to")),
     "policy_retire": lambda c, a, who: core.policy_retire(c, a["id"], who),
+    # Paired phones (#6471): Remove in Settings deletes the row.
+    "device_remove": lambda c, a, who: core.device_remove(c, int(a["id"])),
 }

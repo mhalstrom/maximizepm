@@ -6022,14 +6022,70 @@ def _setup_folder(path, projects, shared):
             "layout": instructions_layout(path) if exists else None}
 
 
+# Phone pairing codes (#6471): short-lived one-time codes shown in the QR of Settings > setup guide > Your phone.
+# Held in memory (no extra table): each code is valid for 10 minutes and consumed when the app POSTs /api/pair.
+PAIR_CODE_TTL = 600
+PAIR_CODES_MAX = 20
+_PAIR_LOCK = threading.Lock()
+PAIR_CODES = {}  # code -> monotonic expiry timestamp
+
+
+def issue_pair_code(now_mono=None):
+    """Mint a 10-minute pairing code for the setup guide's QR; returns (code, expires_iso)."""
+    t = time.monotonic() if now_mono is None else now_mono
+    code = secrets.token_urlsafe(18)  # 24 URL-safe chars (144 bits of entropy)
+    exp = t + PAIR_CODE_TTL
+    with _PAIR_LOCK:
+        for k in [k for k, v in PAIR_CODES.items() if v <= t]:
+            del PAIR_CODES[k]
+        while len(PAIR_CODES) >= PAIR_CODES_MAX:
+            oldest = min(PAIR_CODES, key=PAIR_CODES.get)
+            del PAIR_CODES[oldest]
+        PAIR_CODES[code] = exp
+    from datetime import timedelta
+    expires_iso = core.iso(core.now() + timedelta(seconds=PAIR_CODE_TTL))
+    return code, expires_iso
+
+
+def consume_pair_code(code, now_mono=None):
+    """Check and consume a pairing code in constant time; returns True iff it was valid and unexpired."""
+    if not isinstance(code, str) or not code:
+        return False
+    t = time.monotonic() if now_mono is None else now_mono
+    with _PAIR_LOCK:
+        for k in [k for k, v in PAIR_CODES.items() if v <= t]:
+            del PAIR_CODES[k]
+        matched = None
+        for k in PAIR_CODES:
+            if hmac.compare_digest(k, code):
+                matched = k
+        if matched is not None:
+            del PAIR_CODES[matched]
+            return True
+    return False
+
+
+def clear_pair_codes():
+    with _PAIR_LOCK:
+        PAIR_CODES.clear()
+
+
 def _tailnet_status(conn):
     """tailnet.status for the setup guide; a failure of the Tailscale CLI shows the step as not installed."""
     from . import tailnet
     try:
-        return tailnet.status(conn)
+        st = tailnet.status(conn)
     except Exception:  # the guide opens anyway
         return {"installed": False, "running": False, "serving": False, "url": None, "qr": None,
                 "command": tailnet.serve_command(core.serve_port_now(conn)), "logins": []}
+    if st.get("serving") and st.get("url"):
+        code, expires_at = issue_pair_code()
+        pair_url = f"{st['url'].rstrip('/')}/?pair={code}"
+        st["pair_code"] = code
+        st["pair_expires_at"] = expires_at
+        st["pair_url"] = pair_url
+        st["qr"] = tailnet.qr_svg(pair_url)
+    return st
 
 
 def tailnet_serve(conn, actor=None):
@@ -7314,6 +7370,42 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         return self._send(status, answer)
 
+    def _pair_device(self):
+        """POST /api/pair (#6471): the phone app scans the setup guide's QR and POSTs the 10-minute pairing code,
+        its push_token, platform ('ios' or 'android'), encryption key, and optional device name."""
+        size = int(self.headers.get("Content-Length") or 0)
+        if size > 8192:
+            return self._send(413, {"error": "pairing request is too large"})
+        try:
+            body = json.loads(self.rfile.read(size) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "the body is not JSON"})
+        if not isinstance(body, dict):
+            return self._send(400, {"error": "the body must be a JSON object"})
+        code = body.get("code")
+        platform = (body.get("platform") or "").strip().lower() if isinstance(body.get("platform"), str) else ""
+        push_token = (body.get("push_token") or "").strip() if isinstance(body.get("push_token"), str) else ""
+        key = (body.get("key") or "").strip() if isinstance(body.get("key"), str) else ""
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        # Validate fields before consuming the one-time pairing code so a bad payload does not burn it.
+        if platform not in core.DEVICE_PLATFORMS:
+            return self._send(400, {"error": "platform must be 'ios' or 'android'"})
+        if not push_token or len(push_token) > 1024:
+            return self._send(400, {"error": "push_token is required (at most 1024 characters)"})
+        if not key or len(key) < 16 or len(key) > 512 or any(c.isspace() for c in key):
+            return self._send(400, {"error": "key is required (16 to 512 non-whitespace characters)"})
+        if not consume_pair_code(code):
+            return self._send(403, {"error": "pairing code is missing, invalid, or expired: scan a fresh code from "
+                                             "Settings > setup guide > Your phone"})
+        conn = core.connect()
+        try:
+            device = core.device_pair(conn, name, platform, push_token, key)
+        except RiverError as e:
+            return self._send(400, {"error": str(e)})
+        finally:
+            conn.close()
+        return self._send(200, {"ok": True, "device": device})
+
     def _mcp(self, method):
         """/mcp: river's MCP tools over Streamable HTTP, for this computer only (mcp.local_refusal). /mcp/plan: the
         planner tools only, for a chat app that plans with the person (#6190)."""
@@ -7432,6 +7524,8 @@ class Handler(BaseHTTPRequestHandler):
                 _leave_run()
         if self.path == "/api/pipeline-events":  # #6163: events in from any system, with a token of the pipeline
             return self._pipeline_events()
+        if self.path == "/api/pair":  # #6471: phone app pairs with a 10-minute code from the setup guide's QR
+            return self._pair_device()
         if self.path != "/api/action":
             return self._send(404, {"error": "not found"})
         # Same-origin check: of the pages on this computer, only river's own acts (a river command sends no Origin).

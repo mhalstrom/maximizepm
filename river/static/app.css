@@ -121,6 +121,7 @@ a.btn { display: inline-block; text-decoration: none; }
 /* The QR code of Your phone (#5863): white with its own quiet zone, so it scans in dark mode too; never wider than the box. */
 .su-qr { margin-top: var(--sp-3); }
 .su-qr svg { display: block; max-width: 100%; height: auto; }
+.su-pair { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 /* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
 button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
 button.primary, a.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }

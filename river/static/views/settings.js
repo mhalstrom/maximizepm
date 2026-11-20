@@ -89,7 +89,9 @@ export function renderSettings() {
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
   $("#setProviders").classList.toggle("hidden", current !== "agents");
   $("#setVersions").classList.toggle("hidden", current !== "agents");
+  $("#setDevices").classList.toggle("hidden", current !== "notifications");
   if (current === "agents") { renderProviders(); renderVersions(); }
+  if (current === "notifications") renderDevices();
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
     .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
@@ -313,8 +315,31 @@ $("#regGo").addEventListener("click", async () => {
   toast(`${n} is registered, and is You are on this page`);
 });
 
+// Paired phones (#6471): each phone that scanned the setup guide's QR code, with Remove.
+function renderDevices() {
+  const host = $("#setDevices");
+  const D = S.devices || [];
+  const plat = (p) => p === "ios" ? "iPhone" : p === "android" ? "Android" : p;
+  const rows = D.map(d => `<div class="dev-row" data-device-id="${d.id}">
+    <div class="dev-main">
+      <b>${esc(d.name)}</b> ${chip("c-p", esc(plat(d.platform)))}${d.dead_at ? " " + chip("c-warn", "push token expired") : ""}
+      <div class="muted t-s">paired ${ago(d.paired_at)} · last seen ${ago(d.last_seen)}</div>
+    </div>
+    <div class="dev-acts">${button("Remove", { kind: "warn", data: { "device-remove": d.id }, title: "Remove device" })}</div>
+  </div>`).join("");
+  const html = `<div class="cred-sub">Paired phones</div>
+    <div class="muted t-s set-note">Pair a phone by scanning the QR code in the setup guide (Your phone).</div>
+    ${rows || `<div class="muted t-s">No paired phones yet.</div>`}`;
+  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+}
+
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
+  if (t.dataset.deviceRemove) return run(async () => {
+    const id = +t.dataset.deviceRemove;
+    const d = (S.devices || []).find(x => x.id === id);
+    await act("device_remove", { id }).then(() => toast(d ? `Removed ${d.name}` : "Removed")).catch(() => {});
+  });
   if (t.dataset.retirePolicy) return run(async () => {
     const p = (S.policies || []).find(x => x.kind === "user" && x.id === +t.dataset.retirePolicy);
     if (p && !confirm(`Retire ${p.pid}? It is deleted, and no briefing shows it again.\n${p.text}`)) return;
