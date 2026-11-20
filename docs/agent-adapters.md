@@ -331,6 +331,30 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   folders of `sessions.transcript`. The setup guide offers every agent that MaximizePM can start, from the adapters
   (`server.known_agents`, #5225).
 
+## Model and effort lists
+
+The Start an agent dialog and a session's Settings dialog list each agent's models from one function,
+`core.platform_models`, in one order (`agents.order_models`, #6256): the agent's own choice (auto) first, then each
+provider and maker in the order the agent names them, newest generation first, then the strongest. Each model with
+levels of its own carries them, and the Effort list shows only those; for "the agent's default" it shows the levels
+that any of the agent's models takes. A list longer than 30 shows its picks and finds the rest with Other model….
+What each agent's list came from on this Mac on 2026-11-20 (#6257):
+
+| Agent | Source of the list | Models | Effort levels |
+|---|---|---|---|
+| Claude Code | `model_ladder` (fable, opus, sonnet, haiku) | 4 | the agent's: low to max |
+| Codex | `model_ladder`, and Codex's model cache (`~/.codex/models_cache.json`, hidden models left out) with Codex's names | 10 | each model's, from the cache |
+| Antigravity CLI | `agy models`, read by a thread (`agents.CliList`); one row per model, the level out of the id | 11 | each model's, from its ids; none for the Orchestrators |
+| Pi | `pi --list-models` (the signed-in providers), Pi's `defaultProvider` first and offered as picks | 299 | Pi's levels for a model with thinking, none without |
+| GitHub Copilot CLI | `DESCRIBE['models']`: Copilot prints no list | 8 | the agent's |
+| Hermes | Hermes's model cache of its provider | 17 | the agent's |
+| Grok CLI | Grok's `models_cache.json` | 1 | each model's, from the cache |
+| OpenCode | `opencode models --standalone` | 778 (4 picks) | none: OpenCode takes no effort at the start |
+| Goose | goose's model cache (`sessions.db`), else each provider's model in its `config.yaml` | 1 | the agent's |
+| Aider | `DESCRIBE['models']`: Aider 0.86.2 prints its list only in a terminal, and knows no 2026 model | 7 | low, medium, high |
+| Amp | none: Amp picks its model by its mode (the effort list) | 0: no Model field | low, medium, high, max (ultra) |
+| Cursor CLI | `cursor-agent models` (284 ids), one row per model, the level out of the id | 79 (10 picks) | each model's, from its ids |
+
 ## Tier 1 agents
 
 mark 2026-11-19: 'we should add it and have a definitive feature set'. The tier 1 agents are Claude Code, Codex and

@@ -1162,7 +1162,7 @@ class SettingsAndEffort(Env):
                        "--force --sandbox enabled --mode plan go' WHERE name='c1'")
         got = {s["key"]: s for s in sessions.session_settings(self.c, "c1")["settings"]}
         self.assertEqual(list(got), ["model", "effort", "force", "auto_review", "sandbox", "mode"])
-        self.assertEqual(got["model"]["value"], "opus")
+        self.assertEqual(got["model"]["value"], "claude-opus-5-5")  # Cursor's own id, as its list names it (#6257)
         self.assertEqual(got["effort"]["value"], "high")
         self.assertEqual((got["force"]["value"], got["sandbox"]["value"], got["mode"]["value"]),
                          ("on", "enabled", "plan"))

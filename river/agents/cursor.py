@@ -30,7 +30,7 @@ import os
 import re
 from pathlib import Path
 
-from . import Raw
+from . import CliList, Raw, split_levels
 
 DESCRIBE = {
     "id": "cursor",
@@ -39,7 +39,9 @@ DESCRIBE = {
     # Not "agent": the installer links ~/.local/bin/agent to cursor-agent, but that name is the Grok CLI's too.
     "aliases": ["cursor-agent", "cursor-cli"],
     "family": "multi",
-    "models": ["auto", "opus", "sonnet", "haiku", "fable", "sol", "terra", "luna", "composer-2.5", "grok-4.7"],
+    # The models offered first (picks) of the long list that read_models reads from `cursor-agent models` (#6257).
+    "models": ["auto", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "gpt-5.6-sol",
+               "gpt-5.6-terra", "gpt-5.6-luna", "composer-2.5", "grok-4.7"],
     "default_model": "",  # Cursor's own default (cursor-agent models marks it; Auto on a new account)
     # Cursor takes a base id and picks the effort it names as its default ("claude-opus-5-5" is Opus 5.5 at medium).
     "model_ids": {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5",
@@ -217,14 +219,48 @@ def _on(v):
     return v is True or str(v).strip().lower() in ("on", "true", "1", "yes")
 
 
+def parse_models(text):
+    """The models of `cursor-agent models` ('<id> - <name>' lines; 284 ids on 2026-11-20, cursor-agent 2026.11), one
+    row per model with the levels its ids carry (agents.split_levels: gpt-5.6-sol-high and gpt-5.6-sol-xhigh are one
+    model with high and xhigh)."""
+    rows = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^([a-z0-9][\w.-]*) - (.+)$", line.strip())
+        if m:
+            label = re.sub(r"\s*\((?:default|current)\)\s*$", "", m.group(2).replace("​", "")).strip()
+            rows.append((m.group(1), label))
+    return split_levels(rows)
+
+
+# `cursor-agent models` (about five seconds), read by a thread at most once in ten minutes (agents.CliList); until the
+# first read ends, and when it gives nothing, DESCRIBE['models'] stand. MODELS.runner: a test hook.
+MODELS = CliList(["cursor-agent", "models"], parse_models)
+
+
+def read_models():
+    """The models of the installed Cursor CLI, one dict per model (parse_models); None before the first read."""
+    return [dict(m, efforts=list(m["efforts"])) for m in MODELS.get()] or None
+
+
+def read_effort_levels(model):
+    """The levels Cursor takes for a model (from its ids); [] for a model it lists with no level; None for one it
+    does not list (or before the first read)."""
+    row = next((r for r in MODELS.get() if r["name"] == model), None)
+    return list(row["efforts"]) if row else None
+
+
 def model_word(model, effort):
-    """The --model word: the model id, with the effort as its suffix when both are given, the model is no "auto",
-    and its id names no effort yet (claude-opus-5-5 + high -> claude-opus-5-5-high). None for no model."""
+    """The --model word: the model id, with the effort as its level when both are given, the model is no "auto", and
+    its id names no level yet (claude-opus-5-5 + high -> claude-opus-5-5-high; the level goes before a -fast end:
+    gpt-5.3-codex-fast + low -> gpt-5.3-codex-low-fast). A model that Cursor lists with no level gets none. None for no
+    model."""
     if not model:
         return None
     level = EFFORT["map"].get(effort, effort) if effort else None
-    if not level or model == "auto" or _SUFFIX.search(model):
+    if not level or model == "auto" or _SUFFIX.search(model) or read_effort_levels(model) == []:
         return model
+    if model.endswith("-fast"):
+        return f"{model[:-5]}-{level}-fast"
     return f"{model}-{level}"
 
 

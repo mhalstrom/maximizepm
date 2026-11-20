@@ -21591,6 +21591,17 @@ def platform_models(conn, platform, project_id=None, inline=None):
     else:
         rows = [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam,
                  "id": model_id(conn, platform, m, project_id, inline)} for m in ladder.get(fam, [])]
+        # The models the CLI itself lists now (#6257: Codex's cache has GPT-6.2 Sol and Astra, newer than the ids of
+        # the ladder names): a ladder name whose id it lists gets the CLI's name and levels; each other one is a
+        # model of its own, with no ladder name (an item's limits do not apply to it).
+        by_id = {str(r["id"]).lower(): r for r in rows}
+        for f in ((a.read_models() if a and a.has("read_models") else None) or ()):
+            f = dict(f) if isinstance(f, dict) else {"name": f}
+            hit = by_id.get(str(f["name"]).lower())
+            if hit is not None:
+                hit.update({k: v for k, v in f.items() if k in ("label", "efforts")})
+            elif f["name"] not in ladder.get(fam, []):
+                rows.append({"note": "", "family": fam, "id": f["name"], **f})
     for r in rows:
         levels = r.pop("efforts", None)
         got = a.model_efforts(r["id"], levels) if a else None
@@ -22912,26 +22923,40 @@ def launch_options(conn):
     levels = _levels(setting(conn, "effort_levels"))
     out = []
     for label, cmd in launch_entries(conn):
-        prof = parse_profile(cmd)
-        ad = _adapters().find(prof[0]) if prof else None
-        # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
-        by_exe = None if prof else _adapters().by_exe(entry_exe(cmd))
-        fam = platform_spec(prof[0])["family"] if prof else by_exe and by_exe.describe["family"]
-        fam = fam if fam in ladder else None
-        out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
-                    "agent_type": prof[0] if prof else _exe_platform(cmd),
-                    "models": (platform_models(conn, prof[0], inline=prof[1]) if prof else
-                               _agents_pkg.order_models([{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
-                                                         for f, ms in ladder.items() if fam in (None, f) for m in ms])),
-                    # A profile offers the efforts of its adapter (#5169); none when the agent has no effort.
-                    # Each model with its own levels has them in its "efforts" (#6256); these are the agent's.
-                    "efforts": ad.effort_choices() if ad else (
-                        by_exe.effort_choices() if fam and by_exe and by_exe.effort else levels),
-                    "takes_model": bool(prof) or "{model}" in cmd,
-                    "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
-                    # The options the dialog can change for one launch, preset from the entry and the settings.
-                    "options": profile_option_list(conn, prof[0], prof[1], kinds=("toggle", "choice")) if prof else []})
+        out.append(_launch_option(conn, label, cmd, ladder, levels))
     return out
+
+
+def _efforts_of(models, agent_levels):
+    """The Effort list for "the agent's default" model (#6257): when every model knows its own levels, the levels that
+    any of them takes (Antigravity: low to xhigh, no max); else the agent's."""
+    if models and all(isinstance(m.get("efforts"), list) for m in models):
+        got = {lv for m in models for lv in m["efforts"]}
+        return [lv for lv in agent_levels if lv in got]
+    return agent_levels
+
+
+def _launch_option(conn, label, cmd, ladder, levels):
+    """One entry of launch_options."""
+    prof = parse_profile(cmd)
+    ad = _adapters().find(prof[0]) if prof else None
+    # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
+    by_exe = None if prof else _adapters().by_exe(entry_exe(cmd))
+    fam = platform_spec(prof[0])["family"] if prof else by_exe and by_exe.describe["family"]
+    fam = fam if fam in ladder else None
+    models = (platform_models(conn, prof[0], inline=prof[1]) if prof else
+              _agents_pkg.order_models([{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
+                                        for f, ms in ladder.items() if fam in (None, f) for m in ms]))
+    # A profile offers the efforts of its adapter (#5169); none when the agent has no effort. Each model with its own
+    # levels has them in its "efforts" (#6256); these are the levels for the agent's default model.
+    efforts = ad.effort_choices() if ad else (by_exe.effort_choices() if fam and by_exe and by_exe.effort else levels)
+    return {"label": label, "family": fam, "platform": prof[0] if prof else None,
+            "agent_type": prof[0] if prof else _exe_platform(cmd),
+            "models": models, "efforts": _efforts_of(models, efforts),
+            "takes_model": bool(prof) or "{model}" in cmd,
+            "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
+            # The options the dialog can change for one launch, preset from the entry and the settings.
+            "options": profile_option_list(conn, prof[0], prof[1], kinds=("toggle", "choice")) if prof else []}
 
 
 def profile_option_list(conn, platform, inline=None, project_id=None, kinds=("toggle", "choice", "text")):

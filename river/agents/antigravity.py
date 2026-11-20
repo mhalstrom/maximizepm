@@ -28,12 +28,9 @@ queue's state (an unread alert, a blocked item) when the command runs, and a fix
 import json
 import os
 import re
-import subprocess
-import threading
-import time
 from pathlib import Path
 
-from . import Raw, model_tier
+from . import CliList, Raw, model_tier
 
 # ---------------------------------------------------------------------------------------------------------------
 # 1. Describe
@@ -129,34 +126,14 @@ def parse_models(text):
     return list(out.values())
 
 
-MODELS_RUNNER = None  # a test hook: a function () -> the text of `agy models`
-_models = {"at": 0.0, "list": None, "reader": None}
-_models_lock = threading.Lock()
+# The models of the installed agy (`agy models`, about two seconds), read by a thread at most once in ten minutes
+# (agents.CliList); MODELS_SEEN until the first read ends, and when agy does not answer. MODELS.runner: a test hook.
+MODELS = CliList(["agy", "models"], parse_models, fallback=parse_models(MODELS_SEEN))
 
 
 def read_models():
-    """The models of the installed agy (`agy models`, about two seconds), read at most once in ten minutes by a thread,
-    as OpenCode's (#5638). No caller waits for it (p147: a command answers in 100 ms): until the first read ends, and
-    when agy does not answer, the list is MODELS_SEEN."""
-    with _models_lock:
-        got = _models["list"]
-        if (got is None or time.time() - _models["at"] >= 600) and _models["reader"] is None:
-            _models["reader"] = threading.Thread(target=_read_models, daemon=True, name="agy-models")
-            _models["reader"].start()
-    return [dict(m, efforts=list(m["efforts"])) for m in (got or parse_models(MODELS_SEEN))]
-
-
-def _read_models():
-    got = []
-    try:
-        out = MODELS_RUNNER() if MODELS_RUNNER else subprocess.run(
-            ["agy", "models"], capture_output=True, text=True, timeout=60).stdout
-        got = parse_models(out)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    finally:
-        with _models_lock:
-            _models.update(at=time.time(), list=got or parse_models(MODELS_SEEN), reader=None)
+    """The models of the installed agy, one dict per model (parse_models)."""
+    return [dict(m, efforts=list(m["efforts"])) for m in MODELS.get()]
 
 
 def read_effort_levels(model):

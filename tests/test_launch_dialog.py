@@ -61,6 +61,21 @@ class PlaceholderNote(unittest.TestCase):
         self.assertEqual(json.loads(out.stdout), [["low", "medium", "high"], [], opt["efforts"], opt["efforts"],
                                                   "high", "", "sonnet"])
 
+    def test_an_item_s_model_words_show_only_for_an_agent_that_has_the_model(self):
+        # #6257: with Antigravity CLI chosen, '#6250 recommends opus. #6250 allows at most opus.' said nothing true.
+        agy = {"efforts": ["low", "high"], "models": [{"name": "gemini-4-neon", "label": "Gemini 4 Neon",
+                                                       "efforts": ["low", "high"]}]}
+        claude = {"efforts": ["low", "max"], "models": [{"name": "opus"}, {"name": "sonnet"}]}
+        it = {"id": 6250, "model": "opus", "effort": "high", "max_model": "opus"}
+        js = ("const m = await import('./components/launchDialog.js');"
+              f"const it = {json.dumps(it)};"
+              f"console.log(JSON.stringify([m.itemNotes({json.dumps(agy)}, it, {{}}), m.itemNotes({json.dumps(claude)}, it, {{}})]));")
+        out = subprocess.run(["node", "--input-type=module", "-e", js], cwd=STATIC, capture_output=True, text=True,
+                             timeout=30, check=True)
+        self.assertEqual(json.loads(out.stdout), [
+            {"rec": "#6250 recommends high effort.", "limits": ""},
+            {"rec": "#6250 recommends opus.", "limits": "#6250 allows at most opus."}])
+
     def test_the_drawer_names_any_agent_as_an_agent_type(self):
         text = (STATIC / "components" / "drawer.js").read_text(encoding="utf-8")
         self.assertNotIn("codex or claude-code;", text)

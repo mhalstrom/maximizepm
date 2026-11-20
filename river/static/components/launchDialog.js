@@ -89,6 +89,23 @@ export function pickEffort(opt, it, last, model) {
   return last && efforts.includes(last) ? last : "";
 }
 
+// The lines on an item's recommendation and limits, in the chosen agent's terms (#6257): a model name shows only
+// when this agent has that model (a Claude 'opus' says nothing to Antigravity CLI), an effort only when the agent
+// takes it. {rec, limits}: "" for a line with nothing left.
+export function itemNotes(opt, it, ids) {
+  if (!it) return { rec: "", limits: "" };
+  const has = (m) => !!m && (opt.models || []).some(x => x.name === m || x.name === ladderName(ids, m));
+  const label = (m) => { const x = (opt.models || []).find(y => y.name === m || y.name === ladderName(ids, m)); return (x && x.label) || m; };
+  const efforts = (opt.efforts || []).concat(...(opt.models || []).map(m => m.efforts || []));
+  const own = (lim) => String(lim || "").split(",").map(x => x.trim()).find(has);
+  const parts = [has(it.model) && label(it.model), it.effort && efforts.includes(it.effort) && it.effort + " effort"].filter(Boolean);
+  const lo = own(it.min_model), hi = own(it.max_model);
+  return {
+    rec: parts.length ? `#${it.id} recommends ${parts.join(", ")}.` : "",
+    limits: lo || hi ? `#${it.id} allows ${[lo && "at least " + label(lo), hi && "at most " + label(hi)].filter(Boolean).join(" and ")}.` : "",
+  };
+}
+
 // The Effort field for a model: none when the model takes no effort.
 function effortField(opt, model, effort) {
   const efforts = effortsFor(opt, model);
@@ -195,10 +212,9 @@ function draw(prev) {
   const model = pickModel(opt, it, ladder, store("river.launch.model." + fam), S.model_ids);
   const effort = pickEffort(opt, it, store("river.launch.effort." + fam), model);
   const rows = startable(S), projects = [...new Set(rows.map(i => i.project))];
-  const limits = it && (it.min_model || it.max_model) ? `#${it.id} allows ${[it.min_model && "at least " + it.min_model, it.max_model && "at most " + it.max_model].filter(Boolean).join(" and ")}.` : "";
   const other = it && it.agent && opt.agent_type && opt.agent_type !== it.agent
     ? `#${it.id} is for ${it.agent}; ${agent} runs ${opt.agent_type}, and you start it anyway.` : "";
-  const rec = it && (it.model || it.effort) ? `#${it.id} recommends ${[it.model, it.effort && it.effort + " effort"].filter(Boolean).join(", ")}.` : "";
+  const { rec, limits } = itemNotes(opt, it, S.model_ids);
   const noPlace = placeholderNote(agent, opt);
   const note = [other, rec, limits, noPlace].filter(Boolean).join(" ");
   const work = ctx.pickFolder ? folderFields(prev) : ctx.pickWork ? field("Work", `<select id="lWork">
@@ -227,7 +243,8 @@ function draw(prev) {
       ${work}
       ${ctx.pickFolder || workSel === PLAIN ? "" : newFolderField((it && it.project) || ctx.project, prev)}
       ${field("Agent", select({ id: "lAgent" }, opts.map(o => o.label), agent))}
-      ${opt.efforts.length || opt.models.some(m => (m.efforts || []).length) ? two(field("Model", modelSel), `<div id="lEffortSlot">${effortField(opt, model, effort)}</div>`) : field("Model", modelSel)}
+      ${!opt.models.length ? `<div id="lEffortSlot">${effortField(opt, model, effort)}</div>`
+        : opt.efforts.length || opt.models.some(m => (m.efforts || []).length) ? two(field("Model", modelSel), `<div id="lEffortSlot">${effortField(opt, model, effort)}</div>`) : field("Model", modelSel)}
       ${note ? `<div class="muted t-s">${esc(note)}</div>` : ""}
       ${S.tmux === false ? `<div class="ld-warn t-s">Every agent starts in tmux, and tmux is not installed on this computer: ${esc(S.tmux_install || "brew install tmux")}</div>` : ""}
       ${more ? `<details class="ld-more"><summary>More</summary>${more}</details>` : ""}

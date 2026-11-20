@@ -4994,8 +4994,9 @@ class LaunchProfiles(unittest.TestCase):
         rd = core._shell_quote(core.river_dir())
         codex_home = tempfile.TemporaryDirectory()
         self.addCleanup(codex_home.cleanup)
-        os.environ["CODEX_HOME"] = codex_home.name
-        self.addCleanup(os.environ.pop, "CODEX_HOME", None)
+        env = mock.patch.dict(os.environ, {"CODEX_HOME": codex_home.name})
+        env.start()
+        self.addCleanup(env.stop)
         core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex; Mine=codex -m {model} go")
         t = core._launch_agent_cmd(self.c, pid, "Codex", "astra", "high")
         self.assertEqual(t["command"], f"{_codex()} -m gpt-6-astra -c model_reasoning_effort=high --add-dir {rd} "

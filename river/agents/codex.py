@@ -16,9 +16,20 @@ DESCRIBE = {
 
 
 def read_models():
-    """The model ids in Codex's own model cache (~/.codex/models_cache.json, or $CODEX_HOME), or None without one."""
-    got = codex_models()
-    return sorted(got) if got else None
+    """The models that Codex's own /model menu shows, from its model cache (~/.codex/models_cache.json, or
+    $CODEX_HOME), or None without one (#6257): one dict per model, {"name": its id, "label": Codex's name for it,
+    "efforts": its reasoning levels}; a model the cache hides (visibility "hide": gpt-reserve, codex-auto-review)
+    is left out."""
+    import json
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = [{"name": m["slug"], "label": m.get("display_name") or m["slug"],
+                 "efforts": [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]}
+                for m in data.get("models") or [] if m.get("slug") and m.get("visibility") != "hide"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    return rows or None
 
 
 # ---------------------------------------------------------------------------------------------------------------

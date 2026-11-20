@@ -92,21 +92,52 @@ def _open(path):
     return conn
 
 
+def configured_models(path=None):
+    """The "provider/model" of each provider in goose's config.yaml (providers: <id>: model: <model>), the
+    active_provider first (#6257: on 2026-11-20 the model cache was empty, and the config named chatgpt_codex with
+    gpt-5.6-terra). A small reader of that block: no YAML library (the standard library has none)."""
+    path = Path(path) if path else config_dir() / "config.yaml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    active, out, prov, inside = None, [], None, False
+    for ln in lines:
+        m = re.match(r"^active_provider:\s*(\S+)", ln)
+        if m:
+            active = m.group(1).strip("'\"")
+        if re.match(r"^providers:\s*$", ln):
+            inside = True
+            continue
+        if inside and ln and not ln.startswith(" "):
+            inside = False
+        if not inside:
+            continue
+        m = re.match(r"^  ([\w.-]+):\s*$", ln)
+        if m:
+            prov = m.group(1)
+        m = re.match(r"^    model:\s*(\S+)", ln)
+        if m and prov:
+            out.append(f"{prov}/{m.group(1).strip(chr(39) + chr(34))}")
+    return sorted(out, key=lambda x: x.split("/", 1)[0] != active)
+
+
 def read_models():
-    """The "provider/model" texts of goose's model cache (provider_inventory_models in sessions.db), or None when it
-    has none: goose fills it when a person lists the models of a provider (goose configure)."""
+    """The "provider/model" texts of goose's model cache (provider_inventory_models in sessions.db): goose fills it
+    when a person lists the models of a provider (goose configure). With none there, the model of each provider in
+    goose's config (configured_models); None when neither names one."""
     conn = _open(sessions_db())
     if conn is None:
-        return None
+        return configured_models() or None
     try:
         rows = conn.execute("SELECT e.provider_id, m.model_id FROM provider_inventory_models m "
                             "JOIN provider_inventory_entries e ON e.inventory_key=m.inventory_key "
                             "ORDER BY e.provider_id, m.ordinal").fetchall()
     except sqlite3.Error:
-        return None
+        return configured_models() or None
     finally:
         conn.close()
-    return [f"{r['provider_id']}/{r['model_id']}" for r in rows] or None
+    return [f"{r['provider_id']}/{r['model_id']}" for r in rows] or configured_models() or None
 
 
 # ---------------------------------------------------------------------------------------------------------------

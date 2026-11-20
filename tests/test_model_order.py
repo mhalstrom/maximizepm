@@ -128,7 +128,8 @@ class Antigravity(Db):
     def setUp(self):
         super().setUp()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(antigravity._models, {"at": 0.0, "list": None, "reader": None}).start()
+        antigravity.MODELS.reset()
+        self.addCleanup(antigravity.MODELS.reset)
 
     def test_one_row_per_model_with_agy_s_name_and_its_levels(self):
         ms = core.platform_models(self.c, "antigravity")
@@ -145,11 +146,11 @@ class Antigravity(Db):
         self.assertEqual(ms[0]["name"], "gemini-4-neon")
 
     def test_the_list_of_the_installed_agy_shows_a_new_model(self):
-        mock.patch.object(antigravity, "MODELS_RUNNER", lambda: "Fetching available models...\n"
+        mock.patch.object(antigravity.MODELS, "runner", lambda: "Fetching available models...\n"
                           "gemini-5-neon-low\tGemini 5 Neon (Low)\ngemini-5-neon-max\tGemini 5 Neon (Max)\n"
                           "gemini-4-neon-high\tGemini 4 Neon (High)\n").start()
         antigravity.read_models()  # starts the read; until it ends the list is MODELS_SEEN
-        antigravity._models["reader"] and antigravity._models["reader"].join()
+        antigravity.MODELS.wait()
         ms = core.platform_models(self.c, "antigravity")
         self.assertEqual([(m["name"], m["efforts"]) for m in ms],
                          [("gemini-5-neon", ["low", "max"]), ("gemini-4-neon", ["high"])])
@@ -172,6 +173,87 @@ class Antigravity(Db):
             core._check_agent_effort(a, "gemini-4-carbon", "max")
         core._check_agent_effort(a, "gemini-pro-orchestrator", "high")  # no effort: it starts with none
         core._check_agent_effort(a, "gemini-4-neon", "xhigh")
+
+
+class EachAgentsOwnList(Db):
+    """#6257: each agent's list comes from its own CLI or cache where it has one, with its own names and levels."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(mock.patch.stopall)
+
+    def test_ids_with_levels_become_one_model_each(self):
+        rows = agents.split_levels([("gpt-5.3-codex-low", "Codex 5.3 Low"), ("gpt-5.3-codex", "Codex 5.3"),
+                                    ("gpt-5.3-codex-xhigh", "Codex 5.3 Extra High"),
+                                    ("gpt-5.3-codex-low-fast", "Codex 5.3 Low Fast"), ("composer-2.5", "Composer 2.5")])
+        self.assertEqual(rows, [{"name": "gpt-5.3-codex", "label": "Codex 5.3", "efforts": ["low", "xhigh"]},
+                                {"name": "gpt-5.3-codex-fast", "label": "Codex 5.3 Fast", "efforts": ["low"]},
+                                {"name": "composer-2.5", "label": "Composer 2.5", "efforts": []}])
+
+    def test_cursor_reads_its_list_and_puts_the_level_back_at_launch(self):
+        from river.agents import cursor
+        cursor.MODELS.reset()
+        self.addCleanup(cursor.MODELS.reset)
+        mock.patch.object(cursor.MODELS, "runner", lambda: "Available models\n\nauto - Auto (default)\n"
+                          "gpt-5.6-sol-high - GPT-5.6 Sol 1M High\ngpt-5.6-sol-xhigh-fast - GPT-5.6 Sol 1M Extra High Fast\n"
+                          "claude-opus-5-5-low - Claude Opus 5.5 1M Low\ncomposer-2.5 - Composer 2.5\n").start()
+        cursor.read_models()
+        cursor.MODELS.wait()
+        ms = {m["name"]: m for m in core.platform_models(self.c, "cursor")}
+        self.assertEqual((ms["gpt-5.6-sol"]["label"], ms["gpt-5.6-sol"]["efforts"]), ("GPT-5.6 Sol 1M", ["high"]))
+        self.assertEqual(ms["gpt-5.6-sol-fast"]["efforts"], ["xhigh"])
+        self.assertEqual(ms["composer-2.5"]["efforts"], [])
+        self.assertEqual(cursor.model_word("gpt-5.6-sol-fast", "xhigh"), "gpt-5.6-sol-xhigh-fast")
+        self.assertEqual(cursor.model_word("composer-2.5", "high"), "composer-2.5")  # a model with no level
+        self.assertEqual(cursor.model_word("claude-opus-5-5", "low"), "claude-opus-5-5-low")
+
+    def test_pi_lists_its_signed_in_providers_with_its_default_first(self):
+        from river.agents import pi
+        text = ("provider model context max-out thinking images\n"
+                "amazon-bedrock anthropic.claude-opus-5-5 1M 128K yes yes\n"
+                "mistral mistral-small 128K 8K no no\n"
+                "openai-codex gpt-6.1-sol 1M 128K yes yes\n")
+        with mock.patch.object(pi, "_default_provider", lambda: "openai-codex"):
+            rows = pi.parse_models(text)
+        self.assertEqual([(r["name"], r["pick"]) for r in rows],
+                         [("openai-codex/gpt-6.1-sol", True), ("amazon-bedrock/anthropic.claude-opus-5-5", False),
+                          ("mistral/mistral-small", False)])
+        self.assertEqual(rows[2]["efforts"], [])
+        self.assertEqual(agents.get("pi").model_efforts("x", rows[0]["efforts"]), list(agents.MAXPM_EFFORTS))
+
+    def test_codex_shows_its_cache_with_its_names_and_leaves_hidden_models_out(self):
+        import json
+        from pathlib import Path
+        Path(self.tmp.name, "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-6.2-sol", "display_name": "GPT-6.2-Sol", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": e} for e in ("low", "high")]},
+            {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "medium"}]},
+            {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide"}]}), encoding="utf-8")
+        mock.patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}).start()
+        ms = {m["name"]: m for m in core.platform_models(self.c, "codex")}
+        self.assertNotIn("gpt-reserve", ms)
+        self.assertEqual((ms["gpt-6.2-sol"]["label"], ms["gpt-6.2-sol"]["efforts"]), ("GPT-6.2-Sol", ["low", "high"]))
+        self.assertEqual((ms["sol"]["label"], ms["sol"]["efforts"]), ("GPT-6.1-Sol", ["medium"]))  # the ladder name
+        self.assertIn("astra", ms)  # a ladder name the cache does not list stays
+
+    def test_goose_names_its_configured_model_when_its_cache_is_empty(self):
+        from pathlib import Path
+        from river.agents import goose
+        cfg = Path(self.tmp.name, "config.yaml")
+        cfg.write_text("GOOSE_MODE: auto\nactive_provider: chatgpt_codex\nproviders:\n  anthropic:\n"
+                       "    model: claude-opus-5-5\n  chatgpt_codex:\n    model: gpt-5.6-terra\n    configured: true\n"
+                       "GOOSE_THINKING_EFFORT: medium\n", encoding="utf-8")
+        self.assertEqual(goose.configured_models(cfg), ["chatgpt_codex/gpt-5.6-terra", "anthropic/claude-opus-5-5"])
+
+    def test_the_default_model_s_efforts_are_those_of_the_agent_s_models(self):
+        self.assertEqual(core._efforts_of([{"efforts": ["low"]}, {"efforts": ["medium", "xhigh"]}],
+                                          list(agents.MAXPM_EFFORTS)), ["low", "medium", "xhigh"])
+        self.assertEqual(core._efforts_of([{"efforts": ["low"]}, {"name": "x"}], ["low", "max"]), ["low", "max"])
+        agy = next(o for o in core.launch_options(self.c) if o["platform"] == "antigravity")
+        self.assertEqual(agy["efforts"], ["low", "medium", "high", "xhigh"])  # no agy model takes max
 
 
 if __name__ == "__main__":

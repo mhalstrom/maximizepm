@@ -31,7 +31,7 @@ import re
 import shlex
 from pathlib import Path
 
-from . import Raw
+from . import CliList, Raw
 
 DESCRIBE = {
     "id": "pi",
@@ -42,8 +42,9 @@ DESCRIBE = {
     # Pi resolves a pattern against the models of the providers a person signed in to (pi --list-models): an exact
     # "provider/id" first, else the newest model whose id holds the text. So the model_ladder names go as they are
     # (opus: the newest Opus of any signed-in provider), and a person may name any "provider/id" instead. "" lets Pi
-    # use its own defaultProvider and defaultModel (settings.json).
-    "models": ["opus", "sonnet", "haiku"],
+    # use its own defaultProvider and defaultModel (settings.json). The list comes from `pi --list-models` (read_models,
+    # #6257); these names stand only until it has been read, or when Pi does not answer.
+    "models": [],
     "default_model": "",
     "model_ids": {},
     "prefix": "pi_",
@@ -66,6 +67,48 @@ SETTINGS = [
 ]
 
 LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+def _default_provider():
+    """Pi's defaultProvider (~/.pi/agent/settings.json), or None."""
+    try:
+        got = json.loads((Path.home() / ".pi" / "agent" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return got.get("defaultProvider") if isinstance(got, dict) else None
+
+
+def parse_models(text):
+    """The models of `pi --list-models` (a table: provider, model, context, max-out, thinking, images; only the
+    providers a person signed in to; 299 rows of 4 providers on 2026-11-20, pi 1.5), one row per model as Pi's --model
+    takes it, "provider/model", with Pi's thinking levels when its thinking column says yes and none else (#6257).
+    Pi's defaultProvider comes first, and its models are the ones the dialog offers before 'Other model…'."""
+    rows = []
+    for line in (text or "").splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 5 and re.fullmatch(r"[\w.-]+", f[0]) and f[4] in ("yes", "no"):
+            rows.append({"name": f"{f[0]}/{f[1]}", "efforts": list(LEVELS) if f[4] == "yes" else []})
+    first = _default_provider()
+    for r in rows:
+        r["pick"] = bool(first) and r["name"].startswith(first + "/")
+    return sorted(rows, key=lambda r: not r["pick"])
+
+
+# `pi --list-models`, read by a thread at most once in ten minutes (agents.CliList); until the first read ends, and
+# when Pi does not answer, these model_ladder names stand: Pi resolves each against its signed-in providers.
+MODELS = CliList(["pi", "--list-models"], parse_models,
+                 fallback=[{"name": m, "efforts": list(LEVELS), "pick": True} for m in ("opus", "sonnet", "haiku")])
+
+
+def read_models():
+    """The models of the installed Pi, one dict per model (parse_models)."""
+    return [dict(m, efforts=list(m["efforts"])) for m in MODELS.get()]
+
+
+def read_effort_levels(model):
+    """Pi's thinking levels for a model: [] for one whose thinking column says no; None for one it does not list."""
+    row = next((r for r in MODELS.get() if r["name"] == model), None)
+    return list(row["efforts"]) if row else None
 
 EFFORT = {
     "levels": LEVELS,

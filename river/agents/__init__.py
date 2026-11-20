@@ -156,6 +156,79 @@ def _version_of(m):
     return tuple(int(x) for x in re.findall(r"\d+", str(v)))
 
 
+class CliList:
+    """A list that a CLI prints (`agy models`, `cursor-agent models`, `pi --list-models`), read by a thread at most once
+    in `ttl` seconds (#6257). No caller waits for it (p147: a command answers in 100 ms): until the first read ends,
+    and when the CLI gives nothing, get() gives the fallback. parse(text) -> a list; runner: a test hook, a function
+    () -> the text, used instead of the command."""
+
+    def __init__(self, argv, parse, fallback=(), ttl=600, timeout=60):
+        import threading
+        self.argv, self.parse, self.fallback, self.ttl, self.timeout = list(argv), parse, list(fallback), ttl, timeout
+        self.runner = None
+        self.state = {"at": 0.0, "list": None, "reader": None}
+        self.lock = threading.Lock()
+
+    def get(self):
+        import threading
+        import time
+        with self.lock:
+            got = self.state["list"]
+            if (got is None or time.time() - self.state["at"] >= self.ttl) and self.state["reader"] is None:
+                self.state["reader"] = threading.Thread(target=self._read, daemon=True, name=f"{self.argv[0]}-list")
+                self.state["reader"].start()
+        return list(got if got is not None else self.fallback)
+
+    def wait(self):
+        """Wait for a read that runs (tests)."""
+        r = self.state["reader"]
+        if r is not None:
+            r.join()
+
+    def reset(self):
+        with self.lock:
+            self.state.update(at=0.0, list=None, reader=None)
+
+    def _read(self):
+        import subprocess
+        import time
+        got = []
+        try:
+            out = self.runner() if self.runner else subprocess.run(
+                self.argv, capture_output=True, text=True, timeout=self.timeout).stdout
+            got = list(self.parse(out or ""))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        finally:
+            with self.lock:
+                self.state.update(at=time.time(), list=got or list(self.fallback), reader=None)
+
+
+def split_levels(rows, levels=("none", "minimal", "low", "medium", "high", "xhigh", "max")):
+    """Models whose ids carry the effort level (#6257: Cursor's gpt-5.6-sol-high, gpt-5.3-codex-low-fast): one row per
+    model, {"name": the id without the level, "label", "efforts": its levels low to high}. rows: (id, label) in the
+    CLI's order. A '-fast' end stays on the model (gpt-5.3-codex-fast), the level goes before it; a label loses its
+    level words ('Codex 5.3 Low Fast' -> 'Codex 5.3 Fast'). A model that the CLI also lists with no level keeps that
+    id's label."""
+    lv = re.compile(r"^(.+?)-(" + "|".join(levels) + r")(-fast)?$")
+    words = re.compile(r"\s+(?:None|Minimal|Low|Medium|High|Extra High|XHigh|Max)\b", re.I)
+    out = {}
+    for mid, label in rows:
+        m = lv.match(mid)
+        base, level = ((m.group(1) + (m.group(3) or "")), m.group(2)) if m else (mid, None)
+        row = out.setdefault(base, {"name": base, "label": None, "efforts": []})
+        if level is None:
+            row["label"] = label  # the id with no level names the model best
+            continue
+        if level not in row["efforts"]:
+            row["efforts"].append(level)
+        if row["label"] is None:
+            row["label"] = " ".join(words.sub("", label).split())
+    for row in out.values():
+        row["efforts"].sort(key=list(levels).index)
+    return list(out.values())
+
+
 _ORDER_MEMO = {}
 
 

@@ -301,7 +301,8 @@ class SessionSettings(Home):
     def setUp(self):
         super().setUp()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(antigravity._models, {"at": 0.0, "list": None, "reader": None}).start()
+        antigravity.MODELS.reset()
+        self.addCleanup(antigravity.MODELS.reset)
 
     def test_the_chat_log_names_the_model_and_its_level(self):
         lines = (FIX / "transcript_full.jsonl").read_text(encoding="utf-8").splitlines()

@@ -24,6 +24,8 @@ from pathlib import Path
 _queue_dir = tempfile.mkdtemp(prefix="maxpm-tests-")
 atexit.register(shutil.rmtree, _queue_dir, True)
 os.environ["MAXPM_DB"] = os.path.join(_queue_dir, "maxpm.db")
+# Codex's folder: an empty one, so no test reads the person's Codex model cache (#6257: its models join the list).
+os.environ["CODEX_HOME"] = os.path.join(_queue_dir, "codex")
 
 from river import core, dictation, server  # noqa: E402
 
@@ -112,7 +114,11 @@ server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests 
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
 from river.agents import antigravity as agy_adapter  # noqa: E402
-agy_adapter.MODELS_RUNNER = lambda: ""  # never the installed agy (agy models): MODELS_SEEN stands (#6256)
+agy_adapter.MODELS.runner = lambda: ""  # never the installed agy (agy models): MODELS_SEEN stands (#6256)
+from river.agents import cursor as cursor_adapter  # noqa: E402
+cursor_adapter.MODELS.runner = lambda: ""  # never the installed Cursor CLI (cursor-agent models): MODELS_SEEN (#6257)
+from river.agents import pi as pi_adapter  # noqa: E402
+pi_adapter.MODELS.runner = lambda: ""  # never the installed Pi (pi --list-models): its described models (#6257)
 from river import browser as _browser  # noqa: E402
 # The tests of a browser window and a passkey window run as on a computer with a screen, also on a Linux runner with no
 # DISPLAY (#5878); tests.test_browser.NoScreen sets the other kinds.
