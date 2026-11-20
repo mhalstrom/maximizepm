@@ -362,6 +362,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .su-ab { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); margin-left: auto; }
 #setup .su-tail { flex: 1 0 100%; margin-left: calc(var(--sp-6) + var(--sp-3)); font-family: var(--mono, monospace);
   font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+#setup .su-agents > .btn { align-self: flex-start; }
 #setup .su-more summary { cursor: pointer; color: var(--muted); font-size: var(--fs-m); margin: var(--sp-1) 0; }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
