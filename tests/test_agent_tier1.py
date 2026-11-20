@@ -153,7 +153,7 @@ FEATURES = {
 EXCEPTIONS = {
     ("codex", "shell_guard"): "#6254",
     ("antigravity", "native_message"): "no command, socket or flag",
-    ("antigravity", "shell_guard"): "#6251",
+    ("antigravity", "shell_guard"): "push_guard reads the queue's state",
 }
 
 

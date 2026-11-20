@@ -373,10 +373,10 @@ Exceptions (each also in `EXCEPTIONS` of the test):
 - Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
   session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
   pane, which works at its prompt.
-- Antigravity CLI, `shell_guard`: #6251. agy has a PreToolUse hook, but it loads hooks only from `hooks.json` in its
-  home or in the project, and an adapter installs nothing in a CLI's home (p140); no flag adds a hook for one start.
-  #6251 tries a rule of one session's permissions for the tmux guard; `push_guard` reads the queue's state and
-  cannot be a fixed rule.
+- Antigravity CLI, `shell_guard`, no push guard: push_guard reads the queue's state when the command runs, and a
+  fixed rule cannot. agy has a PreToolUse hook, but it loads hooks only from `hooks.json` in its home or in the
+  project, and an adapter installs nothing in a CLI's home (p140); no flag adds a hook for one start. The tmux guard
+  is deny rules of the session's `--settings` instead (#6251, `antigravity.DENY_TMUX`, measured with agy 1.5.13).
 
 Lists that stay as they are, as they are not a tier: `agents.ASK_FORMS` (the question forms that `river/ask_forms`
 draws, also Copilot's and OpenCode's), `vault.AGENT_PROGRAMS` (the programs of every agent), and
@@ -389,7 +389,7 @@ server, driven through the page's API and the page itself, with its desktop and 
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | Claude Code | not run yet (#6253) | | | | | | | | | | |
 | Codex | not run yet (#6253) | | | | | | | | | | exception (#6254) |
-| Antigravity CLI | not run yet (#6253) | | | | | | | | | | exception (#6251) |
+| Antigravity CLI | not run yet (#6253) | | | | | | | | | | tmux guard only (deny rules, #6251) |
 
 ## Tests in maxpm (step 5)
 

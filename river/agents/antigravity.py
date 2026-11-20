@@ -18,9 +18,11 @@ The sources this adapter declares, one for each signal:
 - Chat log: ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl, one JSON line for each
   step of the conversation. A resume (--conversation <id>) adds to the same file.
 
-No guard before a command: Claude Code's PreToolUse hook refuses a push while an alert is unread (core.push_guard) and
+Guards before a command: Claude Code's PreToolUse hook refuses a push while an alert is unread (core.push_guard) and
 a tmux kill-server of MaximizePM's server (core.tmux_guard). agy has a PreToolUse hook too, but it loads hooks only
-from those hooks.json files, so an agy session has neither guard, as a Codex session has neither.
+from hooks.json files in its home or the project, where an adapter installs nothing (p140). An agy session gets the
+tmux guard as deny rules of its --settings instead (SETTINGS_JSON, #6251). push_guard has no such form: it reads the
+queue's state (an unread alert, a blocked item) when the command runs, and a fixed rule cannot.
 """
 
 import json
@@ -113,14 +115,22 @@ def _on(value):
 # permissions.allow rule alone does not change that. With the rule, a command that the model runs with
 # BypassSandbox runs outside the sandbox with no question, and in the other modes a maxpm command runs with no
 # question. --settings holds it for this session only; agy never saves it, so nothing goes into agy's own files (p140).
-ALLOW_MAXPM = json.dumps({"permissions": {"allow": ["command(maxpm)"]}}, separators=(",", ":"))
+# The deny rules are the tmux guard (core.tmux_guard, #6251). Measured with agy 1.5.13 on 2026-11-20 (echo in place of
+# tmux): a rule matches the command's first words, after agy takes off variables and env before it ('FOO=1 cmd',
+# 'env FOO=1 cmd'), in each command of a chain ('cd . && cmd'), and a deny rule wins over an allow rule. So
+# 'command(tmux kill-server)' refuses the bare kill-server and 'TMUX_TMPDIR=<folder> tmux kill-server' (#6246), and a
+# test's own 'tmux -L <name> kill-server' runs. Not covered, which core.tmux_guard refuses: another option before
+# kill-server with no server of its own ('tmux -f <file> kill-server').
+DENY_TMUX = ["command(tmux kill-server)", "command(tmux -L maximizepm kill-server)",
+             "command(tmux -Lmaximizepm kill-server)"]
+SETTINGS_JSON = json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":"))
 MAXPM_NOTE = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
               "allows maxpm with no question.")
 
 
 def build_command(name, folder, model, effort, settings, prompt):
     """agy [--conversation <id>] [--model M] [--effort E] [--mode M] [--dangerously-skip-permissions] [--sandbox]
-    --add-dir <queue folder> --settings <ALLOW_MAXPM> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a
+    --add-dir <queue folder> --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a
     session name. -i runs the first prompt and keeps the session open."""
     from ..core import river_dir
     s = settings
@@ -132,7 +142,7 @@ def build_command(name, folder, model, effort, settings, prompt):
         words += ["--mode", mode]
     words += ["--dangerously-skip-permissions"] if _on(s.get("skip_permissions")) else []
     words += ["--sandbox"] if _on(s.get("sandbox")) else []
-    words += ["--add-dir", river_dir(), "--settings", ALLOW_MAXPM]
+    words += ["--add-dir", river_dir(), "--settings", SETTINGS_JSON]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
     words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}"] if prompt else []
     return words
@@ -174,7 +184,7 @@ def parse_command(words):
         elif t == "--add-dir" and nxt is not None and (
                 nxt == "{maxpm_dir}" or os.path.realpath(os.path.expanduser(nxt)) == os.path.realpath(river_dir())):
             i += 2
-        elif t == "--settings" and nxt == ALLOW_MAXPM:
+        elif t == "--settings" and nxt == SETTINGS_JSON:
             i += 2
         elif t in ("-i", "--prompt-interactive") and nxt is not None and prompt is None:
             prompt = nxt[:-len(MAXPM_NOTE) - 2] if nxt.endswith("\n\n" + MAXPM_NOTE) else nxt

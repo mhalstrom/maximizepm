@@ -74,15 +74,38 @@ class Launch(Home):
         argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash-low", "high",
                                          {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
                                           "args": "--log-file /tmp/x"}, "maxpm go")
-        allow = ["--add-dir", self.queue, "--settings", '{"permissions":{"allow":["command(maxpm)"]}}']
+        allow = ["--add-dir", self.queue, "--settings", '{"permissions":{"allow":["command(maxpm)"],"deny":['
+                 '"command(tmux kill-server)","command(tmux -L maximizepm kill-server)",'
+                 '"command(tmux -Lmaximizepm kill-server)"]}}']
         self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash-low", "--effort", "high", "--mode", "plan",
                                      "--dangerously-skip-permissions", "--sandbox", *allow])
         self.assertEqual(argv[-3:], ["--log-file /tmp/x", "-i", "maxpm go\n\n" + antigravity.MAXPM_NOTE])
         self.assertIsInstance(argv[-3], agents.Raw)
         self.assertIn("BypassSandbox", antigravity.MAXPM_NOTE)
 
+    def test_the_session_settings_refuse_a_tmux_kill_server_as_core_tmux_guard_does(self):
+        """#6251: agy's deny rules, as measured with agy 1.5.13 (a rule matches the first words of each command of a
+        chain, after variables and env before it), agree with core.tmux_guard on the forms they cover."""
+        rules = json.loads(antigravity.SETTINGS_JSON)["permissions"]
+        self.assertEqual(rules["allow"], ["command(maxpm)"])
+        self.assertIn(f"command(tmux -L {core.TMUX_SOCKET} kill-server)", rules["deny"])
+
+        def denied(command):
+            for part in re.split(r"&&|\|\||;|\|", command):
+                words = part.split()
+                while words and (words[0] == "env" or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0])):
+                    words = words[1:]
+                if any(words[:len(r[8:-1].split())] == r[8:-1].split() for r in rules["deny"]):
+                    return True
+            return False
+        for command in ("tmux kill-server", "TMUX_TMPDIR=/tmp/x tmux kill-server", "env A=1 tmux kill-server",
+                        "cd /tmp && tmux kill-server", "tmux -L maximizepm kill-server",
+                        "tmux -L mx6239 kill-server", "tmux -S /tmp/own.sock kill-server", "tmux ls"):
+            with self.subTest(command=command):
+                self.assertEqual(denied(command), bool(core.tmux_guard(command)))
+
     def test_a_bare_start_lets_agy_choose(self):
-        allow = ["--add-dir", self.queue, "--settings", antigravity.ALLOW_MAXPM]
+        allow = ["--add-dir", self.queue, "--settings", antigravity.SETTINGS_JSON]
         self.assertEqual(antigravity.build_command(None, None, None, None, {}, None), ["agy", *allow])
         # An effort that is no agy level and a mode that is no agy mode go nowhere.
         self.assertEqual(antigravity.build_command(None, None, None, "turbo", {"mode": "yolo"}, None), ["agy", *allow])
@@ -92,7 +115,7 @@ class Launch(Home):
         # 'agy --conversation=<id>' at its exit (pane_exit.txt).
         argv = antigravity.resume_command(CID, None, None, {"prompt": "go on"})
         self.assertEqual(argv, ["agy", "--conversation", CID, "--add-dir", self.queue, "--settings",
-                                antigravity.ALLOW_MAXPM, "-i", "go on\n\n" + antigravity.MAXPM_NOTE])
+                                antigravity.SETTINGS_JSON, "-i", "go on\n\n" + antigravity.MAXPM_NOTE])
         self.assertIsNone(antigravity.resume_command("", None, None, {}))
         self.assertIn(f"agy --conversation={CID}", (FIX / "pane_exit.txt").read_text(encoding="utf-8"))
 

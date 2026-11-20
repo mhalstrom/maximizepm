@@ -120,7 +120,7 @@ def agy_rules(tools):
     """Claude Code's tool rules as agy's permission rules (#6249): Bash(<command>:*) and Bash(<command>) become
     command(<command>), the form agy took for maxpm (river/agents/antigravity.py ALLOW_MAXPM). agy's --mode
     accept-edits takes the file tools (Read, Edit, Write, Glob, Grep); another rule has no agy form and is left out.
-    Not measured yet: a rule of several words (command(git commit)) matching a command that starts with them."""
+    A rule of several words (command(git commit)) matches a command that starts with them (measured, #6251)."""
     out = []
     for t in tools:
         m = re.match(r"^Bash\((.+?)(?::\*)?\)$", t.strip())
