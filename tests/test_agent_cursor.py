@@ -132,8 +132,9 @@ class Launch(Env):
         self.assertEqual(cursor.trust_workspace("", "cursor-agent go"), "cursor-agent go")
 
     def test_a_worktree_made_by_maxpm_starts_cursor_with_trust(self):
-        """#6416: a worktree that MaximizePM made starts cursor-agent with --trust; the project's own folder (shared,
-        not made by MaximizePM) keeps Cursor's trust question."""
+        """#6416, #6439: a worktree that MaximizePM made starts cursor-agent with --trust and allows Shell(maxpm) in
+        .cursor/cli.json (excluded in info/exclude); the project's own folder (shared, not made by MaximizePM) keeps
+        Cursor's trust and command questions."""
         import subprocess
         c = core.connect()
         self.addCleanup(c.close)
@@ -147,6 +148,7 @@ class Launch(Env):
         add = lambda title: core.item_add(c, "web", title)["id"]
         t = server.dispatch_item(c, add("shared"), agent="Cursor", runner=lambda line: None)
         self.assertNotIn("--trust", shlex.split(t["command"]))
+        self.assertFalse((Path(root) / ".cursor" / "cli.json").exists())
         core.unregister(c, t["session_name"])
         core.config_set(c, "workspace", "worktree", project="web")
         sent = []
@@ -154,6 +156,58 @@ class Launch(Env):
         self.assertTrue(t["workspace"])
         self.assertIn("--trust", shlex.split(t["command"]))
         self.assertTrue(sent[-1].endswith(t["command"]))
+        cli_json = Path(t["path"]) / ".cursor" / "cli.json"
+        self.assertEqual(json.loads(cli_json.read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(maxpm)"], "deny": []}})
+        # Excluded in the main repository's info/exclude so git status stays clean.
+        ex = (Path(root) / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertIn("/.cursor/cli.json", ex.splitlines())
+        st = subprocess.run(["git", "-C", t["path"], "status", "--porcelain"], check=True, capture_output=True, text=True)
+        self.assertEqual(st.stdout, "")
+
+    def test_trust_workspace_preserves_global_permissions_and_skips_when_already_allowed_or_forced(self):
+        """#6439: .cursor/cli.json carries over ~/.cursor/cli-config.json allow/deny rules (Cursor replaces arrays
+        rather than joining them), skips writing when Run Everything is on or cli-config.json already allows maxpm,
+        merges into an existing .cursor/cli.json, and leaves invalid JSON alone."""
+        cfg = self.root / "home" / ".cursor" / "cli-config.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"permissions": {"allow": ["Shell(ls)"], "deny": ["Shell(rm)"]}}), encoding="utf-8")
+
+        wt1 = self.root / "wt1"
+        wt1.mkdir()
+        cursor.trust_workspace(str(wt1), "cursor-agent go")
+        self.assertEqual(json.loads((wt1 / ".cursor" / "cli.json").read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(ls)", "Shell(maxpm)"], "deny": ["Shell(rm)"]}})
+
+        # With --force, --yolo or -f, no .cursor/cli.json is written.
+        for flag in ("--force", "--yolo", "-f"):
+            wt_f = self.root / f"wt_{flag.lstrip('-')}"
+            wt_f.mkdir()
+            cursor.trust_workspace(str(wt_f), f"cursor-agent {flag} go")
+            self.assertFalse((wt_f / ".cursor" / "cli.json").exists(), flag)
+
+        # Existing .cursor/cli.json: keeps its rules and adds Shell(maxpm) once.
+        wt2 = self.root / "wt2"
+        (wt2 / ".cursor").mkdir(parents=True)
+        (wt2 / ".cursor" / "cli.json").write_text(
+            json.dumps({"permissions": {"allow": ["Shell(git)"], "deny": []}}), encoding="utf-8")
+        cursor.trust_workspace(str(wt2), "cursor-agent --trust go")
+        self.assertEqual(json.loads((wt2 / ".cursor" / "cli.json").read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(git)", "Shell(maxpm)"], "deny": []}})
+
+        # Malformed .cursor/cli.json: left untouched.
+        wt3 = self.root / "wt3"
+        (wt3 / ".cursor").mkdir(parents=True)
+        (wt3 / ".cursor" / "cli.json").write_text("{bad json", encoding="utf-8")
+        cursor.trust_workspace(str(wt3), "cursor-agent go")
+        self.assertEqual((wt3 / ".cursor" / "cli.json").read_text(encoding="utf-8"), "{bad json")
+
+        # Global cli-config.json already allows Shell(maxpm): no project file is written.
+        cfg.write_text(json.dumps({"permissions": {"allow": ["Shell(maxpm)"], "deny": []}}), encoding="utf-8")
+        wt4 = self.root / "wt4"
+        wt4.mkdir()
+        cursor.trust_workspace(str(wt4), "cursor-agent go")
+        self.assertFalse((wt4 / ".cursor" / "cli.json").exists())
 
     def test_a_built_command_parses_back(self):
         s = {"force": "on", "sandbox": "enabled", "mode": "ask"}

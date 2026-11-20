@@ -18747,10 +18747,10 @@ def project_hooks(conn, platform, folder, project=None):
     return {"file": path, "on": on}
 
 
-def _git_exclude(folder, path):
-    """Add a file that MaximizePM writes into a repository's folder (agy's hook file, #6351) to the repository's
-    info/exclude, so a session's commit of every new file does not take it. The repository of a worktree: its
-    commondir. Nothing outside a repository, and nothing on an error."""
+def _git_exclude(folder, path, note="MaximizePM's hook file (#6351)"):
+    """Add a file that MaximizePM writes into a repository's folder (agy's hook file, #6351; Cursor's permissions,
+    #6439) to the repository's info/exclude, so a session's commit of every new file does not take it. The repository
+    of a worktree: its commondir. Nothing outside a repository, and nothing on an error."""
     try:
         root = Path(folder)
         dot = root / ".git"
@@ -18768,7 +18768,7 @@ def _git_exclude(folder, path):
         if rel not in lines:
             ex.parent.mkdir(parents=True, exist_ok=True)
             with ex.open("a", encoding="utf-8") as fh:
-                fh.write(("\n" if lines and lines[-1] else "") + f"# MaximizePM's hook file (#6351)\n{rel}\n")
+                fh.write(("\n" if lines and lines[-1] else "") + f"# {note}\n{rel}\n")
     except (OSError, ValueError, IndexError):
         return
 

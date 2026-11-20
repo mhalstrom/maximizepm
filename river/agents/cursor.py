@@ -354,11 +354,96 @@ def build_command(name, folder, model, effort, settings, prompt):
     return argv
 
 
+ALLOW_MAXPM = "Shell(maxpm)"
+PROJECT_PERMISSIONS = Path(".cursor") / "cli.json"
+
+
+def _global_permissions(env=None):
+    """The (allow, deny) string lists from ~/.cursor/cli-config.json (empty lists when missing or unreadable)."""
+    try:
+        d = json.loads((cursor_dir(env) / "cli-config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    perms = d.get("permissions") if isinstance(d, dict) and isinstance(d.get("permissions"), dict) else {}
+    allow = [x for x in perms.get("allow") or () if isinstance(x, str)] if isinstance(perms.get("allow"), list) else []
+    deny = [x for x in perms.get("deny") or () if isinstance(x, str)] if isinstance(perms.get("deny"), list) else []
+    return allow, deny
+
+
+def _has_maxpm(allow):
+    return ALLOW_MAXPM in allow or "Shell(maxpm:*)" in allow
+
+
+def _allow_maxpm(folder, env=None):
+    """Ensure <folder>/.cursor/cli.json allows Shell(maxpm) (#6439), and exclude the file in the repository's
+    info/exclude (core._git_exclude) so git status and worktree cleanup ignore it.
+
+    Cursor 2026.11.19 merges .cursor/cli.json onto ~/.cursor/cli-config.json with a strict schema (only 'permissions',
+    and both 'allow' and 'deny' arrays are required) and replaces arrays rather than joining them. So a new file carries
+    over the person's allow and deny rules from cli-config.json and adds Shell(maxpm); when cli-config.json already
+    allows maxpm and no .cursor/cli.json exists, no file is written. An existing non-JSON or malformed file is left
+    alone."""
+    root = Path(folder)
+    if not root.is_dir():
+        return
+    f = root / PROJECT_PERMISSIONS
+    try:
+        text = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except OSError:
+        return
+    if text is None:
+        allow, deny = _global_permissions(env)
+        if _has_maxpm(allow):
+            return
+        data = {"permissions": {"allow": [*allow, ALLOW_MAXPM], "deny": deny}}
+    else:
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            return
+        if not isinstance(data, dict):
+            return
+        perms = data.get("permissions")
+        if perms is None:
+            allow, deny = _global_permissions(env)
+            perms = {"allow": list(allow), "deny": list(deny)}
+        elif isinstance(perms, dict):
+            allow = perms.get("allow")
+            deny = perms.get("deny")
+            if allow is None:
+                allow, _ = _global_permissions(env)
+            elif not isinstance(allow, list):
+                return
+            if deny is None:
+                _, deny = _global_permissions(env)
+            elif not isinstance(deny, list):
+                return
+            perms = {**perms, "allow": list(allow), "deny": list(deny)}
+        else:
+            return
+        if _has_maxpm(perms["allow"]):
+            return
+        perms["allow"].append(ALLOW_MAXPM)
+        data = {**data, "permissions": perms}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f".cli.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        return
+    from .. import core
+    core._git_exclude(folder, f, note="MaximizePM's Cursor permissions (#6439)")
+
+
 def trust_workspace(folder, command, env=None):
     """Add --trust to the start of a worktree that MaximizePM made (#6416, as #6339 for the other CLIs), so Cursor
-    starts there without 'Do you trust the contents of this directory?'. In an interactive start, cursor-agent
+    starts there without 'Do you trust the contents of this directory?', and write .cursor/cli.json allowing
+    Shell(maxpm) (#6439) unless Run Everything (--force/--yolo/-f) is already on. In an interactive start, cursor-agent
     2026.11.19 writes its own trust marker for each workspace folder that has none when --trust is on, and then skips
-    the question. A folder that MaximizePM did not make gets no call and keeps the question."""
+    the question. A folder that MaximizePM did not make gets no call and keeps both questions."""
     import shlex
     if not folder or not command:
         return command
@@ -366,7 +451,11 @@ def trust_workspace(folder, command, env=None):
         words = shlex.split(command)
     except ValueError:
         return command
-    if not words or "--trust" in words:
+    if not words:
+        return command
+    if "--force" not in words and "--yolo" not in words and "-f" not in words:
+        _allow_maxpm(folder, env)
+    if "--trust" in words:
         return command
     # The flag goes after the program word, also when variables (A=1 cursor-agent ...) come first.
     at = next((i for i, w in enumerate(words) if Path(w).name in ("cursor-agent", "agent")), 0)
