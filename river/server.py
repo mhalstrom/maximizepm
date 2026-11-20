@@ -2455,8 +2455,8 @@ def kill_agent(conn, agent, reason, actor=None, by_serve=False):
 
 def _programs(lines):
     """The program names of command lines: for each one, the base name of its program and, for an interpreter, of
-    the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/gemini'
-    gives node and gemini; 'python3 -m aider' gives python3 and aider)."""
+    the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/pi'
+    gives node and pi; 'python3 -m aider' gives python3 and aider)."""
     import os
     names = []
     for line in lines:
@@ -2861,9 +2861,9 @@ def _prompt_found(tail, rx, layout=None):
 
 
 def _prompt_above(tail, parts, rx, lay):
-    """The prompt that shows above a 'behind' question's box (DETECT['behind']), or None (#5818). Gemini draws the
-    trust question of an added folder under a waiting tool question, but Enter answers the tool question: the page
-    read the trust question, and its 'Yes' would have allowed the command."""
+    """The prompt that shows above a 'behind' question's box (DETECT['behind']), or None (#5818): a CLI that draws
+    one question under a waiting tool question, while Enter answers the tool question. Read from the lower one, the
+    page's 'Yes' would have allowed the command."""
     rows = list(getattr(tail, "above", ())) + list(tail)
     n = len(rows) - len(tail) + parts["start"]
     framed = re.compile(f"^\\s*[{lay['box']}]")
@@ -2888,7 +2888,7 @@ def _prompt_command(lines, layout=None):
     command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
     Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it.
-    An adapter's DETECT['header'] reads both from the header line itself (Gemini: '? Shell  touch notes.txt', #5817)."""
+    An adapter's DETECT['header'] reads both from the header line itself ('? Shell  touch notes.txt', #5817)."""
     lay = layout or _layout()
     rule = lay["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
@@ -2905,7 +2905,9 @@ def _prompt_command(lines, layout=None):
     below = lines[head + 1:]
     rules = [n for n, x in enumerate(below) if rule.match(x)]
     body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not rule.match(x)]
-    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")]
+    # Antigravity CLI puts the label 'Requesting permission for:' over the command (#6248).
+    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")
+            and x.strip() != "Requesting permission for:"]
     cmd = body[0] if body else None
     if cmd and len(body) > 1 and len(rules) >= 2:
         cmd += " …"  # a command of more lines: the first one names it
@@ -5479,7 +5481,8 @@ def _agent_cli(conn, label, exe, cmd, term, have, jobs):
     return {"label": label, "platform": platform, "found": bool(path), "path": path,
             "added": label in have or exe in have, "command": _shown_cmd(conn, cmd),
             "main": platform in agentinstall.MAIN,
-            "install": {"command": m["install"], "missing": needs if needs and not term.get(needs) else None}
+            "install": {"command": agentinstall.install_command(platform),
+                        "missing": needs if needs and not term.get(needs) else None}
             if m.get("install") else None,
             "signin": bool(m.get("signin")),
             "signed_in": agentinstall.signed_in(platform, path) if path else None,

@@ -3,8 +3,8 @@
 // ...) get '<program>: <option>' from PROGRAMS and OPTIONS; a key that is in no list gets its words, so a new key
 // still shows.
 
-export const PROGRAMS = { aider: "Aider", amp: "Amp", claude: "Claude Code", codex: "Codex", copilot: "Copilot",
-  cursor: "Cursor", gemini: "Gemini CLI", goose: "Goose", grok: "Grok", hermes: "Hermes", opencode: "OpenCode", pi: "Pi" };
+export const PROGRAMS = { agy: "Antigravity CLI", aider: "Aider", amp: "Amp", claude: "Claude Code", codex: "Codex",
+  copilot: "Copilot", cursor: "Cursor", goose: "Goose", grok: "Grok", hermes: "Hermes", opencode: "OpenCode", pi: "Pi" };
 
 const OPTIONS = { args: "more arguments", prompt: "first prompt", model_ids: "model names", permission_mode: "permission mode",
   permissions: "permissions", sandbox: "sandbox", approval: "approval", approval_mode: "approval mode", mode: "mode",
@@ -15,7 +15,7 @@ const OPTIONS = { args: "more arguments", prompt: "first prompt", model_ids: "mo
   model_warnings: "model warnings", weak_model: "small model", fast: "fast mode", no_ide: "no IDE", quiet: "quiet output",
   settings_file: "settings file", visibility: "visibility", builtins: "built-in tools", max_turns: "most turns",
   checkpoints: "checkpoints", provider: "model provider", skills: "skills", toolsets: "tool sets", tools: "tools",
-  offline: "offline", standalone: "standalone", auto: "automatic mode" };
+  offline: "offline", standalone: "standalone", auto: "automatic mode", skip_permissions: "skip every permission" };
 
 export const LABELS = {
   // Agents

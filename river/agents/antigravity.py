@@ -1,0 +1,597 @@
+"""The Antigravity CLI adapter (#6248): Google's coding agent, the command `agy`, the successor of Gemini CLI (Google
+retired Gemini CLI for free, AI Pro and AI Ultra accounts on 2026-06-18). mark 2026-11-19: one of the three main
+agents, with Claude Code and Codex.
+
+Read from Google's pages (antigravity.google/docs: getting-started, install, cli/reference, cli/headless,
+cli/conversations, hooks, customization-discovery; 2026-11-19) and measured on agy 1.5.13 in a tmux pane on this Mac
+(tests/fixtures/agy: the screens and a cleaned transcript of that run).
+
+The sources this adapter declares, one for each signal:
+
+- State: the screen (DETECT). agy has hooks (Stop with fullyIdle, PreToolUse), but only in hooks.json files in its own
+  folder (~/.gemini/config/hooks.json) or in the project (.agents/hooks.json); no flag of one start adds one, and
+  MaximizePM puts nothing into a CLI's home (p140). The screen shows each state: a spinner line while it works, a
+  menu with its question while it waits for the person, '? for shortcuts' under the input line when it waits for a
+  prompt.
+- Session id: the environment (IDENTITY). agy gives each shell command it runs ANTIGRAVITY_AGENT=1 and
+  ANTIGRAVITY_CONVERSATION_ID=<the conversation's id>, so each maxpm command records the id (core.session_from_env).
+- Chat log: ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl, one JSON line for each
+  step of the conversation. A resume (--conversation <id>) adds to the same file.
+
+No guard before a command: Claude Code's PreToolUse hook refuses a push while an alert is unread (core.push_guard) and
+a tmux kill-server of MaximizePM's server (core.tmux_guard). agy has a PreToolUse hook too, but it loads hooks only
+from those hooks.json files, so an agy session has neither guard, as a Codex session has neither.
+"""
+
+import json
+import os
+import re
+from pathlib import Path
+
+from . import Raw
+
+# ---------------------------------------------------------------------------------------------------------------
+# 1. Describe
+# ---------------------------------------------------------------------------------------------------------------
+
+DESCRIBE = {
+    "id": "antigravity",
+    "label": "Antigravity CLI",
+    "exe": "agy",
+    "aliases": ["agy", "antigravity-cli"],
+    # agy runs Google's Gemini models and others (Claude, GPT-OSS) by its own ids: no family of model_ladder, so an
+    # item's --min-model and --max-model do not apply to them, as for a provider/model agent.
+    "family": "multi",
+    # The ids that `agy models` listed on 2026-11-19 (agy 1.5.13, a Google AI Ultra account). Each id names a model
+    # and its thinking level; --effort sets the reasoning effort apart from it.
+    "models": ["gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium", "gemini-4-neon-low",
+               "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low",
+               "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low",
+               "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low",
+               "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
+               "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+               "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low",
+               "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low",
+               "gpt-oss-120b-medium"],
+    "default_model": "",
+    "model_ids": {},
+    "prefix": "agy_",
+    # agy's /model keeps the new model for later sessions too ("persists across sessions", cli/reference): typed
+    # from the page it would change the person's default. A restart with --model changes this session only.
+    "model_live": None,
+    "model_note": "A restart applies it. /model in its terminal also changes the model of later sessions.",
+    "model_read": r"(?:^|\s)--model(?:=|\s+)(\S+)",
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 2. Settings
+# ---------------------------------------------------------------------------------------------------------------
+
+MODES = ["accept-edits", "auto", "plan"]
+
+SETTINGS = [
+    {"key": "mode", "label": "Agent mode", "kind": "choice", "choices": MODES, "default": "",
+     "text": "accept-edits allows file edits; auto allows edits and safe commands; plan only reads. Empty: agy's own "
+             "setting (auto since agy 1.5.7, where the account has it).",
+     "flag": ["--mode", "{value}"], "live": None, "read": r"--mode(?:=|\s+)(accept-edits|auto|plan)\b",
+     "session": True, "note": "A restart applies it; Shift+Tab in the session cycles the mode for now."},
+    {"key": "skip_permissions", "label": "Skip every permission", "kind": "toggle", "choices": [], "default": "off",
+     "text": "Allow every tool with no question (--dangerously-skip-permissions).",
+     "flag": ["--dangerously-skip-permissions"], "live": None, "read": None, "session": True},
+    {"key": "sandbox", "label": "Sandbox", "kind": "toggle", "choices": [], "default": "off",
+     "text": "Run its terminal commands in agy's sandbox.",
+     "flag": ["--sandbox"], "live": None, "read": None, "session": True},
+    {"key": "args", "label": "Other arguments", "kind": "text", "choices": [], "default": "",
+     "text": "More words for the agy command line, as you type them in a shell.",
+     "flag": [], "live": None, "read": None},
+]
+
+# 3. Effort: --effort low|medium|high|xhigh|max, the same names as MaximizePM's levels. /effort opens a menu in the
+# session; the page changes it by a restart.
+EFFORT = {"levels": ["low", "medium", "high", "xhigh", "max"], "map": {}, "flag": ["--effort", "{value}"],
+          "live": None, "read": r"--effort(?:=|\s+)(low|medium|high|xhigh|max)\b", "label": "Reasoning effort"}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 4. Launch
+# ---------------------------------------------------------------------------------------------------------------
+
+# No session name on the command line (/rename in the session), no system prompt file, no hooks file, no fork flag.
+# --add-dir adds the queue folder to its workspace (agy asked no trust question for it); --conversation <id> resumes.
+# Background: agy runs a command that lasts more than a few seconds as a background task (its footer: '1 task(s)')
+# and wakes the session when it ends. In the end-to-end run of 2026-11-19 its maxpm wait ran so, returned STOP after a
+# stop request from the page, and the session woke, ran maxpm go and ended.
+LAUNCH = {"session_name": False, "system_prompt_file": False, "hooks_file": False, "extra_dirs": True, "fork": False,
+          "resume": True, "autocompact": False, "background": True}
+
+
+def _on(value):
+    return str(value or "").strip().lower() in ("on", "true", "1", "yes")
+
+
+# The maxpm commands of a session (measured on agy 1.5.13, 2026-11-19): auto mode runs each command in agy's
+# sandbox, which refuses to run a program outside the workspace ('zsh:1: operation not permitted: maxpm'); a
+# permissions.allow rule alone does not change that. With the rule, a command that the model runs with
+# BypassSandbox runs outside the sandbox with no question, and in the other modes a maxpm command runs with no
+# question. --settings holds it for this session only; agy never saves it, so nothing goes into agy's own files (p140).
+ALLOW_MAXPM = json.dumps({"permissions": {"allow": ["command(maxpm)"]}}, separators=(",", ":"))
+MAXPM_NOTE = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
+              "allows maxpm with no question.")
+
+
+def build_command(name, folder, model, effort, settings, prompt):
+    """agy [--conversation <id>] [--model M] [--effort E] [--mode M] [--dangerously-skip-permissions] [--sandbox]
+    --add-dir <queue folder> --settings <ALLOW_MAXPM> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a
+    session name. -i runs the first prompt and keeps the session open."""
+    from ..core import river_dir
+    s = settings
+    words = ["agy"] + (["--conversation", s["resume"]] if s.get("resume") else [])
+    words += ["--model", model] if model else []
+    words += ["--effort", effort] if effort in EFFORT["levels"] else []
+    mode = (s.get("mode") or "").strip()
+    if mode in MODES:
+        words += ["--mode", mode]
+    words += ["--dangerously-skip-permissions"] if _on(s.get("skip_permissions")) else []
+    words += ["--sandbox"] if _on(s.get("sandbox")) else []
+    words += ["--add-dir", river_dir(), "--settings", ALLOW_MAXPM]
+    words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
+    words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}"] if prompt else []
+    return words
+
+
+def resume_command(session_ref, model, effort, settings, name=None):
+    """agy --conversation <id>, with the profile's settings and settings['prompt'] as its first prompt (measured: the
+    resumed session runs the prompt and keeps the whole chat). At its exit agy prints the same command:
+    'agy --conversation=<id>'."""
+    if not session_ref:
+        return None
+    return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
+
+
+def parse_command(words):
+    """A hand-written agy command that a profile builds exactly: --model {model}, --effort {effort}, --mode with a
+    known value, --dangerously-skip-permissions, --sandbox, --add-dir of the queue folder, and one prompt (with -i or
+    --prompt-interactive). Anything else: None."""
+    from ..core import river_dir
+    if not words or Path(words[0]).name.lower() not in ("agy", "antigravity"):
+        return None
+    opts, prompt, i = {}, None, 1
+    while i < len(words):
+        t, nxt = words[i], (words[i + 1] if i + 1 < len(words) else None)
+        if t == "--model" and nxt == "{model}" or t == "--effort" and nxt == "{effort}":
+            i += 2
+        elif t == "--mode" and nxt in MODES:
+            opts["mode"] = nxt
+            i += 2
+        elif t.startswith("--mode=") and t.split("=", 1)[1] in MODES:
+            opts["mode"] = t.split("=", 1)[1]
+            i += 1
+        elif t == "--dangerously-skip-permissions":
+            opts["skip_permissions"] = "on"
+            i += 1
+        elif t == "--sandbox":
+            opts["sandbox"] = "on"
+            i += 1
+        elif t == "--add-dir" and nxt is not None and (
+                nxt == "{maxpm_dir}" or os.path.realpath(os.path.expanduser(nxt)) == os.path.realpath(river_dir())):
+            i += 2
+        elif t == "--settings" and nxt == ALLOW_MAXPM:
+            i += 2
+        elif t in ("-i", "--prompt-interactive") and nxt is not None and prompt is None:
+            prompt = nxt[:-len(MAXPM_NOTE) - 2] if nxt.endswith("\n\n" + MAXPM_NOTE) else nxt
+            i += 2
+        else:
+            return None
+    return {"settings": opts, "prompt": prompt} if prompt is not None else None
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 5. Session identity
+# ---------------------------------------------------------------------------------------------------------------
+
+# Measured in a shell command of agy 1.5.13: ANTIGRAVITY_AGENT=1, ANTIGRAVITY_CONVERSATION_ID=<uuid> (also
+# ANTIGRAVITY_TRAJECTORY_ID, ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_PROJECT_ID). No web link for a local conversation.
+IDENTITY = {"source": "env", "env": "ANTIGRAVITY_CONVERSATION_ID", "log_glob": None, "pane": None, "url": None,
+            "inside_env": ["ANTIGRAVITY_AGENT"],
+            "id_pattern": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
+
+
+def data_dir(env=None):
+    """agy's own folder: ~/.gemini/antigravity-cli (the docs' <app_data_dir>; agy gives its commands it as
+    ANTIGRAVITY_APP_DATA_DIR)."""
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def chat_path(session_ref, folder=None, root=None):
+    """The transcript of conversation `session_ref` (its id): <root>/<id>/.system_generated/logs/transcript_full.jsonl,
+    else transcript.jsonl in the same folder (the same steps, with each tool argument as a JSON text). root: the
+    folder of the conversations, in place of ~/.gemini/antigravity-cli/brain (the tests give one). None when there is
+    none."""
+    ref = str(session_ref or "").strip()
+    if not ref:
+        return None
+    if os.path.isfile(ref):
+        return Path(ref)
+    if not re.fullmatch(IDENTITY["id_pattern"], ref):
+        return None
+    logs = (Path(root) if root else data_dir() / "brain") / ref / ".system_generated" / "logs"
+    for name in ("transcript_full.jsonl", "transcript.jsonl"):
+        if (logs / name).is_file():
+            return logs / name
+    return None
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 6. Chat log
+# ---------------------------------------------------------------------------------------------------------------
+
+# edit_file changes a file (measured); write_to_file writes a whole one. agy's prompt cache costs no more to write
+# than plain input.
+CHAT = {"compressed": False, "file_tools": ["edit_file", "write_to_file"], "ref": "session", "cache_write": False}
+
+_REQUEST = re.compile(r"<USER_REQUEST>\n?(.*?)\n?</USER_REQUEST>", re.S)
+# The first lines of a tool's result: 'Created At: <time>' and 'Completed At: <time>', twice.
+_STAMPS = re.compile(r"\A(?:(?:Created|Completed) At: [^\n]*\n)+")
+
+
+def _step(d):
+    return d.get("step_index") if isinstance(d.get("step_index"), int) else None
+
+
+def _call_id(step, n):
+    """The id of the n-th tool call of the model's step `step`: the step that holds its result. agy writes the result
+    of each call as the next steps, in the order of the calls (measured: two calls at step 10, results at 11 and 12),
+    so one line tells its result's call with no state."""
+    return f"s{step + 1 + n}"
+
+
+def _detail(args):
+    for k in ("CommandLine", "Path", "AbsolutePath", "TargetFile", "Query", "Url", "SearchPath", "Pattern"):
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    qs = args.get("questions")
+    if isinstance(qs, list):
+        return " · ".join(q.get("question", "") for q in qs if isinstance(q, dict))
+    return json.dumps(args, ensure_ascii=False) if args else ""
+
+
+def _args(tc):
+    """A tool call's arguments as a dict: transcript_full.jsonl keeps them as values, transcript.jsonl as JSON texts."""
+    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+    out = {}
+    for k, v in args.items():
+        if isinstance(v, str) and v[:1] in '"[{':
+            try:
+                v = json.loads(v)
+            except ValueError:
+                pass
+        out[k] = v
+    return out
+
+
+def parse_chat_line(d):
+    """(entries, turn) of one step of the transcript. USER_INPUT: the person's prompt (the text in <USER_REQUEST>);
+    PLANNER_RESPONSE: the model's text and its tool calls; GENERIC from the model: the result of a tool call (status
+    ERROR: a failed or refused call, its error). SYSTEM_MESSAGE steps (agy's own reminders to the model) are no entries.
+    The turn: working after a prompt, a tool call and a result; idle after a reply with text and no tool call."""
+    if not isinstance(d, dict):
+        return [], None
+    at, kind, step = d.get("created_at"), d.get("type"), _step(d)
+    if kind == "USER_INPUT":
+        content = d.get("content") if isinstance(d.get("content"), str) else ""
+        m = _REQUEST.search(content)
+        said = (m.group(1) if m else content).strip()
+        return ([{"at": at, "role": "user", "text": said}] if said else []), "working"
+    if kind == "PLANNER_RESPONSE":
+        out = []
+        said = d.get("content").strip() if isinstance(d.get("content"), str) else ""
+        if said:
+            out.append({"at": at, "role": "assistant", "text": said})
+        calls = [tc for tc in d.get("tool_calls") or () if isinstance(tc, dict)]
+        for n, tc in enumerate(calls):
+            args = _args(tc)
+            out.append({"at": at, "role": "tool", "text": tc.get("name", ""),
+                        "id": _call_id(step, n) if step is not None else "", "name": tc.get("name", ""),
+                        "detail": _detail(args)})
+        return out, ("working" if calls or not said else "idle")
+    if kind == "GENERIC" and d.get("source") == "MODEL":
+        error = d.get("status") == "ERROR"
+        text = d.get("error") if error and isinstance(d.get("error"), str) else d.get("content")
+        text = _STAMPS.sub("", text if isinstance(text, str) else "").strip()
+        return [{"at": at, "role": "result", "text": text, "for": f"s{step}" if step is not None else "",
+                 "error": error}], "working"
+    return [], None
+
+
+def _lines(lines):
+    for line in lines:
+        line = line.strip() if isinstance(line, str) else line
+        if not line:
+            continue
+        try:
+            d = json.loads(line) if isinstance(line, str) else line
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            yield d
+
+
+def parse_chat(lines):
+    """(entries, turn) of the lines of one transcript (parse_chat_line on each). A turn that the person cancels (Esc)
+    leaves its prompt as the last step: it reads as working, and the screen (DETECT) says idle."""
+    entries, turn = [], None
+    for d in _lines(lines):
+        got, st = parse_chat_line(d)
+        entries += got
+        turn = st or turn
+    return entries, turn
+
+
+def chat_title(lines):
+    """The person's first prompt, on one line."""
+    for e in parse_chat(lines)[0]:
+        if e["role"] == "user" and e["text"]:
+            return " ".join(e["text"].split())[:120]
+    return None
+
+
+def chat_usage(lines):
+    """The token counts of the model's steps: input_tokens is the input without the cached part (cache_read_tokens),
+    as measured (9879 + 0 at the first call, 3109 + 7842 at the next)."""
+    out = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    for d in _lines(lines):
+        if d.get("type") != "PLANNER_RESPONSE":
+            continue
+        out["input"] += int(d.get("input_tokens") or 0)
+        out["cache_read"] += int(d.get("cache_read_tokens") or 0)
+        out["output"] += int(d.get("output_tokens") or 0)
+    return out
+
+
+def chat_requests(session_ref, root=None):
+    """(requests, fork) of a conversation for maxpm usage: each model step of its transcript is one model call, keyed
+    by its step ('s<step>'), with its time and its token counts. agy writes no prompt cache, and no conversation starts
+    as a fork of another here (/fork makes a new id), so fork is False. None when no transcript of it is here."""
+    path = chat_path(session_ref, root=root)
+    if path is None:
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    out = {}
+    for d in _lines(lines):
+        if d.get("type") != "PLANNER_RESPONSE" or _step(d) is None:
+            continue
+        out[f"s{_step(d)}"] = (d.get("created_at"), {
+            "input": int(d.get("input_tokens") or 0), "output": int(d.get("output_tokens") or 0),
+            "cache_read": int(d.get("cache_read_tokens") or 0), "cache_write": 0, "write_1h": 0, "write_5m": 0})
+    return out, False
+
+
+def context_window(model):
+    """The tokens of a model's window, as agy's /context showed them on 2026-11-19 (agy 1.5.13): 1.0M for the Gemini
+    models (gemini-3.8-flash-low, gemini-4-neon-high), 1M for the Claude models (claude-opus-5-5-high), 131.1k for
+    gpt-oss-120b-medium. None for another model."""
+    m = (model or "").lower()
+    if m.startswith("gemini-"):
+        return 1_048_576
+    if m.startswith("claude-"):
+        return 1_000_000
+    if m.startswith("gpt-oss-"):
+        return 131_072
+    return None
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of a transcript into the cache state (the context meter): each model step is one model call,
+    its context the input, the cached part and the output."""
+    try:
+        d = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(d, dict) or d.get("type") != "PLANNER_RESPONSE":
+        return
+    ctx = sum(int(d.get(k) or 0) for k in ("input_tokens", "cache_read_tokens", "output_tokens"))
+    if ctx and d.get("created_at"):
+        st["last"] = {"start": d["created_at"], "at": d["created_at"], "context": ctx}
+        if d.get("model"):
+            st["model"] = d["model"]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 7. State: the screen
+# ---------------------------------------------------------------------------------------------------------------
+
+STATE = {"state": "detect", "session_id": "identity"}
+
+# The pane watcher of maxpm serve (server.watch_prompts) reads a blocked screen first: a question and its menu are
+# the last thing on the screen, above the key line ('↑/↓ Navigate · enter Confirm') and the footer. Else working (a
+# spinner line: a braille character, then 'Generating...'), else idle: the footer under the input line, '? for
+# shortcuts' at its left (or nothing there while the person's draft is in the input line), or the key line of the
+# person's '/' list. The footer reads 'esc to cancel' while it works, while it asks, and also while that list is open,
+# so it is no sign of work. At its right the footer shows the mode and the model ('auto · Gemini 3.8 Flash · low').
+QUESTION = r"^\s*Question \d+/\d+: "
+STATUS = r"^(?:esc to cancel)?\s{10,}\S[^·]*(?: · \S[^·]*)+$"
+DETECT = {
+    # Homebrew's agy is a wrapper that runs the program 'antigravity' (its cask); Google's script installs agy itself.
+    "process": "antigravity",
+    "process_args": r"(?:^|/)agy(?:\s|$)",
+    "idle": r"^\? for shortcuts\b|^\s{10,}\S[^·]*(?: · \S[^·]*)+$|· tab Complete\s*$",
+    "working": r"^[⠀-⣿]\s+\S",
+    "blocked": [
+        r"^\s*Run this command\?",                          # a terminal command
+        r"^\s*Accept this file edit\?",                     # a file edit
+        r"^\s*Allow creation of this file\?",               # a new file
+        r"^\s*Allow access to this file\?",                 # a read outside the workspace
+        r"^\s*Do you trust the contents of this project\?",  # a new project folder, at the start
+        QUESTION,                                            # ask_question: agy asks the person
+        r"^\s*Select login method",                         # sign-in, at the first start
+    ],
+    # 'No, cancel' (a command), 'No, reject this change' (an edit), 'No, deny creation' (a new file), 'No, deny
+    # access' (a read outside the workspace): agy stops the turn and asks 'What should Antigravity CLI do instead?',
+    # and the text goes in as the next prompt.
+    "tell_instead": r"^No, (?:cancel|reject this change|deny creation|deny access)\b",
+    "image_paste": None,
+    # The selected option: '> 1. Yes, run command'; the others have two spaces.
+    "menu": ">",
+    # The key line under a menu, and agy's footer under it ('esc to cancel', then the mode and the model at the right).
+    "hint": r"↑/↓ Navigate\b|\benter Submit\b|" + STATUS,
+    # A question dialog (ask_question): 'Question 1/2: Which size?', its options ('[ ]' and '[x]' boxes when it takes
+    # more answers), 'Write-in...' last, then the key line. river/ask_forms.Antigravity reads and answers it.
+    "ask": QUESTION,
+    "ask_form": "antigravity",
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 8. Input
+# ---------------------------------------------------------------------------------------------------------------
+
+# Stop on the Sessions tab: Esc stops the turn ('Interrupted · What should Antigravity CLI do instead?').
+INPUT = {"native": None, "interrupt": ["Escape"]}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 10. Commands
+# ---------------------------------------------------------------------------------------------------------------
+
+# The built-in commands of agy 1.5.13, as its '/' list shows them (an alias in brackets there: /clear (new)).
+COMMANDS = [{"name": n, "description": d, "hint": h} for n, d, h in (
+    ("add-dir", "Add a directory to the workspace", "<path>"),
+    ("agents", "List available custom agents", ""),
+    ("artifact", "View and review artifacts", ""),
+    ("boost", "Invoke the Boost multi-agent orchestrator for complex tasks", ""),
+    ("browser", "Invoke a browser agent for web tasks", ""),
+    ("btw", "Ask a side question without interrupting the current task", "<question>"),
+    ("changelog", "Show release notes and changes", ""),
+    ("clear", "Clear conversation and start a new one", ""),
+    ("codesearch", "Search code in the workspace", "<query>"),
+    ("compact", "Compact the conversation now (summarize history to free up the context window)", ""),
+    ("config", "Open settings panel", ""),
+    ("context", "Visualize current context usage", ""),
+    ("copy", "Copy the last planner response to the clipboard", "[n|btw]"),
+    ("credits", "Show remaining credits and purchase link", ""),
+    ("diff", "View uncommitted changes and per-turn diffs", ""),
+    ("effort", "Set the reasoning effort", ""),
+    ("exit", "Exit the CLI", ""),
+    ("feedback", "Submit qualitative feedback to improve the agent", ""),
+    ("fork", "Create a branch of the current conversation at this point", "[project id]"),
+    ("goal", "Run until the specified goal is completely finished", "<goal>"),
+    ("grill-me", "Interview me to align on a plan", ""),
+    ("help", "Show available commands and keybindings", ""),
+    ("hooks", "Manage hook configurations for tool events", ""),
+    ("keybindings", "Set custom keybindings", ""),
+    ("learn", "Reflect on recent successes or corrections to capture reusable skills or rules", ""),
+    ("logout", "Log out", ""),
+    ("mcp", "Manage MCP servers", ""),
+    ("model", "Set a model, or run a single prompt on another model", "[model] [prompt]"),
+    ("open", "Open a file or view opened/edited files", ""),
+    ("permissions", "Manage tool permissions", ""),
+    ("plan", "Plan carefully before executing a task", ""),
+    ("plugin", "Manage, discover, install, uninstall, enable, and disable plugins", ""),
+    ("projects", "Create and edit projects", ""),
+    ("record", "Dictate a prompt using your microphone", ""),
+    ("remote-control", "Turn on remote control for this session (off to disable)", "[off]"),
+    ("rename", "Rename the current conversation", "<name>"),
+    ("resume", "Browse and resume past conversations", ""),
+    ("rewind", "Rewind conversation to a previous message", ""),
+    ("schedule", "Run an instruction on a recurring schedule or as a one-time timer", ""),
+    ("skills", "List available skills", ""),
+    ("statusline", "Toggle the statusline", ""),
+    ("swarm", "Run a swarm: several agents working in parallel on one task", ""),
+    ("tasks", "View background tasks", ""),
+    ("teamwork", "Invoke a team of agents to autonomously tackle large projects", ""),
+    ("title", "Toggle custom terminal window title", ""),
+    ("usage", "View model quota usage", ""),
+    ("voice", "Dictate a prompt or talk with the agent by voice", ""),
+)]
+
+# How each command works from the page: the panels, pickers and menus need the terminal; /model and /effort open the
+# Settings dialog at their row (a restart applies them); /context and /usage open the Usage panel.
+_TERMINAL = {"agents", "artifact", "changelog", "config", "copy", "credits", "diff", "help", "hooks", "keybindings",
+             "logout", "mcp", "open", "permissions", "plugin", "projects", "record", "resume", "rewind", "skills",
+             "tasks", "voice"}
+for _c in COMMANDS:
+    _c["run"] = "terminal" if _c["name"] in _TERMINAL else "now"
+    if _c["name"] in ("model", "effort"):
+        _c["setting"], _c["run"] = _c["name"], "terminal"
+    if _c["name"] in ("context", "usage"):
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
+def _skill_description(text):
+    """The description in a SKILL.md's front matter, or ''."""
+    m = re.match(r"\A---\s*\n(.*?)\n---", text, re.S)
+    got = re.search(r"(?m)^description:\s*(.+)$", m.group(1)) if m else None
+    return got.group(1).strip().strip("'\"") if got else ""
+
+
+def read_commands(folder):
+    """agy's skills run as slash commands: each <skills folder>/<name>/SKILL.md of the project (.agents/skills) and of
+    the person (~/.gemini/antigravity-cli/skills, ~/.gemini/skills, ~/.gemini/config/skills; customization-discovery).
+    A project skill replaces a person's skill of the same name."""
+    home = Path.home() / ".gemini"
+    roots = [home / "config" / "skills", home / "skills", data_dir() / "skills"]
+    roots += [Path(folder) / ".agents" / "skills"] if folder else []
+    found = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in sorted(root.glob("*/SKILL.md")):
+            name = re.sub(r"[^a-zA-Z0-9_\-.]", "_", p.parent.name)[:50]
+            try:
+                desc = _skill_description(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            found[name] = {"name": name, "description": " ".join(desc.split())[:100] or f"Skill {name}", "hint": ""}
+    return list(found.values())
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 11. Setup
+# ---------------------------------------------------------------------------------------------------------------
+
+SETUP = {
+    # agy reads AGENTS.md (and GEMINI.md) in the project folder and each folder above it.
+    "instructions": "AGENTS.md",
+    "import": None,
+    # Skills for agy alone; ~/.gemini/config/skills holds skills for the Antigravity app too.
+    "skills_dir": "~/.gemini/antigravity-cli/skills",
+    "voice": "/voice dictates a prompt or talks with agy by voice.",
+    "open_link": None,
+}
+
+
+def write_mcp_config(path=None, remove=False):
+    """Add (or, with remove, take out) MaximizePM's MCP server in agy's MCP file, ~/.gemini/config/mcp_config.json
+    (path: another file), as mcpServers.maxpm = {command, args, env}: setup_entry(), the stdio server `maxpm mcp`,
+    with no MAXPM_CHAT (an agy session runs in a project folder). The form is the one `agy mcp add` writes. Other
+    servers stay; the old file is kept as mcp_config.json.bak. Returns one text that says what changed."""
+    from . import setup_entry
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else Path.home() / ".gemini" / "config" / "mcp_config.json"
+    entry = setup_entry()
+    entry["env"].pop("MAXPM_CHAT", None)
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError:
+        raise RiverError(f"{f} is not plain JSON, so MaximizePM does not rewrite it; fix it first") from None
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
+    servers = data.setdefault("mcpServers", {})
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new agy session has no maxpm tools."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +
+            ". A new agy session has the maxpm tools (/mcp lists them).")

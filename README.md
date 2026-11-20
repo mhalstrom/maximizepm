@@ -235,7 +235,7 @@ Open setup guide in Settings (the ⋯ menu) opens it again.
 
 Every button on the page that starts an agent opens one launch dialog (see
 [Model and effort](#model-and-effort)). The Start button offers Claude Code
-at first; add Codex, Grok, OpenCode, or Gemini in the setup guide when the
+at first; add Codex, Antigravity CLI, Grok, or OpenCode in the setup guide when the
 page finds them on this computer. The Codex command gets `--add-dir
 <MaximizePM data folder>`, so its sandbox can write the queue.
 
@@ -594,10 +594,10 @@ command = "maxpm"
 args = ["mcp", "--plan"]
 ```
 
-Gemini CLI: add this to `~/.gemini/settings.json` under `mcpServers`:
+Antigravity CLI: run this once:
 
-```json
-"maxpm-plan": {"command": "maxpm", "args": ["mcp", "--plan"]}
+```sh
+agy mcp add maxpm-plan -- maxpm mcp --plan
 ```
 
 Claude on the web, ChatGPT on the web and the Gemini web app connect from

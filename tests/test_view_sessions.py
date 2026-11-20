@@ -377,9 +377,9 @@ class Sessions(Base):
         # #5257: the note names the agent whose log MaximizePM looked for, and why it found none.
         core.register(self.c, "gm")
         with core.tx(self.c):
-            self.c.execute("UPDATE agents SET agent_type='gemini' WHERE name='gm'")
+            self.c.execute("UPDATE agents SET agent_type='antigravity' WHERE name='gm'")
         note = sessions.view(self.c, "gm", None, self.root, self.croot)["note"]
-        self.assertIn("no Gemini CLI session id of gm is recorded yet", note)
+        self.assertIn("no Antigravity CLI session id of gm is recorded yet", note)
         self.assertNotIn("Claude Code", note)
         core.register(self.c, "x1")
         from river import agents as _agents
@@ -1368,6 +1368,42 @@ class AskForms(TmuxBase):
         self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["at"]), ([False, True, False], 0))
         self.answer(w, picks=[0], other="Ketchup")
         self.assertEqual(self.pane["keys"], ["Enter", "Down", "Enter", "Down", "Enter", "Ketchup", "Enter", "Tab"])
+
+    def test_antigravity_answers_with_the_arrows_space_and_its_write_in_box(self):
+        """#6248: agy's ask_question dialog, as its pane showed it on 2026-11-19 (tests/fixtures/agy)."""
+        fix = Path(__file__).parent / "fixtures" / "agy"
+        screen = lambda name: (fix / f"pane_{name}.txt").read_text(encoding="utf-8")
+        self.kind("antigravity")
+        w = self.card(screen("blocked_ask"))
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["multi"]),
+                         (["Question 1"], 0, 0, "Which color do you prefer?", False))
+        self.assertEqual([o["label"] for o in a["options"]], ["(Recommended) red", "green", "blue", "Write-in..."])
+        self.assertTrue(a["options"][3]["text"])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+        # The own answer: Enter on Write-in opens its box, then the text and Enter.
+        r = self.answer(self.card(screen("blocked_ask")), other="purple")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("purple", ["Down"] * 3 + ["Enter", "purple", "Enter"]))
+        # The box is open with a text: the new text takes its place.
+        w = self.card(screen("ask_writein_typed"))
+        self.assertEqual((w["ask"]["at"], w["ask"]["options"][3]["typed"]), (3, "purple"))
+        self.answer(w, other="teal")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 6 + ["teal", "Enter"])
+        # Two questions: Right and Left show the other one; the answer given before is marked chosen.
+        w = self.card(screen("ask_two_q1_back"))
+        self.assertEqual(([t["header"] for t in w["ask"]["tabs"]], w["ask"]["current"], w["ask"]["at"]),
+                         (["Question 1", "Question 2"], 0, 1))
+        self.assertEqual([o["chosen"] for o in w["ask"]["options"]], [False, True, False])
+        self.answer(w, tab=1)
+        self.assertEqual(self.pane["keys"], ["Right"])
+        # More answers: Space turns a box over (apple on, plum off; pear stays), Enter sends them all.
+        w = self.card(screen("ask_two_q2_ticked"))
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["multi"], w["ask"]["at"]),
+                         ([False, True, True, None], True, 2))
+        r = self.answer(w, picks=[0, 1])
+        self.assertEqual((r["picked"], self.pane["keys"]), ("(Recommended) apple, pear",
+                                                            ["Up", "Up", "Space", "Down", "Down", "Space", "Enter"]))
 
     def test_an_adapter_names_a_known_form(self):
         from river import agents

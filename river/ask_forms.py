@@ -1,6 +1,7 @@
 """The question dialogs of the agent CLIs other than Claude Code, read from a tmux pane and answered with the CLI's
 keys (#6235). Claude Code's AskUserQuestion dialog is read in server._ask_dialog (#6234); this module reads the same
-kind of dialog of Codex (request_user_input, in Plan mode), Copilot (ask_user) and OpenCode (question). An adapter
+kind of dialog of Codex (request_user_input, in Plan mode), Copilot (ask_user), OpenCode (question) and Antigravity
+CLI (ask_question, #6248). An adapter
 names its form in DETECT['ask_form'] and the dialog's first line in DETECT['ask'].
 
 Each form has read(rows, t): the dialog whose first line is rows[t], or None, as one dict for the page:
@@ -13,7 +14,8 @@ finish(ask, raw): what only the colours of the pane say (raw: the pane's text wi
 answer(ask, pick, text, picks): (the keys, what was picked), with {"key": ...}, {"text": ...} and {"pause": True}
 steps; the caller waits a moment before each text, while the CLI draws its input box, and at each pause.
 tab(ask, n): the keys that show tab n.
-Each was checked by hand on the CLI's own dialog on 2026-11-19: Codex 0.159.1, Copilot 1.0.110, OpenCode 2.2.7."""
+Each was checked by hand on the CLI's own dialog on 2026-11-19: Codex 0.159.1, Copilot 1.0.110, OpenCode 2.2.7,
+Antigravity CLI 1.5.13."""
 from __future__ import annotations
 
 import re
@@ -351,4 +353,76 @@ class OpenCode:
         return _move(ask["current"], n, "Tab", "BTab")
 
 
-FORMS = {"codex": Codex(), "copilot": Copilot(), "opencode": OpenCode()}
+# Antigravity CLI (ask_question, #6248). One question at a time, under 'Question 1/2: Which size?' (the whole question
+# on that line), the numbered options ('> ' marks the selected one; '[ ]' and '[x]' boxes when it takes more answers;
+# '✓' on the answer given before, after the person came back), 'Write-in...' last, and the key line
+# ('↑/↓ Navigate · → Next · enter Select · esc Skip'; 'space Toggle · enter Submit All' on the last question with
+# boxes). Enter answers and shows the next question (on the last one it sends all); on Write-in it opens a box under
+# the list ('Your answer:', the typed text, 'enter Submit · esc Back'). Left and Right show another question. Checked by
+# hand on agy 1.5.13, 2026-11-19 (tests/fixtures/agy/pane_ask_*).
+class Antigravity:
+    anchor = r"^\s*Question \d+/\d+: "
+    _OPT = re.compile(r"^\s*(>\s*)?(\d+)\.\s+(?:\[([ x])\]\s+)?(✓\s+)?(\S.*?)\s*$")
+    _HINT = re.compile(r"↑/↓ Navigate\b|\benter Submit\b")
+
+    def read(self, rows, t):
+        m = re.search(r"Question (\d+)/(\d+): (.*)$", rows[t])
+        if not m:
+            return None
+        k, total, question = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        opts, at, typed, typing, end = [], None, [], False, False
+        for x in rows[t + 1:]:
+            st = x.strip()
+            o = None if typing else self._OPT.match(x)
+            if o:
+                if o.group(1):
+                    at = len(opts)
+                label = o.group(5).strip()
+                opt = _opt(int(o.group(2)), label, len(opts), checked=None if o.group(3) is None else o.group(3) == "x",
+                           text=label.startswith("Write-in"))
+                opt["chosen"] = bool(o.group(4))
+                opts.append(opt)
+            elif self._HINT.search(st):
+                end = True
+                break
+            elif st == "Your answer:":
+                typing = True
+            elif typing and st:
+                typed.append(st)
+            elif question and not opts and st:
+                question += " " + st  # a long question goes on over more lines
+        if not opts or not end:
+            return None
+        box = next((o for o in opts if o.get("text")), None)
+        if box is not None and typed:
+            box["typed"] = " ".join(typed)
+        tabs = [{"header": f"Question {n}", "done": False, "submit": False} for n in range(1, total + 1)]
+        ask = _dialog(tabs, question, opts, at, k - 1, t, rows)
+        ask["typing"] = typing  # the Write-in box is open: Enter sends its text
+        return ask
+
+    def finish(self, ask, raw):
+        pass
+
+    def answer(self, ask, pick, text, picks):
+        at, box = _need_at(ask), _box_of(ask, text)
+        if ask.get("typing"):  # the box of the own answer is open: the new text in place of the old
+            if not text:
+                raise RiverError("the question waits for your own answer: write it")
+            return _rub(box.get("typed")) + _typed(text) + [{"key": "Enter"}], text
+        own = (lambda pos, t: _move(pos, box["stop"]) + [{"key": "Enter"}, {"pause": True}] + _typed(t)
+               + [{"key": "Enter"}])
+        if ask["multi"]:
+            keys, pos, picked = _toggles(ask, picks, "Space")
+            keys += own(pos, text) if text else [{"key": "Enter"}]
+            return keys, ", ".join(picked + ([text] if text else [])) or "nothing"
+        if text:
+            return own(at, text), text
+        o = _one(ask, pick)
+        return _move(at, o["stop"]) + [{"key": "Enter"}], o["label"]
+
+    def tab(self, ask, n):
+        return _move(ask["current"], n, "Right", "Left")
+
+
+FORMS = {"codex": Codex(), "copilot": Copilot(), "opencode": OpenCode(), "antigravity": Antigravity()}

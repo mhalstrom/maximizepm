@@ -4513,18 +4513,29 @@ class SetupGuide(unittest.TestCase):
         """#6239 (mark 2026-11-19): every agent is in the list with its state from a real check, also when the app has
         Finder's short PATH: codex in an installer's folder (~/.local/bin, Homebrew's bin) counts as installed.
         Claude Code is always there (it was left out when it was on the Start button), with Install when missing.
-        Gemini installs with npm only, so with no npm it says what it needs."""
+        #6248 (mark 2026-11-19): Antigravity CLI is the third main agent; on a Mac with Homebrew it installs with
+        Homebrew's cask, else with Google's script."""
+        from river import agentinstall
         b = self._agent_bin("codex")
+        old = agentinstall.BREW, core.PLATFORM
+        self.addCleanup(lambda: (setattr(agentinstall, "BREW", old[0]), setattr(core, "PLATFORM", old[1])))
+        agentinstall.BREW, core.PLATFORM = "", "darwin"
         clis = {a["label"]: a for a in server.setup_status(self.c)["agent_clis"]}
-        claude, codex, gemini = clis["Claude Code"], clis["Codex"], clis["Gemini CLI"]
+        claude, codex, agy = clis["Claude Code"], clis["Codex"], clis["Antigravity CLI"]
         self.assertEqual((claude["found"], claude["added"], claude["main"]), (False, True, True))
         self.assertEqual(claude["install"], {"command": "curl -fsSL https://claude.ai/install.sh | bash", "missing": None})
         self.assertTrue(claude["signin"])
         self.assertEqual((codex["found"], codex["path"], codex["added"], codex["main"]),
                          (True, os.path.join(b, "codex"), False, True))
-        self.assertEqual(gemini["install"]["missing"], "npm")
-        self.assertFalse(gemini["main"])
-        self.assertEqual([a["label"] for a in clis.values() if a["main"]], ["Claude Code", "Codex"])
+        self.assertEqual((agy["found"], agy["main"], agy["signin"], agy["install"]["command"]),
+                         (False, True, True, "curl -fsSL https://antigravity.google/cli/install.sh | bash"))
+        self.assertNotIn("Gemini CLI", clis)
+        self.assertEqual([a["label"] for a in clis.values() if a["main"]], ["Claude Code", "Codex", "Antigravity CLI"])
+        agentinstall.BREW = "/opt/homebrew/bin/brew"
+        self.assertEqual(agentinstall.install_command("antigravity"), "/opt/homebrew/bin/brew install --cask antigravity-cli")
+        core.PLATFORM = "linux"  # casks are for macOS
+        self.assertEqual(agentinstall.install_command("antigravity"), "curl -fsSL https://antigravity.google/cli/install.sh | bash")
+        self.assertEqual(agentinstall.install_command("codex"), agentinstall.METHODS["codex"]["install"])
         # The Start button's list counts the same check: Codex added becomes the default (Claude Code is missing).
         self.assertEqual(server.setup_agent_add(self.c, "Codex"), ["Codex", "Claude Code"])
 
@@ -4566,8 +4577,9 @@ class SetupGuide(unittest.TestCase):
         self.assertEqual((r["name"], r["command"]), ("Sign in to Codex", "codex login --device-auth"))
         with self.assertRaisesRegex(core.RiverError, "only a person"):
             server.OPS["setup_agent_install"](self.c, {"platform": "codex"}, "bot")
-        with self.assertRaisesRegex(core.RiverError, "install Node.js first"):
-            server.OPS["setup_agent_install"](self.c, {"platform": "gemini"}, "mark")
+        # Antigravity CLI signs in at its own start: agy, then the person picks the method in the window.
+        r = server.OPS["setup_agent_signin"](self.c, {"platform": "antigravity"}, "mark")
+        self.assertEqual((r["name"], r["command"]), ("Sign in to Antigravity CLI", "agy"))
         with self.assertRaisesRegex(core.RiverError, "no sign-in command"):
             server.OPS["setup_agent_signin"](self.c, {"platform": "copilot"}, "mark")
         self.assertIn("setup_agent_install", server.TYPING_OPS)

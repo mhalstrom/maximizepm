@@ -555,7 +555,7 @@ class Planner(unittest.TestCase):
         c.close()
 
     def test_stdio_and_its_refusals(self):
-        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Gemini CLI"}}},
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Antigravity CLI"}}},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                  "params": {"name": "add_project", "arguments": {"name": "notes", "description": "My notes"}}},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -570,7 +570,7 @@ class Planner(unittest.TestCase):
         self.assertIn("needs a field to change", r[2]["content"][0]["text"])
         c = core.connect()
         self.assertEqual(c.execute("SELECT actor FROM events WHERE change LIKE 'project notes added%'").fetchone()[0],
-                         "mark@gemini-cli")
+                         "mark@antigravity-cli")
         c.close()
         # Inside an agent session of MaximizePM the planner does not act as the person.
         os.environ["MAXPM_AGENT"] = "worker-1"

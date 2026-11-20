@@ -25,6 +25,12 @@ AGENTS = {
                "paste": True},
     "codex": {"name": "Codex", "status": ["codex", "login", "status"], "login": "codex login --device-auth",
               "paste": False},
+    # Antigravity CLI (#6248) has no sign-in command: agy itself asks at its start, first for the method ("Select
+    # login method: 1. Google OAuth 2. Use a Google Cloud project"; choose: Enter takes the first), then, with no
+    # browser on the computer, it prints the link and waits for the code that the page shows (antigravity.google
+    # /docs/install, 'Over SSH'). agy models exits 0 only when it is signed in.
+    "agy": {"name": "Antigravity CLI", "status": ["agy", "models"], "login": "agy", "paste": True,
+            "choose": (r"Select login method", "Enter")},
 }
 STATUS_RUNNER = None  # tests: fn(argv) -> exit code (0: signed in)
 WAIT = 20.0  # seconds that start waits for the link on the window's screen
@@ -88,8 +94,13 @@ def start(agent):
     end = time.monotonic() + WAIT
     url = code = None
     text = ""
+    chose = not a.get("choose")
     while time.monotonic() < end:
         text = _screen(agent)
+        if not chose and re.search(a["choose"][0], text):  # a menu before the link: its first option, once
+            server._tmux("send-keys", "-t", _window(agent), a["choose"][1])
+            chose = True
+            continue
         url, code = read_screen(text)
         if url and (a["paste"] or code):
             break

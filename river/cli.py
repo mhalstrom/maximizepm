@@ -2725,8 +2725,8 @@ def build_parser(only=None):
     hos.add_parser("forget", help="use this queue here again after a move to a host")
     x = hos.add_parser("signin", help="sign an agent CLI in on the host: its link here, you sign in in your browser")
     x.add_argument("target", help="the SSH target of the host")
-    x.add_argument("agent", choices=["claude", "codex"])
-    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    x.add_argument("agent", choices=["claude", "codex", "agy"])
+    x.add_argument("--code", help="Claude Code, agy: the code that its sign-in page showed")
     ru = sub.add_parser("runner", help="runners: servers where a trigger rule's agent works with no person, terminal "
                         "or prompt (Deploy > Runners)")
     rus = ru.add_subparsers(dest="rucmd", required=True)
@@ -2811,8 +2811,8 @@ def build_parser(only=None):
     x = pgs.add_parser("pin", help="the kept version of its plugin that a pipeline runs (folder: the plugin's folder)")
     x.add_argument("pipeline"); x.add_argument("version")
     x = sub.add_parser("agent-login", help="sign an agent CLI in on a computer with no browser (a host)")
-    x.add_argument("agent", choices=["claude", "codex"])
-    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    x.add_argument("agent", choices=["claude", "codex", "agy"])
+    x.add_argument("--code", help="Claude Code, agy: the code that its sign-in page showed")
     ph = sub.add_parser("phone", help="reach this MaximizePM from your phone over Tailscale: its address and QR code")
     ph.add_argument("--on", action="store_true", help="turn it on: run tailscale serve --bg <serve_port>")
 
@@ -4148,7 +4148,7 @@ def setup_instructions(folder, move=None):
 
 
 def _setup_importers(folder):
-    """The own instruction file of each agent that imports AGENTS.md (Gemini CLI: GEMINI.md, #5218): missing, or
+    """The own instruction file of each agent that imports AGENTS.md (SETUP["import"], #5218): missing, or
     holding only the work queue block, it becomes the one import line; holding its own rules, it gets the work queue
     block, and nothing else of it changes. Returns one line per change."""
     from . import agents

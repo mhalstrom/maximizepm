@@ -146,7 +146,7 @@ TOOLS = [
 ]
 
 # ---------------------------------------------------------------- the planner tools (#6190)
-# A chat app (Claude, ChatGPT, Gemini CLI, any MCP client) that plans with the person: it adds and changes projects,
+# A chat app (Claude, ChatGPT, any MCP client) that plans with the person: it adds and changes projects,
 # goals, tasks and their links, and reads them back, while the manager runs the work. It acts as the person (the
 # history says <person>@<client>, from the client's name in initialize), and it has no tool that takes, finishes,
 # deploys, launches or stops work, nor one that runs any command: maxpm mcp --plan, or /mcp/plan in maxpm serve.

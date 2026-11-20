@@ -2773,7 +2773,7 @@ _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # agents.SAF
 
 def run_session(env=None):
     """The id of the agent CLI session that this command runs in: the id that an agent adapter reads from the
-    environment (session_from_env: Claude Code's CLAUDE_CODE_SESSION_ID, Hermes, Gemini), else Codex's thread
+    environment (session_from_env: Claude Code's CLAUDE_CODE_SESSION_ID, Hermes, Antigravity CLI), else Codex's thread
     (CODEX_THREAD_ID); or None. A command over the local /mcp of maxpm serve has serve's environment, not the chat's:
     None. The session tokens of maxpm serve (#5972) take the first place here when they come."""
     if HTTP_CHAT.get():
@@ -17653,8 +17653,9 @@ def session_from_env(env=None):
     (CHAT['ref'] 'session'), when the id matches its IDENTITY['id_pattern'] (else agents.SAFE_ID); or None. Claude
     Code: CLAUDE_CODE_SESSION_ID; Hermes: HERMES_SESSION_ID. Codex's thread id goes to native_address instead (its
     CHAT['ref'] is 'address'). The order of agents.from_env: every other agent first, then codex, then claude: an
-    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID. Source 'log' (Gemini, #5819): inside the
-    agent (IDENTITY['inside_env']), the module's session_from_log(folder, env) reads the id from its chat logs."""
+    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID; Antigravity CLI:
+    ANTIGRAVITY_CONVERSATION_ID. Source 'log' (#5819): inside the agent (IDENTITY['inside_env']), the module's
+    session_from_log(folder, env) reads the id from its chat logs."""
     from . import agents
     env = os.environ if env is None else env
     got = agents.load()

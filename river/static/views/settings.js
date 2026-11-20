@@ -9,7 +9,7 @@ import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
 import { labelOf, programOf } from "./settingLabels.js";
 
-const AGENT_CLIS = /^(aider|amp|claude|codex|copilot|cursor|gemini|goose|grok|hermes|opencode|pi)_/;
+const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
 // [tab key, tab name, one line for its heading, test of a settings key (none: not a group of keys)]
 export const GROUPS = [

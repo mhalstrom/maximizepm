@@ -372,7 +372,7 @@ class StartPaths(Env):
         self.assertEqual(core.profile_from_command("codex -m {model} -s read-only 'run go'"),
                          ("codex", {"sandbox": "read-only", "prompt": "run go"}))
         self.assertIsNone(core.profile_from_command("claude --model opus go"))  # a fixed model stays custom
-        self.assertIsNone(core.profile_from_command("gemini go"))
+        self.assertIsNone(core.profile_from_command("agy go"))  # a bare prompt: agy takes it only with -i
 
     def test_effort_flags_and_the_effort_read_back_are_the_adapters(self):
         cl, cx = agents.get("claude"), agents.get("codex")
@@ -462,8 +462,8 @@ class HookState(Env):
                          [(agents.get(m).label,
                            " ".join(agents.get(m).input["native"]).replace("{text}", "{message}"))
                           for m in ("codex", "pi", "opencode", "copilot", "hermes", "claude")])
-        # Every other built-in adapter has no native path (#5691 read their docs): Gemini CLI, Cursor CLI, Grok, Amp,
-        # Goose and Aider document none that reaches a running session without an install in their home folder.
+        # Every other built-in adapter has no native path (#5691 read their docs): Antigravity CLI, Cursor CLI, Grok,
+        # Amp, Goose and Aider document none that reaches a running session without an install in their home folder.
         self.assertEqual({m for m in agents.BUILTIN if agents.get(m).input.get("native")},
                          {"codex", "pi", "opencode", "copilot", "hermes", "claude"})
         self.assertEqual(agents.get("claude").detect["image_paste"].format(n=1), "[Image #1]")
@@ -1278,7 +1278,7 @@ class CliAncestor(Env):
                 self.assertEqual(core.agent_process(100), (70, "claude --name ag --model opus"))
             with mock.patch.object(core, "_cli_process_name", lambda env=None: None):
                 self.assertEqual(core.agent_process(100)[0], 90)  # no agent CLI named: the first ancestor, as before
-            with mock.patch.object(core, "_cli_process_name", lambda env=None: "gemini"):
+            with mock.patch.object(core, "_cli_process_name", lambda env=None: "agy"):
                 self.assertEqual(core.agent_process(100)[0], 90)  # the CLI is not among them: the first one
         with mock.patch.object(core, "proc_info", self.NODE.get), \
                 mock.patch.object(core, "_cli_process_name", lambda env=None: "codex"):

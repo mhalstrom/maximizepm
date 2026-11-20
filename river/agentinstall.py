@@ -21,11 +21,13 @@ from pathlib import Path
 
 from .core import RiverError
 
-# platform -> how its vendor installs it. install: the shell command; needs: a program it needs (npm), or None;
+# platform -> how its vendor installs it. install: the shell command; cask: the Homebrew cask that install_command uses
+# in place of install on a computer with Homebrew (optional); needs: a program it needs (npm), or None;
 # signin: the CLI's own sign-in command, or None (it asks at its first start, or uses a key in the environment);
 # status: the command that exits 0 when signed in, or None (no vendor documents one); dirs: where it goes.
 # Sources (read 2026-11-19): code.claude.com/docs/en/setup and cli-reference; github.com/openai/codex README and
-# learn.chatgpt.com/docs/auth; github.com/github/copilot-cli README; github.com/google-gemini/gemini-cli README;
+# learn.chatgpt.com/docs/auth; github.com/github/copilot-cli README; antigravity.google/docs/getting-started and
+# /docs/install;
 # opencode.ai README (sst/opencode dev); github.com/block/goose README; aider.chat/docs/install.html;
 # ampcode.com/docs/cli; cursor.com/docs/cli/installation; pi-mono coding-agent README; hermes-agent README.
 METHODS = {
@@ -37,7 +39,13 @@ METHODS = {
               "signin": "codex login --device-auth", "status": ["login", "status"], "dirs": ["~/.local/bin", "~/.codex/bin"]},
     "copilot": {"install": "curl -fsSL https://gh.io/copilot-install | bash", "needs": None,
                 "signin": None, "status": None, "dirs": ["~/.local/bin"]},  # sign-in: /login inside copilot
-    "gemini": {"install": "npm install -g @google/gemini-cli", "needs": "npm", "signin": None, "status": None, "dirs": []},
+    # Antigravity CLI (#6248), Google's coding agent: one Go program, agy. Google's script puts it in
+    # ~/.local/bin (antigravity.google/docs/getting-started); on a Mac with Homebrew the cask antigravity-cli puts it
+    # in Homebrew's bin, and brew upgrades it. It has no sign-in command: agy with no arguments asks for the sign-in
+    # (Google OAuth, or a Google Cloud project) at its first start, and agy models exits 1 ("Please sign in to view
+    # available models") until then, 0 after (measured with agy 1.5.13, about one second).
+    "antigravity": {"install": "curl -fsSL https://antigravity.google/cli/install.sh | bash", "needs": None,
+                    "cask": "antigravity-cli", "signin": "agy", "status": ["models"], "dirs": ["~/.local/bin"]},
     "opencode": {"install": "curl -fsSL https://opencode.ai/v2/install | bash", "needs": None,
                  "signin": None, "status": None, "dirs": ["~/.opencode/bin"]},
     "goose": {"install": "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh"
@@ -57,8 +65,9 @@ METHODS = {
     "grok": {"install": "curl -fsSL https://x.ai/cli/install.sh | bash", "needs": None,
              "signin": "grok login --device-auth", "status": None, "dirs": ["~/.local/bin", "~/.grok/bin"]},
 }
-# The two the guide shows first (mark 2026-11-19); the others are under More agents.
-MAIN = ("claude-code", "codex")
+# The three the guide shows first (mark 2026-11-19: Claude Code, Codex and Antigravity CLI are the main agents); the
+# others are under More agents.
+MAIN = ("claude-code", "codex", "antigravity")
 # Where installers put programs, besides each method's dirs: Homebrew, the system, npm's and bun's global bins.
 COMMON_DIRS = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin", "~/.bun/bin",
                "~/.volta/bin"]
@@ -72,6 +81,20 @@ def method(platform):
     if platform not in METHODS:
         raise RiverError(f"no install method for {platform!r}; the agents: {', '.join(METHODS)}")
     return METHODS[platform]
+
+
+BREW = None  # tests: the path of brew, or "" for none, in place of core.brew_path()
+
+
+def install_command(platform):
+    """The shell command that installs the agent here: brew install --cask <cask> when the method has a cask and this
+    Mac has Homebrew (brew then upgrades it; casks are for macOS), else the vendor's install command."""
+    from . import core
+    m = method(platform)
+    brew = BREW if BREW is not None else core.brew_path()
+    if m.get("cask") and core.PLATFORM == "darwin" and brew:
+        return f"{_q(brew)} install --cask {m['cask']}"
+    return m["install"]
 
 
 DIRS = None  # tests: the folders to search instead of the real ones
@@ -173,7 +196,7 @@ def run(conn, platform, kind, who):
     m = method(platform)
     label = core.platform_spec(platform)["label"]
     if kind == "install":
-        cmd = m["install"]
+        cmd = install_command(platform)
         if m["needs"] and not find([m["needs"]], server._login_shell_which([m["needs"]]))[m["needs"]]:
             raise RiverError(f"{label} installs with {m['needs']}, which is not on this computer: install Node.js "
                              f"first (nodejs.org), then install {label}")

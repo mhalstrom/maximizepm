@@ -1,0 +1,312 @@
+"""The Antigravity CLI adapter, river/agents/antigravity.py (#6248), against the screens and the transcript of a real
+agy 1.5.13 session in a tmux pane (tests/fixtures/agy, 2026-11-19; the email, the paths and the environment dump
+cleaned for a public repository)."""
+import json
+import os
+import re
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from river import agents, core
+from river.agents import antigravity
+
+FIX = Path(__file__).parent / "fixtures" / "agy"
+LOG = FIX / "transcript_full.jsonl"
+CID = "b7154f41-bb60-49c7-b354-59d9330f2863"
+
+
+def lines(path=LOG):
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def screen(text):
+    """What maxpm serve's pane watcher (server.watch_prompts) reads from a screen with agy's DETECT: the prompt parts
+    of a blocked screen, else working or idle."""
+    from river import server
+    ad = agents.get("antigravity")
+    tail = server._prompt_tail(server._plain(text))
+    parts = server._prompt_found(tail, server._AnyOf(ad.detect["blocked"]), server._layout(ad.detect))
+    return ("blocked", parts) if parts else (server._screen_state(tail, ad.detect), None)
+
+
+class Home(unittest.TestCase):
+    """A temporary HOME (agy's folder is <it>/.gemini/antigravity-cli) and a temporary queue."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home), "MAXPM_DB": str(self.home / "q.db")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.queue = core.river_dir()
+
+
+class Contract(Home):
+    def test_it_is_registered_and_passes_the_check(self):
+        a = agents.get("antigravity")
+        self.assertIs(agents.get("agy"), a)
+        self.assertIs(agents.by_exe("/opt/homebrew/bin/agy"), a)
+        self.assertEqual(agents.check(antigravity, "antigravity"), [])
+        self.assertEqual(a.missing(), [])
+        for part in ("describe", "settings", "effort", "launch", "identity", "chat", "state", "detect", "input",
+                     "resume", "commands", "setup"):
+            self.assertTrue(a.supports(part), part)
+        self.assertEqual(a.describe["family"], "multi")
+        self.assertEqual(a.config_key("mode"), "agy_mode")
+        self.assertEqual(a.effort_name("xhigh"), "xhigh")
+        # One of the three main agents (mark 2026-11-19), after Claude Code and Codex.
+        self.assertEqual(agents.ids()[:3], ["claude", "codex", "antigravity"])
+
+    def test_a_command_inside_agy_is_known_by_its_variables(self):
+        env = {"ANTIGRAVITY_AGENT": "1", "ANTIGRAVITY_CONVERSATION_ID": CID}
+        self.assertIs(agents.from_env(env), agents.get("antigravity"))
+        # agy started from a Claude Code shell keeps CLAUDECODE: agy still wins.
+        self.assertIs(agents.from_env({**env, "CLAUDECODE": "1"}), agents.get("antigravity"))
+        self.assertEqual(core.session_from_env(env), CID)
+        self.assertIsNone(core.session_from_env({"ANTIGRAVITY_AGENT": "1", "ANTIGRAVITY_CONVERSATION_ID": "../x"}))
+
+
+class Launch(Home):
+    def test_a_start_with_every_setting(self):
+        argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash-low", "high",
+                                         {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
+                                          "args": "--log-file /tmp/x"}, "maxpm go")
+        allow = ["--add-dir", self.queue, "--settings", '{"permissions":{"allow":["command(maxpm)"]}}']
+        self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash-low", "--effort", "high", "--mode", "plan",
+                                     "--dangerously-skip-permissions", "--sandbox", *allow])
+        self.assertEqual(argv[-3:], ["--log-file /tmp/x", "-i", "maxpm go\n\n" + antigravity.MAXPM_NOTE])
+        self.assertIsInstance(argv[-3], agents.Raw)
+        self.assertIn("BypassSandbox", antigravity.MAXPM_NOTE)
+
+    def test_a_bare_start_lets_agy_choose(self):
+        allow = ["--add-dir", self.queue, "--settings", antigravity.ALLOW_MAXPM]
+        self.assertEqual(antigravity.build_command(None, None, None, None, {}, None), ["agy", *allow])
+        # An effort that is no agy level and a mode that is no agy mode go nowhere.
+        self.assertEqual(antigravity.build_command(None, None, None, "turbo", {"mode": "yolo"}, None), ["agy", *allow])
+
+    def test_resume_takes_the_conversation_id_and_a_first_prompt(self):
+        # Measured: 'agy --conversation <id> -i <prompt>' runs the prompt in the resumed chat; agy prints
+        # 'agy --conversation=<id>' at its exit (pane_exit.txt).
+        argv = antigravity.resume_command(CID, None, None, {"prompt": "go on"})
+        self.assertEqual(argv, ["agy", "--conversation", CID, "--add-dir", self.queue, "--settings",
+                                antigravity.ALLOW_MAXPM, "-i", "go on\n\n" + antigravity.MAXPM_NOTE])
+        self.assertIsNone(antigravity.resume_command("", None, None, {}))
+        self.assertIn(f"agy --conversation={CID}", (FIX / "pane_exit.txt").read_text(encoding="utf-8"))
+
+    def test_a_hand_written_command_reads_back_into_a_profile(self):
+        got = antigravity.parse_command(["agy", "--model", "{model}", "--effort", "{effort}", "--mode=accept-edits",
+                                         "--sandbox", "--add-dir", "{maxpm_dir}", "-i", "maxpm go"])
+        self.assertEqual(got, {"settings": {"mode": "accept-edits", "sandbox": "on"}, "prompt": "maxpm go"})
+        self.assertEqual(antigravity.parse_command(["/opt/homebrew/bin/agy", "--dangerously-skip-permissions",
+                                                    "--prompt-interactive", "go"]),
+                         {"settings": {"skip_permissions": "on"}, "prompt": "go"})
+        # What build_command writes reads back to the same profile.
+        argv = antigravity.build_command(None, None, None, None, {"mode": "auto"}, "maxpm go")
+        self.assertEqual(antigravity.parse_command(argv), {"settings": {"mode": "auto"}, "prompt": "maxpm go"})
+
+    def test_a_command_a_profile_cannot_build_reads_back_as_none(self):
+        for words in (["agy", "-p", "go"], ["agy", "--mode", "yolo", "-i", "go"], ["agy"], ["gemini", "-i", "go"],
+                      ["agy", "--add-dir", "/elsewhere", "-i", "go"]):
+            self.assertIsNone(antigravity.parse_command(words), words)
+
+    def test_each_setting_reads_back_from_the_command_it_builds(self):
+        a = agents.get("antigravity")
+        cmd = " ".join(antigravity.build_command(None, None, "claude-opus-5-5-high", "max", {"mode": "auto"}, "go"))
+        self.assertEqual(re.search(a.describe["model_read"], cmd).group(1), "claude-opus-5-5-high")
+        self.assertEqual(re.search(antigravity.EFFORT["read"], cmd).group(1), "max")
+        self.assertEqual(re.search(antigravity.SETTINGS[0]["read"], cmd).group(1), "auto")
+
+
+class Identity(Home):
+    def test_the_transcript_of_a_conversation_is_found_by_its_id(self):
+        root = self.home / "brain"
+        logs = root / CID / ".system_generated" / "logs"
+        logs.mkdir(parents=True)
+        self.assertIsNone(antigravity.chat_path(CID, root=root))
+        (logs / "transcript.jsonl").write_text("{}\n")
+        self.assertEqual(antigravity.chat_path(CID, root=root), logs / "transcript.jsonl")
+        (logs / "transcript_full.jsonl").write_text("{}\n")
+        self.assertEqual(antigravity.chat_path(CID, root=root), logs / "transcript_full.jsonl")
+        # The default folder is agy's own, under HOME.
+        self.assertEqual(antigravity.chat_path(CID), None)
+        default = self.home / ".gemini" / "antigravity-cli" / "brain" / CID / ".system_generated" / "logs"
+        default.mkdir(parents=True)
+        (default / "transcript_full.jsonl").write_text("{}\n")
+        self.assertEqual(antigravity.chat_path(CID), default / "transcript_full.jsonl")
+        for bad in ("", "../../etc", "*"):
+            self.assertIsNone(antigravity.chat_path(bad, root=root), bad)
+
+
+class Chat(unittest.TestCase):
+    def test_a_whole_conversation_reads_as_the_page_shows_it(self):
+        entries, turn = antigravity.parse_chat(lines())
+        self.assertEqual(turn, "idle")
+        users = [e["text"] for e in entries if e["role"] == "user"]
+        self.assertEqual(users[1], "Change the word hello to goodbye in notes.txt, then run the shell command: "
+                                   "touch made.txt")
+        self.assertEqual(len(users), 6)
+        tools = [(e["name"], e["id"], e["detail"]) for e in entries if e["role"] == "tool"]
+        self.assertEqual(tools[1:5], [("run_command", "s6", 'pwd && ls -la && find . -name "notes.txt"'),
+                                      ("read_file", "s8", "/Users/me/agyproj/notes.txt"),
+                                      ("edit_file", "s11", "/Users/me/agyproj/notes.txt"),
+                                      ("run_command", "s12", "touch made.txt && ls -la made.txt")])
+        results = {e["for"]: e for e in entries if e["role"] == "result"}
+        self.assertEqual(set(t[1] for t in tools), set(results))  # each call has its result
+        self.assertEqual(results["s8"]["text"], "Showing lines 1-1 of 1\n1: hello")  # no time stamps
+        self.assertFalse(results["s11"]["error"])
+        self.assertTrue(results["s12"]["error"])  # the person refused the command
+        self.assertIn("user denied permission", results["s12"]["text"])
+        self.assertEqual(results["s15"]["text"], "A1: purple")  # the answer to ask_question
+        self.assertEqual(tools[5], ("ask_question", "s15", "Which color do you prefer?"))
+        self.assertFalse(any("SYSTEM_MESSAGE" in e["text"] for e in entries))
+
+    def test_each_step_has_its_turn(self):
+        steps = [json.loads(x) for x in lines()]
+        turns = [antigravity.parse_chat_line(d)[1] for d in steps]
+        self.assertEqual(turns[:4], ["working", "working", "working", "idle"])
+        self.assertIsNone(turns[9])  # agy's own reminder to the model
+        # A cancelled turn (Esc) leaves its prompt last: the transcript says working, the screen idle.
+        cancelled = next(n for n, d in enumerate(steps) if "400-word story" in d.get("content", ""))
+        self.assertEqual(antigravity.parse_chat(lines()[:cancelled + 1])[1], "working")
+        self.assertEqual(screen((FIX / "pane_cancelled.txt").read_text(encoding="utf-8"))[0], "idle")
+
+    def test_the_sessions_tab_reads_an_agy_transcript(self):
+        from river import sessions
+        r = sessions._parse("antigravity", LOG.read_bytes(), 0)
+        self.assertEqual([e["role"] for e in r["entries"]][:4], ["user", "tool", "result", "assistant"])
+        self.assertEqual(r["turn"], "idle")
+        self.assertEqual(len(r["offs"]), len(r["entries"]))
+
+    def test_no_step_yet_is_no_turn_and_bad_lines_are_skipped(self):
+        self.assertEqual(antigravity.parse_chat(["not json", "", "[1]", "{}"]), ([], None))
+
+    def test_title_and_tokens(self):
+        self.assertTrue(antigravity.chat_title(lines()).startswith("Run this shell command and show its output"))
+        u = antigravity.chat_usage(lines())
+        steps = [json.loads(x) for x in lines() if '"PLANNER_RESPONSE"' in x]
+        self.assertEqual(u, {"input": sum(d["input_tokens"] for d in steps),
+                             "output": sum(d["output_tokens"] for d in steps),
+                             "cache_read": sum(d["cache_read_tokens"] for d in steps), "cache_write": 0})
+        st = {"last": None, "ttl": None, "model": None}
+        for raw in LOG.read_bytes().splitlines():
+            antigravity.chat_cache_line(raw, st)
+        self.assertEqual(st["model"], "gemini-3.8-flash-low")
+        last = steps[-1]
+        self.assertEqual(st["last"]["context"],
+                         last["input_tokens"] + last["cache_read_tokens"] + last["output_tokens"])
+
+    def test_maxpm_usage_reads_each_model_call(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        logs = Path(tmp.name) / CID / ".system_generated" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "transcript_full.jsonl").write_text(LOG.read_text(encoding="utf-8"), encoding="utf-8")
+        requests, fork = antigravity.chat_requests(CID, root=tmp.name)
+        steps = [json.loads(x) for x in lines() if '"PLANNER_RESPONSE"' in x]
+        self.assertFalse(fork)
+        self.assertEqual(len(requests), len(steps))
+        self.assertEqual(requests["s1"], ("2026-11-20T04:40:52Z", {"input": 9879, "output": 57, "cache_read": 0,
+                                                                   "cache_write": 0, "write_1h": 0, "write_5m": 0}))
+        self.assertIsNone(antigravity.chat_requests("b7154f41-0000-0000-0000-000000000000", root=tmp.name))
+
+    def test_the_short_transcript_keeps_arguments_as_json_texts(self):
+        # transcript.jsonl (the fallback) holds '"\\"touch made.txt\\""'; the detail is the same.
+        d = {"step_index": 10, "type": "PLANNER_RESPONSE", "tool_calls": [
+            {"name": "run_command", "args": {"CommandLine": "\"touch made.txt\"", "WaitMsBeforeAsync": "5000"}}]}
+        self.assertEqual(antigravity.parse_chat_line(d)[0][0]["detail"], "touch made.txt")
+
+
+class Screen(unittest.TestCase):
+    def read(self, name):
+        return screen((FIX / f"pane_{name}.txt").read_text(encoding="utf-8"))
+
+    def test_each_screen_reads_as_its_state(self):
+        for name, want in (("idle", "idle"), ("idle_draft", "idle"), ("idle_after_reply", "idle"),
+                           ("after_reject", "idle"), ("after_ask", "idle"), ("after_two", "idle"),
+                           ("resumed", "idle"), ("slash_menu", "idle"), ("cancelled", "idle"),
+                           ("working", "working"),
+                           ("blocked_command", "blocked"), ("blocked_edit", "blocked"), ("blocked_trust", "blocked"),
+                           ("blocked_ask", "blocked"), ("ask_two_q2", "blocked"), ("ask_writein_typed", "blocked")):
+            self.assertEqual(self.read(name)[0], want, name)
+        self.assertIsNone(self.read("exit")[0])  # agy ended: a shell, no state
+
+    def test_a_blocked_screen_gives_its_question_options_and_command(self):
+        _, p = self.read("blocked_command")
+        self.assertEqual((p["question"], p["tool"], p["command"]),
+                         ("Run this command?", "Command", 'pwd && ls -la && find . -name "notes.txt"'))
+        self.assertEqual([o for o, _ in p["options"]][::3], ["1. Yes, run command", "4. No, cancel"])
+        _, p = self.read("blocked_edit")
+        self.assertEqual((p["question"], p["options"]),
+                         ("Accept this file edit?", [("1. Yes, accept this change", True),
+                                                     ("2. No, reject this change", False)]))
+        _, p = self.read("blocked_trust")
+        self.assertEqual((p["question"], p["options"]), ("Do you trust the contents of this project?",
+                                                         [("Yes, I trust this folder", True), ("No, exit", False)]))
+        # A read outside the workspace, seen in the end-to-end run (the footer there also names its tasks).
+        _, p = self.read("blocked_access")
+        self.assertEqual((p["question"], [o for o, _ in p["options"]][-1]),
+                         ("Allow access to this file?", "3. No, deny access"))
+
+    def test_the_tell_instead_option_is_on_each_tool_menu(self):
+        for name in ("blocked_command", "blocked_edit", "blocked_access"):
+            opts = [o for o, _ in self.read(name)[1]["options"]]
+            self.assertEqual(sum(bool(re.search(antigravity.DETECT["tell_instead"], o.split(". ", 1)[1]))
+                                 for o in opts), 1, name)
+
+    def test_the_question_dialog_is_read_by_its_form(self):
+        from river import server
+        ad = agents.get("antigravity")
+        lay = server._layout(ad.detect)
+        for name, question in (("blocked_ask", "Which color do you prefer?"), ("ask_two_q2", "Which fruits do you like?")):
+            tail = server._prompt_tail(server._plain((FIX / f"pane_{name}.txt").read_text(encoding="utf-8")))
+            ask = server._ask_read(tail, lay)
+            self.assertEqual((ask["form"], ask["question"]), ("antigravity", question), name)
+
+    def test_the_state_comes_from_the_screen_and_the_id_from_the_environment(self):
+        self.assertEqual(antigravity.STATE, {"state": "detect", "session_id": "identity"})
+        self.assertEqual(antigravity.IDENTITY["source"], "env")
+
+
+class Commands(Home):
+    def test_the_built_in_commands_and_the_skills_of_both_folders(self):
+        names = [c["name"] for c in antigravity.COMMANDS]
+        for n in ("compact", "model", "effort", "resume", "exit", "usage"):
+            self.assertIn(n, names)
+        by = {c["name"]: c for c in antigravity.COMMANDS}
+        self.assertEqual((by["model"]["setting"], by["usage"]["page"], by["compact"]["run"]), ("model", "usage", "now"))
+        project = self.home / "proj"
+        for root, name, desc in ((self.home / ".gemini" / "config" / "skills", "deploy", "Ship it"),
+                                 (project / ".agents" / "skills", "deploy", "Ship this project"),
+                                 (self.home / ".gemini" / "antigravity-cli" / "skills", "notes", "")):
+            (root / name).mkdir(parents=True)
+            front = f"---\nname: {name}\ndescription: {desc}\n---\n" if desc else "no front matter\n"
+            (root / name / "SKILL.md").write_text(front)
+        got = {c["name"]: c["description"] for c in antigravity.read_commands(project)}
+        self.assertEqual(got, {"deploy": "Ship this project", "notes": "Skill notes"})
+
+
+class Setup(Home):
+    def test_the_mcp_server_goes_into_agys_mcp_file(self):
+        f = self.home / ".gemini" / "config" / "mcp_config.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"mcpServers": {"fs": {"command": "npx", "args": [], "disabled": False}}}))
+        self.assertIn("added MaximizePM", antigravity.write_mcp_config())
+        data = json.loads(f.read_text())
+        self.assertEqual(set(data["mcpServers"]), {"fs", "maxpm"})
+        self.assertEqual(data["mcpServers"]["maxpm"]["args"][-1], "mcp")
+        self.assertNotIn("MAXPM_CHAT", data["mcpServers"]["maxpm"]["env"])
+        self.assertIn("nothing changed", antigravity.write_mcp_config())
+        self.assertIn("took MaximizePM out", antigravity.write_mcp_config(remove=True))
+        self.assertEqual(set(json.loads(f.read_text())["mcpServers"]), {"fs"})
+
+    def test_agy_reads_agents_md_itself(self):
+        a = agents.get("antigravity")
+        self.assertEqual((a.setup["instructions"], a.setup["import"]), ("AGENTS.md", None))
+        self.assertEqual(agents.import_files(), [])  # no agent needs a file of its own that imports AGENTS.md
+
+
+if __name__ == "__main__":
+    unittest.main()

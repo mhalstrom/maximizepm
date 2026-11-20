@@ -290,10 +290,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      move in it. Its selected option shows by colour only, so the page takes the first one as
 #                      selected (OpenCode selects it at each new request). "": no such menu (#5281),
 #      "behind":       a regex of a question that the CLI draws under another question while the keys answer the one
-#                      above it (Gemini's added folder trust under a tool question, #5818); the page then reads the
-#                      question above. "": none,
+#                      above it (#5818); the page then reads the question above. "": none,
 #      "header":       a regex of the line above a tool question that names the tool (group 1) and what it runs or
-#                      changes (group 2, optional): Gemini's "? Shell  touch notes.txt" (#5817). "": the built-in
+#                      changes (group 2, optional), such as "? Shell  touch notes.txt" (#5817). "": the built-in
 #                      reading (a line that starts with command, file, edit, fetch or tool),
 #      "fixed":        a regex of a question (its text or an option) that takes only one of its options, no typed text,
 #                      when it has no "tell_instead" option: the question card then has no Other (#5904). "": none,
@@ -315,7 +314,7 @@ DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str,
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
                "behind": str, "header": str, "fixed": str, "ask": str, "ask_form": str}
-ASK_FORMS = ("claude", "codex", "copilot", "opencode")
+ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity")
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -332,7 +331,7 @@ DETECT_LAYOUT = {
     "row": "",
     "behind": "",
     "header": "",
-    # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Gemini's 'Trust folder', Cursor,
+    # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Antigravity CLI, Cursor,
     # Copilot, Grok, Pi): its Esc exits the CLI, so the card offers no Other there (#5904).
     "fixed": r"(?i)\btrust\b",
     "ask": "",
@@ -375,7 +374,7 @@ COMMAND_RUNS = ("now", "menu", "terminal")
 COMMAND_PAGES = ("usage",)
 
 # 11. Setup (#5184). SETUP = {
-#      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
+#      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md),
 #      "import":       the line with {file} by which its instruction file imports another one ("@{file}"), or None;
 #                      an agent whose file is not SHARED_INSTRUCTIONS and that has it reads AGENTS.md through it,
 #      "replaces":     the instruction file it read before, whose rules maxpm init moves into SHARED_INSTRUCTIONS and
@@ -412,7 +411,7 @@ PARTS = {
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
 }
 
-BUILTIN = ("claude", "codex", "pi", "copilot", "hermes", "gemini", "grok", "opencode", "goose", "aider", "amp", "cursor")
+BUILTIN = ("claude", "codex", "antigravity", "pi", "copilot", "hermes", "grok", "opencode", "goose", "aider", "amp", "cursor")
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
@@ -1011,9 +1010,8 @@ def by_exe(exe):
 # Setup (#5184): the instruction files of a project folder, the MCP server entry, and what the page reads
 # ---------------------------------------------------------------------------------------------------------------
 
-# The instruction file that most agents read in a project folder (Claude Code, Codex, OpenCode, Amp and others). An
-# agent with its own file and an import line (SETUP["import"]) reads it through that line: Gemini's GEMINI.md is
-# "@AGENTS.md".
+# The instruction file that most agents read in a project folder (Claude Code, Codex, Antigravity CLI, OpenCode, Amp
+# and others). An agent with its own file and an import line (SETUP["import"]) reads it through that line.
 SHARED_INSTRUCTIONS = "AGENTS.md"
 
 
@@ -1033,8 +1031,8 @@ def replaced_files():
 
 def import_files():
     """[(own, line, label)] for every agent whose own instruction file reads SHARED_INSTRUCTIONS through an import line
-    (SETUP["import"]), one entry per file, in registry order: ('GEMINI.md', '@AGENTS.md', 'Gemini CLI') with the
-    built-in agents (#5218). maxpm init writes each of them."""
+    (SETUP["import"]), one entry per file, in registry order, such as ('OWN.md', '@AGENTS.md', '<label>') (#5218); none
+    with the built-in agents. maxpm init writes each of them."""
     out, seen = [], set()
     for m in ids():
         a = load()[m]

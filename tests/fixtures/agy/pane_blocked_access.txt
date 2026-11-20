@@ -1,0 +1,26 @@
+      ▄▀▀▄        Antigravity CLI 1.5.13
+     ▀▀▀▀▀▀       you@example.com (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Medium)
+   ▄▀▀    ▀▀▄     /Users/me/e2e/proj
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> run maxpm go in this folder and follow the briefing
+
+● Ran 3 commands, killed 1 task (maxpm go · echo $PATH; which maxpm || find / -name "maxpm" 2>/dev/null · pwd && ls -la && ls -la .. · task-4)
+● Explored 2 files (e2e_run.sh, e2e_setup.sh)
+● Exploring 1 file (login-path.txt) (ctrl+o to expand)
+
+File access
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Read: /Users/me/e2e_run.sh
+Reason: outside workspace
+
+Allow access to this file?
+> 1. Yes, allow access
+  2. Yes, and always allow non-workspace access
+  3. No, deny access
+
+  ↑/↓ Navigate
+esc to cancel                                                                                                                                                           auto · Gemini 3.8 Flash · medium
