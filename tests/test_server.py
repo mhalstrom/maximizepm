@@ -20,6 +20,11 @@ from river.core import RiverError
 from tests import timing
 
 
+def _codex():
+    """The start of a Codex command line: codex and its guard hook's -c words (#6254)."""
+    return core.shell_command(["codex", *core.hook_words(core._adapters().get("codex"))])
+
+
 class LaunchAgent(unittest.TestCase):
     def setUp(self):
         self.platform, core.PLATFORM = core.PLATFORM, "darwin"  # a tmux pane (the runner gets its line)
@@ -4834,11 +4839,11 @@ class LaunchProfiles(unittest.TestCase):
         rd = core._shell_quote(core.river_dir())
         codex = core.profile_options(self.c, "codex")
         self.assertEqual(core.build_command("codex", codex, "sol", "xhigh"),
-                         f"codex -m sol -c model_reasoning_effort=xhigh --add-dir {rd} "
+                         f"{_codex()} -m sol -c model_reasoning_effort=xhigh --add-dir {rd} "
                          "'run maxpm go in this folder and follow the briefing'")
         self.assertEqual(core.build_command("codex", {**codex, "sandbox": "workspace-write", "approval": "never",
                                                       "prompt": "go"}),
-                         f"codex --sandbox workspace-write --ask-for-approval never --add-dir {rd} go")
+                         f"{_codex()} --sandbox workspace-write --ask-for-approval never --add-dir {rd} go")
 
     def test_a_session_for_an_item_with_a_goal_gets_the_goal_name(self):
         core.goal_add(self.c, "shop", "ship-v2")
@@ -4992,7 +4997,7 @@ class LaunchProfiles(unittest.TestCase):
         self.addCleanup(os.environ.pop, "CODEX_HOME", None)
         core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex; Mine=codex -m {model} go")
         t = core._launch_agent_cmd(self.c, pid, "Codex", "astra", "high")
-        self.assertEqual(t["command"], f"codex -m gpt-6-astra -c model_reasoning_effort=high --add-dir {rd} "
+        self.assertEqual(t["command"], f"{_codex()} -m gpt-6-astra -c model_reasoning_effort=high --add-dir {rd} "
                                        "'run maxpm go in this folder and follow the briefing'")
         self.assertEqual((t["model"], t["model_id"], t["env"]), ("astra", "gpt-6-astra", {"MAXPM_MODEL": "astra"}))
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Mine", "terra")["command"], "codex -m gpt-5.6-terra go")
@@ -5138,7 +5143,7 @@ class LaunchProfiles(unittest.TestCase):
         self.assertEqual((core.setting(self.c, "codex_sandbox", project_id=pid),
                           core.setting(self.c, "codex_prompt", project_id=pid)), ("read-only", "run maxpm go and follow it"))
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Codex", "sol")["command"],
-                         f"codex -m gpt-6.1-sol --sandbox read-only --add-dir {rd} 'run maxpm go and follow it'")
+                         f"{_codex()} -m gpt-6.1-sol --sandbox read-only --add-dir {rd} 'run maxpm go and follow it'")
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Planner")["command"],
                          "claude --permission-mode plan go --remote-control")
         # A remote-control name, or no prompt: custom, since a profile would change them.

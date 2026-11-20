@@ -21844,12 +21844,12 @@ def shell_command(words):
 
 
 def hook_words(ad, folder=None):
-    """The words that load an adapter's state hook or plugin (its install_hooks, which also writes the hook's files
-    beside the queue), for an agent whose STATE['state'] is 'hook': without them its session reports no state at all
-    (#5214, Grok: --agent <file>). [] for an agent whose state comes from the screen (DETECT), and for one that
-    takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']: Claude Code's --settings, behind its
-    activity_hooks setting)."""
-    if (ad.state or {}).get("state") != "hook" or ad.launch.get("hooks_file"):
+    """The words that load an adapter's hooks or plugin (its install_hooks, which also writes the hook's files beside
+    the queue): an agent whose STATE['state'] is 'hook' reports no state at all without them (#5214, Grok: --agent
+    <file>); Codex, whose state comes from the screen, gets only its guard before a shell command (#6254). [] for an
+    agent with no install_hooks, and for one that takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']:
+    Claude Code's --settings, behind its activity_hooks setting)."""
+    if not ad.has("install_hooks") or ad.launch.get("hooks_file"):
         return []
     return [str(w) for w in ad.install_hooks(folder, report_command()) or ()]
 

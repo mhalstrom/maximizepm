@@ -151,7 +151,6 @@ FEATURES = {
 
 # (agent, feature) -> why it lacks the feature: its fix item, or why it cannot have it. The doc's section lists each.
 EXCEPTIONS = {
-    ("codex", "shell_guard"): "#6254",
     ("antigravity", "native_message"): "no command, socket or flag",
     ("antigravity", "shell_guard"): "push_guard reads the queue's state",
 }

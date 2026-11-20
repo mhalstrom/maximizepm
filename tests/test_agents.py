@@ -353,7 +353,8 @@ class StartPaths(Env):
 
     def test_a_user_module_changes_what_core_builds(self):
         before = core.build_command("codex", {"prompt": "go"}, "gpt-6-luna")
-        self.assertTrue(before.startswith("codex -m gpt-6-luna "), before)
+        self.assertIn(" -m gpt-6-luna ", before)
+        self.assertTrue(before.startswith("codex -c "), before)  # the guard hook's words (#6254)
         self.user_module("codex", """
             from river.agents import Raw
             DESCRIBE = {"id": "codex", "label": "Codex", "exe": "codex", "family": "openai"}
@@ -450,6 +451,38 @@ class HookState(Env):
         self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w1'").fetchone()[0], "report:working")
         with self.assertRaisesRegex(RiverError, "--state working"):
             cli.run(["--as", "w1", "report"])
+
+    def test_a_codex_session_gets_the_guard_before_a_shell_command(self):
+        """#6254: Codex takes a PreToolUse hook from -c with the hash it computes; its state still comes from the
+        screen. Measured with codex-cli 0.159.1 on 2026-11-20: it ran a hook whose hash was this one, gave it this
+        input, and Claude Code's deny answer blocked the command."""
+        a = agents.get("codex")
+        self.assertEqual(a.state["state"], "detect")
+        self.assertEqual(agents.get("codex").module.hook_hash(
+            "python3 /tmp/claude-501/cxhook/probe.py /tmp/claude-501/cxhook/log.jsonl"),
+            "sha256:08e0fbd3682ecce55affa95aaa6ade528c63c1bea22f4f8971cc56675d87ce18")
+        words = core.hook_words(a)
+        self.assertEqual([words[0], words[2]], ["-c", "-c"])
+        self.assertTrue(words[1].startswith("hooks.PreToolUse=[{hooks=[{type=\"command\",command=") and
+                        " report --hook codex\"" in words[1], words[1])
+        self.assertIn('"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:', words[3])
+        cmd = core.build_command("codex", {"prompt": "maxpm go"})
+        self.assertTrue(cmd.startswith("codex -c "), cmd)
+        payload = {"session_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": "TMUX_TMPDIR=/tmp/x tmux kill-server"}, "tool_use_id": "exec-1"}
+        self.assertEqual(a.read_hook(payload)["run"], "TMUX_TMPDIR=/tmp/x tmux kill-server")
+        self.assertIsNone(a.read_hook({**payload, "tool_name": "apply_patch"}))
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "codex"]), 0)
+        got = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(got["permissionDecision"], "deny")
+        self.assertIn("tmux kill-server", got["permissionDecisionReason"])
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps({**payload, "tool_input": {"command": "ls"}}))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "codex"]), 0)
+        self.assertEqual(out.getvalue(), "")
 
     def test_the_defaults_are_the_adapters_data(self):
         """The prompt_pattern default reads the same screens as the built-in adapters' blocked words, and the

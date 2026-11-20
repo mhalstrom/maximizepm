@@ -138,6 +138,55 @@ INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{te
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# The guard before a shell command (#6254): a PreToolUse hook runs maxpm report --hook codex, and core.hook_report
+# refuses the command by core.tmux_guard and core.push_guard, as for Claude Code. The state still comes from the
+# screen (STATE): the hook says nothing of it. Codex takes hooks from -c on its command line (the session flags
+# layer), so nothing goes into ~/.codex (p140), and it runs a hook only when hooks.state holds the hash that Codex
+# computes for it (codex-rs discovery.rs hook_hash: the sha256 of the JSON of {event_name, hooks: [the handler]}, keys
+# sorted, no spaces; #5911 found it). A hash that differs makes Codex ask the person to trust the hook. Measured with
+# codex-cli 0.159.1 on 2026-11-20: its input is Claude Code's (tool_name "Bash", tool_input.command a string), and
+# Claude Code's JSON answer (permissionDecision deny) blocks the command: 'Command blocked by PreToolUse hook: <why>'.
+# The hook has no matcher (a matcher's part in the hash is not measured): it runs before every tool call, and
+# read_hook passes only Bash on.
+# ---------------------------------------------------------------------------------------------------------------
+
+HOOK_TIMEOUT = 5
+_HOOK_KEY = "/<session-flags>/config.toml:pre_tool_use:0:0"  # the key of a hook from -c (discovery.rs)
+
+
+def hook_hash(command, timeout=HOOK_TIMEOUT):
+    """The trust hash that Codex computes for a PreToolUse command hook with no matcher."""
+    import hashlib
+    import json
+    identity = {"event_name": "pre_tool_use",
+                "hooks": [{"type": "command", "command": command, "timeout": timeout, "async": False}]}
+    text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def install_hooks(folder, report):
+    """The -c words that add the PreToolUse hook (maxpm report --hook codex) and its trust, for one start or resume."""
+    import json
+    import shlex
+    command = " ".join(shlex.quote(w) for w in [*report, "--hook", "codex"])
+    return ["-c", f'hooks.PreToolUse=[{{hooks=[{{type="command",command={json.dumps(command)},'
+                  f'timeout={HOOK_TIMEOUT}}}]}}]',
+            "-c", "hooks.state={" + f'{json.dumps(_HOOK_KEY)}={{trusted_hash={json.dumps(hook_hash(command))}}}' + "}"]
+
+
+def read_hook(payload):
+    """A Codex hook's JSON input as a hook report (river/agents HOOK_REPORT_KEYS): a Bash call before it runs, with its
+    command; None for another tool or event."""
+    if payload.get("hook_event_name") != "PreToolUse" or payload.get("tool_name") != "Bash":
+        return None
+    inp = payload.get("tool_input")
+    cmd = inp.get("command") if isinstance(inp, dict) else None
+    sid = payload.get("session_id")
+    return {"event": "PreToolUse", "session_id": sid if isinstance(sid, str) and sid else None, "state": None,
+            "run": cmd if isinstance(cmd, str) else ""}
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # Chat log (#5182). Codex writes ~/.codex/sessions/<y>/<m>/<d>/rollout-<time>-<thread id>.jsonl (or $CODEX_HOME),
 # which it compresses to .jsonl.zst; the thread id is the agent's native_address.
 # ---------------------------------------------------------------------------------------------------------------

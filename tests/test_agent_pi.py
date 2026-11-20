@@ -285,10 +285,12 @@ class State(Env):
         self.assertEqual(core.build_command("pi", {"prompt": "go"}, "opus"), f"pi -e {f} --model opus go")
         self.assertEqual(core.with_hooks(self.a, ["pi", "--session", "7f3c"]), ["pi", "-e", f, "--session", "7f3c"])
         self.assertIn("pi.on(\"agent_start\"", Path(f).read_text(encoding="utf-8"))
-        # Claude Code takes its hooks file as a setting (LAUNCH hooks_file), and Codex reads the screen: no words.
+        # Claude Code takes its hooks file as a setting (LAUNCH hooks_file): no words. Codex reads its state from the
+        # screen, and its words are only the guard before a shell command (#6254), right after the program.
         self.assertEqual(core.hook_words(agents.get("claude")), [])
-        self.assertEqual(core.hook_words(agents.get("codex")), [])
-        self.assertEqual(core.with_hooks(agents.get("codex"), ["codex", "go"]), ["codex", "go"])
+        cx = core.hook_words(agents.get("codex"))
+        self.assertEqual(cx[0], "-c")
+        self.assertEqual(core.with_hooks(agents.get("codex"), ["codex", "go"]), ["codex", *cx, "go"])
         # OpenCode's words are an env prefix: they go before the command, also before an env of its own.
         oc = agents.get("opencode")
         pre = core.hook_words(oc)
