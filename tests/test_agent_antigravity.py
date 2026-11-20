@@ -293,6 +293,51 @@ class Screen(unittest.TestCase):
         self.assertEqual(antigravity.IDENTITY["source"], "env")
 
 
+class SessionSettings(Home):
+    """#6260: the Settings dialog of an agy session shows the model, effort and mode it runs, also when it started with
+    no --model (mark 2026-11-20: 'not known' for all three)."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.dict(antigravity._models, {"at": 0.0, "list": None, "reader": None}).start()
+
+    def test_the_chat_log_names_the_model_and_its_level(self):
+        lines = (FIX / "transcript_full.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(antigravity.chat_settings(lines), {"model": "gemini-3.8-flash", "effort": "low"})
+        change = json.dumps({"type": "USER_INPUT", "content": "<USER_SETTINGS_CHANGE>\nThe user changed setting "
+                             "`Model Selection` from Gemini 3.8 Flash (Low) to Gemini 4 Neon (High). No need to comment"})
+        self.assertEqual(antigravity.chat_settings(lines + [change]), {"model": "gemini-4-neon", "effort": "high"})
+
+    def test_the_footer_names_the_mode_the_model_and_its_level(self):
+        # Each footer as agy 1.5.13 showed it (#6260), for each mode and form of start.
+        for footer, want in (
+                ("auto · Gemini 4 Neon · high", {"mode": "auto", "model": "gemini-4-neon", "effort": "high"}),
+                ("plan · Gemini 4 Neon · high", {"mode": "plan", "model": "gemini-4-neon", "effort": "high"}),
+                ("accept-edits · Gemini 4 Argon · low", {"mode": "accept-edits", "model": "gemini-4-argon",
+                                                         "effort": "low"}),
+                ("auto · Orchestrator (Neon)", {"mode": "auto", "model": "gemini-pro-orchestrator-neon",
+                                                "effort": "none"})):
+            self.assertEqual(antigravity.screen_settings(["", "esc to cancel" + " " * 60 + footer, ""]), want, footer)
+        idle = (FIX / "pane_idle.txt").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(antigravity.screen_settings(idle), {"mode": "auto", "model": "gemini-3.8-flash", "effort": "low"})
+        self.assertEqual(antigravity.screen_settings(["nothing here"]), {})
+
+    def test_the_settings_dialog_reads_the_screen_of_a_session_started_with_no_model(self):
+        from river import server, sessions
+        c = core.connect()
+        self.addCleanup(c.close)
+        core.register(c, "agy1")
+        c.execute("UPDATE agents SET agent_type='antigravity', pid_cmd='agy --add-dir /q -i go' WHERE name='agy1'")
+        screen = "\x1b[2m" + " " * 80 + "plan · Gemini 4 Carbon · medium\x1b[0m\n"
+        mock.patch.object(server, "terminal_screen", lambda conn, agent: {"text": screen}).start()
+        got = {s["key"]: s for s in sessions.session_settings(c, "agy1")["settings"]}
+        self.assertEqual({k: (got[k]["value"], got[k]["source"]) for k in ("model", "effort", "mode")},
+                         {"model": ("gemini-4-carbon", "screen"), "effort": ("medium", "screen"),
+                          "mode": ("plan", "screen")})
+        self.assertEqual(got["model"]["labels"]["gemini-4-carbon"], "Gemini 4 Carbon")
+
+
 class Commands(Home):
     def test_the_built_in_commands_and_the_skills_of_both_folders(self):
         names = [c["name"] for c in antigravity.COMMANDS]

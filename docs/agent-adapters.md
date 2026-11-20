@@ -106,7 +106,7 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
 - An adapter is a module; its parts are module-level names: `DESCRIBE` (+ `read_models`), `SETTINGS`, `EFFORT`
   (+ `read_effort_levels`, `read_effort`), `build_command` with `LAUNCH` (+ `parse_command`), `IDENTITY`,
   `chat_path` with `parse_chat` and `CHAT` (+ `chat_chain`, `chat_title`, `chat_cwd`, `chat_usage`, `chat_settings`),
-  `STATE` with `DETECT` or `install_hooks`, `INPUT`, `resume_command`, `COMMANDS` (+ `read_commands`), `SETUP`
+  `STATE` with `DETECT` (+ `screen_settings`) or `install_hooks`, `INPUT`, `resume_command`, `COMMANDS` (+ `read_commands`), `SETUP`
   (+ `write_mcp_config`). The id is the file name (`claude`, `codex`); the old platform names are aliases
   (`claude-code`).
 - `agents.load()` reads the built-in modules, then each `<id>.py` in the `agents` folder beside the queue
@@ -358,6 +358,7 @@ or an exception. The end-to-end table under it proves what only a real run prove
 | `commands` | The "/" list in the message box with Tab, its custom commands for the folder, and `/model` opens the Settings dialog | unit; e2e / list |
 | `effort` | Its effort levels, the flag that sets one, and the Settings dialog row | unit |
 | `model_order` | The model list of the launch dialog and the Settings dialog is newest generation first, then strongest first (`agents.order_models`), each model once with the name people read; the effort list shows only the levels that the agent and the chosen model take, low to high, and changes with the model (#6256) | unit; e2e Start |
+| `session_settings` | The Settings dialog of a running session shows the model, effort and mode that the session runs, from its chat log (`chat_settings`) or its screen (`screen_settings`: agy's footer), also when it started with none named (#6260) | unit; e2e Settings |
 | `usage` | The context meter and the Usage panel (`context_window`), and `maxpm usage` (its token counts) | unit |
 | `setup_files` | `maxpm init` writes its instruction file, and MaximizePM's MCP server goes into its config | unit |
 | `setup_main` | Setup installs it, checks it (its status command) and signs it in (`agentinstall.METHODS`) | unit; e2e Setup |

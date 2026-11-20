@@ -372,6 +372,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "run":     the shell command that the agent is about to run (a hook before the tool call), or None: MaximizePM
 #                 may refuse it (core.push_guard, #5381); the hook records nothing else,
 #    }
+# screen_settings(lines) -> {setting key: value}: optional, the settings that the session's screen shows now (agy's
+# footer: mode, model and effort, #6260), from the plain lines of its pane; {} when the screen shows none. The Settings
+# dialog of a session takes them before the chat log's (chat_settings): the screen shows a change at once.
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
 #      "process_args": optional: a regex that finds the agent in the command line (ps args) of a process on the
@@ -502,7 +505,7 @@ PARTS = {
                                                         "chat_settings", "chat_cache_line", "chat_texts",
                                                         "chat_limits")},
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
-    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ()},
+    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings",)},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
@@ -928,6 +931,14 @@ class Adapter:
     def chat_settings(self, lines):
         f = self._fn("chat_settings")
         return dict(f(list(lines)) or {}) if f else {}
+
+    def screen_settings(self, lines):
+        """The settings the session's screen shows now (#6260), {} without the reader or when it fails."""
+        f = self._fn("screen_settings")
+        try:
+            return dict(f(list(lines)) or {}) if f else {}
+        except Exception:  # noqa: BLE001 - a reader of a screen: the other sources stand
+            return {}
 
     def chat_usage(self, lines):
         """{"input", "output", "cache_read", "cache_write"} token counts of the lines, or None without the reader."""

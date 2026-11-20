@@ -1520,12 +1520,15 @@ def session_settings(conn, agent, root=None, croot=None):
             seen = _transcript_settings(kind, path)
         except (OSError, ValueError, EOFError):
             seen = {}
+    shown = screen_settings(conn, agent, ad)  # what its screen shows now (agy's footer, #6260): newer than the log
     cmd = a.get("pid_cmd") or pane_command(conn, agent, ad)
     models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
     live = _live_settings(conn, agent)
     out = []
     for spec in ad.session_specs():
         value, source = seen.get(spec["key"]), "session"
+        if shown.get(spec["key"]) is not None:
+            value, source = shown[spec["key"]], "screen"
         got = live.get(spec["key"])
         if got and _live_holds(kind, path, spec["key"], got):
             # A change the page made in place, with no turn after it yet (#5288): newer than the transcript.
@@ -1556,6 +1559,19 @@ def session_settings(conn, agent, root=None, croot=None):
                     "default_key": spec.get("default"),
                     "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
     return {"agent": agent, "provider": prov, "settings": out, "transcript": kind if path else None}
+
+
+def screen_settings(conn, agent, ad):
+    """The settings that the agent's tmux pane shows now, by its adapter's screen_settings (#6260); {} when the adapter
+    has no reader or the agent has no pane here."""
+    if not ad.has("screen_settings"):
+        return {}
+    from . import server
+    try:
+        text = server.terminal_screen(conn, agent)["text"]
+    except core.RiverError:
+        return {}
+    return ad.screen_settings(server._plain(text).splitlines())
 
 
 def pane_command(conn, agent, ad):

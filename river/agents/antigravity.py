@@ -466,6 +466,69 @@ def chat_usage(lines):
     return out
 
 
+def _model_of(label):
+    """(model id, level) for a name that agy shows ('Gemini 4 Neon (High)', 'Orchestrator (Carbon)', 'Gemini 4
+    Neon' with the level apart), by the models of read_models; (None, None) for a name it does not list."""
+    label = (label or "").strip()
+    m = re.match(r"^(.*?)\s*\(([A-Za-z]+)\)$", label)
+    for base, level in ((m.group(1), m.group(2).lower()) if m else (None, None), (label, None)):
+        if base is None:
+            continue
+        row = next((r for r in read_models() if r["label"].lower() == base.lower()), None)
+        if row and (level is None or level in row["efforts"]):
+            return row["name"], level
+    return None, None
+
+
+def chat_settings(lines):
+    """The model and effort of the session's last turn (#6260): each model step names its model id with the level
+    ('gemini-4-neon-medium'), and a change of the model in the session adds a note to the next prompt ('The user
+    changed setting `Model Selection` from None to Gemini 4 Neon (High)'). agy records no mode in the log
+    (screen_settings reads it)."""
+    got = {}
+    for d in _lines(lines):
+        mid, level = None, None
+        if d.get("type") == "PLANNER_RESPONSE" and d.get("model"):
+            m = _ID_LEVEL.match(str(d["model"]))
+            mid, level = (m.group(1), m.group(2)) if m else (str(d["model"]), None)
+        elif d.get("type") == "USER_INPUT":
+            found = re.findall(r"`Model Selection` from .*? to (.+?)\. ", str(d.get("content") or ""))
+            if found:
+                mid, level = _model_of(found[-1])
+        if mid:
+            got["model"] = mid
+            if level:
+                got["effort"] = level
+            else:
+                got.pop("effort", None)
+    return got
+
+
+# The footer at the right of the screen: '<mode> · <model> · <level>', the level left out for a model with none
+# ('auto · Orchestrator (Neon)'). Measured on agy 1.5.13 for every mode and form of start (#6260).
+FOOTER = re.compile(r"(?:^|\s)(" + "|".join(MODES) + r") · ([^·]+?)(?: · (" + "|".join(_LEVELS) + r"))?\s*$")
+
+
+def screen_settings(lines):
+    """What the session runs now, from its footer (#6260): {"mode", "model", "effort"}; {} when the screen shows no
+    footer. The screen follows a /model or Shift+Tab at once, before the next turn writes the log."""
+    for line in reversed(list(lines)):
+        m = FOOTER.search(line)
+        if not m:
+            continue
+        got = {"mode": m.group(1)}
+        mid, level = _model_of(m.group(2))
+        if mid:
+            got["model"] = mid
+        level = m.group(3) or level
+        if level:
+            got["effort"] = level
+        elif mid and read_effort_levels(mid) == []:
+            got["effort"] = "none"  # an Orchestrator takes no effort
+        return got
+    return {}
+
+
 def chat_requests(session_ref, root=None):
     """(requests, fork) of a conversation for maxpm usage: each model step of its transcript is one model call, keyed
     by its step ('s<step>'), with its time and its token counts. agy writes no prompt cache, and no conversation starts
