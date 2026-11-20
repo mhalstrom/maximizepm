@@ -17514,6 +17514,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
         _tell_asker(conn, it, f"{actor or 'The person'} answered #{it['id']} {it['title']} ({status})"
                     + (f": {said}" if said else "") + (f" [choice: {choice}]" if choice else "")
                     + ". It is closed; record nothing. Go on to the next one.", it["id"], actor)
+        if status == "done":
+            res["acts_on_answer"] = _act_on_answer(conn, it, actor, said, choice)
     return res
 
 
@@ -20040,6 +20042,52 @@ def _tell_asker(conn, row, text, item_id=None, actor=None):
         conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
         if st == "sent":
             _mark_delivered(conn, [mid], "native")
+
+
+def _act_on_answer(conn, it, actor, said, choice=None):
+    """After the commit: a person answered (done) a Decide or Approve item that no open item waits on (#6484). Its
+    answer reached nobody: the session that added #6478 had ended, and the manager that added #6491 gets no notice of
+    its own items (_tell_asker); mark had to ask twice (2026-11-20). An agent session that added it: a task acts on the
+    answer. The manager added it or forwarded it with a decision: the active manager gets a blocked alert with the
+    answer, and acts on it (a task when no manager is active). Not for an item that a person or maxpm added, or an
+    approval that a session uses itself (maxpm approval use, a goal's yes). Returns {"task": id} or {"alert": name}."""
+    if it["doer"] != "human" or it["kind"] != "work":
+        return None
+    if _is_ai(conn, actor) and not helper_person(conn, actor):
+        return None  # an agent took it over: it does what follows itself
+    if item_action_type(conn, it["id"], it["title"], _project_name(conn, it["project_id"])) not in ("decide", "approve") \
+            and not decision_of(it):
+        return None
+    if conn.execute("SELECT 1 FROM approvals WHERE item_id=?", (it["id"],)).fetchone() or _waiting_on(conn, it["id"]):
+        return None
+    first = conn.execute("SELECT actor FROM events WHERE item_id=? ORDER BY id LIMIT 1", (it["id"],)).fetchone()
+    adder = first["actor"] if first else None
+    if not adder or adder == "maxpm" or not _is_ai(conn, adder):
+        return None
+    person = helper_person(conn, actor) or actor or "the person"
+    answer = " ".join((said or "").split()) or "done, with no words"
+    if choice and not answer.lower().startswith(str(choice).lower()):
+        answer = f"{choice}: {answer}"
+    by = (decision_of(it) or {}).get("by")
+    boss = active_manager(conn)
+    if boss and (_is_manager(conn, adder) or _is_manager(conn, by)):
+        how = "added" if _is_manager(conn, adder) else "forwarded"
+        with tx(conn):
+            _send(conn, "alert", "maxpm", f"{person} answered #{it['id']} {it['title']}: {answer}. You {how} it, and no "
+                  f"open item waits on it: act on the answer now; nobody else does.", to=boss, item_id=it["id"],
+                  blocked="sender")
+            _event(conn, it["id"], "maxpm", f"the manager {boss} acts on the answer (no open item waits on it)")
+        return {"alert": boss}
+    task = item_add(conn, _project_name(conn, it["project_id"]), f"Act on {person}'s answer to #{it['id']}: {it['title']}",
+                    priority=it["priority"], actor="maxpm", goals=[], found_during=it["id"],
+                    context=f"{person} answered #{it['id']} ({iso(now())[:16]}Z): {answer}. {adder} added #{it['id']}"
+                            + (f" during #{it['found_during']}" if it["found_during"] else "")
+                            + f", and no open item waits on it, so nobody else acts on the answer. Read maxpm show "
+                            f"{it['id']} for the full question, then do what the answer says. When it asks for nothing, "
+                            f"close this task with a note.")
+    with tx(conn):
+        _event(conn, it["id"], "maxpm", f"#{task['id']} acts on the answer (no open item waits on it)")
+    return {"task": task["id"]}
 
 
 def _set_decision(conn, table, row_id, decision, actor):

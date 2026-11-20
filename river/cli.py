@@ -501,6 +501,11 @@ def _print_show(a):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):
         print("  back in progress for its holder:", ", ".join(f"#{i}" for i in a["resumed"]))
+    acts = a.get("acts_on_answer") or {}
+    if acts.get("task"):
+        print(f"  no open item waits on this answer: #{acts['task']} acts on it")
+    elif acts.get("alert"):
+        print(f"  no open item waits on this answer: the manager {acts['alert']} acts on it")
     if a.get("close_check"):
         print("\n".join(_close_check_lines(a["close_check"], a["id"] if "merged" not in a else a["merged"]["id"])))
     if a.get("goal_checks"):

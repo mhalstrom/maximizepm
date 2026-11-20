@@ -7333,6 +7333,44 @@ class EscalationOptions(Base):
             core.done(self.c, j, None, actor="mark", choice="A")
         self.assertEqual(core.done(self.c, j, "fine", actor="mark")["output"], "fine")
 
+    def test_an_answer_that_no_open_item_waits_on_reaches_someone(self):
+        """#6484: a person's Decide or Approve item that blocks no open item: the answer reached nobody."""
+        # A worker added it during its item, and that item is done: a task acts on the answer.
+        i = core.item_add(self.c, "a", "Approve the draft replies", doer="human", actor="w1", found_during=self.x)["id"]
+        core.done(self.c, self.x, "shipped", actor="w1")
+        res = core.done(self.c, i, "A", actor="mark")
+        task = core.item_show(self.c, res["acts_on_answer"]["task"])
+        self.assertEqual((task["title"], task["found_during"], task["status"]),
+                         ("Act on mark's answer to #%d: Approve the draft replies" % i, i, "open"))
+        self.assertIn("mark answered #%d" % i, task["context"])
+        self.assertIn(": A.", task["context"])
+        # The manager added one itself (#6491): the manager gets a blocked alert with the answer, and no task.
+        j = core.item_add(self.c, "a", "Decide: undo the link", doer="human", actor="boss")["id"]
+        core.forward(self.c, item=j, actor="boss", options=self.OPTS, recommend="Red", question="Undo?")
+        res = core.done(self.c, j, None, actor="mark", choice="Red")
+        self.assertEqual(res["acts_on_answer"], {"alert": "boss"})
+        a = self.c.execute("SELECT body, blocked FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
+                           (j,)).fetchone()
+        self.assertEqual(a["blocked"], "sender")
+        self.assertIn("mark answered #%d Decide: undo the link: Red. You added it" % j, a["body"])
+        # A worker's item that the manager forwarded with a decision: the manager hears it too.
+        f = core.item_add(self.c, "a", "Decide the color", doer="human", actor="w1")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        core.forward(self.c, item=f, actor="boss", options=self.OPTS, recommend="Blue")
+        self.assertEqual(core.done(self.c, f, None, actor="mark", choice="Blue")["acts_on_answer"], {"alert": "boss"})
+        # Nothing new: an item that an open item waits on, a Look item, a drop, an agent's takeover, a person's own.
+        k = core.item_add(self.c, "a", "Decide the font", doer="human", actor="w1", blocks=self.add("a", "y"))["id"]
+        look = core.item_add(self.c, "a", "Look at the page http://x", doer="human", actor="w1")["id"]
+        d = core.item_add(self.c, "a", "Decide the size", doer="human", actor="w1")["id"]
+        t = core.item_add(self.c, "a", "Decide the logo", doer="human", actor="w1")["id"]
+        own = core.item_add(self.c, "a", "Decide the name", doer="human", actor="mark")["id"]
+        self.assertIsNone(core.done(self.c, k, "serif", actor="mark")["acts_on_answer"])
+        self.assertIsNone(core.done(self.c, look, "fine", actor="mark")["acts_on_answer"])
+        self.assertNotIn("acts_on_answer", core.drop(self.c, d, "mark", note="no"))
+        self.assertIsNone(core.done(self.c, t, None, actor="w1", note="the brand guide decides")["acts_on_answer"])
+        self.assertIsNone(core.done(self.c, own, "River", actor="mark")["acts_on_answer"])
+
 
 class NeedsYouDialog(Base):
     """#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to use the question
