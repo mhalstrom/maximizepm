@@ -1545,7 +1545,9 @@ def session_settings(conn, agent, root=None, croot=None):
             # picks: the adapter's own models; the dialog lists them first when the list is long (OpenCode, #5242).
             row = {"kind": "choice", "choices": [m["name"] for m in models], "reported": value,
                    "notes": {m["name"]: f"{m['id']}{' · ' + m['note'] if m['note'] else ''}" for m in models},
-                   "picks": [m["name"] for m in models if m.get("pick")]}
+                   "picks": [m["name"] for m in models if m.get("pick")],
+                   # The name people read, where the adapter gives one (Antigravity: Gemini 4 Neon, #6256).
+                   "labels": {m["name"]: m["label"] for m in models if m.get("label")}}
             value = core.model_name_of(models, value) or value
         out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
                     **row,

@@ -43,6 +43,24 @@ class PlaceholderNote(unittest.TestCase):
                              timeout=30, check=True)
         self.assertEqual(json.loads(out.stdout), [{"agent": "A", "folder": "~/Projects/web"}, {"agent": "A"}])
 
+    def test_the_effort_list_follows_the_model_and_the_weakest_allowed_model_is_preselected(self):
+        # #6256: a model with its own levels (Antigravity) offers them; one with none offers no effort; a model with
+        # no levels of its own offers the agent's. The list is strongest first, so a min limit picks from the bottom.
+        opt = {"efforts": ["low", "medium", "high", "xhigh", "max"], "models": [
+            {"name": "gemini-4-carbon", "efforts": ["low", "medium", "high"]},
+            {"name": "gemini-pro-orchestrator", "efforts": []}, {"name": "other"}]}
+        claude = {"efforts": ["low", "high"], "models": [{"name": n} for n in ("fable", "opus", "sonnet", "haiku")]}
+        ladder = {"claude": ["haiku", "sonnet", "opus", "fable"]}
+        js = ("const m = await import('./components/launchDialog.js');"
+              f"const o = {json.dumps(opt)}, c = {json.dumps(claude)}, l = {json.dumps(ladder)};"
+              "console.log(JSON.stringify([m.effortsFor(o, 'gemini-4-carbon'), m.effortsFor(o, 'gemini-pro-orchestrator'),"
+              " m.effortsFor(o, 'other'), m.effortsFor(o, ''), m.pickEffort(o, {effort: 'max'}, '', 'gemini-4-carbon'),"
+              " m.pickEffort(o, null, 'xhigh', 'gemini-4-carbon'), m.pickModel(c, {min_model: 'sonnet'}, l, '', {})]));")
+        out = subprocess.run(["node", "--input-type=module", "-e", js], cwd=STATIC, capture_output=True, text=True,
+                             timeout=30, check=True)
+        self.assertEqual(json.loads(out.stdout), [["low", "medium", "high"], [], opt["efforts"], opt["efforts"],
+                                                  "high", "", "sonnet"])
+
     def test_the_drawer_names_any_agent_as_an_agent_type(self):
         text = (STATIC / "components" / "drawer.js").read_text(encoding="utf-8")
         self.assertNotIn("codex or claude-code;", text)

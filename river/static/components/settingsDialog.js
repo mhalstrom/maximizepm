@@ -22,7 +22,7 @@ function field(s, i) {
   // a field that finds the rest by typing, as the launch dialog does (#5242).
   const { shown, all } = s.kind === "choice" ? nameChoices(s.choices, s.picks, val) : { shown: [], all: [] };
   const input = s.kind === "choice"
-    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${shown.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}</option>`).join("")}${
+    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${shown.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${s.labels && s.labels[c] ? esc(s.labels[c]) : `${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}`}</option>`).join("")}${
       all.length ? `<option value="${OTHER}">Other model…</option>` : ""}</select>${all.length ? `
       <input data-other="${i}" class="hidden" list="setAll${i}" autocomplete="off" spellcheck="false"
         placeholder="Type to find one of ${all.length} models" aria-label="Other ${esc(s.label.toLowerCase())}">

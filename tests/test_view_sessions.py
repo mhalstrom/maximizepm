@@ -230,12 +230,12 @@ class Sessions(Base):
         self.assertEqual((got["model"]["value"], got["model"]["source"], got["model"]["live"]), ("opus", "session", True))
         # #4633: the models of its own provider, the launch dialog's list; the id it reports stays shown.
         self.assertEqual((got["model"]["kind"], got["model"]["choices"], got["model"]["reported"]),
-                         ("choice", ["haiku", "sonnet", "opus", "fable"], "claude-opus-5-5"))
+                         ("choice", ["fable", "opus", "sonnet", "haiku"], "claude-opus-5-5"))
         launch = next(o for o in core.launch_options(self.c) if o["platform"] == "claude-code")
         self.assertEqual([m["name"] for m in launch["models"]], got["model"]["choices"])
         cx = core.platform_models(self.c, "codex")
-        self.assertEqual([m["name"] for m in cx], ["luna", "terra", "sol", "astra"])
-        self.assertEqual(core.model_name_of(cx, cx[2]["id"]), "sol")
+        self.assertEqual([m["name"] for m in cx], ["astra", "sol", "luna", "terra"])  # newest, strongest first (#6256)
+        self.assertEqual(core.model_name_of(cx, next(m["id"] for m in cx if m["name"] == "sol")), "sol")
         self.assertIsNone(core.model_name_of(cx, "gpt-9"))
         with self.assertRaises(core.RiverError):
             sessions.check_value(sessions.setting_spec("codex", "model"), "opus", self.c, "codex")

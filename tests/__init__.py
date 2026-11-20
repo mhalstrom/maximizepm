@@ -111,6 +111,8 @@ server.PANE_PROCESS_FIND = lambda agent, process: (None, None)  # the pane watch
 server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests the shared build (#5428)
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
+from river.agents import antigravity as agy_adapter  # noqa: E402
+agy_adapter.MODELS_RUNNER = lambda: ""  # never the installed agy (agy models): MODELS_SEEN stands (#6256)
 from river import browser as _browser  # noqa: E402
 # The tests of a browser window and a passkey window run as on a computer with a screen, also on a Linux runner with no
 # DISPLAY (#5878); tests.test_browser.NoScreen sets the other kinds.

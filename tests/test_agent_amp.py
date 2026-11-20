@@ -74,7 +74,7 @@ class Contract(Env):
     def test_the_mode_is_the_effort_and_max_is_ultra(self):
         self.assertEqual([self.a.effort_name(x) for x in ("low", "medium", "high", "xhigh", "max")],
                          ["low", "medium", "high", "ultra", "ultra"])
-        self.assertEqual(self.a.effort_choices(), ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(self.a.effort_choices(), ["low", "medium", "high", "max"])  # ultra once, as max (#6256)
         self.assertEqual(self.a.effort["label"], "Mode")
         rx = re.compile(amp.EFFORT["read"])
         self.assertEqual(rx.search("amp --mode ultra --no-ide").group(1), "ultra")

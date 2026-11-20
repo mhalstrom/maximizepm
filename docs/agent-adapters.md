@@ -358,6 +358,7 @@ or an exception. The end-to-end table under it proves what only a real run prove
 | `native_message` | A maxpm message reaches the session during a turn (`INPUT['native']`); the message box reaches its prompt | unit; e2e Message box |
 | `commands` | The "/" list in the message box with Tab, its custom commands for the folder, and `/model` opens the Settings dialog | unit; e2e / list |
 | `effort` | Its effort levels, the flag that sets one, and the Settings dialog row | unit |
+| `model_order` | The model list of the launch dialog and the Settings dialog is newest generation first, then strongest first (`agents.order_models`), each model once with the name people read; the effort list shows only the levels that the agent and the chosen model take, low to high, and changes with the model (#6256) | unit; e2e Start |
 | `usage` | The context meter and the Usage panel (`context_window`), and `maxpm usage` (its token counts) | unit |
 | `setup_files` | `maxpm init` writes its instruction file, and MaximizePM's MCP server goes into its config | unit |
 | `setup_main` | Setup installs it, checks it (its status command) and signs it in (`agentinstall.METHODS`) | unit; e2e Setup |

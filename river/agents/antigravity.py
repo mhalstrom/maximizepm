@@ -28,9 +28,12 @@ queue's state (an unread alert, a blocked item) when the command runs, and a fix
 import json
 import os
 import re
+import subprocess
+import threading
+import time
 from pathlib import Path
 
-from . import Raw
+from . import Raw, model_tier
 
 # ---------------------------------------------------------------------------------------------------------------
 # 1. Describe
@@ -44,17 +47,13 @@ DESCRIBE = {
     # agy runs Google's Gemini models and others (Claude, GPT-OSS) by its own ids: no family of model_ladder, so an
     # item's --min-model and --max-model do not apply to them, as for a provider/model agent.
     "family": "multi",
-    # The ids that `agy models` listed on 2026-11-19 (agy 1.5.13, a Google AI Ultra account). Each id names a model
-    # and its thinking level; --effort sets the reasoning effort apart from it.
-    "models": ["gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium", "gemini-4-neon-low",
-               "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low",
-               "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low",
-               "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low",
-               "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
-               "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-               "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low",
-               "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low",
-               "gpt-oss-120b-medium"],
+    # No list of its own: read_models gives the models of the installed agy, one per model (agy lists each model once
+    # for each effort level, "gemini-4-neon-high"; the launch gives the level with --effort, #6256), and the list of
+    # 2026-11-19 (MODELS_SEEN) when agy does not answer. A model that agy no longer lists does not show.
+    "models": [],
+    # Neon, Carbon, Argon and Hydrogen: no Google page found on 2026-11-19 ranks the four, so they keep the order of
+    # `agy models` (#6256).
+    "tiers": ["neon", "carbon", "argon", "hydrogen"],
     "default_model": "",
     "model_ids": {},
     "prefix": "agy_",
@@ -64,6 +63,108 @@ DESCRIBE = {
     "model_note": "A restart applies it. /model in its terminal also changes the model of later sessions.",
     "model_read": r"(?:^|\s)--model(?:=|\s+)(\S+)",
 }
+
+# What `agy models` printed on 2026-11-19 (agy 1.5.13, a Google AI Ultra account): one line per model and effort
+# level, its id and its name. The list when the installed agy does not answer (a sandbox: it cannot open its port).
+MODELS_SEEN = """\
+gemini-4-neon-high\tGemini 4 Neon (High)
+gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)
+gemini-4-neon-medium\tGemini 4 Neon (Medium)
+gemini-4-neon-low\tGemini 4 Neon (Low)
+gemini-4-carbon-medium\tGemini 4 Carbon (Medium)
+gemini-4-carbon-high\tGemini 4 Carbon (High)
+gemini-4-carbon-low\tGemini 4 Carbon (Low)
+gemini-4-argon-medium\tGemini 4 Argon (Medium)
+gemini-4-argon-high\tGemini 4 Argon (High)
+gemini-4-argon-low\tGemini 4 Argon (Low)
+gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)
+gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)
+gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)
+gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)
+gemini-pro-orchestrator\tOrchestrator (Carbon)
+gemini-pro-orchestrator-argon\tOrchestrator (Argon)
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)
+gemini-3.8-flash-low\tGemini 3.8 Flash (Low)
+claude-opus-5-5-low\tClaude Opus 5.5 (Low)
+claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)
+claude-opus-5-5-high\tClaude Opus 5.5 (High)
+claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)
+claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)
+claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+"""
+
+# The level names of `agy models` (its ids end in -<level>; its names in '(<Level>)').
+_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_ID_LEVEL = re.compile(r"^(.+)-(" + "|".join(_LEVELS) + r")$")
+
+
+def parse_models(text):
+    """The models of `agy models` output, one dict per model (#6256): {"name": the id with no level, "label": its
+    name with no level, "efforts": its levels low to high ([] when agy lists it with no level: the Orchestrators take
+    no --effort)}, in agy's order. An Orchestrator is of the generation of the models it runs (Gemini 4) and comes
+    after them."""
+    out = {}
+    for line in (text or "").splitlines():
+        parts = line.strip().split("\t", 1)
+        if len(parts) != 2 or not re.fullmatch(r"[a-z0-9][\w.-]*", parts[0]):
+            continue
+        mid, label = parts[0], parts[1].strip()
+        m = _ID_LEVEL.match(mid)
+        lm = re.match(r"^(.*?)\s*\(([^)]*)\)$", label)
+        if m and lm and lm.group(2).lower() == m.group(2):
+            base, level, label = m.group(1), m.group(2), lm.group(1)
+        else:
+            base, level = mid, None
+        row = out.setdefault(base, {"name": base, "label": label, "efforts": []})
+        if level and level not in row["efforts"]:
+            row["efforts"].append(level)
+    for row in out.values():
+        row["efforts"].sort(key=_LEVELS.index)
+        if "orchestrator" in row["name"]:
+            # Below the plain models, in the order of the model it names ("Orchestrator (Neon)").
+            row.update(version="4", tier=model_tier(row["label"], DESCRIBE["tiers"]) - 10)
+    return list(out.values())
+
+
+MODELS_RUNNER = None  # a test hook: a function () -> the text of `agy models`
+_models = {"at": 0.0, "list": None, "reader": None}
+_models_lock = threading.Lock()
+
+
+def read_models():
+    """The models of the installed agy (`agy models`, about two seconds), read at most once in ten minutes by a thread,
+    as OpenCode's (#5638). No caller waits for it (p147: a command answers in 100 ms): until the first read ends, and
+    when agy does not answer, the list is MODELS_SEEN."""
+    with _models_lock:
+        got = _models["list"]
+        if (got is None or time.time() - _models["at"] >= 600) and _models["reader"] is None:
+            _models["reader"] = threading.Thread(target=_read_models, daemon=True, name="agy-models")
+            _models["reader"].start()
+    return [dict(m, efforts=list(m["efforts"])) for m in (got or parse_models(MODELS_SEEN))]
+
+
+def _read_models():
+    got = []
+    try:
+        out = MODELS_RUNNER() if MODELS_RUNNER else subprocess.run(
+            ["agy", "models"], capture_output=True, text=True, timeout=60).stdout
+        got = parse_models(out)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
+        with _models_lock:
+            _models.update(at=time.time(), list=got or parse_models(MODELS_SEEN), reader=None)
+
+
+def read_effort_levels(model):
+    """The effort levels agy takes for a model (from read_models; an id with its level, as an old command names it,
+    counts as its model); None for a model agy does not list, [] for one with no level (an Orchestrator)."""
+    m = _ID_LEVEL.match(model or "")
+    names = {model} | ({m.group(1)} if m else set())
+    return next((list(r["efforts"]) for r in read_models() if r["name"] in names), None)
 
 # ---------------------------------------------------------------------------------------------------------------
 # 2. Settings
@@ -135,8 +236,15 @@ def build_command(name, folder, model, effort, settings, prompt):
     from ..core import river_dir
     s = settings
     words = ["agy"] + (["--conversation", s["resume"]] if s.get("resume") else [])
+    # One way to set the level (#6256): --effort with the model's id. agy refuses an id with a level and an --effort
+    # of another level ("--model gemini-4-neon-low conflicts with --effort=high", measured 2026-11-19), so an id with
+    # its level (an old command, an item's model) loses the level when an effort is given; and an Orchestrator takes
+    # no --effort ("--effort is not supported for model").
+    m = _ID_LEVEL.match(model or "")
+    if m and effort in EFFORT["levels"]:
+        model = m.group(1)
     words += ["--model", model] if model else []
-    words += ["--effort", effort] if effort in EFFORT["levels"] else []
+    words += ["--effort", effort] if effort in EFFORT["levels"] and read_effort_levels(model) != [] else []
     mode = (s.get("mode") or "").strip()
     if mode in MODES:
         words += ["--mode", mode]

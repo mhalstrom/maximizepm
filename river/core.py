@@ -21582,20 +21582,33 @@ def model_id(conn, platform, model, project_id=None, inline=None):
 
 def platform_models(conn, platform, project_id=None, inline=None):
     """The models a platform's sessions run, for the launch dialog and a session's Settings dialog (#4633), one
-    source for both: the model_ladder names of its family, each with its note and the id its CLI gets."""
+    source for both: the model_ladder names of its family, each with its note and the id its CLI gets. In the one
+    order of agents.order_models (#6256: newest and strongest first). A model whose effort levels the adapter knows
+    (read_effort_levels, or the facts of read_models) has them in "efforts" (MaximizePM names, low to high; [] when it
+    takes none); "label" is the name people read, when the adapter gives one."""
     fam = launch_platforms().get(platform, {}).get("family")
     ladder = parse_ladder(setting(conn, "model_ladder"))
+    a = _adapters().find(platform)
     if fam and fam not in ladder:
         # A family with no ladder (a "multi" agent's provider/model texts, #5169): the adapter's own model list.
-        # The adapter's own models (DESCRIBE['models']) come first, marked pick: the launch dialog offers them
-        # and finds the rest of a long list by typing (#5238; OpenCode knows about 500).
-        a = _adapters().find(platform)
+        # The adapter's own models (DESCRIBE['models']) are marked pick: the launch dialog offers them and finds the
+        # rest of a long list by typing (#5238; OpenCode knows about 800).
         picks = list(a.describe["models"]) if a else []
-        names = list(dict.fromkeys(picks + (a.read_models() if a else [])))
-        return [{"name": m, "note": "", "family": fam, "id": a.describe["model_ids"].get(m, m), "pick": m in picks}
-                for m in names]
-    return [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam, "id": model_id(conn, platform, m, project_id, inline)}
-            for m in ladder.get(fam, [])]
+        facts = {}
+        for m in picks + (a.read_models() if a else []):
+            row = dict(m) if isinstance(m, dict) else {"name": m}
+            facts[row["name"]] = {**facts.get(row["name"], {}), **row}
+        rows = [{"note": "", "family": fam, "id": a.describe["model_ids"].get(n, n), "pick": n in picks, **f}
+                for n, f in facts.items()]
+    else:
+        rows = [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam,
+                 "id": model_id(conn, platform, m, project_id, inline)} for m in ladder.get(fam, [])]
+    for r in rows:
+        levels = r.pop("efforts", None)
+        got = a.model_efforts(r["id"], levels) if a else None
+        if got is not None:
+            r["efforts"] = got
+    return _agents_pkg.order_models(rows, (a.describe.get("tiers") or ()) if a else ())
 
 
 def model_name_of(models, value):
@@ -22815,8 +22828,11 @@ def _check_agent_effort(ad, mid, effort):
     read = getattr(ad.module, "read_effort_levels", None)
     if not read or not ad.effort:
         return
-    levels = read(mid) or ad.effort.get("levels") or []
-    if effort not in levels:
+    levels = read(mid) if mid else None
+    if levels == []:
+        return  # the model takes no effort (an Orchestrator of agy): the adapter starts it with none (#6256)
+    levels = levels or ad.effort.get("levels") or []
+    if ad.effort_name(effort) not in levels:
         raise RiverError(f"{ad.label}{' ' + mid if mid else ''} takes effort {', '.join(levels)}, not {effort}; "
                          f"pick one of them")
 
@@ -22917,11 +22933,12 @@ def launch_options(conn):
         out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
                     "agent_type": prof[0] if prof else _exe_platform(cmd),
                     "models": (platform_models(conn, prof[0], inline=prof[1]) if prof else
-                               [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
-                                for f, ms in ladder.items() if fam in (None, f) for m in ms]),
+                               _agents_pkg.order_models([{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
+                                                         for f, ms in ladder.items() if fam in (None, f) for m in ms])),
                     # A profile offers the efforts of its adapter (#5169); none when the agent has no effort.
+                    # Each model with its own levels has them in its "efforts" (#6256); these are the agent's.
                     "efforts": ad.effort_choices() if ad else (
-                        list((by_exe.effort or {}).get("levels") or levels) if fam and by_exe else levels),
+                        by_exe.effort_choices() if fam and by_exe and by_exe.effort else levels),
                     "takes_model": bool(prof) or "{model}" in cmd,
                     "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
                     # The options the dialog can change for one launch, preset from the entry and the settings.

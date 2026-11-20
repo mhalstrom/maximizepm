@@ -71,13 +71,13 @@ class Contract(Home):
 
 class Launch(Home):
     def test_a_start_with_every_setting(self):
-        argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash-low", "high",
+        argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash", "high",
                                          {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
                                           "args": "--log-file /tmp/x"}, "maxpm go")
         allow = ["--add-dir", self.queue, "--settings", '{"permissions":{"allow":["command(maxpm)"],"deny":['
                  '"command(tmux kill-server)","command(tmux -L maximizepm kill-server)",'
                  '"command(tmux -Lmaximizepm kill-server)"]}}']
-        self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash-low", "--effort", "high", "--mode", "plan",
+        self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash", "--effort", "high", "--mode", "plan",
                                      "--dangerously-skip-permissions", "--sandbox", *allow])
         self.assertEqual(argv[-3:], ["--log-file /tmp/x", "-i", "maxpm go\n\n" + antigravity.MAXPM_NOTE])
         self.assertIsInstance(argv[-3], agents.Raw)
@@ -137,9 +137,9 @@ class Launch(Home):
 
     def test_each_setting_reads_back_from_the_command_it_builds(self):
         a = agents.get("antigravity")
-        cmd = " ".join(antigravity.build_command(None, None, "claude-opus-5-5-high", "max", {"mode": "auto"}, "go"))
-        self.assertEqual(re.search(a.describe["model_read"], cmd).group(1), "claude-opus-5-5-high")
-        self.assertEqual(re.search(antigravity.EFFORT["read"], cmd).group(1), "max")
+        cmd = " ".join(antigravity.build_command(None, None, "gemini-4-neon", "xhigh", {"mode": "auto"}, "go"))
+        self.assertEqual(re.search(a.describe["model_read"], cmd).group(1), "gemini-4-neon")
+        self.assertEqual(re.search(antigravity.EFFORT["read"], cmd).group(1), "xhigh")
         self.assertEqual(re.search(antigravity.SETTINGS[0]["read"], cmd).group(1), "auto")
 
 

@@ -1452,11 +1452,12 @@ class LaunchAgent(unittest.TestCase):
         server.setup_agent_add(self.c, "Codex")
         core.config_set(self.c, "launch_agents", core.setting(self.c, "launch_agents") + "; Mine=myagent go")
         opts = {o["label"]: o for o in core.state(self.c)["launch_options"]}
+        # Newest and strongest first (#6256).
         self.assertEqual((opts["Claude Code"]["family"], [m["name"] for m in opts["Claude Code"]["models"]]),
-                         ("claude", ["haiku", "sonnet", "opus", "fable"]))
+                         ("claude", ["fable", "opus", "sonnet", "haiku"]))
         self.assertEqual(opts["Claude Code"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual((opts["Codex"]["family"], [m["name"] for m in opts["Codex"]["models"]]),
-                         ("openai", ["luna", "terra", "sol", "astra"]))
+                         ("openai", ["astra", "sol", "luna", "terra"]))  # terra is gpt-5.6, an older generation
         self.assertTrue(opts["Codex"]["takes_model"] and opts["Codex"]["takes_effort"])
         self.assertTrue(all(m["note"] for o in ("Claude Code", "Codex") for m in opts[o]["models"]))
         self.assertEqual((opts["Mine"]["family"], len(opts["Mine"]["models"]), opts["Mine"]["takes_model"]), (None, 8, False))
@@ -5025,8 +5026,11 @@ class LaunchProfiles(unittest.TestCase):
             core._launch_agent_cmd(self.c, None, "Codex", "luna", "max")
         # The dialog offers each agent the models of its family only, and the CLI's effort levels.
         opts = {o["label"]: o for o in core.state(self.c)["launch_options"]}
-        self.assertEqual([m["name"] for m in opts["Codex"]["models"]], ["luna", "terra", "sol", "astra"])
-        self.assertEqual([m["name"] for m in opts["Claude Code"]["models"]], ["haiku", "sonnet", "opus", "fable"])
+        self.assertEqual([m["name"] for m in opts["Codex"]["models"]], ["astra", "sol", "luna", "terra"])
+        self.assertEqual([m["name"] for m in opts["Claude Code"]["models"]], ["fable", "opus", "sonnet", "haiku"])
+        # The Codex model cache lists luna's levels: the dialog offers only them for luna (#6256).
+        luna = next(m for m in opts["Codex"]["models"] if m["name"] == "luna")
+        self.assertEqual(luna["efforts"], ["low", "medium", "high"])
         self.assertEqual(opts["Codex"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
 
     def test_a_launch_with_options_through_a_fake_runner(self):

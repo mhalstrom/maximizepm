@@ -151,7 +151,8 @@ class Describe(Env):
         conn = core.connect()
         self.addCleanup(conn.close)
         ms = core.platform_models(conn, "opencode")
-        self.assertEqual([m["name"] for m in ms], list(picks) + others)  # each model once, the picks first
+        # Each model once, the picks first (their provider comes first), each provider newest first (#6256).
+        self.assertEqual([m["name"] for m in ms], list(picks) + others[::-1])
         self.assertEqual([m["name"] for m in ms if m["pick"]], list(picks))
         if not shutil.which("node"):
             return

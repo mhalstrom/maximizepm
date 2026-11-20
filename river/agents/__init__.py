@@ -66,16 +66,125 @@ FAMILIES = ("claude", "openai", "multi")
 #                       ("change it in its terminal with /models"), or None,
 #      "platform":      the name that settings, launch profiles (@claude-code) and a session's agent type store, when
 #                       it is not the id (Claude Code: "claude-code"); it must be the id or an alias (#5185),
+#      "tiers":         the tier words of its model names that TIER_STRENGTH does not know, strongest first
+#                       (Antigravity: ["neon", "carbon", "argon", "hydrogen"]); order_models uses them (#6256),
 #    }
-# read_models() -> [model name or CLI id] | None: an optional reader of the models the CLI knows now (Codex:
-# ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
+# read_models() -> [model name or CLI id, or a dict of model facts] | None: an optional reader of the models the CLI
+# knows now (Codex: ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands. A dict
+# gives what a name cannot say (#6256): {"name": the id the CLI takes, "label": the name people read, "efforts": the
+# agent's effort levels for this model ([] for none), "version": "4.1" (its generation), "tier": a number (higher is
+# stronger)}; order_models reads the version and the tier from the name when the dict leaves them out.
 # context_window(model) -> int | None: the tokens of that model's context window, for the context meter of a session
 # (#5224); None when the adapter does not know it.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
                  "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
                  "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str,
-                 "model_restart": bool, "model_note": (str, type(None))}
+                 "model_restart": bool, "model_note": (str, type(None)), "tiers": (list, tuple)}
 DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
+
+# ---------------------------------------------------------------------------------------------------------------
+# One order of models for every agent (#6256, mark 2026-11-19): newest generation first; within a generation, the
+# strongest model first (Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5, then the Claude 4 models). The models of one
+# provider and one maker stay together, in the order the agent first names them. order_models is the one sort; each
+# adapter feeds it its model facts (DESCRIBE['tiers'], the dicts of read_models).
+# ---------------------------------------------------------------------------------------------------------------
+
+# The strength of the tier words that MaximizePM knows, higher is stronger. An adapter adds its own (DESCRIBE['tiers']).
+TIER_STRENGTH = {"fable": 4, "opus": 3, "sonnet": 2, "haiku": 1,
+                 "astra": 4, "sol": 3, "terra": 2, "luna": 1,
+                 "ultra": 4, "pro": 3, "flash": 2, "lite": 1, "mini": 1, "nano": 0}
+
+# The maker of a model, from a word of its name: the words of one maker keep its models together.
+MAKER_WORDS = {"anthropic": "anthropic", "claude": "anthropic", "fable": "anthropic", "opus": "anthropic",
+               "sonnet": "anthropic", "haiku": "anthropic",
+               "openai": "openai", "gpt": "openai", "astra": "openai", "sol": "openai", "terra": "openai",
+               "luna": "openai", "codex": "openai",
+               "google": "google", "gemini": "google", "gemma": "google"}
+
+# Names that are no model but a choice of the agent itself: they come first.
+CHOICE_MODELS = ("auto", "default")
+
+# The effort level at the end of a model id (gemini-4-neon-high, claude-opus-5-5-xhigh, gpt-5.6-sol-max-fast).
+LEVEL_SUFFIX = re.compile(r"-(none|minimal|low|medium|high|xhigh|extra-high|max)(-fast)?$")
+
+_WORD = re.compile(r"[-_./: ()]+")
+_VERSION = re.compile(r"[a-z]?(\d{1,3}(?:\.\d{1,3})*)")
+
+
+def model_words(name):
+    """The words of a model name, lower case: 'amazon-bedrock/anthropic.claude-opus-4-1' -> [..., 'claude', 'opus',
+    '4', '1']."""
+    return [w for w in _WORD.split(str(name or "").lower()) if w]
+
+
+def model_version(name):
+    """The version of a model name as numbers, or (): 'claude-opus-5-5' -> (5, 5), 'gpt-6.1-sol' -> (6, 1),
+    'deepseek-v4.1-flash' -> (4, 1), 'gemini-4-neon' -> (4,). The first run of number words counts; a word such as
+    '120b' or '900k' (a size) is no version, and neither is a date (20250805)."""
+    model = str(name or "").lower().rsplit("/", 1)[-1]
+    out = []
+    for w in re.split(r"[-_ ]+", model):
+        m = _VERSION.fullmatch(w)
+        if m:
+            out += [int(x) for x in m.group(1).split(".")]
+        elif out:
+            break
+    return tuple(out)
+
+
+def model_tier(name, tiers=()):
+    """The strength of a model's tier word: the adapter's own words (tiers, strongest first) first, else
+    TIER_STRENGTH; 0 when the name has no tier word."""
+    words = model_words(name)
+    own = [t.lower() for t in tiers or ()]
+    for w in words:
+        if w in own:
+            return len(own) - own.index(w)
+    return max((TIER_STRENGTH[w] for w in words if w in TIER_STRENGTH), default=0)
+
+
+def model_maker(name):
+    """The maker of a model ('anthropic', 'openai', 'google'), else the first word of its model part ('deepseek')."""
+    words = model_words(str(name or "").rsplit("/", 1)[-1])
+    return next((MAKER_WORDS[w] for w in words if w in MAKER_WORDS), words[0] if words else "")
+
+
+def _version_of(m):
+    v = m.get("version")
+    if v is None:
+        return model_version(m.get("name")) or model_version(m.get("id"))
+    return tuple(int(x) for x in re.findall(r"\d+", str(v)))
+
+
+_ORDER_MEMO = {}
+
+
+def order_models(models, tiers=()):
+    """The models in the one order of #6256, as a new list. models: model names or dicts with a "name" (and the facts
+    "id", "version", "tier" of read_models). The agent's own choices (auto) first; then each provider (the part before
+    a '/') and each maker in the order the list first names them; within one maker the newest generation (the first
+    number of the version; a name with no version is the current model), then the strongest tier, then the newer
+    version, then the shorter name. Each list is sorted once (OpenCode's list has hundreds)."""
+    rows = [m if isinstance(m, dict) else {"name": m} for m in models or ()]
+    memo_key = (tuple((r.get("name"), r.get("id"), r.get("version"), r.get("tier")) for r in rows), tuple(tiers or ()))
+    order = _ORDER_MEMO.get(memo_key)
+    if order is None:
+        providers, makers, keys = {}, {}, []
+        for i, r in enumerate(rows):
+            name = str(r.get("name") or "")
+            provider = name.split("/", 1)[0] if "/" in name else ""
+            maker = model_maker(name) or model_maker(r.get("id"))
+            p = providers.setdefault(provider, len(providers))
+            g = makers.setdefault((provider, maker), len(makers))
+            v = _version_of(r)
+            tier = r["tier"] if r.get("tier") is not None else model_tier(name, tiers) or model_tier(r.get("id"), tiers)
+            keys.append((name.lower() not in CHOICE_MODELS, p, g, -(v[0] if v else 10 ** 6), -tier,
+                         tuple(-x for x in (v + (0,) * 4)[:4]), len(name), i))
+        order = [k[-1] for k in sorted(keys)]
+        if len(_ORDER_MEMO) > 64:
+            _ORDER_MEMO.clear()
+        _ORDER_MEMO[memo_key] = order
+    return [models[i] for i in order]
 
 # 2. Settings. SETTINGS = [{
 #      "key":     the option's name; its config key is DESCRIBE["prefix"] + key (claude_permission_mode),
@@ -679,16 +788,39 @@ class Adapter:
         (@<agent> key=value in launch_agents), the Setup section and the launch dialog."""
         return {s["key"]: s for s in self.setting_specs() if s["config"]}
 
-    def effort_choices(self):
-        """The effort levels the launch dialog and the Settings dialog offer, as MaximizePM names them: each level of
-        MaximizePM whose name for the agent (EFFORT['map'], else the same name) is one of EFFORT['levels'], or every
-        level when the levels come from the CLI per model; [] when the agent has no effort."""
+    def effort_choices(self, levels=None):
+        """The effort levels the launch dialog and the Settings dialog offer, as MaximizePM names them, low to high:
+        each level of the agent (levels, else EFFORT['levels']) once (#6256). A MaximizePM level that EFFORT['map']
+        turns into another level's name (Aider: xhigh and max are high) is no second choice: the level of the same
+        name stands for it, else the highest level that maps to it. Every MaximizePM level when the levels come from
+        the CLI per model and none is given; [] when the agent has no effort."""
         if not self.effort:
             return []
-        levels = self.effort.get("levels")
+        levels = self.effort.get("levels") if levels is None else levels
         if not levels:
             return list(MAXPM_EFFORTS)
-        return [lv for lv in MAXPM_EFFORTS if self.effort_name(lv) in levels]
+        pick = {}
+        for lv in MAXPM_EFFORTS:
+            name = self.effort_name(lv)
+            if name in levels and (lv == name or pick.get(name) != name):
+                pick[name] = lv
+        return [lv for lv in MAXPM_EFFORTS if lv in pick.values()]
+
+    def model_efforts(self, model_id, levels=None):
+        """The effort levels (MaximizePM names, low to high) that model model_id takes (#6256): from levels (the
+        agent's names, a model dict of read_models), else read_effort_levels(model_id); None when neither knows the
+        model (the agent's levels stand), [] when the model takes no effort."""
+        if not self.effort:
+            return []
+        if levels is None:
+            f = self._fn("read_effort_levels")
+            try:
+                levels = f(model_id) if f and model_id else None
+            except Exception:  # noqa: BLE001 - a reader of a CLI's files: the agent's levels, not an error page
+                levels = None
+        if levels is None:
+            return None
+        return self.effort_choices(list(levels)) if levels else []
 
     def session_specs(self):
         """The Settings dialog of a running session: the model, the effort, then each setting with session True.

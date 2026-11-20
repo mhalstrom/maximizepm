@@ -1104,7 +1104,8 @@ class SettingsAndEffort(Env):
         opt = next(o for o in core.launch_options(self.c) if o["label"] == "Xyz")
         self.assertEqual(opt["platform"], "xyz")
         self.assertEqual([m["name"] for m in opt["models"]], ["acme/small", "acme/large"])
-        self.assertEqual(opt["efforts"], ["low", "high", "max"])  # the levels whose Xyz name is one of its levels
+        # Each Xyz level once (#6256): high and max are both Xyz's deep, so max, the higher, stands for it.
+        self.assertEqual(opt["efforts"], ["low", "max"])
         self.assertEqual(agents.get("pi").effort_choices(), list(agents.MAXPM_EFFORTS))  # map: only max -> xhigh
         self.assertTrue(opt["takes_effort"])
         self.assertEqual([(o["name"], o["label"], o["value"], o["fixed"]) for o in opt["options"]],
@@ -1134,7 +1135,7 @@ class SettingsAndEffort(Env):
         got = {s["key"]: s for s in sessions.session_settings(self.c, "x1")["settings"]}
         self.assertEqual(list(got), ["model", "effort", "mode", "yolo"])
         self.assertEqual((got["model"]["value"], got["model"]["live"]), ("acme/large", True))
-        self.assertEqual((got["effort"]["label"], got["effort"]["choices"]), ("Thinking", ["low", "high", "max"]))
+        self.assertEqual((got["effort"]["label"], got["effort"]["choices"]), ("Thinking", ["low", "max"]))
         self.assertEqual((got["mode"]["value"], got["mode"]["source"], got["mode"]["default_key"]),
                          ("fast", "command line", "xyz_mode"))
         self.assertEqual((got["yolo"]["value"], got["yolo"]["default_key"]), ("on", None))

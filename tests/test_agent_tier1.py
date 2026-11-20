@@ -4,7 +4,9 @@ is in EXCEPTIONS, with its fix item or the reason it cannot have it, and the sec
 that no longer holds fails, so the list stays true. The features that only a real run proves are the columns of the
 section's end-to-end table (#6253)."""
 
+import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -94,6 +96,30 @@ def _effort(a):
     return None
 
 
+_DB = {}
+
+
+def _model_order(a):
+    """#6256: the launch dialog's model list is in the one order (newest and strongest first), each model once, and
+    its effort list has only the levels the agent and the model take, low to high."""
+    from tests.test_model_order import order_problem
+    if "c" not in _DB:
+        d = tempfile.TemporaryDirectory()
+        _DB.update(dir=d, c=core.connect(os.path.join(d.name, "t.db")))
+    ms = core.platform_models(_DB["c"], core._platform_of(a))
+    if not ms:
+        return "it offers no model"
+    problem = order_problem(ms, a.describe.get("tiers") or ())
+    if problem:
+        return f"the model list breaks the order: {problem}"
+    if len({m["name"] for m in ms}) != len(ms):
+        return "a model shows twice in the model list"
+    ch = a.effort_choices()
+    if len({a.effort_name(lv) for lv in ch}) != len(ch):
+        return "an effort level of the agent shows twice in the effort list"
+    return None
+
+
 def _usage(a):
     if not a.has("context_window") or not (a.has("chat_usage") or a.has("chat_requests")):
         return "needs context_window() and chat_usage() or chat_requests() for the Usage panel and maxpm usage"
@@ -144,7 +170,7 @@ def _secrets(a):
 FEATURES = {
     "parts": _parts, "launch": _launch, "resume": _resume, "identity": _identity, "chat": _chat,
     "states": _states, "ask_card": _ask, "interrupt": _interrupt, "native_message": _native,
-    "commands": _commands, "effort": _effort, "usage": _usage, "setup_files": _setup_files,
+    "commands": _commands, "effort": _effort, "model_order": _model_order, "usage": _usage, "setup_files": _setup_files,
     "setup_main": _setup_main, "host_signin": _host_signin, "roles": _roles, "jobs": _jobs,
     "shell_guard": _shell_guard, "secrets": _secrets,
 }
