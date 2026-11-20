@@ -6998,7 +6998,14 @@ class Kill(Base):
         """#5060: the manager ran maxpm --as <agent> ... in its session, and the manager's pid went into that agent's
         row: who showed a dead expert as active, its resume refused, and tmux_adopt ended the manager."""
         from unittest import mock
-        from river import cli
+        from river import cli, peer
+        # 500, 600 and 700 are made-up pids. On a CI runner a real process can have one of them: set_process then
+        # records its start time, and #5823 keeps a recorded process that still runs, so ex could not move from 600
+        # to 700 (macOS runner of release v1.3.0, run 43841544534, #6487). Here no process has these pids.
+        real_info = peer.info
+        made_up = mock.patch.object(peer, "info", lambda p: None if p in (500, 600, 700) else real_info(p))
+        made_up.start()
+        self.addCleanup(made_up.stop)
         for n in ("mgr", "ex", "old"):
             core.register(self.c, n)
         with core.tx(self.c):
