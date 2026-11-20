@@ -2759,7 +2759,8 @@ def build_parser(only=None):
                        "starts the agent in its own runner; its state and proof come back (#6152)")
     x.add_argument("pipeline")
     x.add_argument("--cli", default="claude", help="the agent CLI of the job (default: claude); a wrong one lists them")
-    x.add_argument("--secret", help="the repository secret of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--secret", help="the repository secret of the model key (ANTHROPIC_API_KEY, CODEX_API_KEY or "
+                   "GEMINI_API_KEY)")
     x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
     x.add_argument("--max-minutes", type=int, default=30, help="GitHub stops the job after this")
     x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
@@ -2770,7 +2771,8 @@ def build_parser(only=None):
                        "fails, GitLab starts the agent in its own runner; its state and proof come back (#6172)")
     x.add_argument("pipeline")
     x.add_argument("--cli", default="claude", help="the agent CLI of the job (default: claude); a wrong one lists them")
-    x.add_argument("--secret", help="the CI/CD variable of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--secret", help="the CI/CD variable of the model key (ANTHROPIC_API_KEY, CODEX_API_KEY or "
+                   "GEMINI_API_KEY)")
     x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
     x.add_argument("--max-minutes", type=int, default=30, help="GitLab stops the job after this")
     x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
@@ -8724,8 +8726,9 @@ def render_runner(a, res):
         for line in res["rules"]:
             print(f"  - rule {line}")
         print("Next, a person does these on Pulumi's page, once:")
+        from .pipeline import agent_job
         print(f"  1. Puts the model key in the ESC environment {res['env']}, as an environment variable "
-              f"(environmentVariables: {'CODEX_API_KEY' if res['cli'] == 'codex' else 'ANTHROPIC_API_KEY'}), and "
+              f"(environmentVariables: {agent_job.SECRET[res['cli']]}), and "
               f"MAXPM_GIT_TOKEN, a token that may push branches (and open pull requests on GitHub), when the fix "
               f"should come back as a branch; without it, it comes back as a patch.")
         print(f"  2. Sets the deployment settings of stack {res['stack']} (Settings > Deploy): the source repository "

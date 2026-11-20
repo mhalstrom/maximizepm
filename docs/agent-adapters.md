@@ -370,7 +370,6 @@ or an exception. The end-to-end table under it proves what only a real run prove
 Exceptions (each also in `EXCEPTIONS` of the test):
 
 - Codex, `shell_guard`: #6254. MaximizePM installs no hook in Codex sessions yet; its state comes from the screen.
-- Antigravity CLI, `jobs`: #6249 adds agy to the runner and CI jobs.
 - Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
   session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
   pane, which works at its prompt.
