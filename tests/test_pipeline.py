@@ -1720,13 +1720,16 @@ class DefaultPipelines(Base):
                                                          f"5xx at {n}" if bad else "fine"))
         w = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
                  if s["name"] == "watch")["last_run"]
-        self.assertEqual(w["state"], "failed")
+        # #6505: a check that failed in the watch never fails the release: the watch runs to its end (24h), and the
+        # failure is a note.
+        self.assertEqual(w["state"], "running")
         rows = w["step_list"]
         self.assertEqual([(s["name"], s["state"], s["runs"], s["failed"]) for s in rows],
                          [("web-prod/errors", "passed", 100, 2), ("web-prod/shell", "passed", 100, 0),
                           ("web-prod/up", "passed", 100, 0)])  # the checks that failed first
         self.assertEqual([f["summary"] for f in rows[0]["fails"]], ["5xx at 41", "5xx at 40"])  # newest first
-        self.assertEqual(w["errors"], "2 failed check run(s): web-prod/errors (passes now)")
+        self.assertEqual(w["errors"], "A note, not a failure of the release: 2 failed check run(s): web-prod/errors "
+                                      "(passes now); a check in fault has its own fix item")
         runs = self.targets.watch_runs(self.c, ids["errors"], w["started_at"], w["watch_end"])
         self.assertEqual((runs["check"], len(runs["runs"])), ("web-prod/errors", 100))
         self.assertEqual(runs["runs"][58]["state"], "failed")  # newest first: run 41 is the 59th
@@ -1743,6 +1746,12 @@ class DefaultPipelines(Base):
                        "'critical')", (ids["errors"], core.iso(core.now()), core.iso(core.now())))
         w = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
                  if s["name"] == "watch")["last_run"]
+        self.assertIn("web-prod/errors (fails now)", w["errors"])
+        # After its end the watch passed, with the note still there.
+        self.c.execute("UPDATE items SET closed_at=? WHERE id=?", (core.iso(start - core.timedelta(hours=23)), dep))
+        w = next(s for s in self.targets.default_pipeline(self.c, "web-prod")["stages"]
+                 if s["name"] == "watch")["last_run"]
+        self.assertEqual(w["state"], "passed")
         self.assertIn("web-prod/errors (fails now)", w["errors"])
 
     def hook_run(self, event, command, dep):

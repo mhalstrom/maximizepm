@@ -163,9 +163,10 @@ def _watch(conn, t, dep, next_at, checks):
                       "fails": [{"at": r["started_at"], "summary": r["summary"]} for r in fails[-WATCH_FAILS:][::-1]]})
     steps.sort(key=lambda s: (not s["failed"], s["name"]))  # the checks that failed first
     bad = [s for s in steps if s["failed"]]
-    if bad:
-        state = "failed"
-    elif core.now() < end:
+    # #6505 (mark 2026-11-20: 'these types of issues should not block deployment'): a check that fails in the watch
+    # never fails the release. The watch runs until its end and then passed; each failed check is a note on the
+    # Deploy page (errors) and its own fault item (ops_faults), not a failed stage, so no stage-failed rule acts.
+    if core.now() < end:
         state = "running"
     else:
         state = "passed" if rows else "skipped"
@@ -176,9 +177,9 @@ def _watch(conn, t, dep, next_at, checks):
             f"IN ({','.join('?' * len(bad))}) AND ended_at IS NOT NULL GROUP BY check_id)", [s["check"] for s in bad])}
         for s in bad:
             s["now"] = _check_state(now.get(s["check"]))
-        errors = f"{sum(s['failed'] for s in bad)} failed check run(s): " + ", ".join(
-            s["name"] + (" (passes now)" if s["now"] == "passed" else " (fails now)" if s["now"] == "failed" else "")
-            for s in bad)
+        errors = f"A note, not a failure of the release: {sum(s['failed'] for s in bad)} failed check run(s): " + \
+            ", ".join(s["name"] + (" (passes now)" if s["now"] == "passed" else " (fails now)" if s["now"] == "failed"
+                                   else "") for s in bad) + "; a check in fault has its own fix item"
     out = _run("watch", state, dep["closed_at"], core.iso(end) if state != "running" else None, steps=steps,
                errors=errors)
     out["watch_end"] = core.iso(end)  # the end of the window that watch_runs reads

@@ -6299,9 +6299,11 @@ OPS_PROBES = {
              "probe reports that)",
     "notices": "a notice channel whose newest attempt failed (a subject for each channel)",
     "page-speed": "the p90 of the last 50 page builds of maxpm serve (GET /api/state-timing): a warning over 100 ms, "
-                  "critical over 200 ms",
+                  "critical over 200 ms. A command to run by hand: no check runs it (#6505); the budget is the local "
+                  "test tests/test_page_speed.py",
 }
-PAGE_BUILD_WARN, PAGE_BUILD_CRIT, PAGE_BUILDS = 100, 200, 50  # the page-speed probe (#5638; policy p147)
+# The page-speed probe (#5638; policy p147) and the budget of tests/test_page_speed.py (#6505).
+PAGE_BUILD_WARN, PAGE_BUILD_CRIT, PAGE_BUILDS = 100, 200, 50
 
 
 def _item_loops(conn, where, setting_key):
@@ -6785,6 +6787,7 @@ def _ops_verify(conn, run, watch, state):
             out.append({"item": x["id"], "verified": True})
             continue
         reopen(conn, x["id"], actor="maxpm")
+        _ops_leave_releases(conn, x["id"], f"its check {c['key']} failed after release #{watch['deploy']}")
         tail = "\n".join((last["output"] or "").splitlines()[-10:]) if last else ""
         with tx(conn):
             _event(conn, x["id"], "maxpm", f"verification failed, open again: {what}; last run "
@@ -7903,6 +7906,7 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
     within = parse_duration(setting(conn, "ops_reopen_within"))
     if old and old["closed_at"] and at - parse_iso(old["closed_at"]) < within:
         reopen(conn, old["id"], actor="maxpm")
+        _ops_leave_releases(conn, old["id"], f"its check {key} failed again")
         _ops_note(conn, old["id"], f"ops fault again at {show_time(iso(at))}: {summary}", at, force=True)
         with tx(conn):
             _event(conn, old["id"], "maxpm", f"ops kind: {kind['kind']} (rule {kind['rule']}: {kind['why']})")
@@ -7962,24 +7966,46 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
     return {"key": key, "item": r["id"], "action": "opened"}
 
 
+def _ops_leave_releases(conn, item_id, why):
+    """#6505 (mark 2026-11-20: 'these types of issues should not block deployment'): an item that a check opened again
+    (a fault item, or a fix that failed its check after its release) leaves each open release that ships it, so no
+    check holds a release. Its next close ships it again (done --ship). Returns the ids of the releases it left."""
+    with tx(conn):
+        rels = [r["id"] for r in conn.execute(
+            f"SELECT i.id FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy' AND "
+            f"i.status IN {OPEN_STATES} ORDER BY i.id", (item_id,))]
+        for rid in rels:
+            conn.execute("DELETE FROM deps WHERE item_id=? AND blocked_by=?", (rid, item_id))
+            _event(conn, rid, "maxpm", f"#{item_id} left this release: {why}; a check never holds a release")
+            _event(conn, item_id, "maxpm", f"left release #{rid}: {why}; it ships again when it is done (--ship)")
+    return rels
+
+
 def _ops_rollback_step(conn, fault_id, c, release_id, summary):
     """A release regression (#5515): the fault item names the last good release and the rollback command of the
     project's system description (infra.rollback) at once, and a step for a person, which the manager sees first,
     starts the rollback; the fault item waits on it, then the code fix follows through normal review. No session
-    runs the rollback (on production only a person sets its command). Returns the person's item."""
+    runs the rollback (on production only a person sets its command). Returns the person's item, or None: a project
+    with no rollback command gets no rollback step (#6505, mark 2026-11-20: a check never holds or rolls back a
+    release; for maxpm, a release is a version on GitHub), and its fault goes to an agent as a fix."""
     rel = _item(conn, release_id)
+    project = _ops_project(conn, c)
+    cmd = (_ops_system_part(conn, project, "infra").get("rollback") or "").strip()
+    if not cmd:
+        with tx(conn):
+            _event(conn, fault_id, "maxpm", f"no rollback step: the fault came right after release #{release_id} to "
+                                            f"{rel['target']}, and the project has no rollback command "
+                                            f"(infra.rollback); the fix goes out with a later release")
+        return None
     good = conn.execute("SELECT id, closed_at, cut_rev FROM items WHERE kind='deploy' AND target=? AND status='done' AND "
                         "closed_at<? ORDER BY closed_at DESC, id DESC LIMIT 1", (rel["target"], rel["closed_at"])
                         ).fetchone()
-    project = _ops_project(conn, c)
-    cmd = (_ops_system_part(conn, project, "infra").get("rollback") or "").strip()
     good_text = (f"release #{good['id']} (done {show_time(good['closed_at'])}"
                  + (f", commit {good['cut_rev'][:12]}" if good["cut_rev"] else "") + ")") if good else \
         "none: this is the first release of the target"
     line = (f"ROLLBACK FIRST: the fault came right after release #{release_id} to {rel['target']}. The last good release: "
             f"{good_text}. The rollback command (the system description of {project}, infra.rollback): "
-            + (cmd if cmd else "none set; a person sets it: maxpm ops system edit " + project
-               + " --set infra.rollback=\"<command>\"") + ". A person or the manager starts the rollback (the "
+            f"{cmd}. A person or the manager starts the rollback (the "
             f"item this one waits on); then fix the code through normal review, with a test that fails before the fix.\n")
     with tx(conn):
         it = _item(conn, fault_id)
@@ -7991,8 +8017,7 @@ def _ops_rollback_step(conn, fault_id, c, release_id, summary):
                  short=f"Roll back {rel['target']}"[:60],
                  context=f"The check {c['scope']}/{c['name']} fails since release #{release_id} to {rel['target']}: "
                          f"{summary}. The last good release: {good_text}. The rollback command: "
-                         + (cmd if cmd else "none set (set it: maxpm ops system edit " + project
-                            + " --set infra.rollback=\"<command>\")") + f". Run it, check that {c['scope']}/{c['name']} "
+                         f"{cmd}. Run it, check that {c['scope']}/{c['name']} "
                          f"passes (maxpm ops run {c['scope']} {c['name']}), then mark this item done: the fault "
                          f"#{fault_id} then goes to an agent, which fixes the code through normal review. If a rollback "
                          f"is not wanted, drop this item with the reason.")

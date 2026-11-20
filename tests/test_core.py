@@ -12005,10 +12005,10 @@ class OpsSelf(Base):
         with mock.patch.object(cli, "SETUP_ASK", ask), contextlib.redirect_stdout(out):
             cli.run(["--as", "mark", "ops", "setup"])
         text = out.getvalue()
-        self.assertIn("  0. MaximizePM itself: 10 checks", text)
-        self.assertIn("added 10 checks to the project maximizepm", text)
+        self.assertIn("  0. MaximizePM itself: 9 checks", text)
+        self.assertIn("added 9 checks to the project maximizepm", text)
         self.assertIn("What should MaximizePM watch in maximizepm?", text)  # then more checks, as for any project
-        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 10)
+        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 9)
 
 
 class EditKeepsOldText(Base):
@@ -12709,6 +12709,29 @@ class Ops(Base):
             self.run_at("site", "job", later, bad); r = self.run_at("site", "job", later + timedelta(minutes=5), bad)
         self.assertEqual(r["items"][0]["action"], "opened")
         self.assertEqual(len(self.ops_items()), 2)
+
+    def test_a_fault_item_that_opens_again_leaves_the_open_release(self):
+        # #6505: the page-speed fault #6342 was shipped into the open release #6211 of maximizepm-github; a fault
+        # again would open it again, and the release would wait on it. A check never holds a release.
+        core.target_add(self.c, "web", "rsync, then restart")
+        core.project_target(self.c, "site", "web")
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1, "recover_after": 1},
+                     actor="boss")
+        t = core.now()
+        bad = self.proc(2, "JOB CRITICAL - no run for 2h\n")
+        self.run_at("site", "job", t, bad)
+        (it,) = self.ops_items()
+        core.done(self.c, it["id"], actor="boss", output="the disk was full")
+        dep = core.ship(self.c, it["id"], "boss")["id"]
+        waits = lambda: [r[0] for r in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?", (dep,))]
+        self.assertIn(it["id"], waits())
+        self.run_at("site", "job", t + timedelta(minutes=5), self.proc(0, "JOB OK"))
+        r = self.run_at("site", "job", t + timedelta(minutes=10), bad)
+        self.assertEqual(r["items"][0]["action"], "reopened")
+        self.assertNotIn(it["id"], waits())
+        self.assertEqual(core.item_show(self.c, dep)["status"], "open")
+        changes = [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (dep,))]
+        self.assertTrue(any(f"#{it['id']} left this release" in x for x in changes), changes)
 
     def test_the_briefing_of_a_fault_item_shows_the_check_and_its_commands(self):
         core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1,
@@ -14030,6 +14053,27 @@ class OpsKindRelease(ReleaseBase):
         self.assertEqual((p["doer"], p["priority"]), ("human", 0))
         self.assertTrue(p["title"].startswith(f"Roll back web to release #{self.deploy}: HTTP 500"), p["title"])
         self.assertIn("deploy.sh --to <rev>", p["context"])
+
+    def test_a_release_regression_with_no_rollback_command_goes_to_a_fix(self):
+        # #6505 (mark 2026-11-20): a check never rolls back a release. With no rollback command (maxpm: a release is
+        # a version on GitHub), no person's rollback step: the fault item is the fix, and nothing waits on a person.
+        first = self.release()
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "fail_after": 1}, actor="dev")
+        w = self.add("site", "new page")
+        core.claim(self.c, w, "dev")
+        core.done(self.c, w, "def", "dev", ship_it=True)
+        second = self.c.execute("SELECT id FROM items WHERE kind='deploy' AND status='open'").fetchone()["id"]
+        self.run_at("home", first + timedelta(minutes=1), 200)
+        core.claim(self.c, second, "ops")
+        with mock.patch.object(core, "now", lambda: first + timedelta(minutes=30)):
+            core.done(self.c, second, "v2 out", "ops")
+        r = self.run_at("home", first + timedelta(minutes=35), 500)
+        [x] = [i for i in r["items"] if i["key"] == "ops:site:home"]
+        it = core.item_show(self.c, x["item"])
+        self.assertEqual(x["kind"], "release-regression")
+        self.assertEqual(it["waits_on"], [])
+        self.assertNotIn("ROLLBACK FIRST", it["context"])
+        self.assertFalse(self.c.execute("SELECT 1 FROM items WHERE title LIKE 'Roll back %'").fetchone())
 
 
 class OpsOutside(Base):
