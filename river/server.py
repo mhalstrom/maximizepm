@@ -812,10 +812,12 @@ def _open_terminal(t, env, runner=None, conn=None):
     # The agent uses the same queue as this page: a page on a MAXPM_DB queue starts agents on it too.
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
-    # A worktree that MaximizePM made for this session is trusted before the agent starts (#6339); a folder that
-    # MaximizePM did not make has no t["workspace"] and keeps its trust prompt.
+    # A worktree that MaximizePM made for this session is trusted before the agent starts (#6339). Codex also trusts a
+    # project's linked folder (maxpm project path), for this start only: its -c flag writes nothing to ~/.codex
+    # (mark 2026-11-20, #6432). Another folder, and the other CLIs in a project folder, keep their trust prompt.
     platform = t.get("platform") or core._exe_platform(t.get("command") or "")
-    if t.get("workspace") and platform:
+    if platform and (t.get("workspace") or (platform == "codex" and conn is not None and t.get("path")
+                                            and core.projects_for_dir(conn, t["path"]))):
         ad = core._adapters().find(platform)
         if ad is not None:
             t["command"] = ad.trust_workspace(t["path"], t["command"], env)

@@ -1241,13 +1241,25 @@ class LaunchAgent(unittest.TestCase):
         )
 
         with mock.patch.dict(os.environ, {"COPILOT_HOME": str(chome), "GROK_HOME": str(ghome)}):
-            # Shared folder (not made by maxpm): none of the four CLIs gets trusted.
+            # Shared folder (not made by maxpm): Codex trusts the project's linked folder for this start only
+            # (#6432, its -c flag writes no file); the other three CLIs keep their trust prompt.
             for label in ("Antigravity", "Codex", "Copilot", "Grok"):
                 sent = []
                 t = server.dispatch_item(self.c, add(f"shared {label}"), agent=label, runner=sent.append)
                 self.assertNotIn("trustedWorkspaces", t["command"])
-                self.assertNotIn("trust_level", t["command"])
+                if label == "Codex":
+                    self.assertIn(f'projects={{{json.dumps(root)}={{trust_level="trusted"}}}}',
+                                  shlex.split(t["command"]))
+                    self.assertTrue(sent[-1].endswith(t["command"]))
+                else:
+                    self.assertNotIn("trust_level", t["command"])
                 core.unregister(self.c, t["session_name"])
+            # A folder that no project links keeps Codex's trust prompt.
+            other = os.path.join(os.path.realpath(self.dir.name), "elsewhere")
+            os.makedirs(other)
+            spec = {"path": other, "command": "codex hi", "platform": "codex"}
+            server._open_terminal(spec, {}, [].append, self.c)
+            self.assertEqual(spec["command"], "codex hi")
             self.assertEqual(json.loads((chome / "config.json").read_text().split("\n", 1)[1])["trustedFolders"],
                              ["/keep"])
             self.assertNotIn(root, (ghome / "trusted_folders.toml").read_text())
@@ -1672,8 +1684,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertTrue(sent[0].startswith(f"cd {shlex.quote(t['path'])} && "))  # the folder quoted for the pane's shell
         core.config_set(self.c, "launch_agents", 'Claude Code=claude go; Codex=codex "run maxpm go and follow it"')
         t = server.launch_agent(self.c, runner=sent.append, agent="Codex")
-        self.assertEqual((t["agent"], t["command"]), ("Codex", 'codex "run maxpm go and follow it"'))
-        self.assertIn('codex "run maxpm go and follow it"', sent[-1])
+        # Codex trusts the project's linked folder for this start (#6432); the hand-written prompt stays.
+        self.assertEqual(t["agent"], "Codex")
+        words = shlex.split(t["command"])
+        self.assertEqual((words[0], words[1], words[-1]), ("codex", "-c", "run maxpm go and follow it"))
+        self.assertIn(json.dumps(os.path.realpath(folder)) + '={trust_level="trusted"}', words[2])
+        self.assertTrue(sent[-1].endswith(t["command"]))
         self.assertEqual(server.launch_agent(self.c, runner=sent.append)["agent"], "Claude Code")  # first is default
         # The entries first, in their order, then each other registered agent (#5234).
         self.assertEqual(core.state(self.c)["launch_agents"][:2], ["Claude Code", "Codex"])

@@ -1671,4 +1671,6 @@ class CodexWorktreeTrust(unittest.TestCase):
         # The main folder of a repository and a folder outside one: only the folder itself.
         self.assertIsNone(codex._trust_root(repo))
         self.assertIsNone(codex._trust_root(base))
+        # A project linked to a folder inside a repository's main folder (#6432): Codex trusts the repository root.
+        self.assertEqual(codex._trust_root(os.path.join(repo, "app")), repo)
         self.assertEqual(shlex.split(codex.trust_workspace(repo, "codex hi")).count("-c"), 1)

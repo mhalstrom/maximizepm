@@ -177,14 +177,15 @@ def resume_command(session_ref, model, effort, settings, name=None):
 def _trust_root(folder):
     """The folder that Codex trusts for a git worktree: the main worktree of its repository (the folder that holds the
     common .git directory). Codex reads the worktree's .git file the same way and asks 'Trusting will apply to the
-    repository root' when only the worktree is trusted (#6415). None outside a worktree, for a bare repository, and on
-    an error."""
+    repository root' when only the worktree is trusted (#6415). For a folder inside a repository's main folder, that
+    main folder (a project's linked folder can be a part of a repository, #6432). None for the main folder itself,
+    outside a repository, for a bare repository, and on an error."""
     try:
         d = Path(folder)
         for p in (d, *d.parents):
             dot = p / ".git"
             if dot.is_dir():
-                return None  # the main worktree itself: its own path is the root
+                return None if p == d else str(p)  # the main worktree itself: its own path is the root
             if dot.is_file():
                 gd = Path(dot.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
                 gd = gd if gd.is_absolute() else (p / gd)
@@ -198,8 +199,9 @@ def _trust_root(folder):
 
 
 def trust_workspace(folder, command, env=None):
-    """Pass -c projects={"<folder>"={trust_level="trusted"}, ...} for a worktree that MaximizePM made (#6339), so Codex
-    starts there without its folder trust prompt and without writing to ~/.codex/config.toml. The repository's main
+    """Pass -c projects={"<folder>"={trust_level="trusted"}, ...} for a worktree that MaximizePM made (#6339), or a
+    project's linked folder (#6432), so Codex starts there without its folder trust prompt and without writing to
+    ~/.codex/config.toml. The repository's main
     folder is in the same table: Codex 0.159 applies trust to the repository root of a worktree (#6415).
     One inline table, not the dotted form -c projects."<folder>".trust_level="trusted": codex-cli 0.171.0 ignores the
     dotted form for its trust question and asks 'Trust this folder?'; the inline table starts with no question, in a
