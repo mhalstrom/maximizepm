@@ -65,8 +65,11 @@ def serve_requests(db, proto_in, proto_out):
             os.chdir(home)
         except OSError:
             pass
-        proto_out.write(json.dumps(ans) + "\n")
-        proto_out.flush()
+        try:
+            proto_out.write(json.dumps(ans) + "\n")
+            proto_out.flush()
+        except BrokenPipeError:
+            break
         gc.collect()
 
 

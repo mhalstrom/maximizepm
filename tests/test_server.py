@@ -5477,6 +5477,29 @@ class ServeReload(unittest.TestCase):
                 server.restart_now()
             self.assertEqual(ran, [(sys.executable, [sys.executable, "/x/bin/maxpm", "serve", "--port", "8765"])])
 
+    def test_drain_runners_waits_for_inflight_commands_and_rejects_new_ones(self):
+        # #6475: restart_now drains in-flight /api/run commands before exec and refuses new ones with restarting.
+        import threading
+        self.addCleanup(lambda: server._RUN_STATE.update(restarting=False, inflight=0))
+        self.assertTrue(server._enter_run())
+        done = threading.Event()
+
+        def drain():
+            server.drain_runners(timeout=2.0)
+            done.set()
+        t = threading.Thread(target=drain)
+        t.start()
+        deadline = time.monotonic() + 1.0
+        while not server._RUN_STATE["restarting"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(server._RUN_STATE["restarting"])
+        self.assertFalse(server._enter_run())
+        self.assertEqual(server.run_command({}), {"busy": True, "restarting": True})
+        self.assertFalse(done.is_set())
+        server._leave_run()
+        t.join(timeout=2.0)
+        self.assertTrue(done.is_set())
+
     def test_only_the_loop_of_river_serve_starts_again(self):
         import threading
         from river import notify

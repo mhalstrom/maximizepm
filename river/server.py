@@ -5828,8 +5828,13 @@ def restart_now(why="code changed"):
     """Replace this process with a new maxpm serve on the same port, which runs the code on disk. Python
     sockets are not inherited across exec, so the port is free for the new process."""
     print(f"{why}; restarting", flush=True)
+    drain_runners()  # finish running /api/run commands before exec (#6475)
     stop_loop_process()  # the new serve starts its own (#5569)
-    os.execv(sys.executable, _restart_argv())
+    try:
+        os.execv(sys.executable, _restart_argv())
+    finally:
+        with _RUN_COND:
+            _RUN_STATE["restarting"] = False
 
 
 def _restart_soon(why="updated"):
@@ -5850,10 +5855,15 @@ def _restart_into(root):
         time.sleep(0.8)
         _restart_wait("updated")
         print(f"updated; restarting from {root}", flush=True)
+        drain_runners()
         stop_loop_process()
         os.chdir(root)
-        os.execv(sys.executable, [sys.executable, str(Path(root) / "bin" / "maxpm")]
-                 + [a for a in sys.argv[1:] if a != "--open"])
+        try:
+            os.execv(sys.executable, [sys.executable, str(Path(root) / "bin" / "maxpm")]
+                     + [a for a in sys.argv[1:] if a != "--open"])
+        finally:
+            with _RUN_COND:
+                _RUN_STATE["restarting"] = False
     threading.Thread(target=go, daemon=True).start()
 
 
@@ -7337,14 +7347,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": str(e)})
         finally:
             conn.close()
-        ans = run_command(req)
-        if ans.get("busy"):
-            return self._send(503, {"error": "every runner is busy"})
-        if ans.get("refused"):
-            return self._send(409, {"error": ans["refused"]})
-        if ans.get("error"):
-            return self._send(500, ans)
-        return self._send(200, ans)
+        if not _enter_run():
+            return self._send(503, {"error": "restarting"})
+        try:
+            ans = run_command(req)
+            if ans.get("busy"):
+                return self._send(503, {"error": "restarting" if ans.get("restarting") else "every runner is busy"})
+            if ans.get("refused"):
+                return self._send(409, {"error": ans["refused"]})
+            if ans.get("error"):
+                return self._send(500, ans)
+            return self._send(200, ans)
+        finally:
+            _leave_run()
 
     def do_DELETE(self):
         if self.path.split("?")[0] in MCP_PATHS:
@@ -7382,17 +7397,22 @@ class Handler(BaseHTTPRequestHandler):
                     from . import peer
                     pid = peer.holder(self.client_address[1], srv[1], [req.get("pid"), req.get("ppid")])
                     req["chain"] = peer.chain(pid) if pid else None
+            if not _enter_run():
+                return self._send(503, {"error": "restarting"})
             try:
-                ans = run_command(req)
+                try:
+                    ans = run_command(req)
+                finally:
+                    CALLERS.pop(token, None)
+                if ans.get("busy"):
+                    return self._send(503, {"error": "restarting" if ans.get("restarting") else "every runner is busy"})
+                if ans.get("refused"):
+                    return self._send(409, {"error": ans["refused"]})
+                if ans.get("error"):
+                    return self._send(500, ans)
+                return self._send(200, ans)
             finally:
-                CALLERS.pop(token, None)
-            if ans.get("busy"):
-                return self._send(503, {"error": "every runner is busy"})
-            if ans.get("refused"):
-                return self._send(409, {"error": ans["refused"]})
-            if ans.get("error"):
-                return self._send(500, ans)
-            return self._send(200, ans)
+                _leave_run()
         if self.path == "/api/pipeline-events":  # #6163: events in from any system, with a token of the pipeline
             return self._pipeline_events()
         if self.path != "/api/action":
@@ -7620,6 +7640,43 @@ RUNNERS = []
 # #5845: token -> the peer data of a caller's /api/run connection while a runner runs its command; the runner sends
 # the token with its own requests (X-Maxpm-Caller), and the session proof looks at the caller's connection.
 CALLERS = {}
+# #6475: count in-flight /api/run requests so restart_now drains them before exec instead of cutting them mid-write.
+_RUN_COND = threading.Condition()
+_RUN_STATE = {"restarting": False, "inflight": 0}
+
+
+def _enter_run():
+    with _RUN_COND:
+        if _RUN_STATE["restarting"]:
+            return False
+        _RUN_STATE["inflight"] += 1
+        return True
+
+
+def _leave_run():
+    with _RUN_COND:
+        _RUN_STATE["inflight"] = max(0, _RUN_STATE["inflight"] - 1)
+        if _RUN_STATE["inflight"] == 0:
+            _RUN_COND.notify_all()
+
+
+def drain_runners(timeout=5.0):
+    """Stop taking new /api/run commands, wait (at most timeout s) for running ones to finish and reply, and close
+    the runner processes cleanly so none hits BrokenPipeError during exec (#6475)."""
+    deadline = time.monotonic() + timeout
+    with _RUN_COND:
+        _RUN_STATE["restarting"] = True
+        while _RUN_STATE["inflight"] > 0:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            _RUN_COND.wait(rem)
+    for r in list(RUNNERS):
+        if r.lock.acquire(blocking=False):
+            try:
+                r.stop()
+            finally:
+                r.lock.release()
 
 
 class _Runner:
@@ -7660,6 +7717,8 @@ class _Runner:
 
 def run_command(req):
     """The answer of an idle runner to a command request; {"busy": True} when every runner is busy."""
+    if _RUN_STATE["restarting"]:
+        return {"busy": True, "restarting": True}
     for r in RUNNERS:
         if not r.lock.acquire(blocking=False):
             continue

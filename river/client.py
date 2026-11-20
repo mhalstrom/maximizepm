@@ -186,6 +186,31 @@ def _inline(words, found):
     return {"files": files, "stdin": stdin}
 
 
+def _read_serve(path):
+    """(port, token) from the serve file, or (None, None) when it is missing or unreadable."""
+    if not path:
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            info = _loads(f.read())
+        return int(info["port"]), str(info["token"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+
+
+def _can_write_db(env):
+    """True when this process can open the queue file for writing (not inside a sandbox that denies writes, #5975)."""
+    db = os.path.expanduser((env or os.environ).get("MAXPM_DB") or os.path.join("~", ".maximizepm", "maxpm.db"))
+    if not os.path.exists(db):
+        return True
+    try:
+        fd = os.open(db, os.O_RDWR)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
 def serve_file(env=None):
     """The file in which maxpm serve names its port and token, beside the queue it serves."""
     env = os.environ if env is None else env
@@ -300,6 +325,7 @@ def run_remote(words, env=None, cwd=None):
         return None
     if cmd == "canvas" and _sub(words, _at(words)) in CANVAS_LOCAL:
         return None
+    serve_path = None
     if runner:
         try:
             port, token = int(runner), env.get("MAXPM_RUNNER_KEY") or ""
@@ -307,11 +333,9 @@ def run_remote(words, env=None, cwd=None):
             return None
         ROUTE.update(path="/api/runner-run", header="X-Maxpm-Runner")
     else:
-        try:
-            with open(serve_file(env), encoding="utf-8") as f:
-                info = _loads(f.read())
-            port, token = int(info["port"]), str(info["token"])
-        except (OSError, ValueError, KeyError, TypeError):
+        serve_path = serve_file(env)
+        port, token = _read_serve(serve_path)
+        if token is None:
             return None
     try:
         cwd = cwd or os.getcwd()
@@ -323,16 +347,34 @@ def run_remote(words, env=None, cwd=None):
     req = {"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(), "pid": os.getpid(),
            "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False, **extra}
     if poll:
-        return _poll_loop(port, token, req)
+        return _poll_loop(port, token, req, serve_path=serve_path, can_local=not runner and _can_write_db(env))
     status, answer = _post_fresh(port, _dumps(req).encode(), token)
-    if runner and status == 503:  # every command runner of serve is busy: a runner has no queue to run it on
-        import time
-        for _ in range(10):
-            time.sleep(1)
+    # #6475: a command during a serve restart can hit 403 (serve rotated RUN_TOKEN), 503 (draining / busy),
+    # 502/504 (proxy while serve execs), or no connection (None). Re-read serve_file and retry until serve answers.
+    if not runner and status == 403:
+        new_port, new_token = _read_serve(serve_path)
+        if new_token is not None and (new_port != port or new_token != token):
+            port, token = new_port, new_token
+            req["stamp"] = code_stamp()
             status, answer = _post_fresh(port, _dumps(req).encode(), token)
-            if status != 503:
+    retrying = (status in (502, 504)
+                or (status == 503 and (runner or b"restarting" in (answer or b"")))
+                or (not runner and status in (None, 503) and not _can_write_db(env)))
+    if retrying:
+        import time
+        for _ in range(RETRY_TRIES):
+            time.sleep(RETRY_SLEEP)
+            if serve_path:
+                new_port, new_token = _read_serve(serve_path)
+                if new_token is not None:
+                    port, token = new_port, new_token
+            req["stamp"] = code_stamp()
+            status, answer = _post_fresh(port, _dumps(req).encode(), token)
+            if status not in (None, 403, 502, 503, 504):
                 break
-    if runner and (status is None or 400 <= status < 500 or status == 503):
+            if runner and status == 403:
+                break
+    if runner and (status is None or 400 <= status < 500 or status in (502, 503, 504)):
         try:
             why = _loads(answer or b"{}").get("error")
         except (ValueError, AttributeError):
@@ -353,6 +395,8 @@ def run_remote(words, env=None, cwd=None):
 POLL_AGAIN = 75  # core.POLL_AGAIN: a poll that found nothing yet
 POLL_SLEEP = 3.0  # seconds between two polls, as the loops of the waits in core
 POLL_LOST = 120.0  # seconds that serve may not answer during a wait (a restart) before the wait runs here
+RETRY_SLEEP = 0.5  # seconds between retries of a command while serve restarts (#6475)
+RETRY_TRIES = 16  # up to ~8 s: enough for serve to drain, exec and open its port again
 
 
 def _post_fresh(port, body, token):
@@ -379,7 +423,7 @@ def _pollable(cmd, words):
     return cmd == "wait" or (cmd == "inbox" and "--wait" in words) or (cmd == "manage" and "--watch" in words)
 
 
-def _poll_loop(port, token, req, sleep=None, clock=None):
+def _poll_loop(port, token, req, sleep=None, clock=None, serve_path=None, can_local=True):
     """Run a wait as polls in serve: each poll is a short command in a runner; this process sleeps between them and
     keeps the wait's state. The exit status of the last poll, or None when serve took no poll (it runs here)."""
     import time
@@ -389,12 +433,21 @@ def _poll_loop(port, token, req, sleep=None, clock=None):
     while True:
         status, answer = _post_fresh(port, _dumps(req).encode(), token)
         if status is None or 400 <= status < 500 or status in (502, 503, 504, 599):
-            # serve does not run it now: a restart (no connection, older code), every runner busy, a lost answer.
-            # serve never answers 502 or 504: the sandbox's HTTP proxy does, when serve is down for a restart (#6030).
-            if first and status != 599:
+            # serve does not run it now: a restart (no connection, new token -> 403, new code -> 409, draining -> 503,
+            # proxy -> 502/504), every runner busy, or a lost answer (#6030, #6475).
+            # Re-read the serve file and code stamp: a restarted serve has a new RUN_TOKEN and may have newer code.
+            new_port, new_token = _read_serve(serve_path)
+            reloaded = new_token is not None and (new_port != port or new_token != token)
+            if new_token is not None:
+                port, token = new_port, new_token
+            if "stamp" in req:
+                req["stamp"] = code_stamp()
+            if status == 403 and reloaded:
+                continue  # serve rotated its token: retry immediately with the new one
+            if first and status != 599 and can_local:
                 return None
             lost = lost if lost is not None else clock()
-            if clock() - lost > POLL_LOST:
+            if can_local and clock() - lost > POLL_LOST:
                 sys.stderr.write("maxpm: maxpm serve stopped answering during this wait; it goes on here\n")
                 return None
             sleep(POLL_SLEEP)
