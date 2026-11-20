@@ -116,7 +116,7 @@ OPS = {op: ANY for op in (
     "pipeline_run_stage",  # #6138: the same
     "pipeline_definition_back")}  # #6143: versions.restore takes a person or the manager
 OPS.update({op: LEAD for op in (
-    "agent_interrupt", "prompt_approve", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
+    "agent_interrupt", "session_kill_command", "prompt_approve", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
     "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
     "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",

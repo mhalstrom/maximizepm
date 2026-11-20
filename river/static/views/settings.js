@@ -26,7 +26,8 @@ export const GROUPS = [
   ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
     (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)
       || has("max_leases", "max_sessions", "busy_max", "gone_after", "away_after", "owner_ttl", "reserve_ttl",
-             "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every")(k)],
+             "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every",
+             "command_hang_after", "command_hang_kill")(k)],
   ["work", "Work", "Reviews, releases, deploys, and how items are added, checked and cleaned up.",
     (k) => /^(review|release_|similar_|list_cleanup_)/.test(k)
       || has("auto_review", "deploy_timeout", "result_look", "push_guard", "due_warn_before",

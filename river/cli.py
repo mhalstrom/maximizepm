@@ -2713,11 +2713,14 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--human", action="store_true"); x.add_argument("--note", default="")
     x.add_argument("--session", help="the Claude Code session this agent runs in")
     x = sub.add_parser("session", help="record the Claude Code session you run in: maxpm session \"<name>\" --ref <ref>; "
-                       "or pin a session to the top of the Sessions tab: maxpm --as <you> session pin|unpin <agent>")
+                       "pin a session: maxpm --as <you> session pin|unpin <agent>; "
+                       "or end a hanging child command: maxpm session kill-command <agent> [--pid <pid>]")
     x.add_argument("name", nargs="*", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
     x.add_argument("--move", metavar="SESSION_ID", help="a person or the manager: the session id belongs to --to only")
     x.add_argument("--to", metavar="AGENT", help="with --move: the agent whose session it is")
+    x.add_argument("--pid", type=int, help="with kill-command: end only this PID (must be under the session's agent process)")
+    x.add_argument("--reason", help="with kill-command: why the command was ended")
     x = sub.add_parser("unregister", help="remove an agent that holds nothing (default: you)")
     x.add_argument("name", nargs="?")
     x = sub.add_parser("now", help="what you do now, in about 10 plain words, for your row on the Sessions tab: "
@@ -5365,6 +5368,11 @@ def dispatch(conn, a, actor):
             raise RiverError('maxpm session "<name>" --ref <ref>')
         if len(a.name) == 2 and a.name[0] in ("pin", "unpin") and not a.ref:
             return {"pin": core.session_pin(conn, a.name[1], actor, a.name[0] == "pin")}
+        if a.name[0] == "kill-command":
+            if len(a.name) != 2 or a.ref:
+                raise RiverError('maxpm session kill-command <session> [--pid <pid>] [--reason "..."]')
+            return ask_server(conn, "session_kill_command",
+                              {"agent": a.name[1], "pid": a.pid, "reason": a.reason}, actor, timeout=15)
         if not actor:
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.set_session(conn, actor, " ".join(a.name), a.ref)
@@ -5595,6 +5603,9 @@ def _findings_lines(f, r):
         out.append(f"  STUCK {x['agent']} ({x['state']}, {x['why']}): holds "
                    + (", ".join(f"#{i}" for i in x["holds"]) or "nothing") + (f", {x['queued']} queued" if x["queued"] else "")
                    + f".  Ask it to stop: {r} stop {x['agent']} --reason \"...\"")
+    for x in f.get("hanging_commands", []):
+        out.append(f"  COMMAND HANGS {x['agent']} {x['command']} {x['minutes']}m"
+                   f" (PID {x['pid']}).  End it: {r} session kill-command {x['agent']} --pid {x['pid']}")
     for x in f.get("ends", []):
         # #5776: a session that waits at its prompt for a person's answer should end; the answer starts a fresh one.
         out.append(f"  END IT {x['agent']}: waits at its prompt {x['waited']} for {x['person']}'s answer to question "
@@ -6406,6 +6417,7 @@ def render_go(b):
                 f"  a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, then "
                 f"{r} inbox --wait",
                 f"  a refused command:     a step for the user, with the exact command and the reason of the refusal",
+                f"  long tests/commands:   give them a timeout (never --test-timeout=0)",
                 *_look_rule(b, it, r, short=True),
                 f"  vague item: make a reasonable choice and say what you chose in --output.",
                 "",
@@ -6417,6 +6429,7 @@ def render_go(b):
                 f"  - Do this item only. Read `{r} show {it['id']}` again if you need the links.",
                 f"  - Say what you do, for your row on the Sessions tab: {r} now \"<about 10 plain words>\" when you",
                 f"    start and at each new step (no ids, file names or commands).",
+                f"  - Give long tests and commands a timeout (never --test-timeout=0): a command with no output is ended by maxpm serve.",
                 f"  - The item is vague: make a reasonable choice and say what you chose in --output. Ask the user",
                 f"    (a human item, below) only when a wrong guess would be costly.",
                 f"  - It needs something first: {r} add \"<title>\" --blocks {it['id']} --keep   (small; you do it now)",
@@ -9676,6 +9689,11 @@ def render(a, res):
         return
     if c == "register":
         print(f"{res['name']} ({res['kind']}) registered. Set MAXPM_AGENT={res['name']} in your shell.")
+        return
+    if c == "session" and "killed_pids" in res:
+        print(f"{res['agent']}: ended child command PID {res['pid']} ({res['command']}); "
+              f"signaled {len(res['killed_pids'])} process{'es' if len(res['killed_pids']) != 1 else ''}"
+              + (f", SIGKILLed {len(res['force_killed'])}" if res.get("force_killed") else ""))
         return
     if c == "session" and "pin" in res:
         x = res["pin"]

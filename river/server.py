@@ -3816,6 +3816,135 @@ def watch_busy(conn):
     return core.keep_busy(conn, busy, waiting) if busy or waiting else []
 
 
+CMD_HANG = {}  # agent -> {pid, cmd, screen, quiet_since, warned_at, started} (#6497)
+
+
+def session_kill_command(conn, agent, pid=None, reason=None, actor=None, grace=5.0, sleep=None):
+    """End a running child command of an agent session (maxpm session kill-command, #6497).
+    Runs in maxpm serve, which started the session and owns its process tree."""
+    ag = core._agent(conn, agent)
+    pane = None if ag["pid"] else pane_process(conn, agent)
+    res = core.kill_session_command(conn, agent, pid=pid, actor=actor, reason=reason, grace=grace, sleep=sleep,
+                                    pane_pid=pane["pid"] if pane else None)
+    st = CMD_HANG.get(agent)
+    if st and st.get("pid") in set(res.get("killed_pids") or ()):
+        CMD_HANG.pop(agent, None)
+    return res
+
+
+def watch_commands(conn, grace=5.0, sleep=None, server_grace=None):
+    """One pass of maxpm serve (#6497): watch child commands running under each live session on this host.
+    When a child command runs with no new tmux pane output and no end for command_hang_after (20m), send the session
+    a note with the command and its time, and record it in meta (hanging_commands) so the manager's watch shows
+    'COMMAND HANGS <session> <command> <minutes>'. After command_hang_kill (5m) more with still no new pane output,
+    end that command's process tree (SIGTERM, then SIGKILL) and tell both the session and the manager."""
+    after_str = core.setting(conn, "command_hang_after")
+    after = core.parse_duration(after_str)
+    kill_str = core.setting(conn, "command_hang_kill")
+    kill_wait = core.parse_duration(kill_str)
+    if after.total_seconds() <= 0:
+        CMD_HANG.clear()
+        core.set_hanging_commands(conn, {})
+        return {"hanging": {}, "warned": [], "killed": []}
+    host = core.this_host()
+    rows = conn.execute("SELECT name, pid, host FROM agents WHERE kind='ai' AND stop_at IS NULL "
+                        "AND (pid IS NULL OR host=?) ORDER BY name", (host,)).fetchall()
+    terminals = agent_terminals(conn) if TMUX_RUNNER is not None or _tmux_cmd() else {}
+    pids = {}
+    for r in rows:
+        if r["pid"] and r["host"] == host:
+            pids[r["name"]] = r["pid"]
+        elif r["name"] in terminals:
+            p = pane_process(conn, r["name"])
+            if p and p.get("pid"):
+                pids[r["name"]] = p["pid"]
+    for a in [a for a in CMD_HANG if a not in pids]:
+        del CMD_HANG[a]
+    if not pids:
+        core.set_hanging_commands(conn, {})
+        return {"hanging": {}, "warned": [], "killed": []}
+    text = core._shell_list()
+    if not text:
+        return {"hanging": core.hanging_commands(conn), "warned": [], "killed": []}
+    t = core.now()
+    running = core.session_child_commands(text, pids, t, server_grace=server_grace)
+    for a in [a for a in CMD_HANG if a not in running or not running[a]]:
+        del CMD_HANG[a]
+    hanging_out, warned, killed = {}, [], []
+    for agent, cmds in sorted(running.items()):
+        if not cmds:
+            CMD_HANG.pop(agent, None)
+            continue
+        cmd = cmds[0]
+        pane = terminals.get(agent)
+        if pane:
+            try:
+                screen = _pane_screen(agent, pane)
+            except RiverError:
+                continue
+            if screen["ended"]:
+                CMD_HANG.pop(agent, None)
+                continue
+            pane_text = _plain(screen["text"])
+        else:
+            pane_text = ""
+        st = CMD_HANG.get(agent)
+        if not st or st["pid"] != cmd["pid"] or st["screen"] != pane_text:
+            CMD_HANG[agent] = {"pid": cmd["pid"], "cmd": cmd["label"], "screen": pane_text,
+                               "quiet_since": t, "warned_at": None, "started": cmd["started"]}
+            continue
+        quiet = t - st["quiet_since"]
+        if quiet < after:
+            continue
+        held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                            "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+        held_id = held["id"] if held else None
+        if st["warned_at"] is None:
+            st["warned_at"] = t
+            note = (f"Your command (PID {cmd['pid']}: {cmd['label']}) has produced no new output for "
+                    f"{core._short(quiet)} (started {st['started'][:16].replace('T', ' ')} UTC).")
+            if kill_wait.total_seconds() > 0:
+                note += (f" If it produces no new output in {kill_str} more, maxpm serve will end it "
+                         f"(SIGTERM, then SIGKILL).")
+            with core.tx(conn):
+                core._send(conn, "note", "maxpm", note, to=agent, item_id=held_id)
+            warned.append(agent)
+            hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                  "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+        elif kill_wait.total_seconds() > 0 and t - st["warned_at"] >= kill_wait:
+            why = f"hung with no new output for {core._short(quiet)}"
+            try:
+                core.kill_session_command(conn, agent, pid=cmd["pid"], reason=why, grace=grace, sleep=sleep,
+                                          by_serve=True, pane_pid=pids.get(agent), server_grace=server_grace)
+            except RiverError as e:
+                print(f"maxpm: could not end hanging command in {agent}: {e}", file=sys.stderr, flush=True)
+                hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                      "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+                continue
+            CMD_HANG.pop(agent, None)
+            manager = core.active_manager(conn)
+            to_mgr = [manager] if manager and manager != agent else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                core._send(conn, "note", "maxpm",
+                           f"maxpm serve ended your hanging command (PID {cmd['pid']}: {cmd['label']}) after "
+                           f"{core._short(quiet)} with no new output (SIGTERM, then SIGKILL). Give long tests "
+                           f"and commands a timeout.",
+                           to=agent, item_id=held_id)
+                for p in to_mgr:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve ended a hanging command in {agent} (PID {cmd['pid']}: {cmd['label']}) "
+                               f"after {core._short(quiet)} with no new output.",
+                               to=p, item_id=held_id)
+                core.sync_needs_you(conn)
+            killed.append(agent)
+        else:
+            hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                  "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+    core.set_hanging_commands(conn, hanging_out)
+    return {"hanging": hanging_out, "warned": warned, "killed": killed}
+
+
 BACKGROUND = set()  # (agent, task id) that fresh_sessions wrote into the history: once for each task
 
 
@@ -6658,6 +6787,9 @@ OPS = {
                                 relay_words(c, a["agent"], a.get("text") or "", a.get("person"), who))[1],
     "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
                                           session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
+    "session_kill_command": lambda c, a, who: (_same_queue(a.get("db")),
+                                               session_kill_command(c, a["agent"], pid=a.get("pid"),
+                                                                    reason=a.get("reason"), actor=who))[1],
     "prompt_approve": lambda c, a, who: (_same_queue(a.get("db")),  # maxpm approve (#6282), as agent_interrupt
                                          prompt_approve(c, a["agent"], a.get("option"), a.get("text"), who))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],

@@ -578,6 +578,7 @@ def loop(stop, interval_s=None):
                 server.paste_pending,  # a message held during a turn: type it at the idle prompt (#5587)
                 core.escalate_by_state,  # a message to the manager whose sender stopped working wakes it now (#5976)
                 server.watch_busy,  # an agent that is busy with no river command keeps its leases
+                server.watch_commands,  # a child command with no new pane output for command_hang_after (#6497)
                 core.sample_sessions,  # once a minute: what each live session does, for maxpm health (#5352)
                 core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person
                 core.tell_unanswered,  # a blocked message the manager did not answer in manage_unanswered: tell its sender

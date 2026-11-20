@@ -36,6 +36,7 @@ export const LABELS = {
   reserve_ttl: "How long a pushed item stays reserved", auto_continue: "After a task, take", fresh_sessions: "Start a fresh session after an answer",
   revive_sessions: "Resume a session that crashed", revive_within: "Resume only within", native_message: "Send messages into sessions",
   human_wait_max: "Longest hold on a person's answer", tmux_adopt: "Move sessions into tmux", shells_every: "Read session commands every",
+  command_hang_after: "Hanging command warning after", command_hang_kill: "End a hanging command after",
   expert_idle_end: "End a quiet expert after", fresh_min: "Fresh session above",
   session_idle_end: "End a quiet session with no item after", queue: "Use the queue",
   workspace: "Folder of each session", workspace_setup: "Setup command of a new worktree",

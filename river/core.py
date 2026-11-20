@@ -329,6 +329,12 @@ DEFAULT_SETTINGS = {
     # sign-in, an update, a question of a new CLI version): one alert with its last lines goes to the active manager
     # (else each person), as for a prompt with no question MaximizePM can read (#5908). 0s: never.
     "stuck_after": "3m",
+    # A child command of a session with no new pane output and no end for command_hang_after: maxpm serve sends the
+    # session a note with the command and its time, records it for the manager's watch (COMMAND HANGS), and after
+    # command_hang_kill more with still no new pane output ends that command's process tree (SIGTERM, then SIGKILL)
+    # and tells the session and the manager (#6497). 0s: off (command_hang_kill 0s: warn only).
+    "command_hang_after": "20m",
+    "command_hang_kill": "5m",
     # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report
     # each tool call, prompt, permission prompt and turn end to river (maxpm report --hook claude, #4288). A session that holds
     # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,
@@ -3261,7 +3267,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
+            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free"):
@@ -16109,6 +16115,262 @@ def _shells_of(a):
         return None
 
 
+HANGING_KEY = "hanging_commands"  # meta key: {agent: {pid, command, since, warned_at, started}} (#6497)
+
+
+def hanging_commands(conn):
+    """The hanging child commands that maxpm serve recorded ({agent: {pid, command, since, warned_at, started}})."""
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (HANGING_KEY,)).fetchone()
+    if not r or not r["value"]:
+        return {}
+    try:
+        data = json.loads(r["value"])
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def set_hanging_commands(conn, data):
+    """Store the hanging child commands in meta (only writes when changed)."""
+    cur = hanging_commands(conn)
+    if cur == data:
+        return False
+    with tx(conn):
+        if data:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (HANGING_KEY, json.dumps(data)))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (HANGING_KEY,))
+    return True
+
+
+def _parse_ps_tree(text, t=None):
+    """Parse 'ps -A -ww -o pid=,ppid=,etime=,command=' into (children, info).
+    children: {ppid: [pid, ...]}; info: {pid: {pid, ppid, age, started, cmd}}."""
+    t = t or now()
+    children, info = {}, {}
+    for line in (text or "").splitlines():
+        f = line.split(None, 3)
+        try:
+            pid, ppid, age = int(f[0]), int(f[1]), _elapsed(f[2])
+        except (IndexError, ValueError):
+            continue
+        cmd = f[3].strip() if len(f) > 3 else ""
+        children.setdefault(ppid, []).append(pid)
+        info[pid] = {"pid": pid, "ppid": ppid, "age": age, "started": t - timedelta(seconds=age), "cmd": cmd}
+    return children, info
+
+
+def _is_ignored_command(cmd):
+    """True for processes under an agent CLI that are never hanging user/agent commands: MaximizePM waits,
+    hooks/wake listeners, and macOS caffeinate."""
+    if not cmd:
+        return True
+    parts = cmd.split()
+    prog = os.path.basename(parts[0]).lstrip("-")
+    if prog == "caffeinate":
+        return True
+    padded = " " + cmd + " "
+    if " report --wake " in padded or " report --hook " in padded:
+        return True
+    if _bg_wait(cmd):
+        return True
+    return False
+
+
+def _is_wrapper_proc(cmd):
+    """True for a wrapper process (bare shell without -c, sandbox-exec) whose children may be commands."""
+    parts = (cmd or "").split()
+    if not parts:
+        return False
+    prog = os.path.basename(parts[0]).lstrip("-")
+    if prog == "sandbox-exec":
+        return True
+    if prog in SHELL_NAMES and _shell_label(cmd) is None:
+        return True
+    return False
+
+
+def session_child_commands(text, pids, t=None, server_grace=None):
+    """{agent: [{"pid", "label", "cmd", "started", "age"}]} from one ps listing: running child commands under each
+    agent CLI process (works for Claude Code, Codex, agy, and direct child processes, #6497).
+    Skips the agent CLI itself, MaximizePM waits/hooks, caffeinate, and helper/MCP servers started within
+    server_grace of the agent CLI (while still descending through helpers/wrappers like agy's language_server or
+    sandbox-exec to find commands spawned under them). Oldest first."""
+    t = t or now()
+    grace_s = (CLI_SERVERS_GRACE if server_grace is None else server_grace).total_seconds()
+    children, info = _parse_ps_tree(text, t)
+    out = {}
+    for name, root_pid in pids.items():
+        if root_pid not in info:
+            continue
+        root_age = info[root_pid]["age"]
+        found, seen = [], {root_pid}
+        stack = list(reversed(children.get(root_pid, ())))
+        while stack:
+            pid = stack.pop()
+            if pid in seen or pid not in info:
+                continue
+            seen.add(pid)
+            rec = info[pid]
+            cmd = rec["cmd"]
+            if _is_ignored_command(cmd):
+                continue
+            slabel = _shell_label(cmd)
+            if slabel is not None:
+                if not _is_ignored_command(slabel):
+                    found.append({"pid": pid, "label": slabel, "cmd": cmd, "started": iso(rec["started"]),
+                                  "age": rec["age"]})
+                continue  # this shell is the command root; do not report its children separately
+            if _is_wrapper_proc(cmd):
+                stack.extend(reversed(children.get(pid, ())))
+                continue
+            # A non-shell process started right after the agent CLI (MCP server, agy language_server): not a command
+            # itself, but descend into its children so commands spawned under it are found.
+            if grace_s > 0 and (root_age - rec["age"]) <= grace_s:
+                stack.extend(reversed(children.get(pid, ())))
+                continue
+            label = cmd if len(cmd) <= SHELL_LABEL else cmd[:SHELL_LABEL - 1] + "…"
+            found.append({"pid": pid, "label": label, "cmd": cmd, "started": iso(rec["started"]), "age": rec["age"]})
+        out[name] = sorted(found, key=lambda s: (s["started"], s["pid"]))
+    return out
+
+
+def descendant_pids(children, root_pid):
+    """Every PID strictly below root_pid (never root_pid itself)."""
+    desc, stack = set(), list(children.get(root_pid, ()))
+    while stack:
+        pid = stack.pop()
+        if pid == root_pid or pid in desc:
+            continue
+        desc.add(pid)
+        stack.extend(children.get(pid, ()))
+    return desc
+
+
+def subtree_pids(children, pid):
+    """All PIDs in the subtree rooted at pid (children before parent, so killing bottom-up avoids orphans)."""
+    order, seen = [], set()
+
+    def walk(p):
+        if p in seen:
+            return
+        seen.add(p)
+        for ch in children.get(p, ()):
+            walk(ch)
+        order.append(p)
+
+    walk(pid)
+    return order
+
+
+def _terminate_tree(pids, grace=5.0, sleep=None):
+    """End a command's process tree: SIGTERM to all, wait up to grace, then SIGKILL to any still alive.
+    Never signals PID <= 1 or os.getpid(). Returns (signaled, force_killed)."""
+    import signal
+    import time
+    sleep = sleep or time.sleep
+    me = os.getpid()
+    targets = [int(p) for p in pids if int(p) > 1 and int(p) != me]
+    signaled = []
+    for p in targets:
+        try:
+            os.kill(p, signal.SIGTERM)
+            signaled.append(p)
+        except (ProcessLookupError, PermissionError):
+            pass
+    waited = 0.0
+    while waited < grace:
+        alive = []
+        for p in signaled:
+            try:
+                os.waitpid(p, os.WNOHANG)  # reap if a child of this process (tests)
+            except (ChildProcessError, OSError):
+                pass
+            if pid_alive(p):
+                alive.append(p)
+        if not alive:
+            break
+        sleep(0.2)
+        waited += 0.2
+    forced = []
+    for p in signaled:
+        try:
+            os.waitpid(p, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        if pid_alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+                forced.append(p)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return signaled, forced
+
+
+def kill_session_command(conn, agent, pid=None, actor=None, reason=None, grace=5.0, sleep=None, by_serve=False,
+                         pane_pid=None, server_grace=None):
+    """End a running child command of an agent session without ending the session itself (#6497).
+    Refuses any PID that is not strictly under the session's agent process (including the agent process itself).
+    When pid is None, ends the hanging command (if recorded) or the oldest running child command."""
+    why = None if by_serve else may_change_queue(conn, actor, agent)
+    if why:
+        raise RiverError(f"refused: a person or a manager ends a session's command ({why})")
+    ag = _agent(conn, agent)
+    root_pid = ag["pid"] or pane_pid
+    if not root_pid:
+        raise RiverError(f"{agent} has no recorded process on this host")
+    if ag["pid"] and ag["host"] != this_host():
+        raise RiverError(f"{agent} runs on {ag['host']}, not on this host ({this_host()})")
+    text = _shell_list()
+    if not text:
+        raise RiverError("cannot read the process list on this host")
+    children, info = _parse_ps_tree(text)
+    if root_pid not in info:
+        raise RiverError(f"{agent}'s process (PID {root_pid}) is not running")
+    desc = descendant_pids(children, root_pid)
+    if pid is not None:
+        pid = int(pid)
+        if pid == root_pid:
+            raise RiverError(f"refused: PID {pid} is {agent}'s own agent process, not a child command; "
+                             f"use maxpm stop {agent} --kill to end the session")
+        if pid not in desc:
+            raise RiverError(f"refused: PID {pid} is not under {agent}'s process (PID {root_pid}); nothing was killed")
+        target_pid = pid
+        raw_cmd = info[pid]["cmd"]
+        label = _shell_label(raw_cmd) or (raw_cmd if len(raw_cmd) <= SHELL_LABEL else raw_cmd[:SHELL_LABEL - 1] + "…")
+    else:
+        hc = hanging_commands(conn).get(agent)
+        if hc and hc.get("pid") in desc:
+            target_pid = int(hc["pid"])
+            label = hc.get("command") or info[target_pid]["cmd"][:SHELL_LABEL]
+        else:
+            cmds = session_child_commands(text, {agent: root_pid}, server_grace=server_grace).get(agent, [])
+            if not cmds:
+                raise RiverError(f"{agent} has no running child command to end")
+            target_pid = cmds[0]["pid"]
+            label = cmds[0]["label"]
+    tree = [p for p in subtree_pids(children, target_pid) if p in desc]
+    signaled, forced = _terminate_tree(tree, grace=grace, sleep=sleep)
+    hc_all = hanging_commands(conn)
+    if agent in hc_all and hc_all[agent].get("pid") in set(tree):
+        hc_all.pop(agent, None)
+        set_hanging_commands(conn, hc_all)
+    who = "maxpm" if by_serve else (actor or "?")
+    held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                        "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+    held_id = held["id"] if held else None
+    why_part = f" ({reason})" if reason else ""
+    with tx(conn):
+        _event(conn, held_id, who,
+               f"ended child command PID {target_pid} ({label}) of {agent}{why_part}")
+        if not by_serve:
+            _send(conn, "note", who,
+                  f"{who} ended your child command (PID {target_pid}: {label}){why_part}.",
+                  to=agent, item_id=held_id)
+    return {"agent": agent, "root_pid": root_pid, "pid": target_pid, "command": label,
+            "killed_pids": signaled, "force_killed": forced, "reason": reason}
+
+
 def _lease_lost(conn):
     """{item: (agent row, when)} for the open items whose lease ran out and that nobody claimed since, when the
     agent is registered on this computer and is not asked to stop."""
@@ -26808,9 +27070,18 @@ def manager_findings(conn):
                             "done_when": g["done_when"], "outcome": g["outcome"], "backlog": backlog,
                             "last": dict(last) if last else None, "question": _done_when_question(g, backlog)})
     waits = release_waits(conn)
+    live_names = {a["name"] for a in agents if a["state"] != "stopped"}
+    hanging = []
+    for ag_name, h in sorted(hanging_commands(conn).items()):
+        if ag_name not in live_names:
+            continue
+        since_dt = parse_iso(h["since"]) if h.get("since") else t
+        mins = max(1, int((t - since_dt).total_seconds() // 60))
+        hanging.append({"agent": ag_name, "pid": h["pid"], "command": h["command"],
+                        "since": h["since"], "minutes": mins})
     return {"stuck": stuck, "ends": ends, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
             "unneeded": unneeded, "goal_checks": goal_checks, "unpushed": waits["unpushed"],
-            "untagged": waits["untagged"],
+            "untagged": waits["untagged"], "hanging_commands": hanging,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "net_down": [net] if net else [],
             "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
@@ -26950,6 +27221,7 @@ def _finding_keys(f):
                   | {f"rule:{x['key']}" for x in f.get("broken_rules", [])}
                   | {f"unpushed:{x['target']}" for x in f.get("unpushed", [])}
                   | {f"untagged:{x['id']}" for x in f.get("untagged", [])}
+                  | {f"hanging:{x['agent']}:{x['pid']}" for x in f.get("hanging_commands", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 
