@@ -11160,13 +11160,12 @@ class ManagerWake(Base):
             "SELECT level, body FROM messages WHERE to_agent='boss' ORDER BY id")]
         self.assertEqual(got, [
             ("now", f"ship request: #{x} page joins deploy #{dep} for web"),
-            # The cut offers the review report (#6003): a low notice, read at the next wake.
-            ("low", f"release #{dep} of web is cut with 1 task: read its report (maxpm target report {dep}) and write "
-                    f"its summary, risks first (maxpm target summary {dep} \"<one paragraph>\"): the person then gets "
-                    f"it as a Read card"),
+            # The cut asks the manager for nothing: a task writes the summary of the report (#6493).
             ("now", f"review #{rv} of web passed: its deploy can start (checked the page)"),
             ("now", f"deploy #{dep} to web is done (release-1)")])
-        # The watch returns for them at once.
+        # The watch returns for them at once (the summary task, a new task, is a change before them: it is done).
+        summary = self.c.execute("SELECT id FROM items WHERE found_during=? AND kind='operational'", (dep,)).fetchone()[0]
+        core.drop(self.c, summary, "w1", note="written")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None)
         self.assertEqual(w["result"], "messages")
         # The manager's own steps wake nothing.
@@ -15232,9 +15231,7 @@ class ReleaseReport(Base):
         self.assertEqual(names[0], "Risks")  # risks first
         self.assertEqual(r["groups"][0]["items"], [self.r])
         self.assertEqual(r["tasks"][self.r]["risk"], "a revert")
-        self.assertIn("checkout", names)
-        self.assertEqual(next(g for g in r["groups"] if g["name"] == "checkout")["line"], "People can pay")
-        self.assertIn("site", names)
+        self.assertEqual(names, ["Risks", "site"])  # before the summary: by project, not by goal (#6493)
         t = r["tasks"][self.a]
         self.assertEqual((t["changed"], t["commits"], t["done_by"]), ("You can pay by card", [f"abc{self.a:04d}f"], "dev"))
         self.assertEqual(t["decisions"][0]["answer"]["body"], "Card first")
@@ -15243,23 +15240,64 @@ class ReleaseReport(Base):
         with self.assertRaisesRegex(RiverError, "is no release"):
             report.report(self.c, self.a)
 
-    def test_the_cut_tells_the_manager_and_the_summary_sends_a_read_card(self):
+    def test_the_cut_adds_the_summary_task_and_the_summary_sends_a_read_card(self):
+        # #6493: at the cut a fresh session writes the summary; the manager is not asked and nothing waits on it.
         from river import report
         core.target_cut(self.c, "web", actor="mark")
-        note = self.c.execute("SELECT body FROM messages WHERE to_agent='boss' AND body LIKE 'release #%'").fetchone()
-        self.assertIn(f"maxpm target report {self.deploy}", note["body"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM messages WHERE to_agent='boss' AND body LIKE 'release #%'").fetchone())
+        task = self.c.execute("SELECT * FROM items WHERE found_during=? AND kind='operational'", (self.deploy,)).fetchone()
+        self.assertEqual(task["title"], f"Write the summary of release #{self.deploy} of web")
+        self.assertEqual((task["doer"], task["status"], task["short"]), ("ai", "open", "Write the release summary"))
+        self.assertIn(f"maxpm target summary {self.deploy} --file", task["context"])
+        self.assertIn("## Risks and what to check", task["context"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM deps WHERE blocked_by=?", (task["id"],)).fetchone())
+        r = report.report(self.c, self.deploy)
+        self.assertEqual(r["summary"]["task"], {"id": task["id"], "status": "open"})
+        self.assertTrue(r["summary"]["text"].startswith(f"An agent writes the summary of this release now (#{task['id']})"))
+        self.assertNotIn(task["id"], r["tasks"])
+        with self.assertRaisesRegex(RiverError, "--file"):
+            report.summary_set(self.c, self.deploy, "  ", "boss")
         self.c.execute("UPDATE agents SET last_seen=? WHERE name='mark'", (core.iso(core.now()),))
         self.c.commit()
-        out = report.summary_set(self.c, self.deploy, "One revert of the menu; card payments are new.", "boss")
+        text = (f"## What changes for you\n\n### Checkout\n- You can pay by card (#{self.a}).\n\n### Pages\n"
+                f"- The footer shows again (#{self.b}, #{self.a}).\n\n## Risks and what to check\n"
+                f"- The menu change is undone (#{self.r}).\n\n## Under the hood\nNo other tasks.\n")
+        with self.assertRaisesRegex(RiverError, "only the session that holds the summary task"):
+            report.summary_set(self.c, self.deploy, text, "dev")
+        core.register(self.c, "writer")
+        core.claim(self.c, task["id"], "writer")
+        out = report.summary_set(self.c, self.deploy, text, "writer")
         self.assertEqual(len(out["read_cards"]), 1)
         card = self.c.execute("SELECT body, level FROM messages WHERE to_agent='mark' AND kind='alert'").fetchone()
         self.assertTrue(card["body"].startswith("Read the report"))
+        self.assertIn("before it goes out: You can pay by card. The footer shows again. The menu change is undone.",
+                      card["body"])
         self.assertEqual(card["level"], "low")
         self.assertEqual(core.action_type(card["body"]), "read")
         r = report.report(self.c, self.deploy)
-        self.assertEqual((r["summary"]["by"], r["summary"]["text"]), ("boss", "One revert of the menu; card payments are new."))
-        again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
+        self.assertEqual((r["summary"]["by"], r["summary"]["text"]), ("writer", text.strip()))
+        # The task list follows the areas of the summary; the revert stays under Risks, each task in one group.
+        self.assertEqual([(g["name"], g["items"]) for g in r["groups"]],
+                         [("Risks", [self.r]), ("Checkout", [self.a]), ("Pages", [self.b])])
+        self.assertEqual(r["tasks"][self.r]["risk"], "a revert")
+        # The manager edits it; a task that only its risks name joins the Risks group.
+        again = report.summary_set(self.c, self.deploy, f"Changed.\n\n## Risks and what to check\n- Footer (#{self.b})",
+                                   "boss")
         self.assertEqual(again["read_cards"], [])  # one Read card only
+        r = report.report(self.c, self.deploy)
+        self.assertEqual([(g["name"], g["items"]) for g in r["groups"]],
+                         [("Risks", [self.r, self.b]), ("Under the hood", [self.a])])
+        self.assertEqual(r["tasks"][self.b]["risk"], "a risk the summary names")
+
+    def test_the_areas_of_a_summary(self):
+        from river import report
+        tasks = {1: {}, 2: {}, 3: {}}
+        text = ("## What changes for you\n- A flat point (#1)\n### Pages\n- Page (#2, #1, #99)\n"
+                "## Risks and what to check\n- Restart (#3)\n")
+        self.assertEqual(report.areas(text, tasks), [("What changes for you", [1]), ("Pages", [2]),
+                                                     ("Risks and what to check", [3])])
+        self.assertEqual(report.areas("One paragraph about #1.", tasks), [])
+        self.assertEqual(report.plain("## A\n- One (#1, #2).\n- Two #3\n"), "One. Two")
 
     def _card(self):
         from river import report
@@ -15450,9 +15488,20 @@ class ReleaseReport(Base):
         old = cli.INSIDE_AGENT
         cli.INSIDE_AGENT = lambda: True
         self.addCleanup(setattr, cli, "INSIDE_AGENT", old)
-        with self.assertRaisesRegex(RiverError, "not allowed"):
+        # #6493: a session writes only the summary of the release whose summary task it holds.
+        with self.assertRaisesRegex(RiverError, "only the session that holds the summary task"):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 cli.run(["--as", "dev", "target", "summary", str(self.deploy), "All good"])
+        core.target_cut(self.c, "web", actor="mark")
+        task = self.c.execute("SELECT id FROM items WHERE found_during=? AND kind='operational'", (self.deploy,)).fetchone()[0]
+        core.register(self.c, "writer")
+        core.claim(self.c, task, "writer")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "writer", "target", "summary", str(self.deploy), "## What changes for you\n- Pay by card"])
+            cli.run(["--as", "writer", "target", "summary", str(self.deploy)])
+        self.assertIn(f"The summary of release #{self.deploy} is saved.", out.getvalue())
+        self.assertTrue(out.getvalue().rstrip().endswith("## What changes for you\n- Pay by card"))
 
 
 class CardShare(Base):

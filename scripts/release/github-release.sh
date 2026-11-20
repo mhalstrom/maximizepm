@@ -47,13 +47,14 @@
 #             release: nothing is public. A failed job stops the release with the run's link
 #   draft     the draft of vX.Y.Z is made from the commit and has both .dmg files, the code archive and manifest.json
 #   notes     gh release edit of the draft with the notes from maxpm target report <deploy id>
-#             (scripts/release/release_notes.py: the 'changed' line of each done task of project maximizepm, by goal,
-#             and the Download part of desktop/release-notes.md)
+#             (scripts/release/release_notes.py: the report's summary, or before it is written the 'changed' line of
+#             each done task of project maximizepm; then the Download part of desktop/release-notes.md)
 # Then it prints what the person approves and exits 76. After the yes:
 #   check     as above, and the draft's commit is on origin/main
 #   version   the version of main; its draft names the commit that the person approved
 #   tag       git push of the annotated tag vX.Y.Z at that commit
-#   publish   gh release edit vX.Y.Z --draft=false: the release and its downloads are public
+#   publish   the notes again from the report (its summary may be newer than the draft), then gh release edit vX.Y.Z
+#             --draft=false: the release and its downloads are public
 #   published the GitHub release vX.Y.Z is published and has every download of this version
 #
 # It fails closed: the first step that fails prints its reason and the script exits 1, so MaximizePM opens the fix
@@ -342,16 +343,21 @@ PY
     echo "github-release: no deploy item (MAXPM_DEPLOY): the notes stay those of desktop/release-notes.md"
     step_end skipped
   else
-    [ -n "$scratch" ] || scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
-    "$maxpm" --json target report "$deploy" >"$scratch/report.json" 2>"$scratch/report.err" \
-      || fail "maxpm target report $deploy failed: $(tail -n 3 "$scratch/report.err")"
-    git show "$commit:desktop/release-notes.md" >"$scratch/release-notes.md" 2>/dev/null || : >"$scratch/release-notes.md"
-    python3 "$here/release_notes.py" "$scratch/report.json" "$new" "$scratch/release-notes.md" >"$scratch/notes.md" \
-      || fail "release_notes.py could not write the notes"
-    "$gh" release edit "v$new" --notes-file "$scratch/notes.md" >/dev/null || fail "gh release edit v$new failed"
-    echo "github-release: the notes of v$new come from the report of deploy #$deploy ($(wc -l <"$scratch/notes.md" | tr -d ' ') lines)"
+    notes
     step_end passed
   fi
+}
+
+# ---- the notes of the release from the report of the deploy item: its summary (#6493), the same text the person read
+notes() {
+  [ -n "$scratch" ] || scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
+  "$maxpm" --json target report "$deploy" >"$scratch/report.json" 2>"$scratch/report.err" \
+    || fail "maxpm target report $deploy failed: $(tail -n 3 "$scratch/report.err")"
+  git show "$commit:desktop/release-notes.md" >"$scratch/release-notes.md" 2>/dev/null || : >"$scratch/release-notes.md"
+  python3 "$here/release_notes.py" "$scratch/report.json" "$new" "$scratch/release-notes.md" >"$scratch/notes.md" \
+    || fail "release_notes.py could not write the notes"
+  "$gh" release edit "v$new" --notes-file "$scratch/notes.md" >/dev/null || fail "gh release edit v$new failed"
+  echo "github-release: the notes of v$new come from the report of deploy #$deploy ($(wc -l <"$scratch/notes.md" | tr -d ' ') lines)"
 }
 
 # ---- the end before the yes: what the person approves (the last lines go on their item), then exit HOOK_YES
@@ -391,6 +397,9 @@ publish() {
     step_end passed
 
     step_start publish deploy
+    # The summary of the report may have changed since the draft (an agent wrote it, the manager edited it): the
+    # published notes are the report's text of now (#6493).
+    [ -z "$deploy" ] || notes
     "$gh" release edit "v$new" --draft=false >/dev/null || fail "gh release edit v$new --draft=false failed; the tag stays"
     echo "github-release: published the release v$new: $url"
     step_end passed

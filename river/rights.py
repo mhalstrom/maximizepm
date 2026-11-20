@@ -32,7 +32,8 @@ COMMANDS = {
     "ops": {"*": ANY, "setup": LEAD, "profile": LEAD},
     "target": {"add": LEAD, "describe": LEAD, "deployer": LEAD, "watch": LEAD, "cadence": LEAD, "cut": ANY,
                "risk": LEAD, "mode": LEAD, "releaser": LEAD,
-               "report": ANY, "summary": LEAD, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY},
+               "report": ANY, "hook": LEAD, "release-now": ANY, "show": ANY, "own": ANY, "release": ANY, "give": ANY, "list": ANY,
+               "summary": ANY},  # #6493: report.summary_set lets a session write only the summary task it holds
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
                  "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "host": LEAD, "rerun": LEAD,
                  "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD,

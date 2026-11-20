@@ -122,11 +122,18 @@ class Notes(unittest.TestCase):
         self.assertIn("## Download", out)
         self.assertIn("MaximizePM-1.4.0-arm64.dmg` of v1.4.0", out)
 
-    def test_a_written_summary_comes_first(self):
-        report = dict(REPORT, summary={"text": "This release adds the Deploy tab.", "by": "manager-1"})
-        out = release_notes.build(report, "1.4.0", "")
-        self.assertIn("The main changes:\n\nThis release adds the Deploy tab.\n\n## Deploy tab", out)
-        self.assertNotIn("## Download", out)
+    def test_a_written_summary_is_the_notes(self):
+        # #6493: the notes are the report's summary, so the two never differ; no task list, no queue ids.
+        text = ("## What changes for you\n\n### Deploy page\n- A new Deploy tab (#2, #6).\n- Steps show (#1).\n\n"
+                "## Risks and what to check\n- Restart maxpm serve; see ~/notes/x.md (#4)\n- None else, see #6.\n\n"
+                "## Under the hood\n3 internal fixes.\n")
+        report = dict(REPORT, summary={"text": text, "by": "maximizepm-ab12"})
+        out = release_notes.build(report, "1.4.0", NOTES_MD)
+        self.assertTrue(out.startswith("MaximizePM 1.4.0 ships 4 tasks.\n\n## What changes for you\n\n### Deploy page\n"
+                                       "- A new Deploy tab.\n- Steps show.\n\n## Risks and what to check\n"
+                                       "- None else, see.\n\n## Under the hood\n3 internal fixes.\n\n## Download"), out)
+        self.assertNotIn("Pipelines show steps", out)  # no line of each task
+        self.assertNotIn("#", "".join(ln for ln in out.splitlines() if not ln.startswith("#")))
 
 
 def _write(path, text, mode=None):

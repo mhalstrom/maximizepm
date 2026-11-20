@@ -1889,11 +1889,12 @@ def build_parser(only=None):
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
                        "the target's pipeline in Deploy")
     x.add_argument("id", type=int, help="the release's deploy item, or its review")
-    x = tgs.add_parser("summary", help="the person or the manager: write the paragraph at the top of a release's "
-                       "report, risks first; the first one sends the person a Read card")
+    x = tgs.add_parser("summary", help="the summary at the top of a release's report: what changes for a user, the "
+                       "risks and what to check (Markdown). A task at the cut writes it; a person or the manager edits "
+                       "it. With no text it prints it. The first one sends the person a Read card")
     x.add_argument("id", type=int, help="the release's deploy item, or its review")
-    x.add_argument("text", nargs="?", help="one paragraph (or --file)")
-    x.add_argument("--file", help="read the paragraph from a file (- for stdin)")
+    x.add_argument("text", nargs="?", help="the text (or --file)")
+    x.add_argument("--file", help="read the text from a file (- for stdin)")
     x = tgs.add_parser("cut", help="fix the list of items of the collected release now (the target owner, the "
                        "manager, or a person): later ship requests join the next deploy item, which waits until this "
                        "release is done. The cut also comes by itself when a reviewer takes the review of the release")
@@ -5006,9 +5007,10 @@ def dispatch(conn, a, actor):
             return report.report(conn, a.id)
         if a.tcmd == "summary":
             from . import report
+            if a.text is None and not a.file:  # #6493: print it, to edit it
+                return {"id": a.id, "show": report.report(conn, a.id)["summary"]}
             text = a.text if a.text is not None else (
-                sys.stdin.read() if a.file == "-" else Path(a.file).expanduser().read_text(encoding="utf-8") if a.file
-                else "")
+                sys.stdin.read() if a.file == "-" else Path(a.file).expanduser().read_text(encoding="utf-8"))
             return report.summary_set(conn, a.id, text, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
@@ -6075,7 +6077,13 @@ def render_release_report(r):
           f"({n['faults_open']} open); review fixes {n['fixes']}; your decisions {n['decisions']}"
           + (f"; cost ${n['usd']:.2f}" if n["usd"] is not None else ""))
     print()
-    print(textwrap.fill(r["summary"]["text"], 100, initial_indent="  ", subsequent_indent="  "))
+    if r["summary"]["by"] == "maxpm":
+        print(textwrap.fill(r["summary"]["text"], 100, initial_indent="  ", subsequent_indent="  "))
+    else:  # the written summary is Markdown: its lines as they are (#6493)
+        print("\n".join(("  " + ln).rstrip() for ln in r["summary"]["text"].splitlines()))
+        print(f"  (the summary of {r['summary']['by']})")
+    print()
+    print("THE TASKS")
     for g in r["groups"]:
         print()
         print(("RISKS" if g["risk"] else g["name"].upper()) + (f": {g['line']}" if g["line"] and not g["risk"] else ""))
@@ -9227,6 +9235,12 @@ def render(a, res):
     if c == "target" and getattr(a, "tcmd", None) == "report":
         return render_release_report(res)
     if c == "target" and getattr(a, "tcmd", None) == "summary":
+        if "show" in res:
+            s = res["show"]
+            print(s["text"] if s["by"] != "maxpm" else
+                  f"No summary yet. {s['text']}\nWrite it: maxpm target summary {res['id']} --file <file>"
+                  + (f" (the form: maxpm show {s['task']['id']})" if s.get("task") else ""))
+            return
         print(f"The summary of release #{res['id']} is saved."
               + (f" The person got a Read card." if res["read_cards"] else "")
               + (f" No Read card: the person reads it on the release's approval card." if res.get("on_approval")

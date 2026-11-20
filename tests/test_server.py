@@ -787,6 +787,9 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["result"], "again")
         z = core.item_add(self.c, "site", "about page")["id"]
         core.register(self.c, "plain")
+        # The cuts added the tasks that write the summaries of the releases (#6493): a fresh session takes those.
+        for (t,) in self.c.execute("SELECT id FROM items WHERE kind='operational' AND title LIKE 'Write the summary%'").fetchall():
+            core.drop(self.c, t, "ops", note="written")
         self.assertEqual(core.wait(self.c, self.dir.name, "plain", **nap)["why"], f"#{z} is ready: about page")
 
     def test_a_target_with_no_owner_gets_a_deployer_standing_starts_it_during_the_review_and_off_starts_none(self):

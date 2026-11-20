@@ -1,6 +1,7 @@
 // The review report of a release (#6003, summaries-mockup v7): what a cut release ships, for the person to read before
-// the deploy. Left: the scope line, the summary paragraph (the manager's, or MaximizePM's plain one until then), the
-// numbers, and the groups, risks first in red; a group opens to its tasks. Right: the task you pick, with what changed
+// the deploy. Left: the scope line, the summary (what changes for a user by area, the risks and what to check; the
+// summary task writes it at the cut, MaximizePM's plain text until then), the numbers, and below them the task list,
+// closed, by the areas of the summary, risks first in red; a group opens to its tasks. Right: the task you pick, with what changed
 // for a person, its proof (commits, check), who, when and cost, its decisions (questions and their answers), and its
 // Code tab: the Changes view of the task (changesView.js), where a comment on a line goes to the agent. On a phone the
 // levels are one screen each: a tap on a task shows it, Back goes up.
@@ -13,6 +14,9 @@ import { makeDialog, wideButton } from "./dialog.js";
 import { renderChanges } from "./changesView.js";
 
 let dlg = null, el = null, data = null, picked = null, tab = "task";
+// chat.js markdown (marked, then DOMPurify), imported when the dialog first opens: DOMPurify needs a page.
+let md = null;
+const asText = (text) => `<p>${esc(text)}</p>`;
 const usd = (n) => n == null ? "" : "$" + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(2));
 
 export function numbersHtml(n) {
@@ -27,18 +31,25 @@ const taskLine = (t) => `<div class="rep-t${picked === t.id ? " on" : ""}" data-
   <span class="muted t-s">#${t.id}</span> ${esc(t.short || clip(t.title, 90))}${t.status === "done" ? "" : ` <span class="muted">(${esc(t.status.replace("_", " "))})</span>`}
   ${t.risk ? chip("c-p0", esc(t.risk)) : ""}${t.changed ? `<div class="muted t-s">${esc(t.changed)}</div>` : ""}</div>`;
 
-export function leftHtml(r) {
+export function leftHtml(r, render = md || asText) {
   const rel = r.release, rv = rel.review;
   const state = rel.status !== "open" ? rel.status.replace("_", " ") : rel.cut_at ? `cut ${ago(rel.cut_at)}` : "collecting";
   const scope = `<div class="rep-scope">${chip("c-goal", "Release")} <b>#${rel.id}</b> of ${esc(rel.target || "")}
     <span class="muted t-s">${esc(state)}${rel.cut_rev ? " · " + esc(rel.cut_rev) : ""}${rv ? ` · review <span class="link" data-open="${rv.id}">#${rv.id}</span> ${esc(rv.status.replace("_", " "))}` : ""}</span></div>`;
-  const sum = `<div class="rep-sum"><p>${esc(r.summary.text)}</p><div class="muted t-s">${r.summary.by === "maxpm"
-    ? "Written by MaximizePM from its records; the manager writes the summary when it reads the release."
-    : `The summary of ${esc(r.summary.by)}${r.summary.at ? ", " + esc(ago(r.summary.at)) : ""}`}</div></div>`;
+  // The summary leads (#6493): what changes for a user by area, the risks and what to check, written in Markdown by
+  // the session of the summary task at the cut. Each #<id> of a task opens it on the right.
+  const s = r.summary, written = s.by !== "maxpm";
+  const sum = `<div class="rep-sum">${written ? linkTasks(render(s.text), r.tasks) : asText(s.text)}
+    <div class="muted t-s">${written ? `The summary of ${esc(s.by)}${s.at ? ", " + esc(ago(s.at)) : ""}`
+      : "Written by MaximizePM from its records."}</div></div>`;
   const groups = r.groups.map(g => `<details class="rep-g${g.risk ? " risk" : ""}"${g.risk || r.groups.length <= 3 ? " open" : ""}>
     <summary><b>${esc(g.name)}</b> <span class="muted t-s">${g.items.length} task${g.items.length === 1 ? "" : "s"}</span>
       ${g.line && !g.risk ? `<div class="muted t-s">${esc(g.line)}</div>` : ""}</summary>
     ${g.items.map(i => taskLine(r.tasks[i])).join("")}</details>`).join("");
+  // The task list comes below the summary, closed while a written summary leads.
+  const n = Object.keys(r.tasks).length;
+  const list = groups ? `<details class="rep-tasks"${written ? "" : " open"}><summary><b>The tasks</b>
+      <span class="muted t-s">${n} task${n === 1 ? "" : "s"}, by area</span></summary>${groups}</details>` : "";
   // The code of the whole release (#6038): one line that opens it on the right, and the commits that name no task.
   const c = r.code;
   const code = c ? `<div class="rep-t${picked === "code" ? " on" : ""}" data-rep-code="1" role="button" tabindex="0">
@@ -46,7 +57,13 @@ export function leftHtml(r) {
   const untasked = c && c.untasked.length ? `<details class="rep-g risk"><summary><b>Commits with no task</b>
       <span class="muted t-s">${c.untasked.length}</span><div class="muted t-s">No queue item names them: read them in the code</div></summary>
       ${c.untasked.map(u => `<div class="rep-t"><code>${esc(u.sha)}</code> ${esc(u.subject)}</div>`).join("")}</details>` : "";
-  return scope + sum + numbersHtml(r.numbers) + code + untasked + (groups || `<div class="muted">This release ships no task yet.</div>`);
+  return scope + sum + numbersHtml(r.numbers) + code + untasked + (list || `<div class="muted">This release ships no task yet.</div>`);
+}
+
+// Each #<id> in the summary's HTML (sanitized) that names a task of the release becomes a link that shows the task.
+export function linkTasks(html, tasks) {
+  return html.replace(/(^|[^\w&#"/])#(\d{1,7})\b/g, (m, pre, id) => tasks[id]
+    ? `${pre}<span class="link" data-rep-task="${id}" role="button" tabindex="0">#${id}</span>` : m);
 }
 
 // The right side for the code of the whole release: its files with their tasks, and the Changes view of the range.
@@ -117,10 +134,15 @@ export async function openReport(id) {
   el.querySelector(".rep-l").innerHTML = `<div class="muted">Reading the release…</div>`;
   el.querySelector(".rep-r").innerHTML = "";
   dlg.open();
-  try { data = await getJson(`api/report/${id}`); }
+  try {
+    if (!md) md = (await import("./chat.js")).markdown;
+    data = await getJson(`api/report/${id}`);
+  }
   catch (e) { el.querySelector(".rep-l").innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
-  const first = data.groups.length ? data.groups[0].items[0] : null;
-  picked = matchMedia("(max-width: 759px)").matches ? null : first;  // a phone starts at the summary
+  // A phone starts at the summary; a desktop shows the code of the whole release beside it (#6493), or the first task.
+  const first = data.code ? "code" : data.groups.length ? data.groups[0].items[0] : null;
+  picked = matchMedia("(max-width: 759px)").matches ? null : first;
+  tab = first === "code" ? "files" : "task";
   draw();
 }
 

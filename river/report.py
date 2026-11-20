@@ -1,16 +1,21 @@
 """The review report of a release (#6003; summaries-mockup v7, mark 2026-11-15: 'as a pre-release effort the review
 stuff is good'). What a cut release ships, for the person to read before the deploy, one level at a time:
 
-1. the summary: one paragraph (the manager writes it: maxpm target summary; until then MaximizePM writes a plain one
-   from its records) and the numbers (tasks done, dropped and open, faults, reviews, the person's decisions, cost);
-2. the groups: risks first (a revert, a fix that a review asked for, an open fault), then one group for each goal,
-   then one for each project;
+1. the summary: what changes for a user in a few points grouped by area, the risks and what to check, and one line
+   for the work under the hood (#6493, mark 2026-11-20: 'just listing the tasks is not it'). At the cut MaximizePM
+   adds an operational task (summary_task) whose fresh session writes it: maxpm target summary. A person or the
+   manager edits that text with the same command; until it is written, MaximizePM shows a plain one from its records.
+   The GitHub release notes use the same text (scripts/release/release_notes.py). Then the numbers (tasks done,
+   dropped and open, faults, reviews, the person's decisions, cost);
+2. the groups: risks first (a revert, a fix that a review asked for, an open fault), then one group for each area of
+   the summary (the #<id> under each '### <area>' heading), then 'Under the hood' for the tasks the summary does not
+   name; before the summary, one group for each project;
 3. each task: what changed for a person (done --changed), the proof (its commits, its check), who and when, cost;
 4. the decisions on the task: its questions and their answers, and the notes between sessions;
 5. the code: the Changes view of the task (GET /api/diff?item=<id>, #5855).
 
-It opens from the target's pipeline in Deploy (Plan > Releases until #6136), from the release's deploy item and from its review. When a release is cut, the manager
-gets a notice that offers it (core._release_cut); the manager's summary sends the person one Read card."""
+It opens from the target's pipeline in Deploy (Plan > Releases until #6136), from the release's deploy item and from
+its review. The first summary sends the person one Read card."""
 
 import re
 
@@ -19,6 +24,35 @@ from .core import RiverError
 
 _SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 _REVERT = re.compile(r"\brevert", re.I)
+_HEAD = re.compile(r"^(#{2,4})\s+(.+?)\s*#*\s*$")
+_REF = re.compile(r"(?<![\w&])#(\d+)\b")
+
+# The title of the task that writes a release's summary; with found_during = the deploy item, it names that task.
+SUMMARY_TITLE = "Write the summary of release #{dep} of {target}"
+REST = "Under the hood"
+
+SUMMARY_GUIDE = """Write the summary at the top of the report of release #{dep} of {target} ({n} tasks). The person reads it before the release goes out, and the release notes (GitHub) use the same text. It replaces a list of the tasks: say what changes for a user.
+
+1. Read the report: maxpm target report {dep}. Each task has its line for a person (changed:) and the report lists the risks. Where a line is not clear, read the code of the task (maxpm show <id>, git show <commit>) or of the whole release (maxpm --json target report {dep}: code.base to code.head).
+2. Write the summary in Markdown, in this form:
+
+## What changes for you
+
+### <area>
+- <one point: what is new, changed or fixed for a user, in plain words> (#<id>, #<id>)
+
+Use 2 to 5 areas of the product as a user sees it (for example Sessions and agents, Deploy page, Planner, Desktop app, Installer) and 3 to 7 points in all. Name each task that a user notices in one point, with its #<id> in the parentheses at the end of the point (the release notes drop them; write no #<id> anywhere else): the report groups the task list by these areas. A point says the result for the user, not the work.
+
+## Risks and what to check
+- <a change that breaks a habit or a setting, a restart of maxpm serve, a change of the database, a removed feature, a revert or a fix that the review asked for; and what to check after the update>. Write "None found." when there is none.
+
+## Under the hood
+<one line: the count of the other tasks (tests, internal fixes, docs for developers) and what they are, in a few words>
+
+3. Save it: maxpm target summary {dep} --file <your file>. When the report's summary is already written by a person or an agent, start from that text (maxpm target summary {dep} prints it): keep what it says and add what is missing.
+4. Close this task: maxpm done <this task> --output "the summary of release #{dep}" --no-proof "a text in the queue, no code".
+
+Write no file path, no private name and no other project's name: the release notes of a public repository are public."""
 
 
 def release_of(conn, item_id):
@@ -118,27 +152,39 @@ def report(conn, item_id):
                     "commits": sorted(set(_SHA.findall(it["output"] or "")), key=(it["output"] or "").find),
                     "done_by": core._done_by(conn, i), "closed_at": it["closed_at"], "usd": _usd(conn, i),
                     "decisions": decisions, "risk": _risk(it, faults)}
-    # Level 2: risks first, then each goal, then each project; a task is in one group.
+    s = conn.execute("SELECT * FROM release_reports WHERE deploy_id=?", (dep["id"],)).fetchone()
+    # Level 2: risks first, then the areas of the summary, then the rest; a task is in one group. A group by goal
+    # said nothing ('maximizepm 109 tasks', #6493).
     groups, seen = [], set()
     risky = [i for i, t in tasks.items() if t["risk"]]
     if risky:
         groups.append({"key": "risks", "name": "Risks", "risk": True, "items": risky,
                        "line": "; ".join(f"#{i} {tasks[i]['risk']}" for i in risky)})
         seen |= set(risky)
-    by_goal, by_project = {}, {}
-    for i, t in tasks.items():
-        if i in seen:
+    for name, items in (areas(s["summary"], tasks) if s else []):
+        items = [i for i in items if i not in seen]
+        if not items:
             continue
-        if t["goals"]:
-            by_goal.setdefault(t["goals"][0], []).append(i)
-        else:
-            by_project.setdefault(t["project"], []).append(i)
-    outcome = {g["name"]: g["outcome"] for gs in goals.values() for g in gs}
-    for name, items in by_goal.items():
-        groups.append({"key": "goal:" + name, "name": name, "risk": False, "items": items,
-                       "line": outcome.get(name) or ""})
-    for name, items in by_project.items():
-        groups.append({"key": "project:" + name, "name": name, "risk": False, "items": items, "line": ""})
+        seen |= set(items)
+        if name.lower().startswith("risk"):  # the tasks that the summary's risks name, with the risks MaximizePM found
+            for i in items:
+                tasks[i]["risk"] = "a risk the summary names"
+            if not (groups and groups[0]["risk"]):
+                groups.insert(0, {"key": "risks", "name": "Risks", "risk": True, "items": [], "line": ""})
+            groups[0]["items"] += items
+            groups[0]["line"] = "; ".join(f"#{i} {tasks[i]['risk']}" for i in groups[0]["items"])
+            continue
+        groups.append({"key": "area:" + name, "name": name, "risk": False, "items": items, "line": ""})
+    rest = [i for i in tasks if i not in seen]
+    if s and rest:
+        groups.append({"key": "rest", "name": REST, "risk": False, "items": rest,
+                       "line": "The tasks that the summary names in no point"})
+    elif rest:
+        by_project = {}
+        for i in rest:
+            by_project.setdefault(tasks[i]["project"], []).append(i)
+        for name, items in by_project.items():
+            groups.append({"key": "project:" + name, "name": name, "risk": False, "items": items, "line": ""})
     done = [t for t in tasks.values() if t["status"] == "done"]
     usd = [t["usd"] for t in tasks.values() if t["usd"] is not None]
     numbers = {"tasks": len(tasks), "done": len(done),
@@ -150,9 +196,9 @@ def report(conn, item_id):
                "decisions": sum(1 for t in tasks.values() for d in t["decisions"]
                                 if d["kind"] == "question" and _person(conn, d["to"])),
                "usd": round(sum(usd), 2) if usd else None}
-    s = conn.execute("SELECT * FROM release_reports WHERE deploy_id=?", (dep["id"],)).fetchone()
-    summary = ({"text": s["summary"], "by": s["by"], "at": s["at"]} if s
-               else {"text": _plain_summary(dep, numbers, groups), "by": "maxpm", "at": None})
+    task = summary_task_of(conn, dep)
+    summary = ({"text": s["summary"], "by": s["by"], "at": s["at"], "task": task} if s
+               else {"text": _plain_summary(dep, numbers, groups, task), "by": "maxpm", "at": None, "task": task})
     code = _code(conn, dep["id"])
     if code:  # the size of the whole release, not only of its tasks (#6038)
         numbers.update(files=code["files"], added=code["added"], removed=code["removed"])
@@ -178,29 +224,109 @@ def _person(conn, name):
     return bool(name) and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (name,)).fetchone() is not None
 
 
-def _plain_summary(dep, n, groups):
-    """MaximizePM's own paragraph, until the manager writes one: the counts and the risks, risks first."""
+def _plain_summary(dep, n, groups, task=None):
+    """MaximizePM's own text until the summary is written: who writes it, the risks and the counts."""
     risks = next((g for g in groups if g["risk"]), None)
     parts = []
+    if task and task["status"] in core.OPEN_STATES:
+        parts.append(f"An agent writes the summary of this release now (#{task['id']}): what changes for you, the "
+                     f"risks and what to check.")
     if risks:
         parts.append(f"Risks: {risks['line']}.")
     if n["faults_open"]:
         parts.append(f"{n['faults_open']} open fault{'s' if n['faults_open'] != 1 else ''}.")
-    rest = [g["name"] for g in groups if not g["risk"]]
-    parts.append(f"The release of {dep['target'] or 'its target'} ships {n['tasks']} task{'s' if n['tasks'] != 1 else ''}"
-                 + (f" in {len(rest)} group{'s' if len(rest) != 1 else ''}: {', '.join(rest)}" if rest else "") + ".")
+    parts.append(f"The release of {dep['target'] or 'its target'} ships {n['tasks']} task{'s' if n['tasks'] != 1 else ''}.")
     if n["open"]:
         parts.append(f"{n['open']} {'is' if n['open'] == 1 else 'are'} not done yet.")
-    return " ".join(parts) + " (MaximizePM wrote this from its records; the manager has not written a summary yet.)"
+    return " ".join(parts)
+
+
+def areas(text, tasks):
+    """The areas of a written summary, in its order: [(name, [task ids])] from each '### <area>' heading under '## What
+    changes' and the #<id> that the points below it name (only the tasks of the release, each in its first area). A
+    summary with points but no area heading gives one area, 'What changes for you'."""
+    out, cur, changes, risks = [], None, False, False
+    for line in (text or "").splitlines():
+        m = _HEAD.match(line.strip())
+        if m:
+            if len(m.group(1)) == 2:
+                changes, cur = m.group(2).lower().startswith("what changes"), None
+                risks = m.group(2).lower().startswith("risk")
+                if risks:  # '## Risks and what to check' is an area too: its tasks join the Risks group
+                    cur = (m.group(2), [])
+                    out.append(cur)
+            elif changes:
+                cur = (m.group(2), [])
+                out.append(cur)
+            continue
+        if not (changes or risks):
+            continue
+        ids = [int(x) for x in _REF.findall(line) if int(x) in tasks]
+        if ids and cur is None:
+            cur = ("What changes for you", [])
+            out.append(cur)
+        for i in ids:
+            if not any(i in items for _, items in out):
+                cur[1].append(i)
+    return [(name, items) for name, items in out if items]
+
+
+def plain(text):
+    """A written summary as one line of plain words, for a card: no headings, no list marks, no #<id>."""
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    words = [re.sub(r"^[-*]\s+", "", ln) for ln in lines if ln and not _HEAD.match(ln)]
+    out = " ".join(re.sub(r"\s*\((?:#\d+[,\s]*)+\)", "", w) for w in words)
+    return " ".join(_REF.sub("", out).split())
+
+
+def summary_task_of(conn, dep):
+    """The task that writes the summary of this release ({id, status}), or None."""
+    r = conn.execute("SELECT id, status FROM items WHERE found_during=? AND kind='operational' AND title=? "
+                     "ORDER BY id DESC LIMIT 1",
+                     (dep["id"], SUMMARY_TITLE.format(dep=dep["id"], target=dep["target"]))).fetchone()
+    return dict(r) if r else None
+
+
+def summary_task(conn, dep_id, n):
+    """At the cut (core._release_cut, inside its tx): the operational task whose fresh session writes the summary
+    (#6493: 'written for every release at cut time with no wait for the manager'). maxpm serve starts that session
+    (auto_operational). It is in the project of the first task the release ships, so the session works in that
+    folder, and it blocks nothing: until it is done the report shows MaximizePM's plain text."""
+    dep = core._item(conn, dep_id)
+    if summary_task_of(conn, dep) or conn.execute("SELECT 1 FROM release_reports WHERE deploy_id=?",
+                                                  (dep_id,)).fetchone():
+        return None
+    ships = conn.execute("SELECT i.project_id FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
+                         "AND i.kind NOT IN ('review','deploy') ORDER BY i.id LIMIT 1", (dep_id,)).fetchone()
+    project_id = ships["project_id"] if ships else dep["project_id"]
+    top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (project_id,)).fetchone()["m"]
+    target = dep["target"] or "its target"
+    cur = conn.execute(
+        "INSERT INTO items(project_id,title,short,priority,rank,doer,context,kind,found_during,created_at) "
+        "VALUES (?,?,?,?,?,'ai',?,'operational',?,?)",
+        (project_id, SUMMARY_TITLE.format(dep=dep_id, target=dep["target"]), "Write the release summary",
+         dep["priority"], top + 1, SUMMARY_GUIDE.format(dep=dep_id, target=target, n=n), dep_id, core.iso(core.now())))
+    core._event(conn, cur.lastrowid, "maxpm", f"added: release #{dep_id} is cut; this task writes its summary")
+    return cur.lastrowid
 
 
 def summary_set(conn, item_id, text, actor=None):
-    """The manager's paragraph of a release's report (maxpm target summary). The first one sends each person one Read
-    card (a low alert) with the report: the manager offers it when the release is cut."""
+    """The summary of a release's report (maxpm target summary): the agent of the summary task writes it, and a person
+    or the manager edits it. The first one sends each person one Read card (a low alert) with the report."""
     text = (text or "").strip()
-    if not text:
-        raise RiverError("write the summary: maxpm target summary <id> \"<one paragraph, risks first>\"")
     dep = release_of(conn, item_id)
+    if actor and core._is_ai(conn, actor):  # a person or the manager edits any summary (rights.py: summary ANY)
+        me = conn.execute("SELECT role FROM agents WHERE name=?", (actor,)).fetchone()
+        task = summary_task_of(conn, dep)
+        held = task and conn.execute("SELECT 1 FROM items WHERE id=? AND assignee=?", (task["id"], actor)).fetchone()
+        if not (me and me["role"] == "manager") and not held:
+            raise RiverError(f"refused: only the session that holds the summary task of release #{dep['id']}, the "
+                             f"manager or a person writes its summary"
+                             + (f" (the task is #{task['id']})" if task else "")
+                             + ". Ask the manager: maxpm alert <manager> \"<the change of the summary>\"")
+    if not text:
+        raise RiverError(f"write the summary in a file (the form: maxpm show <the summary task>), then maxpm target "
+                         f"summary {dep['id']} --file <file>; maxpm target summary {dep['id']} alone prints it now")
     t = core.iso(core.now())
     with core.tx(conn):
         first = conn.execute("SELECT 1 FROM release_reports WHERE deploy_id=?", (dep["id"],)).fetchone() is None
@@ -216,7 +342,7 @@ def summary_set(conn, item_id, text, actor=None):
         for p in [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' AND last_seen IS NOT NULL "
                                                     "ORDER BY name")]:
             m = core.send(conn, "alert", f"{core.REPORT_CARD} {dep['target'] or 'a target'} "
-                          f"(#{dep['id']}) before it goes out: {text[:300]}", to=p, item=dep["id"], actor=actor,
+                          f"(#{dep['id']}) before it goes out: {plain(text)[:300]}", to=p, item=dep["id"], actor=actor,
                           level="low")
             sent.append(m["id"] if isinstance(m, dict) and "id" in m else p)
     return {"id": dep["id"], "summary": text, "read_cards": sent, "on_approval": on_approval}
