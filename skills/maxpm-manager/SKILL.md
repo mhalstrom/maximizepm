@@ -151,7 +151,7 @@ ends the session, and tell the user.
   deploy item.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
-  review-passed, review-failed, deployed, deploy; `--clear` removes one; no event lists
+  review-passed, review-failed, deployed, deploy, merged; `--clear` removes one; no event lists
   them; only a person or you set, change, or remove a hook). The maxpm command
   that causes the event runs the hook before it returns (when that command is
   in the sandbox of an agent session, maxpm serve runs it, outside the
@@ -162,6 +162,10 @@ ends the session, and tell the user.
   by hand. A hook never undoes and never refuses its event: when it fails or
   runs longer than `hook_timeout` (10m), the target owner (you, with no owner)
   gets an alert with the exit code and the last lines of its output.
+  The event merged (a push target has it too): an item of a project of the
+  target is done; maxpm serve runs the hook about two minutes later in that
+  project's folder, with MAXPM_ITEM, for example to remove the builds that
+  only the item used.
 - **A target with a deploy plan releases by a deploy hook** (mark: "the deploy
   should be a hook"): `maxpm target hook <target> deploy "<release command>"`,
   and `maxpm config set review on --project deploy-<target>`. No session types

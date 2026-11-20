@@ -110,7 +110,7 @@ class PageHooks(unittest.TestCase):
         self.assertIn('data-hook="release-cut" data-target="web" data-clear="1"', cut)
         self.assertIn("<b>deployed</b>", deployed)
         self.assertIn('<span class="muted">never ran</span>', deployed)
-        self.assertEqual(re.findall(r'data-hook="([a-z-]+)"', free), ["review-passed", "review-failed", "deploy"])
+        self.assertEqual(re.findall(r'data-hook="([a-z-]+)"', free), ["review-passed", "review-failed", "deploy", "merged"])
         # The hook passes on the next run: the line is not a warning any more.
         core.target_hook(self.c, "web", "release-cut", self.cmd, actor="mark")
         self.c.execute("UPDATE hook_runs SET exit_code=0")

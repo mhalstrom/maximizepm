@@ -9192,7 +9192,8 @@ class Hooks(Base):
 
     def test_each_release_event_runs_its_hook_once_with_the_environment(self):
         cmd = self.recorder()
-        events = [e for e in core.HOOK_EVENTS if e != "deploy"]  # a deploy hook releases with no session (DeployHook)
+        # A deploy hook releases with no session (DeployHook); maxpm serve runs a merged hook (test_merged_...).
+        events = [e for e in core.HOOK_EVENTS if e not in ("deploy", "merged")]
         for event in events:
             core.target_hook(self.c, "web", event, cmd, actor="mark")
         here = os.path.realpath(self.dir.name)
@@ -9225,6 +9226,39 @@ class Hooks(Base):
         for event in events:  # one line for each run, on the deploy item
             self.assertEqual(len([c for c in history if c.startswith(f"hook {event}: exit 0, ")]), 1, history)
         self.assertEqual([m for m in core.inbox(self.c, "ops") if "hook" in m["body"]], [])  # no alert: none failed
+
+    def test_merged_runs_in_maxpm_serve_in_the_items_project_folder(self):
+        """#6401: when an item of a project of the target is done, its commits are on main, and a hook removes the
+        builds that only it used. done answers at once: only maxpm serve runs it, as a hook whose command ended."""
+        other = os.path.join(self.dir.name, "other")
+        os.mkdir(other)
+        core.project_add(self.c, "api", target="web", path=other)
+        core.target_hook(self.c, "web", "merged", self.recorder(), actor="mark")
+        a, h = self.add("api", "endpoint"), self.add("api", "Decide the name", doer="human")
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit 1", "dev")
+        core.done(self.c, h, "named", "mark")  # a person's item has no commits
+        self.assertEqual(core.run_hooks(self.c), [])  # not the command's own hook
+        self.c.execute("UPDATE hook_runs SET queued_at=?", (core.iso(core.now() - core.timedelta(minutes=3)),))
+        r = core.run_hooks(self.c, orphans=True)
+        self.assertEqual([(x["event"], x["item"], x["ok"]) for x in r], [("merged", a, True)])
+        self.assertEqual([(x["event"], x["item"], x["deploy"], x["cwd"]) for x in self.runs()],
+                         [("merged", str(a), str(a), os.path.realpath(other))])
+        self.assertTrue(any(e["change"].startswith("hook merged: exit 0") for e in core.item_show(self.c, a)["events"]))
+        core.claim(self.c, self.review, "rev")  # a review or deploy item of the target is no merge
+        core.review_pass(self.c, self.review, None, "rev")
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "release 7", "ops")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM hook_runs WHERE event='merged'").fetchone()[0], 1)
+
+    def test_a_push_target_has_the_merged_hook_and_no_other(self):
+        core.target_add(self.c, "docs")
+        core.target_mode(self.c, "docs", "push", "mark")
+        core.target_hook(self.c, "docs", "merged", "scripts/sweep.sh", actor="mark")
+        with self.assertRaisesRegex(RiverError, "mode push.*no hooks"):
+            core.target_hook(self.c, "docs", "deployed", "x", actor="mark")
+        core.target_mode(self.c, "docs", "deploy", "mark")
+        core.target_mode(self.c, "docs", "push", "mark")  # the merged hook does not stop the push mode
 
     def test_a_cut_that_comes_with_a_claim_runs_the_hook_with_no_revision(self):
         core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
@@ -9478,7 +9512,7 @@ class Hooks(Base):
         with self.assertRaises(RiverError) as e:
             core.target_hook(self.c, "web", "item-done", "scripts/x.sh", actor="mark")
         self.assertEqual(str(e.exception), "no hook event 'item-done'; the events: release-cut, review-passed, "
-                                           "review-failed, deployed, deploy")
+                                           "review-failed, deployed, deploy, merged")
         with self.assertRaisesRegex(RiverError, "no hook event 'cut'"):
             core.target_hook(self.c, "web", "cut", clear=True)
         self.assertEqual(core.target_hook(self.c, "web")["hooks"], [])

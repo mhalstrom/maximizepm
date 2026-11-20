@@ -5371,7 +5371,14 @@ HOOK_EVENTS = {
     "deploy": "the release command: maxpm serve runs it when the deploy item is ready (with review on: when the review "
               "passed), and no session takes the deploy item. Exit 0 closes the deploy item; a failure keeps it open, "
               "adds a fix item, and the release starts again: a new cut, a new review, then this hook again",
+    "merged": "an item of a project of the target is done, so its commits are on main: maxpm serve runs the hook about "
+              "two minutes later, in the item's project folder (#6401: the builds that only the item used can go)",
 }
+# The events that a push target has too (#6401): a push target has no release, but its items still merge into main.
+PUSH_HOOK_EVENTS = ("merged",)
+# queued_by of a run that no command waits for: maxpm serve runs it as it runs the hooks of a command that ended
+# early (HOOK_ORPHAN_AFTER). A done answers at once (p147), and a build sweep can take minutes.
+HOOK_SERVE = "serve"
 HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook whose command did not (it ended early)
 # A hook that exits HOOK_BUSY says 'busy, run me again later' (#5605; the exit code of the gate's busy refusals, #5387):
 # maxpm queues it again, maxpm serve runs it after HOOK_ORPHAN_AFTER, and so on until hook_timeout from its first run.
@@ -5442,7 +5449,7 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
                 why = may_set_hook(conn, actor) or _fault_refusal(conn, actor, "change a hook")
                 if why:
                     raise RiverError(why)
-                if t["mode"] == "push" and command is not None:  # #5968, #6043
+                if t["mode"] == "push" and command is not None and event not in PUSH_HOOK_EVENTS:  # #5968, #6043
                     raise RiverError(f"target {name} releases by a push (mode push: the session that made the change pushes to main when its tests pass): it "
                                      f"has no hooks; to give it hooks: maxpm target mode {name} deploy")
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
@@ -9307,7 +9314,8 @@ def _hook_folder(conn, target, deploy_id=None):
 def _hook(conn, event, target, item_id, actor, deploy_id=None, token=None):
     """An event of a target occurred: when the target has a hook for it, queue one run. Inside the tx of the
     event, so an event that did not occur queues nothing. The command that caused the event runs the hook after
-    that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue."""
+    that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue.
+    A merged hook only maxpm serve runs (HOOK_SERVE), so that done answers at once."""
     _hook_event(event)
     h = conn.execute("SELECT h.command FROM hooks h JOIN targets t ON t.id=h.target_id WHERE t.name=? AND h.event=?",
                      (target, event)).fetchone() if target else None
@@ -9317,7 +9325,8 @@ def _hook(conn, event, target, item_id, actor, deploy_id=None, token=None):
     rev = conn.execute("SELECT cut_rev FROM items WHERE id=?", (deploy_id,)).fetchone()
     conn.execute("INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (target, event, h["command"], item_id, deploy_id,
-                                                rev["cut_rev"] if rev else None, actor, iso(now()), token or hook_token()))
+                                                rev["cut_rev"] if rev else None, actor, iso(now()),
+                                                HOOK_SERVE if event == "merged" else token or hook_token()))
 
 
 def _review_deploy(conn, review_id):
@@ -9412,6 +9421,10 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     limit_text = setting(conn, limit_key, item_id=run["deploy_id"])
     limit = parse_duration(limit_text).total_seconds()
     folder = _hook_folder(conn, target, run["deploy_id"])
+    if event == "merged":  # the folder of the item's own project, whose build folder the item used (#6401)
+        p = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+                         (run["item_id"],)).fetchone()
+        folder = p["path"] if p and p["path"] else folder
     where = os.path.expanduser(folder) if folder else cwd
     env = {**os.environ, "MAXPM_EVENT": event, "MAXPM_TARGET": target, "MAXPM_REV": run["rev"] or "",
            "MAXPM_ITEM": str(run["item_id"] or ""), "MAXPM_DEPLOY": str(run["deploy_id"] or ""),
@@ -10127,9 +10140,11 @@ def target_mode(conn, name, mode, actor=None):
         t = _target(conn, name)
         name = t["name"]
         if mode == "push":
-            hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))]
+            hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))
+                     if r["event"] not in PUSH_HOOK_EVENTS]
             if hooks:
-                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push target has none: "
+                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push target has only "
+                                 f"{', '.join(PUSH_HOOK_EVENTS)}: "
                                  f"maxpm target hook {name} <event> --clear")
             dep = conn.execute(f"SELECT id FROM items WHERE kind='deploy' AND target=? AND status IN {OPEN_STATES} "
                                "ORDER BY id LIMIT 1", (name,)).fetchone()
@@ -17158,6 +17173,9 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
             _hook(conn, "deployed", it["target"], it["id"], actor)
         elif status == "done" and it["kind"] == "review":
             _hook(conn, "review-passed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
+        elif status == "done" and it["doer"] != "human":  # #6401: its commits are on main
+            p = conn.execute("SELECT target FROM projects WHERE id=?", (it["project_id"],)).fetchone()
+            _hook(conn, "merged", p["target"] if p else None, it["id"], actor)
         goal_checks = _ask_done_when(conn, conn.execute(
             "SELECT g.* FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? ORDER BY g.rank, g.id",
             (it["id"],)).fetchall(), actor, f"#{it['id']} {it['title']}", send=False)
