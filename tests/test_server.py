@@ -1241,17 +1241,22 @@ class LaunchAgent(unittest.TestCase):
         )
 
         with mock.patch.dict(os.environ, {"COPILOT_HOME": str(chome), "GROK_HOME": str(ghome)}):
-            # Shared folder (not made by maxpm): Codex trusts the project's linked folder for this start only
-            # (#6432, its -c flag writes no file); the other three CLIs keep their trust prompt.
+            # Shared folder (not made by maxpm): Codex (#6432, its -c flag) and agy (#6456, its session-only
+            # --settings) trust the project's linked folder for this start only, and write no file; Copilot and
+            # Grok keep their trust prompt.
             for label in ("Antigravity", "Codex", "Copilot", "Grok"):
                 sent = []
                 t = server.dispatch_item(self.c, add(f"shared {label}"), agent=label, runner=sent.append)
-                self.assertNotIn("trustedWorkspaces", t["command"])
                 if label == "Codex":
                     self.assertIn(f'projects={{{json.dumps(root)}={{trust_level="trusted"}}}}',
                                   shlex.split(t["command"]))
                     self.assertTrue(sent[-1].endswith(t["command"]))
+                elif label == "Antigravity":
+                    words = shlex.split(t["command"])
+                    self.assertIn(root, json.loads(words[words.index("--settings") + 1])["trustedWorkspaces"])
+                    self.assertTrue(sent[-1].endswith(t["command"]))
                 else:
+                    self.assertNotIn("trustedWorkspaces", t["command"])
                     self.assertNotIn("trust_level", t["command"])
                 core.unregister(self.c, t["session_name"])
             # A folder that no project links keeps Codex's trust prompt.
