@@ -32,6 +32,9 @@ export function stateText(r) {
   return "";
 }
 
+// The task that investigates a failed or late update (#6461): ' · task #N', a link that opens it in the drawer.
+const taskLink = (u) => u && u.task ? ` · <span class="link" data-open="${+u.task}">task #${+u.task}</span>` : "";
+
 function rowHtml(r, one) {
   const u = r.update || {}, run = active(r);
   const go = u.state === "queued" ? button("Cancel", { data: { "au-cancel": r.id }, title: "Cancel the update" })
@@ -40,7 +43,7 @@ function rowHtml(r, one) {
   const cls = u.state === "failed" ? " au-fail" : u.state === "done" ? " au-done" : "";
   return `<div class="au-row${cls}">
     <div class="au-name"><b>${esc(r.label)}</b> <span class="muted t-s">${esc(r.installed || "?")}${r.newer ? ` → ${esc(r.latest)}` : ""}</span></div>
-    <div class="au-st t-s" role="status">${esc(stateText(r))}</div>
+    <div class="au-st t-s" role="status">${esc(stateText(r))}${taskLink(u)}</div>
     <div class="au-acts">${go}</div></div>`;
 }
 
@@ -71,6 +74,7 @@ function dialog() {
   d.addEventListener("click", async (e) => {
     if (e.target === d) return;
     if (e.target.closest("[data-au-close]")) return dlg.close();
+    if (e.target.closest("[data-open]")) return dlg.close();  // the task opens in the drawer (app.js)
     if (e.target.closest("[data-au-later]")) {
       await run("agent_update_later", { agents: shown });
       return dlg.close();
@@ -152,7 +156,7 @@ export function versionsHtml(s) {
       r.error ? esc(r.error) : ""].filter(Boolean).join(" · ");
     return `<div class="au-row${u.state === "failed" ? " au-fail" : ""}">
       <div class="au-name"><b>${esc(r.label)}</b> <span class="t-s">${ver}</span></div>
-      <div class="au-st t-s muted">${esc(stateText(r)) || lines}</div>
+      <div class="au-st t-s muted">${esc(stateText(r)) || lines}${taskLink(u)}</div>
       <div class="au-acts">${go}${auto}</div></div>`;
   }).join("")}</div>`;
 }
