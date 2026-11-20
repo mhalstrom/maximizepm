@@ -319,8 +319,16 @@ class SettingsRead(unittest.TestCase):
         (home / "config.toml").write_text('model = "gpt-6.1-terra"\nmodel_reasoning_effort = "medium"\n'
                                           '[profiles.x]\nmodel = "other"\n', encoding="utf-8")
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
-            self.assertEqual(codex.config_settings(), {"model": "gpt-6.1-terra", "effort": "medium", "sandbox": None,
-                                                       "approval": None})
+            self.assertEqual(codex.config_settings(), {"model": "gpt-6.1-terra", "effort": "medium",
+                                                       "sandbox": "workspace-write", "approval": "on-request"})
+            (home / "config.toml").write_text('sandbox_mode = "read-only"\napproval_policy = "never"\n',
+                                              encoding="utf-8")
+            self.assertEqual(codex.config_settings(), {"model": None, "effort": None,
+                                                       "sandbox": "read-only", "approval": "never"})
+            (home / "config.toml").write_text('default_permissions = ":read-only"\nsandbox_mode = "workspace-write"\n',
+                                              encoding="utf-8")
+            self.assertEqual(codex.config_settings(), {"model": None, "effort": None,
+                                                       "sandbox": "read-only", "approval": "on-request"})
         (home / ".pi" / "agent").mkdir(parents=True)
         (home / ".pi" / "agent" / "settings.json").write_text(
             '{"defaultProvider": "openai-codex", "defaultModel": "gpt-6.1-sol"}', encoding="utf-8")

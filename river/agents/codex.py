@@ -352,12 +352,19 @@ def parse_chat(lines):
     return _s().parse_lines(parse_chat_line, lines)
 
 
+_PERM_SANDBOX = {":workspace": "workspace-write", ":read-only": "read-only",
+                 ":danger-full-access": "danger-full-access"}
+
+
 def config_settings():
-    """What a Codex session takes from config.toml when its command line names nothing (#6280): the top-level model,
-    model_reasoning_effort, sandbox_mode and approval_policy (gpt-6.1-terra and medium on 2026-11-20)."""
+    """What a Codex session takes from config.toml when its command line names nothing (#6280, #6316): the top-level
+    model, model_reasoning_effort, sandbox (default_permissions, else sandbox_mode, else Codex's default
+    workspace-write in a trusted folder) and approval_policy (else Codex's default on-request). Measured on
+    codex-cli 0.159.1 on 2026-11-20 via app-server thread/start."""
     got = _config_top()
+    sandbox = _PERM_SANDBOX.get(got.get("default_permissions") or "") or got.get("sandbox_mode") or "workspace-write"
     return {"model": got.get("model"), "effort": got.get("model_reasoning_effort"),
-            "sandbox": got.get("sandbox_mode"), "approval": got.get("approval_policy")}
+            "sandbox": sandbox, "approval": got.get("approval_policy") or "on-request"}
 
 
 # Where the Settings dialog reads each setting of a running session (#6280): a turn_context at each turn, and
