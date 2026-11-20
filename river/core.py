@@ -25427,6 +25427,20 @@ def _goal_brief(conn, name, actor):
             "parent_handoff": parent_handoff(conn, _goal(conn, name))}
 
 
+def _go_read_dirs(conn, brief):
+    """The project's read_dirs (#6281, #6500): the claimed item's project when there is one, else the area's projects."""
+    it = brief.get("item")
+    if it and it.get("project_id") is not None:
+        return parse_read_dirs(setting(conn, "read_dirs", project_id=it["project_id"]))
+    out = []
+    for n in brief.get("projects") or ():
+        p = _project(conn, n)
+        for d in parse_read_dirs(setting(conn, "read_dirs", project_id=p["id"])):
+            if d not in out:
+                out.append(d)
+    return out
+
+
 def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
        agent_type=None):
     """One call for a fresh agent session; see _go. The briefing ends with the policies for the session (#5308)."""
@@ -25437,6 +25451,7 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         if it and it.get("project") and it["project"] not in names:
             names.append(it["project"])
         brief["policies"] = policies_for(conn, names, brief["role"], cwd)
+        brief["read_dirs"] = _go_read_dirs(conn, brief)
         if it and fault_key(it):
             brief["fault"] = ops_fault_brief(conn, it)  # an investigation (#5432)
     if brief.get("agent"):

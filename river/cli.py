@@ -6167,6 +6167,9 @@ def render_go(b):
         if off:
             out.append(f"The queue is off in {', '.join(off)}. The person turns it on: maxpm config set queue on "
                        f"--project {off[0]}")
+        if b.get("read_dirs"):  # #6500
+            out.append(f"READ-ONLY FOLDERS (read_dirs): {', '.join(b['read_dirs'])} "
+                       f"(you may read files there, not write; secret files are blocked).")
         print("\n".join(out).rstrip())
         return
     if core.queue_note():
@@ -6201,6 +6204,9 @@ def render_go(b):
         out += [f"BUILDS: a build outside the checkout's own target (a clean copy, an export, a test copy) goes to "
                 f"CARGO_TARGET_DIR=$MAXPM_BUILD_DIR/<name> ({b['build_dir']}), never to a scratch folder. maxpm serve "
                 f"removes that folder, and any build folder in your scratchpad, when your session has ended.", ""]
+    if b.get("read_dirs"):  # #6500
+        out += [f"READ-ONLY FOLDERS (read_dirs): {', '.join(b['read_dirs'])} "
+                f"(you may read files there, not write; secret files are blocked).", ""]
     if b.get("help_prompt"):
         out += [b["help_prompt"], "",
                 f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\"."]

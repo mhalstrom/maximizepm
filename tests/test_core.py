@@ -802,6 +802,54 @@ class Go(Base):
         with self.assertRaises(RiverError):
             core.go(self.c, self.dir.name)
 
+    def test_go_briefing_names_project_read_dirs(self):
+        """#6500: the go briefing names the project's read_dirs when set, and says nothing when unset."""
+        from river import cli
+        self.add("web", "page")
+        self.add("api", "route")
+
+        def text(brief):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_go(brief)
+            return out.getvalue()
+
+        # Unset: empty list in the brief, no line in render_go.
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual(b["read_dirs"], [])
+        self.assertNotIn("READ-ONLY FOLDERS", text(b))
+
+        # Set on web: listed in order, real paths, for worker, idle and plain roles; not on api.
+        r1 = os.path.join(self.dir.name, "ref1")
+        r2 = os.path.join(self.dir.name, "ref2")
+        os.makedirs(r1)
+        os.makedirs(r2)
+        expected = [os.path.realpath(r1), os.path.realpath(r2)]
+        core.config_set(self.c, "read_dirs", f"{r1}, {r2}", project="web")
+
+        b_worker = core.go(self.c, self.web, "w1")
+        self.assertEqual(b_worker["read_dirs"], expected)
+        rendered = text(b_worker)
+        self.assertIn(f"READ-ONLY FOLDERS (read_dirs): {expected[0]}, {expected[1]}", rendered)
+
+        b_idle = core.go(self.c, self.web, "w2")
+        self.assertEqual((b_idle["role"], b_idle["read_dirs"]), ("idle", expected))
+        self.assertIn(f"READ-ONLY FOLDERS (read_dirs): {expected[0]}, {expected[1]}", text(b_idle))
+
+        b_plain = core.go(self.c, self.web, "p1", role="plain")
+        self.assertEqual((b_plain["role"], b_plain["read_dirs"]), ("plain", expected))
+        self.assertIn(f"READ-ONLY FOLDERS (read_dirs): {expected[0]}, {expected[1]}", text(b_plain))
+
+        b_api = core.go(self.c, self.api, "a1")
+        self.assertEqual(b_api["read_dirs"], [])
+        self.assertNotIn("READ-ONLY FOLDERS", text(b_api))
+
+        # Unset again: disappears.
+        core.config_unset(self.c, "read_dirs", project="web")
+        b_after = core.go(self.c, self.web, "w1")
+        self.assertEqual(b_after["read_dirs"], [])
+        self.assertNotIn("READ-ONLY FOLDERS", text(b_after))
+
 
 class Capacity(Base):
     def test_slots_and_excess(self):
