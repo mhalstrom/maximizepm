@@ -453,6 +453,43 @@ class Setup(unittest.TestCase):
         self.assertEqual(hermes.SETUP["instructions"], "AGENTS.md")
 
 
+class SessionValues(HomeCase):
+    """#5241: Hermes 0.22.7 stores the CLI's MaximizePM variables in the session's policy, but its terminal tool
+    starts without them; a maxpm command there reads them from the policy."""
+
+    def store(self, sid, client_env):
+        with sqlite3.connect(self.home / "state.db") as c:
+            c.execute("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)")
+            policy = {"client_env_json": None if client_env is None else json.dumps(client_env), "source": "cli"}
+            c.execute("INSERT INTO state_meta VALUES (?, ?)",
+                      (hermes.POLICY_KEY + sid, json.dumps({"session_id": sid, "policy": policy})))
+        c.close()
+
+    def test_it_reads_the_maxpm_variables_of_the_session_and_nothing_else(self):
+        self.store("local-ab", {"MAXPM_AGENT": "hermes-1", "MAXPM_DB": "/q/t.db", "PATH": "/bin", "OTHER": "x"})
+        self.store("local-cd", None)  # a session of Desktop: no client environment
+        env = {"HERMES_HOME": str(self.home), "HERMES_SESSION_ID": "local-ab"}
+        self.assertEqual(hermes.session_values(env), {"MAXPM_AGENT": "hermes-1", "MAXPM_DB": "/q/t.db"})
+        for sid in ("local-cd", "local-zz", "", "bad id; x"):
+            self.assertEqual(hermes.session_values({**env, "HERMES_SESSION_ID": sid}), {}, sid)
+        self.assertEqual(hermes.session_values({**env, "HERMES_HOME": str(self.home / "none")}), {})
+
+    def test_the_command_fills_only_what_its_environment_lacks(self):
+        from river import client
+        self.store("local-ab", {"MAXPM_AGENT": "hermes-1", "MAXPM_DB": "/q/t.db", "MAXPM_QUIET": "1"})
+        env = {"HERMES_HOME": str(self.home), "HERMES_SESSION_ID": "local-ab", "MAXPM_QUIET": "0"}
+        client.agent_values(env)
+        self.assertEqual((env["MAXPM_AGENT"], env["MAXPM_DB"], env["MAXPM_QUIET"]), ("hermes-1", "/q/t.db", "0"))
+        # The variables arrived (a later Hermes, or a token): the stored ones are not read.
+        for have in ({"MAXPM_DB": "/other.db"}, {"MAXPM_TOKEN": "t"}):
+            env = {"HERMES_HOME": str(self.home), "HERMES_SESSION_ID": "local-ab", **have}
+            client.agent_values(env)
+            self.assertNotIn("MAXPM_AGENT", env)
+        env = {"HERMES_HOME": str(self.home)}  # not inside Hermes
+        client.agent_values(env)
+        self.assertNotIn("MAXPM_DB", env)
+
+
 class Deliver(HomeCase):
     def test_the_delivery_names_the_sessions_provider_and_model(self):
         """#5704: without --provider, hermes chat --resume used the config's default provider (Nous Portal) for a

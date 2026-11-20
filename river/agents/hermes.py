@@ -216,6 +216,9 @@ def parse_command(words):
 # (#5211) is no help: it passes names from the gateway's own environment, which never had MaximizePM's variables. So
 # MAXPM_AGENT, MAXPM_DB and the others reach maxpm only after `hermes config set terminal.client_env_passthrough ...`
 # (CLIENT_ENV); before it, every maxpm command of a Hermes session reads the default queue as an unnamed agent.
+# With that setting, Hermes 0.22.7 stores the values in the session's policy, but its terminal tool still starts
+# without them, and without the client's PATH too (a test on 2026-11-20, #5241). So a maxpm command that finds
+# HERMES_SESSION_ID and none of MaximizePM's variables reads them from that stored policy (session_values).
 # The first process above a maxpm command of a Hermes session is that shared gateway (a Python with no terminal,
 # started once for every session), not the CLI in the pane: MaximizePM records it only when it runs on a terminal, so
 # the busy checks and maxpm stop --kill never act on the gateway (#5247).
@@ -231,6 +234,33 @@ def client_env_command():
     """The command that lets MaximizePM's variables reach the shell commands of Hermes (a person runs it once; it
     applies to the sessions that start after it)."""
     return ["hermes", "config", "set", "terminal.client_env_passthrough", "[" + ", ".join(CLIENT_ENV) + "]"]
+
+
+# The row of $HERMES_HOME/state.db (table state_meta) that holds a local session's policy, fixed at its creation.
+POLICY_KEY = "gateway.local_policy.v1:"
+
+
+def session_values(env=None):
+    """MaximizePM's variables (CLIENT_ENV) that the CLI of this Hermes session sent its gateway, read from the
+    session's stored policy (state_meta, POLICY_KEY + HERMES_SESSION_ID; its client_env_json), or {}. A maxpm
+    command in Hermes's terminal tool lacks them (#5241); the CLI in the pane had them. Hermes keeps the values of
+    the session's creation: a resume keeps those too."""
+    env = os.environ if env is None else env
+    sid = env.get("HERMES_SESSION_ID") or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", sid):
+        return {}
+    try:
+        con = sqlite3.connect(f"{(hermes_home(env) / 'state.db').as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            row = con.execute("SELECT value FROM state_meta WHERE key=?", (POLICY_KEY + sid,)).fetchone()
+        finally:
+            con.close()
+        sent = json.loads(json.loads(row[0])["policy"]["client_env_json"]) if row else {}
+    except (sqlite3.Error, ValueError, KeyError, TypeError):
+        return {}
+    if not isinstance(sent, dict):
+        return {}
+    return {k: v for k, v in sent.items() if k in CLIENT_ENV and isinstance(v, str)}
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -459,10 +459,23 @@ def refuse_native_windows():
         sys.exit(2)
 
 
+def agent_values(env=None):
+    """A command in Hermes's terminal tool gets none of the session's MaximizePM variables (#5241): it would read
+    the default queue as an unnamed agent. Then take them from the session that Hermes stored. Each value that the
+    environment has already stays."""
+    env = os.environ if env is None else env
+    if not env.get("HERMES_SESSION_ID") or any(env.get(k) for k in ("MAXPM_AGENT", "MAXPM_DB", "MAXPM_TOKEN")):
+        return
+    from .agents import hermes
+    for k, v in hermes.session_values(env).items():
+        env.setdefault(k, v)
+
+
 def main():
     """The installed maxpm command (the pyproject entry point, and bin/maxpm): serve runs it when it can, else
     maxpm here."""
     refuse_native_windows()
+    agent_values()
     code = run_remote(sys.argv[1:])
     if code is not None:
         sys.exit(code)
