@@ -27,7 +27,7 @@ LINK_WAIT_S = 15  # seconds that serve_on waits for tailscale serve to end or to
 _LINK = re.compile(r"https://\S+")
 _PENDING = {"proc": None, "out": None}  # the tailscale serve that waits for the person's approval
 CACHE_S = 60  # seconds that a read of tailscale status stays good
-_SELF = {"at": 0.0, "value": None}
+_SELF = {"at": None, "value": None}
 
 
 def cli():
@@ -68,7 +68,7 @@ def read_self():
 def self_info(fresh=False):
     """read_self, read again at most every CACHE_S seconds (mcp.local_refusal asks it for each forwarded request)."""
     t = time.monotonic()
-    if fresh or t - _SELF["at"] > CACHE_S:
+    if fresh or _SELF["at"] is None or t - _SELF["at"] > CACHE_S:
         _SELF.update(at=t, value=read_self())
     return _SELF["value"]
 
@@ -91,23 +91,23 @@ def allowed_logins(conn=None):
     return got
 
 
-_LOGINS = {"at": 0.0, "value": set()}
+_LOGINS = {"at": None, "value": set()}
 
 
 def login_ok(login):
     """Whether a login that Tailscale gave (Tailscale-User-Login) may use the page; the setting is read again at most
     every CACHE_S seconds."""
     t = time.monotonic()
-    if t - _LOGINS["at"] > CACHE_S:
+    if _LOGINS["at"] is None or t - _LOGINS["at"] > CACHE_S:
         _LOGINS.update(at=t, value=allowed_logins())
     return bool(login) and login.strip().lower() in _LOGINS["value"]
 
 
 def forget():
     """Read the status and the setting again at the next request (after maxpm phone, the setup step, or a test)."""
-    _SELF.update(at=0.0, value=None)
-    _LOGINS.update(at=0.0, value=set())
-    _PAGE.update(at=0.0, port=None, value=None)
+    _SELF.update(at=None, value=None)
+    _LOGINS.update(at=None, value=set())
+    _PAGE.update(at=None, port=None, value=None)
 
 
 def serving(port):
@@ -118,14 +118,14 @@ def serving(port):
     return f"127.0.0.1:{port}" in out or f"localhost:{port}" in out
 
 
-_PAGE = {"at": 0.0, "port": None, "value": None}
+_PAGE = {"at": None, "port": None, "value": None}
 
 
 def page_url(port):
     """https://<name> (no slash at the end) when tailscale serve forwards this computer's page on <port> now, else
     None: the address of a phone notice's link (notify.remote_page, #5860). Read again at most every CACHE_S seconds."""
     t = time.monotonic()
-    if _PAGE["port"] != port or t - _PAGE["at"] > CACHE_S:
+    if _PAGE["at"] is None or _PAGE["port"] != port or t - _PAGE["at"] > CACHE_S:
         me = self_info() if cli() or RUNNER else None
         on = bool(me and me.get("running") and me.get("name")) and serving(port)
         _PAGE.update(at=t, port=port, value=f"https://{me['name']}" if on else None)

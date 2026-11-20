@@ -169,6 +169,17 @@ class Status(DbCase):
         with self.assertRaisesRegex(core.RiverError, "tailnet_logins is a comma list"):
             core.config_set(self.c, "tailnet_logins", "two words")
 
+    def test_caches_read_when_monotonic_clock_is_below_cache_ttl(self):
+        # On a freshly booted host (e.g. a CI VM), time.monotonic() < CACHE_S: an empty cache must still read (#6524).
+        from unittest import mock
+        use(self, Fake(serving=True))
+        with mock.patch.object(tailnet.time, "monotonic", lambda: 10.0):
+            self.assertEqual(tailnet.self_info()["name"], NAME)
+            self.assertTrue(tailnet.login_ok("mark@example.com"))
+            self.assertEqual(tailnet.page_url(8765), f"https://{NAME}")
+            tailnet.forget()
+            self.assertEqual(tailnet.page_url(8765), f"https://{NAME}")
+
 
 LINK = "https://login.tailscale.com/f/serve?node=n1abc"
 
