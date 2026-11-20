@@ -3065,6 +3065,12 @@ TOKEN_ENV = "MAXPM_TOKEN"  # the variable of the pane that holds a session's tok
 TOKEN_PREFIX = "mxt_"  # so the run log's mask and a person who sees one know what it is
 # The agent of the token of the command that runs now (cli._run sets it): _session_self takes it first.
 TOKEN_AGENT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_token_agent", default=None)
+
+
+def as_cmd(name):
+    """The start of a command that a text tells agent name to run (#6423): plain maxpm when this command runs with
+    name's own session token, which names it (a --as there only prints 'not needed'); else maxpm --as <name>."""
+    return "maxpm" if name and TOKEN_AGENT.get() == name else f"maxpm --as {name}"
 # The processes above the caller of a command that a runner of serve runs (serve reads them from the kernel, as
 # vault._chain_now does): [(pid, ppid, comm, start)], or None. The runner sets it for each command.
 CALLER_CHAIN = None
@@ -5532,7 +5538,7 @@ def may_set_hook(conn, actor):
     if r is None or r["kind"] == "human" or r["role"] == "manager":
         return None
     return (f"{actor} is an agent; only a person or the manager sets, changes, or removes a hook, because maxpm "
-            f"serve runs it outside the sandbox. Ask the manager: maxpm --as {actor} ask manager \"<the hook and why>\"")
+            f"serve runs it outside the sandbox. Ask the manager: {as_cmd(actor)} ask manager \"<the hook and why>\"")
 
 
 def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
@@ -5673,13 +5679,13 @@ def may_set_check(conn, actor, check):
     if check.get("repair") and check["scope_kind"] == "target" and not person:
         return (f"{actor} is {'the manager' if r['role'] == 'manager' else 'an agent'}; only a person sets, changes, "
                 f"or removes a check with a repair on the deploy target {check['scope']}, because a repair there "
-                f"changes production. Ask the person: maxpm --as {actor} ask <person> \"<the check and why>\"")
+                f"changes production. Ask the person: {as_cmd(actor)} ask <person> \"<the check and why>\"")
     if person or r["role"] == "manager" or (check["form"] not in OPS_COMMAND_FORMS and not check.get("repair")):
         return None
     what = "a repair command" if check.get("repair") else f"a {check['form']} check"
     return (f"{actor} is an agent; only a person or the manager sets, changes, or removes {what}, because maxpm "
             f"serve runs it outside the sandbox. An agent may add a url or a beat check. Ask the manager: "
-            f"maxpm --as {actor} ask manager \"<the check and why>\"")
+            f"{as_cmd(actor)} ask manager \"<the check and why>\"")
 
 
 def _ops_statuses(text):
@@ -9280,7 +9286,7 @@ def _ops_rollback_guard(conn, pr, old, new, actor, proposed=False):
     target = conn.execute("SELECT target FROM projects WHERE id=?", (pr["id"],)).fetchone()["target"]
     if target and actor and not _is_person(conn, actor):
         raise RiverError(f"refused: {pr['name']} releases to {target}, and on production only a person sets the "
-                         f"rollback command (infra.rollback). Ask the person: maxpm --as {actor} ask <person> "
+                         f"rollback command (infra.rollback). Ask the person: {as_cmd(actor)} ask <person> "
                          f"\"<the rollback command of {pr['name']}, and why>\"")
 
 
@@ -15131,8 +15137,8 @@ def _stop_text(conn, agent, sender, reason):
     ends it. A Codex session that got only 'inbox; go' answered in words and kept its item."""
     held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                           "ORDER BY id", (agent,))]
-    me = f"maxpm --as {agent}"
-    steps = "".join(f" For #{i}: {me} done {i} --output \"<what changed, commit>\" when it is finished, else {me} "
+    me = as_cmd(agent)
+    steps ="".join(f" For #{i}: {me} done {i} --output \"<what changed, commit>\" when it is finished, else {me} "
                     f"release {i} --note \"<what is done, what is left>\"." for i in held)
     return (f"[maxpm stop request from {sender}] {reason} Commit the work that is finished.{steps} Then run {me} go "
             f"once more: with nothing held it ends this session. Answering in words does not end it.")
@@ -16611,11 +16617,11 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: {actor} is an assistant session: it goes through what waits on "
                          f"{ag['assistant_for'] or 'the person'}, with them, and takes no queue work. Add the work "
                          f"(maxpm add \"<title>\" --found-during <id>): a worker session takes it. A person's item that "
-                         f"you do yourself, with their yes: maxpm --as {actor} takeover <id> --note \"<how>\"")
+                         f"you do yourself, with their yes: {as_cmd(actor)} takeover <id> --note \"<how>\"")
     if ag["role"] in ("planner", "manager") and not (ag["role"] == "manager" and it0["kind"] == "deploy"
                                                      and manager_releases(conn, it0["target"])):  # #6048
         raise RiverError(f"refused: {actor} is a {ag['role']} session; it changes the plan and does not take work. "
-                         f"To work instead, run: maxpm --as {actor} go" + (
+                         f"To work instead, run: {as_cmd(actor)} go" + (
                              f". #{item_id} is reserved for you: start a session for it (maxpm launch --item {item_id}), "
                              f"or open it to every agent (maxpm edit {item_id} --unreserve)"
                              if it0["reserved_for"] == actor and it0["status"] == "open" else ""))
@@ -18871,8 +18877,8 @@ def push_guard(conn, agent, command):
     why += [f"#{b['id']} is blocked: {' '.join(b['blocked_reason'].split())[:120]}" for b in blocked[:2]]
     more = len(alerts) + len(blocked) - len(why)
     return ("MaximizePM holds this command (push_guard): " + "; ".join(why) + (f"; and {more} more" if more > 0 else "")
-            + f". Read it first: maxpm --as {agent} inbox"
-            + (f" (and maxpm --as {agent} show {blocked[0]['id']})" if blocked else "")
+            + f". Read it first: {as_cmd(agent)} inbox"
+            + (f" (and {as_cmd(agent)} show {blocked[0]['id']})" if blocked else "")
             + ". Then do what it says, and run the command again only when it still applies.")
 
 
@@ -19043,7 +19049,7 @@ def session_move(conn, sid, to, actor=None):
     by = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
     if actor and not (by and (by["kind"] == "human" or by["role"] == "manager")):
         raise RiverError(f"refused: only a person or the manager moves a session to another agent; ask the manager: "
-                         f"maxpm --as {actor} alert {active_manager(conn) or '<manager>'} \"session {sid} is {to}'s\"")
+                         f"{as_cmd(actor)} alert {active_manager(conn) or '<manager>'} \"session {sid} is {to}'s\"")
     if not to or not (conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (to,)).fetchone()
                       or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (to,)).fetchone()):
         raise RiverError(f"{to or '--to'} is no agent: maxpm session --move <session id> --to <agent>")
@@ -20134,7 +20140,7 @@ def asked_line(agent, qs):
     # what it was. The reminder carries each question whole, and says to quote it, never the number alone.
     each = "; ".join(f"#{q['id']} to {q['to_agent']}: \"{full_text(q.get('body'))}\"" for q in qs)
     return (f"you have {len(qs)} open question(s) to {who} ({each}): close each that is answered, from any channel: "
-            f"maxpm --as {agent} answer <id> --self \"<the answer>\"; or that is moot: maxpm --as {agent} withdraw <id> "
+            f"{as_cmd(agent)} answer <id> --self \"<the answer>\"; or that is moot: {as_cmd(agent)} withdraw <id> "
             f"--note \"<why>\". When you tell the person that one still waits, give its whole text, not only its "
             f"number")
 
@@ -20234,7 +20240,7 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
     _agent(conn, actor)
     if active_manager(conn) == actor:  # a second watcher woke the manager twice for each message (#1312)
         raise RiverError(f"{actor} is the active manager, and maxpm manage --watch is its only watcher: it returns "
-                         f"for messages too. Run maxpm --as {actor} manage --watch instead of inbox --wait")
+                         f"for messages too. Run {as_cmd(actor)} manage --watch instead of inbox --wait")
     state = _poll_state()  # #6008: a wait that the caller repeats, one poll at a time
     state.setdefault("since", iso(now()))
     deadline = parse_iso(state["since"]) + parse_duration(timeout or INBOX_WAIT)
@@ -24087,7 +24093,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     if not mid:
         raise RiverError(f"MaximizePM does not know the model {agent} ran on (not in the queue, its command line or "
                          f"its transcript), and a resume with no model takes the CLI's default: nothing resumed. "
-                         f"The session records it with maxpm --as {agent} go --model <model>; or pick the model in "
+                         f"The session records it with {as_cmd(agent)} go --model <model>; or pick the model in "
                          f"its Settings on the Sessions tab")
     opts = {**profile_options(conn, prof[0], prof[1], project_id, None),
             "prompt": ov.get("prompt") or ADOPT_PROMPT.format(agent=agent), **(ov.get("opts") or {})}
@@ -25481,7 +25487,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         raise RiverError("waiting needs an agent name: pass --as <name>")
     if _agent(conn, actor)["role"] == "expert":
         raise RiverError(f"{actor} is an expert session: it waits at its prompt for the person, not in maxpm wait, "
-                         f"and MaximizePM never ends it for that. Answer the person; maxpm --as {actor} go shows your "
+                         f"and MaximizePM never ends it for that. Answer the person; {as_cmd(actor)} go shows your "
                          f"news")
     names = _names(conn, project) if project else projects_for_dir(conn, cwd)
     scope = agent_scope(conn, actor)
@@ -25505,7 +25511,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
                                 (actor,)).fetchall()
             if held:
                 raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; finish or release "
-                                 f"it before you wait: maxpm --as {actor} go")
+                                 f"it before you wait: {as_cmd(actor)} go")
             conn.execute("UPDATE agents SET waiting_since=COALESCE(waiting_since, ?), role='waiting', waiting_in=?, "
                          "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
                                                  f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
@@ -26835,8 +26841,8 @@ def tell_watch_late(conn):
                 body = (f"{WATCH_WAKE} {_short(gap)} ago and {len(due)} message{'s' if len(due) != 1 else ''} "
                         f"wait{'' if len(due) != 1 else 's'} for you"
                         + (f", {blocked} blocked (the sender stands still)" if blocked else "")
-                        + f". Read them now (maxpm --as {name} inbox), then start the watch again in the background: "
-                          f"maxpm --as {name} manage --watch")
+                        + f". Read them now ({as_cmd(name)} inbox), then start the watch again in the background: "
+                          f"{as_cmd(name)} manage --watch")
                 wakes[name] = {"id": _send(conn, "alert", "maxpm", body, to=name), "created_at": iso(now()), "body": body}
         for name in wake_now:  # outside the tx: a platform's command may take seconds
             w = wakes[name]

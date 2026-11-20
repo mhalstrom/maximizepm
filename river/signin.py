@@ -392,7 +392,7 @@ def agent_refusal(conn, who, url):
     if q is None:
         return None
     return (f"refused: your sign-in on {site} failed once, and MaximizePM asked for the next step (question #{q}, "
-            f"policy g5: one try, no retry). Wait for the answer: maxpm --as {who} inbox --wait, or take other work. "
+            f"policy g5: one try, no retry). Wait for the answer: {core.as_cmd(who)} inbox --wait, or take other work. "
             f"The person or the manager may withdraw it: maxpm withdraw {q} --note \"<why>\"")
 
 
@@ -445,7 +445,7 @@ def agent_after(conn, b, who, url, before=None):
         out["question"] = m["id"]
     out["line"] = (f"STOP: the sign-in on {site} failed ({why}). Policy g5: one try. "
                    + (f"MaximizePM asked {to} for the next step (question #{out['question']}); your next action on its "
-                      f"sign-in pages is refused until the answer. Take other work or run maxpm --as {who} inbox --wait."
+                      f"sign-in pages is refused until the answer. Take other work or run {core.as_cmd(who)} inbox --wait."
                       if to else "Ask the person before you try again."))
     return out
 

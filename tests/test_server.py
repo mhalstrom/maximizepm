@@ -1911,6 +1911,44 @@ class LaunchInTmux(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "did not make"):
             run("now", "x", env={core.TOKEN_ENV: core.TOKEN_PREFIX + "x" * 40})
 
+    def test_token_session_texts_name_commands_without_as(self):
+        """#6423: a session with a token reads its briefing, its hints and its footer with plain maxpm commands; a
+        --as there only printed 'maxpm: --as is not needed' on each command the agent copied. A text for another
+        agent, or a command with no token, keeps --as."""
+        from river import cli
+        self.tmux.pane_pid = os.getppid()
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        tok = self._token_of()
+        core.register(self.c, "mark", human=True)
+        core.send(self.c, "note", "a note for you", to=name, actor="mark")
+
+        def run(*words):
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {core.TOKEN_ENV: tok}), mock.patch.object(cli, "_caller_chain",
+                                                                                      return_value=None), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                cli.run(list(words))
+            return out.getvalue() + err.getvalue()
+
+        text = run("go", "--project", "shop")
+        self.assertIn(f"#{x}", text)
+        self.assertIn(f"When finished:  maxpm done {x} --output", text)
+        self.assertNotIn("--as", text)
+        text = run("inbox")
+        self.assertNotIn("--as", text)
+        text = run("done", str(x), "--output", "published", "--no-proof", "a test")
+        self.assertIn("next: maxpm go", text)
+        self.assertNotIn("--as", text)
+        # The helper: plain only for the token's own agent.
+        tk = core.TOKEN_AGENT.set(name)
+        try:
+            self.assertEqual(core.as_cmd(name), "maxpm")
+            self.assertEqual(core.as_cmd("other"), "maxpm --as other")
+        finally:
+            core.TOKEN_AGENT.reset(tk)
+        self.assertEqual(core.as_cmd(name), f"maxpm --as {name}")
+
     def test_token_is_replaced_and_cancelled_on_end_kill_and_takeover(self):
         from river import cli
         t = server.start_session(self.c, self.dir.name)

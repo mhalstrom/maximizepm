@@ -819,7 +819,7 @@ def _unread_text(u, actor):
     if u["questions"]:
         parts.append(f"{u['questions']} question{'s' if u['questions'] > 1 else ''} to answer"
                      + (f", {u['questions_waiting']} waiting over {u['nudge_after']}" if u.get("questions_waiting") else ""))
-    return f"inbox: {', '.join(parts)} (maxpm --as {actor} inbox)"
+    return f"inbox: {', '.join(parts)} ({core.as_cmd(actor)} inbox)"
 
 
 def _footer(conn, actor):
@@ -852,11 +852,11 @@ def _footer(conn, actor):
     asked = core.asked_open(conn, actor)
     if asked:  # #5001: the asker closes each question that is answered or moot
         bits.append(f"{len(asked)} open question(s) you asked ({', '.join('#' + str(q['id']) for q in asked)}): close "
-                    f"each answered one: maxpm --as {actor} answer <id> --self \"...\", or a moot one: withdraw <id> "
+                    f"each answered one: {core.as_cmd(actor)} answer <id> --self \"...\", or a moot one: withdraw <id> "
                     f"--note \"...\"")
     gap = core.watch_gap(conn, actor)
     if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898); a stopped one ends (#6057)
-        bits.append(f"no watch runs for {core._short(gap)}: start maxpm --as {actor} manage --watch in the "
+        bits.append(f"no watch runs for {core._short(gap)}: start {core.as_cmd(actor)} manage --watch in the "
                     f"background before you end your turn")
     if bits:
         print(f"[{actor}: {'; '.join(bits)}]", file=sys.stderr)
@@ -3170,7 +3170,7 @@ def _for_other(conn, actor, cmd=None):
         return False  # the agent of this session is gone: the session takes another name
     manager = core.active_manager(conn)
     raise RiverError(f"refused: this session is {own}, and only the manager runs a command as another agent "
-                     f"(--as {actor}). Run it as yourself, or ask the manager: maxpm --as {own} alert "
+                     f"(--as {actor}). Run it as yourself, or ask the manager: {core.as_cmd(own)} alert "
                      f"{manager or '<manager>'} \"<what {actor} needs>\"")
 
 
@@ -4062,8 +4062,8 @@ def serve_restart(conn, wait=60, sleep=None):
 
 def _stop_banner(me, st):
     return (f"STOP REQUESTED by {st['stop_by'] or 'someone'}: {st['stop_reason']}. Take no new work. Commit finished "
-            f"work, release or hand back your item with a note (maxpm --as {me} release <id> --note \"...\"), "
-            f"then run maxpm --as {me} go once more: it ends the session.")
+            f"work, release or hand back your item with a note ({core.as_cmd(me)} release <id> --note \"...\"), "
+            f"then run {core.as_cmd(me)} go once more: it ends the session.")
 
 
 def _print_queue(res):
@@ -4084,17 +4084,18 @@ def _hint(a, res, actor):
     c = a.cmd
     if c in ("go", "plan"):
         return None
+    me = core.as_cmd(actor)
     if actor and c == "done":
-        return ((f"what changed, for a person: maxpm --as {actor} edit {res['id']} --changed \"<one plain line>\"\n"
+        return ((f"what changed, for a person: {me} edit {res['id']} --changed \"<one plain line>\"\n"
                  if isinstance(res, dict) and not res.get("changed") and res.get("id") else "")
-                + f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
+                + f"next: {me} go   (now: keep going while go gives you items, unless auto_continue is off; "
                 f"with tree, go gives only the tasks of your own tree)")
     if c == "report" or (c == "release" and a.id is None):
         return None  # a hook runs it: no hint
     if actor and (c == "release" or c == "review"):
-        return f"next: maxpm --as {actor} go"
+        return f"next: {me} go"
     if actor and c == "goal" and a.gcmd == "done":
-        return f"next: maxpm --as {actor} go --role owner   (takes the highest-ranked goal nobody owns)"
+        return f"next: {me} go --role owner  (takes the highest-ranked goal nobody owns)"
     if c == "register":
         return HINTS["register"].format(name=res["name"])
     if c == "next":
@@ -4110,13 +4111,11 @@ def _hint(a, res, actor):
     if c == "release":
         return HINTS["release"]
     if c == "inbox" and isinstance(res, dict):
-        me = f"maxpm --as {actor}"
         if res["result"] == "stop":
             return f"stop: {me} go"
         return (f"act on them, then start it again in the background: {me} inbox --wait" if res["messages"] else
                 f"start it again in the background: {me} inbox --wait")
     if c == "inbox" and res:
-        me = f"maxpm --as {actor}"
         return (f"answer a question: {me} answer <id> \"...\"   reply: {me} send note --reply <id> \"...\"   "
                 f"whole conversation: {me} thread <id>")
     if not actor and c in ("list", "show", "who", "capacity", "blockers"):
@@ -5696,7 +5695,7 @@ def _unanswered_line(m, r):
 
 def render_manage(b):
     me = b["agent"]
-    r = f"maxpm --as {me}"
+    r = core.as_cmd(me)
     if "result" in b:  # --watch
         if b["result"] == "stop":
             # #6057: the loop starts the watch again after every other exit; after this one it must not.
@@ -5755,7 +5754,7 @@ def render_manage(b):
                f"and end the turn."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
-    if b["new_name"]:
+    if b["new_name"] and r != "maxpm":  # a token names the session itself (#6423)
         out.append(f"Pass --as {me} on every maxpm command.")
     out += _tmux_line()
     if b.get("release"):
@@ -5957,7 +5956,7 @@ def render_expert(res):
         x = res["adopted"]
         print(f"{x['name']} is now an expert on: {x['topic']}")
         print(f"  MaximizePM does not end it as a worker, and gives it no queue work. Keep its notes: "
-              f"maxpm --as {x['name']} expert notes {x['name']} --put <file>. Run maxpm --as {x['name']} go for the rules.")
+              f"{core.as_cmd(x['name'])} expert notes {x['name']} --put <file>. Run {core.as_cmd(x['name'])} go for the rules.")
     elif "ended_expert" in res:
         e = res["ended_expert"]
         print(f"ended the expert {e['ended']}." + (f" Done: {', '.join('#' + str(i) for i in e['done'])}." if e.get("done") else "")
@@ -5969,7 +5968,7 @@ def render_expert(res):
             print(f"Notes of {n['name']} (canvas {n['canvas']}, version {n['version']}):\n")
             print(n["text"].rstrip())
         else:
-            print(f"{n['name']} has no notes yet. Write them: maxpm --as {n['name']} expert notes {n['name']} --put <file>")
+            print(f"{n['name']} has no notes yet. Write them: {core.as_cmd(n['name'])} expert notes {n['name']} --put <file>")
     elif "expert_started" in res:
         t = res["expert_started"]
         if t.get("fresh_from"):
@@ -6052,7 +6051,7 @@ def render_release_report(r):
 
 def render_go(b):
     me = b["agent"]
-    r = f"maxpm --as {me}"
+    r = core.as_cmd(me)
     out = []
     out.append(f"You are MaximizePM agent {me}. Role: {'SESSION' if b['role'] == 'plain' else b['role'].upper()}. "
                f"({b['why']})")
@@ -6077,7 +6076,7 @@ def render_go(b):
         return
     if core.queue_note():
         out.append(core.queue_note() + ". Tell the user if that is not what they meant.")
-    if b["new_name"]:
+    if b["new_name"] and r != "maxpm":  # a token names the session itself (#6423)
         out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
     out += _tmux_line()
     # Only Claude Code has session names and ListAgents; it sets CLAUDECODE in the commands it runs.
@@ -6530,7 +6529,7 @@ def render_cleanup(rows, r="maxpm"):
 
 
 def render_wait(res):
-    r = f"maxpm --as {res['agent']}"
+    r = core.as_cmd(res["agent"])
     if res["result"] == "stop":
         st = res["stop"]
         print(f"STOP: {st['stop_by'] or 'someone'} asked this session to stop: {st['stop_reason']}. "
@@ -8889,7 +8888,7 @@ def render(a, res):
     if c == "cleanup" and isinstance(res, dict) and "folder" in res:
         return render_space(res)
     if c == "cleanup":
-        return render_cleanup(res, f"maxpm --as {a.actor}" if a.actor else "maxpm")
+        return render_cleanup(res, core.as_cmd(a.actor) if a.actor else "maxpm")
     if c == "keep" and isinstance(res, dict) and "kept" in res:
         print(f"kept after the close of #{res['closed']}: " + ", ".join(f"#{k['id']} {_cut(k['title'], 50)}" for k in res["kept"]))
         return
@@ -9499,10 +9498,11 @@ def render(a, res):
             elif res["result"] == "timeout":
                 print(f"(no new message in {res['waited']})")
             else:
-                print(f"NEW MESSAGES for {res['agent']}:" + (f" (and {res['still_open']} older, still open: maxpm "
-                                                             f"--as {res['agent']} inbox)" if res.get("still_open") else ""))
+                me = core.as_cmd(res["agent"])
+                print(f"NEW MESSAGES for {res['agent']}:" + (f" (and {res['still_open']} older, still open: {me} "
+                                                             f"inbox)" if res.get("still_open") else ""))
                 # Delivered, not read (#5685): the sender sees that until the session acts on them.
-                print(f"  (delivered, not read: maxpm --as {res['agent']} inbox, an answer or a reply marks them read)")
+                print(f"  (delivered, not read: {me} inbox, an answer or a reply marks them read)")
             res = res["messages"]
         elif not res:
             print("(inbox empty)")
