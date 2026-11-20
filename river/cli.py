@@ -2343,6 +2343,9 @@ def build_parser(only=None):
                    help="move the rules from CLAUDE.md and GEMINI.md to AGENTS.md and delete the old files "
                         "(the default with no terminal)")
     x.add_argument("--no-move", dest="move", action="store_false", help="keep old instruction files that hold rules")
+    x.add_argument("--plan", metavar="FILE",
+                   help="add every line of a plan file (an outline) to the project as an item, as maxpm add --from "
+                        "does; - reads it from stdin")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -4289,6 +4292,14 @@ def link_folder(conn, here, project=None, description="", actor=None):
 def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
+    plan = None
+    if args.plan:  # read and check the plan first: a plan with an error leaves the folder as it was
+        try:
+            plan = sys.stdin.read() if args.plan == "-" else Path(args.plan).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:  # no such file, a folder, no permission, not text
+            why = e.strerror if isinstance(e, OSError) and e.strerror else "it is not UTF-8 text"
+            raise RiverError(f"cannot read the plan file {args.plan}: {why}") from None
+        core.parse_plan(plan)
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
     # AGENTS.md holds the rules shared by all agents.
     if args.file:
@@ -4314,7 +4325,15 @@ def init_folder(args):
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     lines += look_setup_lines(shown, core.look_setup(conn, shown))
-    lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
+    if plan is not None:
+        rows = core.add_plan(conn, shown, plan, args.actor)["items"]
+        ids = [r["id"] for r in rows]
+        lines.append(f"{shown}: {len(ids)} item(s) added from the plan (#{min(ids)} to #{max(ids)}); "
+                     f"maxpm list --project {shown} shows them")
+        lines.append("next: open an agent here and say go")
+    else:
+        lines.append(f"next: add work (maxpm add {shown} \"...\", or a whole plan: maxpm add {shown} --from plan.md) "
+                     f"or open an agent here and say go")
     print("\n".join(lines))
     return 0
 
@@ -5038,7 +5057,12 @@ def dispatch(conn, a, actor):
         if a.plan_file:
             if len(a.words) > 1:
                 raise RiverError("with --from, give at most a project: maxpm add [project] --from plan.md")
-            text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text(encoding="utf-8")
+            try:
+                text = (sys.stdin.read() if a.plan_file == "-"
+                        else Path(a.plan_file).expanduser().read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as e:  # no such file, a folder, no permission, not text (#9)
+                why = e.strerror if isinstance(e, OSError) and e.strerror else "it is not UTF-8 text"
+                raise RiverError(f"cannot read the plan file {a.plan_file}: {why}") from None
             project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None, text)
             return core.add_plan(conn, project, text, actor, a.priority, a.doer, a.dry_run)
         if a.dry_run:  # a one-item add has no preview: it would add the item
