@@ -2048,6 +2048,32 @@ class GitHub(Base):
         self.assertEqual((beta["key"], beta["state"], beta["approved_by"]), ("gh-run-202", "passed", "mark"))
         self.assertEqual(store.show(self.c, "mpm")["envs"][0]["rev"], "a" * 40)
 
+    def test_pull_request_runs_are_skipped_and_action_required_does_not_fail(self):
+        # External fork PR runs come back with event 'pull_request' and conclusion 'action_required' (#6473):
+        # the plugin skips pull-request runs and maps action_required to skipped rather than failed.
+        self.runs["tests.yml"] = [
+            dict(gh_run(103, "c" * 40, conclusion="action_required"), event="pull_request"),
+            dict(gh_run(102, "b" * 40, conclusion="failure"), event="pull_request_target"),
+            dict(gh_run(101, "a" * 40, conclusion="success"), event="push"),
+        ]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        out = self.gh.poll(self.c, self.p())
+        self.assertEqual(out["runs"], 1)
+        listed = [c[1] for c in self.api.calls if c[1].startswith("/repos/o/r/actions/workflows/tests.yml/runs")]
+        self.assertIn("exclude_pull_requests=true", listed[-1])
+        keys = [r["key"] for r in self.c.execute(
+            "SELECT key FROM stage_runs WHERE stage_id=(SELECT id FROM pipeline_stages WHERE name='tests')").fetchall()]
+        self.assertEqual(keys, ["gh-run-101"])
+        # A non-PR run held for approval (action_required) records as skipped, never failed.
+        self.runs["tests.yml"] = [dict(gh_run(104, "d" * 40, conclusion="action_required"), event="workflow_dispatch")]
+        self.jobs(104)
+        self.api.routes[("GET", "/repos/o/r/actions/runs/104/artifacts")] = (200, {"artifacts": []})
+        self.c.execute("UPDATE pipelines SET polled_at=NULL")
+        self.gh.poll(self.c, self.p())
+        r104 = self.c.execute("SELECT state, errors FROM stage_runs WHERE key='gh-run-104'").fetchone()
+        self.assertEqual((r104["state"], r104["errors"]), ("skipped", "action_required"))
+
     def test_a_refused_artifact_download_skips_its_report_and_never_reads_as_a_refused_token(self):
         # The storage host of the artifact answers 401 (#6459): the run is read, its report is skipped, and the
         # pipeline keeps no error that the token check reads as GitHub's refusal of the token.

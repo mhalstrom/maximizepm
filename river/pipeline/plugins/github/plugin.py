@@ -43,7 +43,8 @@ DONE_KEEP = 300  # finished runs that the state remembers as read
 NAMES = {"github": "GitHub", "gitea": "Gitea", "forgejo": "Forgejo"}
 LINK = re.compile(r"\bmaxpm run (\d+)\b")  # the run-name of a run that MaximizePM started
 OUTCOME = {"success": "success", "failure": "failure", "timed_out": "failure", "startup_failure": "failure",
-           "cancelled": "cancel", "skipped": "skip", "neutral": "success", "stale": "cancel"}
+           "cancelled": "cancel", "skipped": "skip", "neutral": "success", "stale": "cancel",
+           "action_required": "skip"}
 
 
 class Failed(Exception):
@@ -195,15 +196,19 @@ def norm(run):
 
 
 def runs_of(api, workflow):
-    """The newest runs of a workflow, oldest first (so a newer version is handed on last). Gitea and Forgejo list the
-    runs of the whole repository: keep those of this workflow."""
+    """The newest runs of a workflow, oldest first (so a newer version is handed on last). Pull-request runs are
+    skipped: a pipeline tracks the repository's own commits (push, tag, workflow_dispatch), not unmerged or fork PRs
+    whose runs may also be held for approval (conclusion 'action_required', #6473). Gitea and Forgejo list the runs
+    of the whole repository: keep those of this workflow."""
     if api.forge == "github":
-        runs = api.call("GET", f"/repos/{api.repo}/actions/workflows/{workflow}/runs?per_page={RUNS}").get(
-            "workflow_runs", [])
+        runs = api.call(
+            "GET", f"/repos/{api.repo}/actions/workflows/{workflow}/runs?per_page={RUNS}&exclude_pull_requests=true"
+        ).get("workflow_runs", [])
     else:
         got = api.call("GET", f"/repos/{api.repo}/actions/runs?limit=50")
         listed = got.get("workflow_runs") or got.get("runs") or [] if isinstance(got, dict) else got
-        runs = [r for r in (norm(r) for r in listed) if r["workflow"] == workflow][:RUNS]
+        runs = [r for r in (norm(r) for r in listed) if r["workflow"] == workflow]
+    runs = [r for r in runs if not str(r.get("event") or "").startswith("pull_request")][:RUNS]
     return list(reversed(runs))
 
 
