@@ -575,6 +575,17 @@ The tools: `list_projects`, `show_project`, `add_project`,
 `unlink_tasks`, `backlog_task`, `activate_task`, `drop_task`, and
 `planning_guide`.
 
+The planner can also keep a design document for a topic, the way an expert
+session does. `start_doc` starts one for a task or a goal, with the parts
+Brief, Discovery, Decisions, Plan and Risks, and opens it in the MaximizePM
+page. You read it, edit it and comment on it there, and the sessions that do
+the tasks read it too. `write_section` fills in a part, `read_doc` reads it
+back (with `plan`, the versions of the plan and where each task stands),
+`doc_comments` reads your comments and your answers to its decisions,
+`reply_comment` answers a comment, and `answer_decision` records an answer
+you give in the chat. `list_docs` lists the documents, `read_notes` reads an
+expert's notes, and `show_goal` includes the goal's handoff.
+
 An app on this computer runs the planner with `maxpm mcp --plan` (stdin and
 stdout), or reaches it at `http://127.0.0.1:<port>/mcp/plan` in `maxpm serve`
 (Streamable HTTP; like `/mcp`, it answers only on this computer).
