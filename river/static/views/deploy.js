@@ -178,7 +178,12 @@ function bannersHtml() {
   // #6189: a deploy target whose collected tasks wait (for its cadence, or for the release that runs): Release now.
   for (const p of data.pipelines) if (p.release) {
     const r = p.release, n = `${r.tasks} task${r.tasks === 1 ? "" : "s"}`;
-    out.push(`<div class="dp-banner"><span>📦 ${esc(p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
+    if (r.approve) {  // #6488: the release of a target that a pipeline of its own releases waits for the person's yes
+      out.push(`<div class="dp-banner dp-human"><span>✋ ${esc(r.target)}: release${r.deploy ? " #" + r.deploy : ""} waits for your yes</span>
+        <span class="spacer"></span>${releaseButton(p)}${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
+      continue;
+    }
+    out.push(`<div class="dp-banner"><span>📦 ${esc(r.target || p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
       : r.running ? ` after release #${r.running}` : ""}</span><span class="spacer"></span>${releaseButton(p)}
       ${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
   }

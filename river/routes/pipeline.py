@@ -51,6 +51,7 @@ def pipeline(conn, path):
         p["account"] = _accounts().for_pipeline(conn, conn.execute("SELECT * FROM pipelines WHERE name=?",
                                                                    (name,)).fetchone())  # #6147
         work = _links().stage_work(conn, name).get(name) or {}
+        p["release"] = _targets_release(conn, [e["target"] for e in p["envs"] if e.get("target")])  # #6488
     else:
         p = targets.default_pipeline(conn, name)
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
@@ -388,8 +389,28 @@ def _release_now(conn, name):
     plan = core.release_plan(conn, name)
     if not (plan["deploy"] and plan["ships"] and plan["waits"]):
         return None
-    return {"deploy": plan["deploy"], "tasks": len(plan["ships"]), "until": plan["until"], "running": plan["running"],
-            "text": plan["text"]}
+    return {"target": plan["target"], "deploy": plan["deploy"], "tasks": len(plan["ships"]), "until": plan["until"],
+            "running": plan["running"], "text": plan["text"]}
+
+
+def _targets_release(conn, names):
+    """Release now for a pipeline of its own whose environments name deploy targets (#6488, mark 2026-11-20: 'why
+    can I not put the maxpm release out?'): the first of those targets whose release waits for the person's yes
+    ({"target", "approve": the approval item, "deploy"}), else whose collected tasks wait, as _release_now gives it
+    (with its target's name), else None. Such a target has no default pipeline, so these are its only buttons."""
+    for name in dict.fromkeys(names):
+        yes = conn.execute("SELECT i.id, d.item_id dep FROM items i LEFT JOIN deps d ON d.blocked_by=i.id WHERE "
+                           "i.doer='human' AND i.target=? AND i.status IN " + str(core.OPEN_STATES) + " AND i.title "
+                           "LIKE ? ORDER BY i.id DESC LIMIT 1", (name, core.APPROVE_TITLE + " %")).fetchone()
+        if yes:
+            return {"target": name, "approve": yes["id"], "deploy": yes["dep"]}
+        try:
+            r = _release_now(conn, name)
+        except RiverError:  # an environment that names a target that is gone
+            continue
+        if r:
+            return r
+    return None
 
 
 def _person_waits(conn, pipeline_id):
@@ -429,7 +450,8 @@ def deploy(conn, path):
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits,
                     "definition": _versions().current(conn, p["id"]),  # #6143: the head's 'definition vN'
-                    "followed": bool(p.get("followed"))})  # #6167: an outside system runs its flow
+                    "followed": bool(p.get("followed")),  # #6167: an outside system runs its flow
+                    "release": _targets_release(conn, [e["target"] for e in d["envs"] if e.get("target")])})  # #6488
     for t in targets.default_list(conn):
         d = defaults[t["name"]]
         approval = next((s for s in d["stages"] if s["name"] == "approval"), None)

@@ -478,6 +478,62 @@ try {
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
 
+    def test_a_github_pipeline_of_a_target_offers_release_now(self):
+        """#6488 (mark 2026-11-20: 'why can I not put the maxpm release out?'): a pipeline that reads GitHub runs and
+        whose environment names the deploy target hides the target's default pipeline. Its page's Next bar and the
+        Deploy list's banner offer the target's Release now while collected tasks wait; its dialog names the target.
+        At 1500 and 390 px."""
+        from river.pipeline import define
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        core.target_cadence(self.c, "toolscaled-prod", "1w", "mark")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        with core.tx(self.c):  # the last release is out: the next one waits for the cadence
+            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE kind='deploy'", (core.iso(core.now()),))
+        i = core.item_add(self.c, "web", "Another change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        define.pipeline_add(self.c, "app", project="web", actor="mark")
+        define.forge_set(self.c, "app", "github", repo="o/app", secret="gh-app", actor="mark")
+        define.env_set(self.c, "app", "release", target="toolscaled-prod", actor="mark")
+        define.stage_set(self.c, "app", "release", "deploy", env="release", workflow="release.yml", actor="mark")
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('.dp-banner [data-relnow]'), "the banner's Release now");
+  const out = { banner: q('.dp-banner [data-relnow]').closest(".dp-banner").textContent.replace(/\s+/g, " "),
+    target: !!q('#dpList [data-dp-open="toolscaled-prod"]') };
+  q('#dpList [data-dp-open="app"]').click();
+  await until(() => q('.pl-next [data-relnow]'), "the Next bar's Release now");
+  const b = q('.pl-next [data-relnow]').getBoundingClientRect();
+  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  out.inView = b.bottom <= innerHeight && b.right <= innerWidth;
+  q('.pl-next [data-relnow]').click();
+  await until(() => q('#relNowDlg:not(.hidden) [data-relgo]'), "the dialog");
+  out.dlg = q("#relNowDlg").textContent.replace(/\s+/g, " ");
+  q('#relNowDlg [data-relclose]').click();
+  q('.pl-next [data-dp-open="toolscaled-prod"]').click();  // Release steps: the target's own page
+  await until(() => q('#dpStages [data-pl-stage="watch"]') && !q('#dpStages [data-pl-stage="release"]'), "the target's page");
+  out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
+  out.stepsNext = q(".pl-next").textContent.replace(/\s+/g, " ");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertIn("toolscaled-prod: 1 task wait for the next release", r["banner"], r)
+            self.assertFalse(r["target"], r)  # the pipeline app stands for the target
+            self.assertIn("Next: 1 task of toolscaled-prod wait for the next release", r["next"], r)
+            self.assertIn("Release steps", r["next"], r)
+            self.assertTrue(r["inView"], r)
+            self.assertIn("Release toolscaled-prod now?", r["dlg"], r)
+            self.assertEqual(r["steps"], ["holding", "deploy", "watch"], r)
+            self.assertIn("Release now", r["stepsNext"], r)  # the target's own page offers it too
+
     def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
         """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'): the Next bar names
         the running release, its step and its time with a log link, and offers nothing that starts another release;

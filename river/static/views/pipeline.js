@@ -79,8 +79,18 @@ export async function renderPipeline(force) {
 // The release of a deploy target in one click (#6189, mark 2026-11-19: 'I cannot figure out how to deploy
 // maximizepm-github'): Approve release when its release waits for the person's yes (never a way round it), else
 // Release now when collected tasks wait for the cadence or for the release that runs (its dialog: targets.js).
+// #6488 (mark 2026-11-20: 'why can I not put the maxpm release out?'): a pipeline of its own whose environment names
+// a deploy target (maximizepm reads its GitHub runs) shows Release now for that target too (D.release.target).
 export function releaseButton(D) {
-  if (!D.default || !D.controls) return "";
+  if (!D.default) {
+    const r = D.release;
+    if (!r) return "";
+    if (r.approve) return button(`Approve and release${r.deploy ? " #" + r.deploy : ""}`, { kind: "primary",
+      data: { "pl-yes": r.approve, dep: r.deploy || "" }, title: "Give your yes" })
+      + button("Open the card", { data: { "dp-card": r.approve }, title: "Approve or decline" });
+    return button("Release now", { kind: "primary", data: { relnow: r.target, relshow: "1" }, title: "Start the release" });
+  }
+  if (!D.controls) return "";
   // D is the pipeline page's data (its approval stage's last run) or a row of the Deploy list (its waits).
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run;
   const item = D.waits ? (D.waits[0] || {}).item : appr && appr.state === "queued" ? appr.item : null;
@@ -191,8 +201,18 @@ function nextBar(D) {
   if (run) return run;
   if (!D.default) {  // #6193: every pipeline names its next step
     const s = yesWaits(D), w = s && s.transition.waiting[0];
-    return s ? `<div class="pl-next"><span class="t-m">Next: <span class="pl-ver">${esc(short(w.rev))}</span> waits for your yes before ${esc(s.name)}.</span>
-      <span class="spacer"></span>${button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Let this version in" })}</div>` : "";
+    if (s) return `<div class="pl-next"><span class="t-m">Next: <span class="pl-ver">${esc(short(w.rev))}</span> waits for your yes before ${esc(s.name)}.</span>
+      <span class="spacer"></span>${button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Let this version in" })}</div>`;
+    // #6488: the release of the deploy target that this pipeline's environment names: its yes or Release now, and
+    // the target's own page with the release's steps (the deploy hook's log).
+    const R = D.release;
+    if (!R) return "";
+    const text = R.approve ? `release${R.deploy ? " #" + R.deploy : ""} of ${esc(R.target)} waits for your yes`
+      : `${R.tasks} task${R.tasks === 1 ? "" : "s"} of ${esc(R.target)} wait for the next release${R.until
+        ? `, due in ${esc(left(R.until))}` : R.running ? ` after release #${R.running}` : ""}`;
+    return `<div class="pl-next"><span class="t-m">Next: ${text}.</span><span class="spacer"></span>${releaseButton(D)}
+      ${R.approve ? "" : button("Release with an agent…", { data: { relagent: R.target }, title: "An agent releases it" })}
+      ${button("Release steps", { data: { "dp-open": R.target }, title: "The target's releases" })}</div>`;
   }
   const b = headControls(D);
   if (!b) return "";
@@ -704,7 +724,7 @@ function releaseLine(D, h) {
 // What the transition does now, with the buttons that act on it.
 function arrowNow(D, s, release) {
   if (!release) {
-    const yes = s.name === "approval" ? releaseButton(D) : "";
+    const yes = D.default && s.name === "approval" ? releaseButton(D) : "";
     const t = s.transition, w = (t.waiting || [])[0];
     const line = t.state !== "open" ? esc(t.state_text) : w ? `<span class="pl-ver">${esc(short(w.rev))}</span> waits here` : esc(t.text);
     return `<div class="t-m">${line}</div>` + (yes ? `<div class="pl-bar">${yes}</div>` : "");
