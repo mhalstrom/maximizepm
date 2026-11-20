@@ -660,7 +660,10 @@ class LaunchAgent(unittest.TestCase):
         core.target_add(self.c, "web")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
         core.config_set(self.c, "review", "on")
-        core.ship(self.c, core.item_add(self.c, "site", "page")["id"])  # the release waits on open work
+        page = core.item_add(self.c, "site", "page")["id"]
+        core.done(self.c, page, "done", "dev")
+        core.ship(self.c, page)
+        core.reopen(self.c, page)  # the release waits on open work
         with mock.patch.object(core, "annotate", side_effect=AssertionError("no graph")):
             self.assertEqual(server.auto_release(self.c, runner=[].append),
                              {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": [], "asked": {}})

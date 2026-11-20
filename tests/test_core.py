@@ -1028,6 +1028,7 @@ class Targets(Base):
         self.assertEqual(core.target_show(core.connect(self.path), "site-com")["mode"], "push")
         # Back to deploy: ship works again; the risk class shows in the line.
         core.target_mode(self.c, "site-com", "deploy", "mark")
+        core.done(self.c, it, "done", "w")
         core.ship(self.c, it, "w")
         self.assertIn("risk low", core.target_mode_text(core.target_risk(self.c, "site-com", "low", "mark")))
 
@@ -1821,13 +1822,13 @@ class Ship(Base):
         a = self.add("site", "page", p=1)
         b = self.add("api", "endpoint")
         core.done(self.c, a, "abc", "t", ship_it=True)
+        core.done(self.c, b, "def", "t")
         d1 = core.ship(self.c, b, "dev")
         self.assertEqual(d1["kind"], "deploy")
         self.assertEqual(d1["project"], "deploy-web")
         self.assertEqual(d1["waits_on"], sorted([a, b]))
         self.assertEqual(d1["priority"], 1)
         self.assertEqual(d1["context"], "rsync, then smoke test")
-        core.done(self.c, b, "def", "t")
         self.assertEqual([x["id"] for x in core.next_item(self.c, actor="dev")], [])
         with self.assertRaises(RiverError):
             core.claim(self.c, d1["id"], "dev")
@@ -1835,6 +1836,7 @@ class Ship(Base):
         self.assertEqual([x["id"] for x in core.next_item(self.c, actor="ops")], [d1["id"]])
         core.claim(self.c, d1["id"], "ops")
         c = self.add("site", "later")
+        core.done(self.c, c, "ghi", "t")
         d2 = core.ship(self.c, c, "dev")  # the first deploy item is taken: a new one starts
         self.assertNotEqual(d2["id"], d1["id"])
         done = core.done(self.c, d1["id"], "release r-42", "ops")
@@ -1851,6 +1853,7 @@ class Ship(Base):
         with self.assertRaises(RiverError):
             core.ship(self.c, self.add("misc", "x"), "dev")
         a = self.add("site", "page")
+        core.done(self.c, a, "abc", "dev")
         d = core.ship(self.c, a, "dev")
         self.assertEqual(core.ship(self.c, a, "dev")["id"], d["id"])
         with self.assertRaises(RiverError):
@@ -1867,28 +1870,31 @@ class Ship(Base):
         self.assertEqual((it["status"], it["output"], it["assignee"]), ("in_progress", "", "dev"))
         self.assertEqual(core.done(self.c, x, "out", "dev")["status"], "done")
 
-    def test_a_ship_of_an_open_item_warns_that_the_release_waits_on_it(self):
-        # #5386: a walk item, or part 1 of a split build, stays open after its release; ship held the release.
+    def test_a_ship_of_an_open_item_is_refused(self):
+        # #6452: a walk item, or part 1 of a split build, stays open after its release; ship must refuse it
+        # instead of linking the deploy and its review to an open item.
         core.config_set(self.c, "review", "on")
         walk = self.add("site", "walk the onboarding")
+        msg = (rf"close it first: maxpm done {walk} --ship; "
+               r"a pushed part of an open item goes out with the next release by itself")
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is open; {msg}"):
+            core.ship(self.c, walk, "dev")
         core.claim(self.c, walk, "dev")
-        d = core.ship(self.c, walk, "dev")
-        rv = [i for i in d["waits_on"] if i != walk][0]
-        w = d["ship_warning"]
-        self.assertIn(f"#{walk} is in progress: deploy #{d['id']} and review #{rv} now wait on it", w)
-        self.assertIn(f"maxpm done {walk} --ship", w)
-        self.assertIn(f"maxpm undep {d['id']} --on {walk}; maxpm undep {rv} --on {walk}", w)
-        from river import cli
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
-            cli.run(["--as", "dev", "ship", str(walk)])
-        self.assertIn(f"  WARNING: #{walk} is in progress:", out.getvalue())
-        # Done, then ship: no warning.
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is in progress; {msg}"):
+            core.ship(self.c, walk, "dev")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='held' WHERE id=?", (walk,))
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is held; {msg}"):
+            core.ship(self.c, walk, "dev")
+        # No deploy or review item was created by the refused ships.
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind IN ('deploy','review')").fetchone()[0], 0)
+        # Done, then ship (or done --ship): works.
         x = self.add("site", "a page")
         core.claim(self.c, x, "ops")
         res = core.done(self.c, x, "abc", "ops", ship_it=True)
-        self.assertNotIn("ship_warning", core.ship(self.c, x, "ops"))
+        d = core.ship(self.c, x, "ops")
         self.assertEqual(res["shipped_in"], d["id"])
+        self.assertNotIn("ship_warning", d)
 
 
 class Plan(Base):
@@ -4300,7 +4306,8 @@ class DeployNow(Base):
         with self.assertRaisesRegex(RiverError, "nothing is collected"):
             core.deploy_now(self.c, "web")
         a = self.add("site", "page")
-        core.ship(self.c, a, "dev")
+        core.done(self.c, a, "draft", "dev", ship_it=True)
+        core.reopen(self.c, a, "dev")
         r = core.deploy_now(self.c, "web")
         self.assertEqual((r["ready"], [w["id"] for w in r["waits_on"]], r["start"]["kind"]), (False, [a], "deploy"))
         core.claim(self.c, a, "dev")
@@ -4645,7 +4652,9 @@ class DoneWaitsOnPrerequisites(Base):
 
     def test_a_deploy_is_refused_even_with_force(self):
         a = self.add("site", "page")
+        core.done(self.c, a, "commit", "dev")
         d = core.ship(self.c, a, "dev")
+        core.reopen(self.c, a, "dev")
         with self.assertRaises(RiverError) as e:
             core.done(self.c, d["id"], "release", "ops", force="ship it anyway")
         self.assertIn("deploy", str(e.exception))
@@ -5067,6 +5076,7 @@ class ReleaseReview(Base):
     def test_review_off_changes_nothing(self):
         core.config_set(self.c, "review", "off")
         c = self.add("site", "x")
+        core.done(self.c, c, "done", "dev")
         d = core.ship(self.c, c, "dev")
         self.assertEqual(d["id"], self.deploy)
         self.assertEqual([i for i in core.item_show(self.c, c)["unblocks"]], [self.deploy])
@@ -8274,6 +8284,7 @@ class Manager(Base):
         core.target_give(self.c, "web", "boss", "mark")
         core.inbox(self.c, "boss")
         x = self.add("a", "page")
+        core.done(self.c, x, "done", "w1")
         core.ship(self.c, x, "w1")
         got = [m for m in core.inbox(self.c, "boss", mark_read=False) if "ship request" in m["body"]]
         # The owner is the manager: a ship request wakes it at once (#4289, mark 2026-11-04), one notice.
@@ -8283,7 +8294,9 @@ class Manager(Base):
         self.assertEqual((w["result"], minutes), ("messages", 0))
         # Another owner: it gets the low notice, and the manager gets one that wakes it at once.
         core.target_give(self.c, "web", "w2", "mark")
-        core.ship(self.c, self.add("a", "footer"), "w1")
+        footer = self.add("a", "footer")
+        core.done(self.c, footer, "done", "w1")
+        core.ship(self.c, footer, "w1")
         self.assertEqual(sorted((m["to_agent"], m["level"]) for m in self.c.execute(
             "SELECT to_agent, level FROM messages WHERE body LIKE 'ship request%footer%'")), [("boss", "now"), ("w2", "low")])
         core.inbox(self.c, "boss")
@@ -12457,6 +12470,7 @@ class Ops(Base):
         self.c.commit()
         self.assertIsNone(core._fault_refusal(self.c, "boss", "deploy"))
         core.target_hook(self.c, "prod", "deployed", "echo again", actor="boss")
+        core.done(self.c, work, "fixed", "dev")
         core.ship(self.c, work, "boss")
 
     def test_project_show_has_a_monitoring_line_with_the_checks_of_the_project_and_its_target(self):
