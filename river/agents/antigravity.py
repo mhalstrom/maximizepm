@@ -225,14 +225,29 @@ def session_settings(read_dirs=(), secret_files=()):
     allow = ["command(maxpm)"] + [f"read_file({d})" for d in read_dirs]
     deny = DENY_TMUX + [f"write_file({d})" for d in read_dirs] + [f"read_file({f})" for f in secret_files]
     return json.dumps({"permissions": {"allow": allow, "deny": deny}}, separators=(",", ":"))
-MAXPM_NOTE = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
-              "allows maxpm with no question.")
+
+
+# The note after the first prompt. run_command has a BypassSandbox parameter only in auto mode (agy's default, also with
+# no --mode) without --dangerously-skip-permissions (#6368). Measured with agy 1.5.13 on 2026-11-20, from the tool
+# schema that agy keeps in each conversation and from print-mode runs: auto mode had it with Claude, Gemini and GPT-OSS
+# models; accept-edits, plan, and --dangerously-skip-permissions (also in auto mode) had it with none, so a Claude
+# model there said 'run_command doesn't have a BypassSandbox parameter' and ran maxpm without it, which worked. The note
+# goes only where the parameter can be, and says 'when' for a default mode that agy's own settings may change.
+MAXPM_NOTE = ("When your run_command tool has a BypassSandbox parameter, set it to true for each maxpm command: agy's "
+              "sandbox cannot run maxpm, and this session allows maxpm with no question.")
+_OLD_NOTES = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
+              "allows maxpm with no question.",)
+
+
+def note_applies(settings):
+    """True when the session's run_command can have BypassSandbox: auto mode or no mode, without skip_permissions."""
+    return (settings.get("mode") or "").strip() in ("", "auto") and not _on(settings.get("skip_permissions"))
 
 
 def build_command(name, folder, model, effort, settings, prompt):
     """agy [--conversation <id>] [--model M] [--effort E] [--mode M] [--dangerously-skip-permissions] [--sandbox]
-    --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a session name. -i runs the
-    first prompt and keeps the session open."""
+    --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE when note_applies]. agy has no flag for a session
+    name. -i runs the first prompt and keeps the session open."""
     s = settings
     words = ["agy"] + (["--conversation", s["resume"]] if s.get("resume") else [])
     # One way to set the level (#6256): --effort with the model's id. agy refuses an id with a level and an --effort
@@ -256,7 +271,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     # need no queue folder in the workspace: they run outside agy's sandbox (BypassSandbox and SETTINGS_JSON).
     words += ["--settings", session_settings(s.get("read_dirs") or (), s.get("secret_files") or ())]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
-    words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}"] if prompt else []
+    words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}" if note_applies(s) else prompt] if prompt else []
     return words
 
 
@@ -343,7 +358,10 @@ def parse_command(words):
         elif t == "--settings" and nxt == SETTINGS_JSON:
             i += 2
         elif t in ("-i", "--prompt-interactive") and nxt is not None and prompt is None:
-            prompt = nxt[:-len(MAXPM_NOTE) - 2] if nxt.endswith("\n\n" + MAXPM_NOTE) else nxt
+            prompt = nxt
+            for note in (MAXPM_NOTE,) + _OLD_NOTES:
+                if nxt.endswith("\n\n" + note):
+                    prompt = nxt[:-len(note) - 2]
             i += 2
         else:
             return None

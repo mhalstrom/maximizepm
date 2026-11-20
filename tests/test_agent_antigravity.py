@@ -80,9 +80,26 @@ class Launch(Home):
                  '"command(tmux -Lmaximizepm kill-server)"]}}']
         self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash", "--effort", "high", "--mode", "plan",
                                      "--dangerously-skip-permissions", "--sandbox", *allow])
-        self.assertEqual(argv[-3:], ["--log-file /tmp/x", "-i", "maxpm go\n\n" + antigravity.MAXPM_NOTE])
+        # Plan mode and --dangerously-skip-permissions: run_command has no BypassSandbox, so no note (#6368).
+        self.assertEqual(argv[-3:], ["--log-file /tmp/x", "-i", "maxpm go"])
         self.assertIsInstance(argv[-3], agents.Raw)
+
+    def test_the_bypass_note_goes_only_where_run_command_has_the_parameter(self):
+        """#6368, measured with agy 1.5.13: BypassSandbox is in run_command's schema in auto mode (agy's default)
+        without --dangerously-skip-permissions, for Claude, Gemini and GPT-OSS models; nowhere else."""
         self.assertIn("BypassSandbox", antigravity.MAXPM_NOTE)
+        noted = "maxpm go\n\n" + antigravity.MAXPM_NOTE
+        for settings, want in (({}, noted), ({"mode": "auto"}, noted), ({"mode": "auto", "sandbox": "on"}, noted),
+                               ({"mode": "auto", "skip_permissions": "on"}, "maxpm go"),
+                               ({"skip_permissions": "on"}, "maxpm go"),
+                               ({"mode": "accept-edits"}, "maxpm go"), ({"mode": "plan"}, "maxpm go")):
+            with self.subTest(settings=settings):
+                argv = antigravity.build_command(None, None, "claude-sonnet-5-5", None, settings, "maxpm go")
+                self.assertEqual(argv[-2:], ["-i", want])
+        # A command that an older start wrote, with the old note, reads back to its prompt.
+        old = "maxpm go\n\n" + antigravity._OLD_NOTES[0]
+        self.assertEqual(antigravity.parse_command(["agy", "-i", old])["prompt"], "maxpm go")
+        self.assertEqual(antigravity.parse_command(["agy", "-i", noted])["prompt"], "maxpm go")
 
     def test_the_session_settings_refuse_a_tmux_kill_server_as_core_tmux_guard_does(self):
         """#6251: agy's deny rules, as measured with agy 1.5.13 (a rule matches the first words of each command of a
