@@ -20,6 +20,7 @@ const OPTIONS = { args: "more arguments", prompt: "first prompt", model_ids: "mo
 export const LABELS = {
   // Agents
   launch_agents: "Agents the Start button offers", default_agent: "Agent program for new items", agent_rules: "Agent type by kind of item",
+  agent_order: "Agents in order, when one hits its limit",
   default_model: "Model for new items", default_effort: "Effort for new items", default_min_model: "Weakest model allowed",
   default_max_model: "Strongest model allowed", effort_levels: "Effort levels", model_ladder: "Models, weakest to strongest",
   model_prices: "Model prices", prompt_pattern: "How a waiting prompt looks", prompt_wait: "Wait before a prompt counts",

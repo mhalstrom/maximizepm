@@ -44,13 +44,23 @@ function head() {
 }
 
 function plans(p) {
-  const rows = (p.windows || []).map(w => w.used_percent != null
-    ? `<div class="cost-meter"><div class="cost-mh"><span>${esc(w.agent)}: ${esc(w.name)}</span><span class="spacer"></span><b>${Math.round(w.used_percent)}%</b></div>
-       ${bar(Math.min(100, w.used_percent))}${w.resets_at ? `<div class="muted t-s">Starts again ${esc(when(w.resets_at))}</div>` : ""}</div>`
-    : `<div class="t-m">${esc(w.agent)}: ${esc(w.name)} ${esc(w.text || "")}</div>`).join("");
+  const rows = (p.windows || []).map(w => {
+    if (w.used_percent != null || w.remaining_percent != null) {
+      const used = w.used_percent != null ? w.used_percent : Math.max(0, 100 - w.remaining_percent);
+      const rem = w.remaining_percent != null ? w.remaining_percent : Math.max(0, 100 - used);
+      const isLim = w.limited || rem <= 0;
+      const right = isLim ? `<b class="cost-over">At limit</b>` : `<b>${Math.round(rem)}% left</b>`;
+      const reset = w.reset_since ? "Started again since the reading"
+        : w.resets_at ? `Resets ${esc(when(w.resets_at))}` : (w.resets_text ? `Resets ${esc(w.resets_text)}` : "");
+      // The bar is what is left, as the number beside it says.
+      return `<div class="cost-meter"><div class="cost-mh"><span>${esc(w.agent)}: ${esc(w.name)}</span><span class="spacer"></span>${right}</div>
+       ${bar(Math.max(0, Math.min(100, rem)))}${reset ? `<div class="muted t-s">${reset}</div>` : ""}</div>`;
+    }
+    return `<div class="t-m">${esc(w.agent)}: ${esc(w.name)} ${esc(w.text || "")}</div>`;
+  }).join("");
   const silent = (p.silent || []).length
-    ? `<div class="muted t-m">${p.silent.map(esc).join(", ")} ${p.silent.length === 1 ? "writes" : "write"} no plan use to the log: type /usage in its terminal to see it.</div>` : "";
-  return rows || silent ? `<section class="cost-sec"><h3 class="cost-h">Plan</h3>${rows}${silent}</section>` : "";
+    ? `<div class="muted t-m">${p.silent.map(esc).join(", ")} ${p.silent.length === 1 ? "has" : "have"} no recorded usage yet: run /usage in its terminal.</div>` : "";
+  return rows || silent ? `<section class="cost-sec"><h3 class="cost-h">Agent usage</h3>${rows}${silent}</section>` : "";
 }
 
 function limits(list) {

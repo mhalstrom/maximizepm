@@ -39,7 +39,7 @@ def read_models():
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from . import Raw  # noqa: E402
+from . import Raw, parse_reset_time  # noqa: E402
 
 EFFORT = {
     "levels": ["low", "medium", "high", "xhigh", "max"],  # when Codex's model cache does not list the model
@@ -210,6 +210,12 @@ DETECT = {
     "idle": r"^\s*›(\s|$)",  # the marker of its input box
     "working": r"(?i)\besc to interrupt\b",
     "blocked": BLOCKED,
+    # Limit-stop text (#6348): Codex's usage/rate limit stop messages.
+    "limit": [
+        r"(?i)you've\s+hit\s+your\s+usage\s+limit",
+        r"(?i)\b(?:5-hour|weekly|usage|rate)\s+limit\s+reached\b",
+        r"(?i)\busage\s+limit\s+exceeded\b",
+    ],
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Codex what to do differently"
     "image_paste": None,  # not read yet: an image path is pasted alone, as for every agent
     # The request_user_input dialog of Plan mode (#6235): 'Question 1/2 (2 unanswered)', the question, numbered
@@ -223,6 +229,32 @@ DETECT = {
     "ask_form": "codex",
     "ask_open": {"line": r"^\s*shift\+← to answer\s*$", "keys": ["S-Left"]},
 }
+
+
+def screen_limits(lines, now=None):
+    """Read plan limits from Codex's `/usage` or `/status` screen (#6348): lines such as
+    '5h limit: [████████--] 80% left (resets 14:30)' or 'Weekly limit: ... 40% used (resets Nov 25)'."""
+    import re
+    seq = [str(ln) for ln in (lines or ())]
+    row_rx = re.compile(
+        r"^\s*(?:[│┃]\s*)?(5h\s+limit|5-hour\s+limit|weekly\s+limit)\s*:\s*"
+        r"(?:[█▓▒░▇▆▅▄▃▂▁━─=\[\]#-]{2,}\s+)?(\d{1,3}(?:\.\d+)?)\s*%\s*(left|remaining|used)\b",
+        re.I,
+    )
+    out = []
+    for i, raw in enumerate(seq):
+        m = row_rx.match(raw)
+        if not m:
+            continue
+        name = "5-hour window" if m.group(1).lower().startswith("5") else "weekly window"
+        pct, kind = float(m.group(2)), m.group(3).lower()
+        rem = round(max(0.0, min(100.0, pct)), 1) if kind in ("left", "remaining") else round(max(0.0, 100.0 - pct), 1)
+        used = round(max(0.0, 100.0 - rem), 1)
+        chunk = raw + (" " + seq[i + 1] if i + 1 < len(seq) else "")
+        resets_at, resets_text = parse_reset_time(chunk, now=now)
+        out.append({"name": name, "used_percent": used, "remaining_percent": rem,
+                    "resets_at": resets_at, "resets_text": resets_text})
+    return out or None
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'). The turn's shell command keeps running as a
@@ -606,6 +638,41 @@ def chat_limits(lines):
             out.append({"name": "plan", "text": str(rl["plan_type"])})
         return out
     return None
+
+
+_LATEST = {}  # {path: (mtime, limits)}: the newest log is read again only when it changed
+
+
+def latest_limits(root=None):
+    """The plan limits of the newest Codex session log of any session (#6348): Codex writes its rate limits to each
+    log, so the page shows them also when no Codex session runs. Only the newest day folder is listed. None when no
+    log has them."""
+    base = Path(root or chat_root())
+    try:
+        days = sorted(base.glob("[0-9]*/[0-9]*/[0-9]*"), reverse=True)[:2]
+    except OSError:
+        return None
+    path = _s().newest([p for d in days for p in d.glob("rollout-*.jsonl")])
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    got = _LATEST.get(str(path))
+    if got and got[0] == mtime:
+        return got[1]
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    limits = chat_limits(lines)
+    _LATEST.clear()
+    _LATEST[str(path)] = (mtime, limits)
+    return limits
 
 
 def read_commands(folder):

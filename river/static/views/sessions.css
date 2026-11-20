@@ -736,3 +736,11 @@ button.srow-it { cursor: pointer; }
 /* A person's sign-off on a release (#6039, askCard.js releaseHtml): the review it follows and its report. */
 .acard-rel { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--accent);
   border-radius: var(--r-m); overflow-wrap: anywhere; }
+/* Agent usage & limits in the session list (#6348): compact rows above Cost; a click opens Cost. */
+.sess-limits { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2) var(--sp-3);
+  border-top: var(--hair) solid var(--line); cursor: pointer; flex: none; font-size: var(--fs-s); }
+.sess-limits.hidden { display: none; }
+.sess-limits:hover { background: var(--bg); }
+.sl-lim-row { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.sl-lim-name { font-weight: 600; }
+.sl-lim-warn { color: var(--warn); font-weight: 600; }

@@ -31,7 +31,7 @@ import re
 import shlex
 from pathlib import Path
 
-from . import CliList, Raw, model_tier
+from . import CliList, Raw, model_tier, parse_reset_time
 
 # ---------------------------------------------------------------------------------------------------------------
 # 1. Describe
@@ -582,6 +582,42 @@ def screen_settings(lines):
     return {}
 
 
+_GROUP = re.compile(r"^\s*([A-Z][A-Z0-9 ]*MODELS)\s*$")
+_WINDOW = re.compile(r"^\s*(Weekly|Five Hour)\s+Limit\s+Remaining\s*$", re.I)
+_PERCENT = re.compile(r"^\s*\[[^\]]*\]\s*(\d{1,3}(?:\.\d+)?)\s*%\s*$")
+
+
+def screen_limits(lines, now=None):
+    """The quota of agy's /usage screen, 'Models & Quota' (#6348; read from agy on 2026-11-20): for each group of
+    models ('GEMINI MODELS', 'CLAUDE AND GPT MODELS') a 'Weekly Limit Remaining' and a 'Five Hour Limit Remaining',
+    each with a bar and a percent left on the next line and 'Refreshes in 2h 31m' after it. One window per group and
+    limit: 'Gemini models: 5-hour'."""
+    seq = [str(ln) for ln in (lines or ())]
+    if not any("Models & Quota" in ln for ln in seq):
+        return None
+    out, group, window = [], None, None
+    for i, raw in enumerate(seq):
+        g = _GROUP.match(raw)
+        if g:
+            # 'CLAUDE AND GPT MODELS' -> 'Claude and GPT models'
+            words = [w.lower() if w in ("AND", "MODELS") else w if len(w) <= 3 else w.capitalize()
+                     for w in g.group(1).split()]
+            group, window = " ".join(words), None
+            continue
+        w = _WINDOW.match(raw)
+        if w:
+            window = "5-hour" if w.group(1).lower().startswith("five") else "weekly"
+            continue
+        p = _PERCENT.match(raw)
+        if p and window:
+            rem = round(max(0.0, min(100.0, float(p.group(1)))), 1)
+            resets_at, resets_text = parse_reset_time(seq[i + 1] if i + 1 < len(seq) else "", now=now)
+            out.append({"name": f"{group}: {window}" if group else window, "used_percent": round(100.0 - rem, 1),
+                        "remaining_percent": rem, "resets_at": resets_at, "resets_text": resets_text})
+            window = None
+    return out or None
+
+
 def chat_requests(session_ref, root=None):
     """(requests, fork) of a conversation for maxpm usage: each model step of its transcript is one model call, keyed
     by its step ('s<step>'), with its time and its token counts. agy writes no prompt cache, and no conversation starts
@@ -661,6 +697,12 @@ DETECT = {
         r"^\s*Do you trust the contents of this project\?",  # a new project folder, at the start
         QUESTION,                                            # ask_question: agy asks the person
         r"^\s*Select login method",                         # sign-in, at the first start
+    ],
+    # Limit-stop text (#6348): 'Individual quota reached ... Resets in ~30m', 'Model quota reached', etc.
+    "limit": [
+        r"(?i)\b(?:individual|model|daily|weekly)?\s*quota\s+(?:reached|exceeded|exhausted)\b",
+        r"(?i)\busage\s+limit\s+reached\b",
+        r"(?i)\brate\s+limit\s+(?:reached|exceeded)\b",
     ],
     # 'No, cancel' (a command), 'No, reject this change' (an edit), 'No, deny creation' (a new file), 'No, deny
     # access' (a read outside the workspace): agy stops the turn and asks 'What should Antigravity CLI do instead?',

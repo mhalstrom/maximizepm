@@ -353,6 +353,8 @@ DETECT = {
     # limit), and the free usage limit's own words.
     "blocked": [r"Do you trust the contents of this directory\?", r"(?m)^\s*No, quit\s+n\s*$",
                 r"(?m)^\s*┃\s+\d+ \([○●]\) \S", r"You hit your free usage limit"],
+    # Limit-stop text (#6348): Grok's free usage limit and rate limit messages.
+    "limit": [r"(?i)You hit your free usage limit", r"(?i)\busage\s+limit\s+reached\b", r"(?i)\brate\s+limit\s+reached\b"],
     "tell_instead": r"No, reject \(type to add feedback\)",
     "image_paste": "[Image #{n}]",
     "menu": "●",  # the selected option: "3 (●) Yes, proceed"; the others are "(○)"

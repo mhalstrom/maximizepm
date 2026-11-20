@@ -504,6 +504,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
+               "limit": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
                "fixed": str, "ask": str, "ask_form": str, "ask_open": (dict, type(None))}
@@ -595,7 +596,8 @@ PARTS = {
                                                         "chat_settings", "chat_cache_line", "chat_texts",
                                                         "chat_limits")},
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
-    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings",)},
+    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings", "screen_limits", "limit_stop",
+                                                             "latest_limits")},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
@@ -763,6 +765,8 @@ def check(module, mid=None):
                                    ["DETECT['item'] has a group of its own; use (?:...)"])
             for i, p in enumerate(det.get("blocked") or ()):
                 out += _regex(f"DETECT['blocked'][{i}]", p) if isinstance(p, str) else [f"DETECT['blocked'][{i}] is no str"]
+            for i, p in enumerate(det.get("limit") or ()):
+                out += _regex(f"DETECT['limit'][{i}]", p) if isinstance(p, str) else [f"DETECT['limit'][{i}] is no str"]
     if getattr(module, "INPUT", None) is not None:
         out += _shape("INPUT", module.INPUT, INPUT_KEYS)
         keys = module.INPUT.get("interrupt") if isinstance(module.INPUT, dict) else None
@@ -1087,12 +1091,48 @@ class Adapter:
         return dict(got) if got else None
 
     def chat_limits(self, lines):
-        """The plan limits the chat log says last (#5224): [{"name", "used_percent", "window_minutes", "resets_at"
-        (ISO or None)}], {"credits": text} entries too; None when the agent writes none to its log (they show only
-        on its screen). chat_limits(lines) -> list | None."""
+        """The plan limits the chat log says last (#5224): [{"name", "used_percent", "remaining_percent",
+        "window_minutes", "resets_at" (ISO or None)}], {"credits": text} entries too; None when the agent writes none
+        to its log (they show only on its screen). chat_limits(lines) -> list | None."""
         f = self._fn("chat_limits")
         got = f(list(lines)) if f else None
-        return list(got) if got is not None else None
+        return _norm_limits(got) if got is not None else None
+
+    def screen_limits(self, lines, now=None):
+        """The plan or quota limits shown on the session's screen (/usage, /status, #6348), in the same shape as
+        chat_limits; None when the screen shows none or the adapter has no reader."""
+        f = self._fn("screen_limits")
+        if f is None:
+            return None
+        try:
+            got = f(list(lines), now=now) if "now" in f.__code__.co_varnames[:f.__code__.co_argcount] else f(list(lines))
+        except Exception:  # noqa: BLE001 - a reader of a screen: none, not a loop error
+            return None
+        return _norm_limits(got) if got else None
+
+    def latest_limits(self, root=None):
+        """The plan limits that the agent wrote last to any of its logs (#6348: Codex), in the shape of chat_limits,
+        read also when no session of the agent runs; None when the adapter has no reader or no log has them."""
+        f = self._fn("latest_limits")
+        if f is None:
+            return None
+        try:
+            got = f(root=root)
+        except Exception:  # noqa: BLE001 - a reader of the agent's logs: none, not a loop error
+            return None
+        return _norm_limits(got) if got else None
+
+    def limit_stop(self, lines, now=None):
+        """Whether the session's screen shows that it stopped at its usage/quota limit (#6348):
+        {"message": str, "resets_at": ISO | None, "resets_text": str | None}, or None."""
+        f = self._fn("limit_stop")
+        if f is not None:
+            try:
+                return f(list(lines), now=now) if "now" in f.__code__.co_varnames[:f.__code__.co_argcount] else f(list(lines))
+            except Exception:  # noqa: BLE001 - a reader of a screen: none, not a loop error
+                return None
+        pats = (self.detect or {}).get("limit")
+        return match_limit_stop(lines, pats, now=now) if pats else None
 
     def chat_cache_line(self, raw, st):
         f = self._fn("chat_cache_line")
@@ -1354,9 +1394,153 @@ def is_tier1(name):
     return bool(a) and a.id in TIER1
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Usage limits & reset-time parsing (#6348)
+# ---------------------------------------------------------------------------------------------------------------
+
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+_ISO_RX = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))\b")
+_REL_RX = re.compile(
+    r"(?:resets?\s+in|refreshes\s+in|try\s+again\s+in|available\s+in|wait)\s+~?\s*"
+    r"((?:\d+\s*(?:d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)\s*)+)",
+    re.I,
+)
+_REL_PART = re.compile(r"(\d+)\s*(d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)", re.I)
+_TZ_RX = re.compile(r"\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)*)\)")
+_DATE_TIME_RX = re.compile(
+    r"(?:resets?(?:\s+at)?|try\s+again\s+at)\s+"
+    r"(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:,?\s*(?:at\s+)?)?)?"
+    r"(?:(?P<hour>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ampm>am|pm)\b|(?P<h24>\d{1,2}):(?P<m24>\d{2})\b)?"
+    # Codex /status: '(resets 2:46 PM on 26 Nov)'
+    r"(?:\s+on\s+(?P<day2>\d{1,2})\s+(?P<mon2>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)?",
+    re.I,
+)
+
+
+def parse_reset_time(text, now=None):
+    """Parse a reset time from a CLI usage or limit-stop message (#6348).
+    Returns (resets_at_iso_utc_or_None, resets_text_or_None)."""
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    s = " ".join(str(text or "").split())
+    if not s:
+        return None, None
+    if now is None:
+        from .. import core
+        now = core.now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    # 1. Exact ISO timestamp
+    m = _ISO_RX.search(s)
+    if m:
+        raw = m.group(1)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ"), raw
+        except ValueError:
+            pass
+    # 2. Relative duration: 'Resets in ~30m', 'resets in 2h 15m', 'Try again in 45 minutes'
+    m = _REL_RX.search(s)
+    if m:
+        span = m.group(1).strip()
+        secs = 0
+        for num, unit in _REL_PART.findall(span):
+            u = unit[0].lower()
+            secs += int(num) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u]
+        if secs > 0:
+            dt = (now + timedelta(seconds=secs)).astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ"), f"in {span}"
+    # 3. Date / clock time: 'resets 3pm (America/Los_Angeles)', 'resets Nov 25, 3pm', 'resets 14:30'
+    m = _DATE_TIME_RX.search(s)
+    if m and (m.group("hour") or m.group("h24") or m.group("mon")):
+        tz_m = _TZ_RX.search(s[m.start():])
+        # A clock time with no zone is the computer's own time (Codex: 'resets 2:09 PM').
+        from .. import core
+        tz = core._machine_zone()
+        if tz_m:
+            try:
+                tz = ZoneInfo(tz_m.group(1))
+            except Exception:  # noqa: BLE001 - '(Sonnet only)' is no zone
+                tz_m = None
+        local_now = now.astimezone(tz)
+        hour = minute = 0
+        if m.group("hour"):
+            hour = int(m.group("hour"))
+            minute = int(m.group("min") or 0)
+            ampm = m.group("ampm").lower()
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+        elif m.group("h24"):
+            hour, minute = int(m.group("h24")), int(m.group("m24"))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            try:
+                if m.group("mon") or m.group("mon2"):
+                    mon = _MONTHS[(m.group("mon") or m.group("mon2")).lower()[:3]]
+                    day = int(m.group("day") or m.group("day2"))
+                    year = local_now.year
+                    cand = datetime(year, mon, day, hour, minute, tzinfo=tz)
+                    if cand < local_now - timedelta(hours=1):
+                        cand = datetime(year + 1, mon, day, hour, minute, tzinfo=tz)
+                else:
+                    cand = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if cand <= local_now:
+                        cand += timedelta(days=1)
+                raw = m.group(0).strip()
+                if tz_m and tz_m.group(0) not in raw:
+                    raw += f" {tz_m.group(0)}"
+                return cand.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw
+            except ValueError:
+                pass
+    return None, None
+
+
+def match_limit_stop(lines, patterns, now=None):
+    """Scan pane `lines` for any regex in `patterns`. Returns {"message", "resets_at", "resets_text"} or None."""
+    if not patterns:
+        return None
+    seq = [str(ln) for ln in (lines or ())]
+    compiled = [re.compile(p) for p in patterns]
+    for i in range(len(seq) - 1, -1, -1):
+        line = seq[i].strip()
+        if not line:
+            continue
+        if any(rx.search(line) for rx in compiled):
+            # Include up to 2 neighboring lines when reset time appears on the next line.
+            chunk = " ".join(x.strip() for x in seq[i:min(len(seq), i + 3)] if x.strip())
+            resets_at, resets_text = parse_reset_time(chunk, now=now)
+            msg = line
+            if resets_text and resets_text.lower() not in msg.lower() and i + 1 < len(seq):
+                nxt = seq[i + 1].strip()
+                if nxt and re.search(r"(?i)reset|try again|available", nxt):
+                    msg = f"{msg} · {nxt}"
+            return {"message": msg[:240], "resets_at": resets_at, "resets_text": resets_text}
+    return None
+
+
+def _norm_limits(rows):
+    """Normalize plan/quota limit rows so every percentage row carries both used_percent and remaining_percent."""
+    out = []
+    for r in rows or ():
+        if not isinstance(r, dict):
+            continue
+        d = dict(r)
+        if d.get("used_percent") is not None and d.get("remaining_percent") is None:
+            d["used_percent"] = round(max(0.0, min(100.0, float(d["used_percent"]))), 1)
+            d["remaining_percent"] = round(max(0.0, 100.0 - d["used_percent"]), 1)
+        elif d.get("remaining_percent") is not None and d.get("used_percent") is None:
+            d["remaining_percent"] = round(max(0.0, min(100.0, float(d["remaining_percent"]))), 1)
+            d["used_percent"] = round(max(0.0, 100.0 - d["remaining_percent"]), 1)
+        out.append(d)
+    return out
+
+
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files",
-           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "TIER1", "is_tier1"]
+           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "TIER1", "is_tier1",
+           "parse_reset_time", "match_limit_stop"]
 
 
 # Last, after every name above: core imports the built-in adapters while it loads (their setting defaults), and they import

@@ -1104,12 +1104,26 @@ def session_usage(conn, name, root=None, croot=None):
             tot["eq"] = core.usage_eq({"input": tot["input"], "cache_read": tot["cache_read"], "write_1h": 0,
                                        "write_5m": tot["cache_write"]})
     limits = None
+    limits_source = None
     if ad is not None and path and ad.has("chat_limits"):
         try:
             text, _start, _end = _read(path, None, USAGE_TAIL)
             limits = ad.chat_limits(text.splitlines())
+            if limits is not None:
+                limits_source = "chat"
         except (OSError, ValueError, EOFError):
             limits = None
+    if limits is None and ad is not None:
+        rec = core.agent_limit_status(conn, ad.id)
+        if rec and (rec["windows"] or rec["limited"] or rec["remaining_pct"] is not None):
+            limits_source = rec["source"]
+            if rec["windows"]:
+                limits = rec["windows"]
+            else:
+                limits = [{"name": "Usage limit" if rec["limited"] else "Quota",
+                           "used_percent": rec["used_pct"] if rec["used_pct"] is not None else 100.0,
+                           "remaining_percent": rec["remaining_pct"] if rec["remaining_pct"] is not None else 0.0,
+                           "resets_at": rec["resets_at"], "resets_text": rec["resets_text"]}]
     label = ad.label if ad else "This agent"
     note = None
     if limits is None:
@@ -1117,11 +1131,12 @@ def session_usage(conn, name, root=None, croot=None):
                 f"its command there." if ad is None or not ad.has("chat_limits") else
                 f"{label} has written no plan limit to this session's log yet.")
     pct = round(100 * context / window, 1) if context is not None and window else None
-    return {"agent": name, "label": ad.label if ad else None, "model": model, "context": context, "window": window,
+    return {"agent": name, "label": ad.label if ad else None, "adapter_id": ad.id if ad else None,
+            "model": model, "context": context, "window": window,
             "percent": pct, "measured": measured,
             **({k: (round(v) if k == "eq" and v is not None else v) for k, v in tot.items()} if measured else
                dict.fromkeys(tot)),
-            "limits": limits, "limits_note": note}
+            "limits": limits, "limits_source": limits_source, "limits_note": note}
 
 
 # The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote

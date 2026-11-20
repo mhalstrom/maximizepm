@@ -171,35 +171,42 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
 
 
 def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
-                  prompt=None, folder=None):
+                  prompt=None, folder=None, reuse_workspace_from=None):
     """Start work on one ready item: a session that waits for work in its project gets it (push);
     else river names a new session, reserves the item for it (push), and opens the chosen agent in the
     project folder with MAXPM_AGENT set to that name and MAXPM_FOCUS=item:<id>, so its first maxpm go takes it.
-    With a custom prompt (maxpm launch --prompt) it always opens a new session."""
+    With a custom prompt (maxpm launch --prompt) it always opens a new session.
+    reuse_workspace_from: another session's name whose active worktree this new session continues (#6348)."""
     t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
                            prompt=prompt, folder=folder)
-    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
+    waiting = None if (t["custom_prompt"] or reuse_workspace_from) else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
         _give_scope(conn, waiting, [f"tasks:{t['item']['id']}"], "Dispatch pushed it to this session", only_widen=True)
         return {**t, "pushed_to": waiting}
     _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go")
-    return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it")
+    return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it",
+                           reuse_workspace_from=reuse_workspace_from)
 
 
-def _start_for_item(conn, t, runner, actor, why, by="the page"):
+def _start_for_item(conn, t, runner, actor, why, by="the page", reuse_workspace_from=None):
     """Name a new session, reserve the item for it (push), and open the agent with MAXPM_AGENT and
     MAXPM_FOCUS=item:<id>: its first maxpm go claims that item, or says why not. A session that never runs
     a river command is a manager finding (not connected) and does not count as the project's agent."""
     name = core.new_agent_name(conn, t["project"])  # never a stopped session's name (#6359)
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     _give_scope(conn, name, [f"tasks:{t['item']['id']}"], f"{by}: {why}")
+    reassigned = False
     try:
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
+        if reuse_workspace_from:
+            reassigned = core.workspace_reassign(conn, reuse_workspace_from, name) is not None
         t = _workspace(conn, t, name, core._project(conn, t["project"])["id"])
         _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner, conn)
     except Exception as e:
+        if reassigned:
+            core.workspace_reassign(conn, name, reuse_workspace_from)
         _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
     if t.get("custom_prompt"):  # what the session was told, for the people who read the item's history
         flat = " ".join(t["custom_prompt"].split())
@@ -2359,6 +2366,7 @@ def _pane_screen(agent, pane):
 # sees it until a person looks. PROMPTS remembers, for each agent whose screen shows a prompt now, the lines
 # river saw ("sig"), since when, and the alert it sent for them ("told").
 PROMPTS = {}
+LIMIT_SEEN = {}  # agent -> the limit-stop message that watch_prompts read last on its screen (#6348)
 PROMPT_LINES = 15  # a prompt is at the end of the screen: text further up is what the agent wrote before
 _ESCAPES = None
 
@@ -2987,7 +2995,7 @@ def watch_prompts(conn):
     {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
     "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids, procs, asks, whys = {}, {}, {}, {}, {}, {}
+    waiting, states, ids, procs, asks, whys, limit_hits = {}, {}, {}, {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     terminals = agent_terminals(conn)
     for agent in [a for a in STILL if a not in terminals or a in stopped]:
@@ -3008,8 +3016,36 @@ def watch_prompts(conn):
         pid = _pane_process(conn, agent, ad)
         if pid:
             procs[agent] = pid
+        plain_text = _plain(screen["text"])
+        tail = _prompt_tail(plain_text)
+        if ad is not None:
+            # A limit stop counts only on a screen that shows no turn at work (a working session may show the words
+            # in a file or a diff), and once for each message: agy keeps the old message on the screen after the
+            # reset, and its 'Resets in 29m45s' read again would move the reset time on each pass.
+            working = (ad.detect or {}).get("working")
+            hit = None if working and any(re.search(working, x) for x in tail) else ad.limit_stop(tail)
+            if hit and LIMIT_SEEN.get(agent) == hit.get("message"):
+                hit = None
+            if hit:
+                LIMIT_SEEN[agent] = hit.get("message")
+                core.record_agent_limit(conn, ad.id, limited=True, resets_at=hit.get("resets_at"),
+                                        resets_text=hit.get("resets_text"), reason=hit.get("message"),
+                                        source="limit_stop")
+                limit_hits[agent] = (ad, hit, pane)
+                STILL.pop(agent, None)
+                continue
+            if ad.has("screen_limits"):
+                scr_lim = ad.screen_limits(plain_text.splitlines())
+                # The same /usage screen on the next pass is no new reading: its 'Resets in 2h' read again moves.
+                sig = scr_lim and repr([(w.get("name"), w.get("used_percent"), w.get("resets_text")) for w in scr_lim])
+                if sig and LIMIT_SEEN.get(("screen", agent)) == sig:
+                    scr_lim = None
+                elif sig:
+                    LIMIT_SEEN[("screen", agent)] = sig
+                if scr_lim:
+                    at_lim = any((w.get("used_percent") or 0) >= 100 for w in scr_lim)
+                    core.record_agent_limit(conn, ad.id, limited=at_lim, windows=scr_lim, source="screen")
         if pattern:
-            tail = _prompt_tail(_plain(screen["text"]))
             parts = _prompt_found(tail, rx, layout)
             if parts:
                 held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
@@ -3042,6 +3078,10 @@ def watch_prompts(conn):
         "SELECT id, from_agent, body FROM messages WHERE kind='alert' AND read_at IS NULL AND body LIKE ?",
         (core.PROMPT_NOTE + "%",))]
     closed = [m["id"] for m in alerts if waiting.get(m["from_agent"], ("",))[0] != m["body"]]
+    if limit_hits:
+        restarts = _handle_limit_stops(conn, limit_hits)
+        if restarts:
+            reported["limit_restarts"] = restarts
     if not waiting and not closed:
         return {"waiting": {}, "told": [], "closed": [], **reported}  # the usual pass: nothing to write
     with core.tx(conn):
@@ -3121,6 +3161,83 @@ def _end_at_prompt(conn, waiting, asks, t):
                 core._send(conn, "alert", "maxpm", text, to=p, item_id=held)
             core.sync_needs_you(conn)
         out.append(agent)
+    return out
+
+
+def _handle_limit_stops(conn, limit_hits):
+    """#6348: When a worker session stops at its usage limit, stop it with a handback note and start its item again
+    with the next agent of agent_order that is not at its limit (default Antigravity, then Claude Code), continuing the
+    uncommitted work in the same folder/worktree. Returns a list of restart/alert result dicts."""
+    out = []
+    for agent, (ad, hit, _pane) in sorted(limit_hits.items()):
+        ag = conn.execute("SELECT role, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
+        if not ag or ag["stop_at"] is not None:
+            continue
+        held = [dict(r) for r in conn.execute(
+            "SELECT id, title, project_id, tier FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+            "ORDER BY id", (agent,)).fetchall()]
+        msg = hit.get("message") or f"{ad.label} usage limit reached"
+        reset_part = f" (resets {hit['resets_text'] or hit['resets_at']})" if (hit.get("resets_text") or hit.get("resets_at")) else ""
+        if ag["role"] in ("manager", "expert") or not held:
+            key = f"limit_alert:{agent}:{hit.get('resets_at') or msg[:40]}"
+            with core.tx(conn):
+                if not conn.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone():
+                    conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, core.iso(core.now())))
+                    manager = core.active_manager(conn)
+                    to = [manager] if manager and manager != agent else [
+                        r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+                    for p in to:
+                        core._send(conn, "alert", "maxpm",
+                                   f"{agent} ({ad.label}) stopped at its usage limit{reset_part}: {msg}", to=p)
+                    core.sync_needs_you(conn)
+            continue
+        handback = f"stopped at {ad.label} usage limit{reset_part}: {msg}"
+        try:
+            kill_agent(conn, agent, handback, "maxpm", by_serve=True)
+        except RiverError as e:
+            print(f"maxpm: could not stop {agent} at its usage limit: {e}", file=sys.stderr, flush=True)
+            continue
+        PROMPTS.pop(agent, None)
+        primary = held[0]
+        fb = core.fallback_agent(conn, ad.id, project_id=primary["project_id"])
+        if fb is None:
+            manager = core.active_manager(conn)
+            to = [manager] if manager else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                for p in to:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({ad.label} usage limit{reset_part}: "
+                               f"{msg}), and no fallback agent is available until it resets.",
+                               to=p, item_id=primary["id"])
+                core.sync_needs_you(conn)
+            out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "reason": "no fallback"})
+            continue
+        _fb_id, fb_label = fb
+        cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at its {ad.label} usage limit"
+                       f"{reset_part} ({msg}). Check git status and git diff in this folder and continue the "
+                       f"uncommitted work.")
+        try:
+            started = dispatch_item(conn, primary["id"], agent=fb_label, actor="maxpm",
+                                    prompt=cont_prompt, reuse_workspace_from=agent)
+        except RiverError as e:
+            manager = core.active_manager(conn)
+            to = [manager] if manager else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                for p in to:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({ad.label} usage limit{reset_part}), "
+                               f"but could not start fallback {fb_label}: {e}", to=p, item_id=primary["id"])
+                core.sync_needs_you(conn)
+            out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "error": str(e)})
+            continue
+        new_name = started.get("session_name") or started.get("pushed_to")
+        with core.tx(conn):
+            core._event(conn, primary["id"], "maxpm",
+                        f"started {new_name} ({fb_label}) to continue uncommitted work after {agent} hit "
+                        f"{ad.label} usage limit{reset_part}")
+        out.append({"agent": agent, "item_id": primary["id"], "restarted": new_name, "fallback": fb_label})
     return out
 
 

@@ -5423,6 +5423,30 @@ def render_status(res):
         print(f"  {ag['name']} ({ag['kind']}, {ag['state']}): {holds}{owns}")
     if res.get("ended"):
         print(f"  ({res['ended']} stopped or gone agent(s) that hold nothing: maxpm who --all)")
+    if res.get("agent_limits"):
+        print()
+        print("Agent usage:")
+        for al in res["agent_limits"]:
+            if not al.get("known", True):
+                print(f"  {al['label']}: not known (no reading yet; /usage in its terminal shows it)")
+                continue
+            reset = ""
+            if al.get("resets_at"):
+                reset = f", resets {core.show_time(al['resets_at'])}"
+            elif al.get("resets_text"):
+                reset = f", resets {al['resets_text']}"
+            read = f" (read {core.show_time(al['updated_at'])})" if al.get("updated_at") else ""
+            if al.get("limited"):
+                why = f": {al['reason']}" if al.get("reason") else ""
+                print(f"  {al['label']}: AT LIMIT{reset}{why}")
+            elif al.get("remaining_pct") is not None:
+                print(f"  {al['label']}: {al['remaining_pct']:.0f}% remaining{reset}{read}")
+            else:
+                print(f"  {al['label']}: no limit reached{reset}{read}")
+            wins = [w for w in al.get("windows") or () if w.get("remaining_percent") is not None]
+            for w in wins if len(wins) > 1 else ():
+                at = core.show_time(w["resets_at"]) if w.get("resets_at") else w.get("resets_text") or ""
+                print(f"    {w['name']}: {w['remaining_percent']:.0f}% left{f', resets {at}' if at else ''}")
     if res.get("due"):
         print()
         print("Due dates:")

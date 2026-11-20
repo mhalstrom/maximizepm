@@ -22,7 +22,7 @@ DESCRIBE = {
 
 from pathlib import Path  # noqa: E402
 
-from . import Raw  # noqa: E402
+from . import Raw, parse_reset_time  # noqa: E402
 
 EFFORT = {
     "levels": ["low", "medium", "high", "xhigh", "max"],
@@ -151,12 +151,60 @@ DETECT = {
     "idle": r"^\s*❯(\s|$)",  # the marker of its input box, under a rule
     "working": r"(?i)\besc to interrupt\b",
     "blocked": BLOCKED,
+    # Limit-stop text (#6348): Claude Code's plan/session/weekly usage limit messages.
+    "limit": [
+        r"(?i)you've\s+hit\s+your\s+limit",
+        r"(?i)claude\s+ai\s+usage\s+limit\s+reached",
+        r"(?i)\b(?:5-hour|session|weekly|usage|rate)\s+limit\s+reached\b",
+        r"(?i)\bout\s+of\s+extra\s+usage\b",
+    ],
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Claude what to do differently"
     "image_paste": "[Image #{n}]",  # an image path pasted alone becomes this in its prompt (#4618)
     # The tab line of the AskUserQuestion dialog (#6234): one tab for each question (☐ open, ☒ answered), then
     # '✔ Submit' between arrows; one question has its tab alone (" ☐ Pet").
     "ask": r"^\s*(?:←\s+)?[☐☒]\s+\S.*?(?:\s+✔\s+Submit\s+→)?\s*$",
 }
+
+
+def screen_limits(lines, now=None):
+    """Read plan usage limits from Claude Code's `/usage` screen (#6348): sections such as 'Current session',
+    'Current week (all models)', 'Current week (Sonnet only)' with '% used' / '% left' and 'Resets ...'."""
+    seq = [str(ln) for ln in (lines or ())]
+    if not any(_re.search(r"(?i)\b(?:current\s+session|current\s+week|extra\s+usage|plan\s+usage)\b", ln) for ln in seq):
+        return None
+    out, i = [], 0
+    heading_rx = _re.compile(r"^\s*(Current\s+(?:session|week(?:\s*\([^)]+\))?)|Extra\s+usage)\s*$", _re.I)
+    pct_rx = _re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%\s*(used|left|remaining)\b", _re.I)
+    inline_rx = _re.compile(
+        r"^\s*(Current\s+(?:session|week(?:\s*\([^)]+\))?)|Extra\s+usage)\s*[:·-]?\s*"
+        r"(?:[█▓▒░▇▆▅▄▃▂▁━─=\[\]#-]{2,}\s+)?(\d{1,3}(?:\.\d+)?)\s*%\s*(used|left|remaining)\b",
+        _re.I,
+    )
+    while i < len(seq):
+        line = seq[i].strip()
+        im = inline_rx.match(line)
+        if im:
+            name, pct, kind = im.group(1).strip(), float(im.group(2)), im.group(3).lower()
+            used = round(max(0.0, min(100.0, pct)), 1) if kind == "used" else round(max(0.0, 100.0 - pct), 1)
+            chunk = " ".join(seq[i:min(len(seq), i + 2)])
+            resets_at, resets_text = parse_reset_time(chunk, now=now)
+            out.append({"name": name, "used_percent": used, "remaining_percent": round(100.0 - used, 1),
+                        "resets_at": resets_at, "resets_text": resets_text})
+            i += 1
+            continue
+        hm = heading_rx.match(line)
+        if hm:
+            name = hm.group(1).strip()
+            block = seq[i + 1:min(len(seq), i + 5)]
+            pm = next((pct_rx.search(b) for b in block if pct_rx.search(b)), None)
+            if pm:
+                pct, kind = float(pm.group(1)), pm.group(2).lower()
+                used = round(max(0.0, min(100.0, pct)), 1) if kind == "used" else round(max(0.0, 100.0 - pct), 1)
+                resets_at, resets_text = parse_reset_time(" ".join(block), now=now)
+                out.append({"name": name, "used_percent": used, "remaining_percent": round(100.0 - used, 1),
+                            "resets_at": resets_at, "resets_text": resets_text})
+        i += 1
+    return out or None
 
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'); the session keeps its context.
 # Messages reach it through MaximizePM's listener hook (core.native_message 'wake', #5686).

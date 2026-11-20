@@ -462,9 +462,30 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         ? ": the next ready item, or a plain session in a folder" : ""}.</div>`);
     drawTabs();
     drawStatus();
+    drawLimits();
     drawState();
     fit();
     autoWait();
+  }
+
+  // Agent usage & limits (#6348): compact summary per agent above Cost when known; a click opens Cost.
+  function drawLimits() {
+    const host = $("#sessLimits");
+    if (!host) return;
+    const rows = (S && S.agent_limits) || [];
+    host.classList.toggle("hidden", !rows.length);
+    if (!rows.length) return;
+    const fmtAt = (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const html = rows.map(r => {
+      const reset = r.resets_at ? `resets ${fmtAt(r.resets_at)}` : (r.resets_text ? `resets ${r.resets_text}` : "");
+      const read = r.updated_at && !r.limited ? `read ${fmtAt(r.updated_at)}` : "";
+      const val = !r.known ? `<span class="muted">not known</span>`
+        : r.limited ? `<span class="sl-lim-warn">At limit</span>`
+        : r.remaining_pct != null ? `<span>${Math.round(r.remaining_pct)}% left</span>` : `<span>no limit reached</span>`;
+      const note = [reset, read].filter(Boolean).join(" · ");
+      return `<div class="sl-lim-row"><span class="sl-lim-name">${esc(r.label)}</span>${val}${note ? `<span class="muted t-s">${esc(note)}</span>` : ""}</div>`;
+    }).join("");
+    putHtml(host, html);
   }
 
   // The Sessions line of the list (#5886: with the browsers that run), from the same read as the rows (sessionsLine):

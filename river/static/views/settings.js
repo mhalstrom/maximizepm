@@ -16,7 +16,7 @@ export const GROUPS = [
   ["credentials", "Credentials", ""],
   ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
     (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
-      || has("launch_agents", "agent_rules", "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
+      || has("launch_agents", "agent_rules", "agent_order", "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
              "prompt_wait", "stuck_after")(k)],
   ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
     (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)

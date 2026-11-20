@@ -691,6 +691,10 @@ DEFAULT_SETTINGS = {
     # (--kind).
     "agent_rules": "",
     "default_agent": "",
+    # The agent types in the order a launch tries them when one is at its usage limit (#6348): a session that stops at
+    # its limit starts again on the first other agent of the list that is not at its limit, and a launch whose agent
+    # is at its limit takes that one. One ordered list, comma separated.
+    "agent_order": "antigravity, claude-code",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
     # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
     # deployer a deploy item, an expert an expert-tier task; the manager has no item.
@@ -1143,6 +1147,20 @@ CREATE TABLE IF NOT EXISTS workspaces (
   checked_at  TEXT,
   kept_why    TEXT,                       -- why the sweep keeps it (uncommitted changes, unmerged commits)
   removed_at  TEXT
+);
+
+-- Per-agent-type remaining usage and limit state (#6348): one row per adapter id (antigravity, claude, codex, ...).
+CREATE TABLE IF NOT EXISTS agent_limits (
+  agent_type     TEXT PRIMARY KEY,
+  limited        INTEGER NOT NULL DEFAULT 0,
+  remaining_pct  REAL,
+  used_pct       REAL,
+  resets_at      TEXT,
+  resets_text    TEXT,
+  reason         TEXT,
+  windows_json   TEXT,
+  source         TEXT,
+  updated_at     TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -3241,6 +3259,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         parse_ladder(value)
     elif key == "agent_rules":
         parse_agent_rules(value)
+    elif key == "agent_order":
+        parse_agent_order(value)
     elif key in ("default_agent",) + tuple(f"agent_for.{r}" for r in AGENT_ROLES) and value:
         _check_agent_type(conn, value)
     elif key == "native_message":
@@ -3491,6 +3511,234 @@ def _rule_agent(rules, it):
             elif re.search(r"\b" + re.escape(pat.lower()) + r"\b", title):
                 return platform
     return None
+
+
+# ---------------------------------------------------------------- agent usage limits & fallback (#6348)
+
+DEFAULT_LIMIT_COOLDOWN = timedelta(minutes=30)
+
+
+def parse_agent_order(value):
+    """The agent_order setting (#6348): agent types in the order a launch tries them, 'antigravity, claude-code'
+    ('->' between them works too). One ordered list, so the provider list of #6361 extends it. Returns the adapter
+    ids, each once; [] when empty."""
+    out = []
+    for raw in re.split(r"\s*(?:,|->|;|\n)\s*", value or ""):
+        name = raw.strip()
+        if not name:
+            continue
+        ad = _adapters().find(name)
+        if ad is None:
+            raise RiverError(f"agent_order: unknown agent {name!r}; known: {', '.join(agent_types())}")
+        if ad.id in out:
+            raise RiverError(f"agent_order: {ad.id} is in the list twice")
+        out.append(ad.id)
+    return out
+
+
+def _limit_adapter_id(agent_type):
+    ad = _adapters().find(agent_type)
+    return ad.id if ad is not None else (agent_type or "").strip().lower()
+
+
+def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
+                       reason=None, source="screen"):
+    """Record an agent type's remaining usage or limit-stop state (#6348).
+    When `limited` is True and `resets_at` is None, sets a default cooldown (DEFAULT_LIMIT_COOLDOWN) so launches
+    avoid the exhausted agent until it resets."""
+    aid = _limit_adapter_id(agent_type)
+    if not aid:
+        return None
+    t = now()
+    win_list = list(windows) if windows else None
+    rem_pct = used_pct = None
+    if win_list:
+        pcts = [float(w["remaining_percent"]) for w in win_list if w.get("remaining_percent") is not None]
+        if not pcts:
+            pcts = [round(max(0.0, 100.0 - float(w["used_percent"])), 1)
+                    for w in win_list if w.get("used_percent") is not None]
+        if pcts:
+            rem_pct = round(min(pcts), 1)
+            used_pct = round(max(0.0, 100.0 - rem_pct), 1)
+        if resets_at is None:
+            # Prefer the reset time of the most-used (lowest remaining) window.
+            ordered = sorted((w for w in win_list if w.get("resets_at")),
+                             key=lambda w: w.get("remaining_percent") if w.get("remaining_percent") is not None else 100.0)
+            if ordered:
+                resets_at = ordered[0]["resets_at"]
+                resets_text = resets_text or ordered[0].get("resets_text")
+    if limited:
+        if reason is None and win_list:
+            full = [w for w in win_list if (w.get("used_percent") or 0) >= 100]
+            reason = f"{full[0]['name']} at 0% left" if full else None
+        if rem_pct is None:
+            rem_pct, used_pct = 0.0, 100.0
+        if resets_at is None:
+            resets_at = iso(t + DEFAULT_LIMIT_COOLDOWN)
+            resets_text = resets_text or "in 30m"
+    wjson = json.dumps(win_list) if win_list is not None else None
+    with tx(conn):
+        if win_list is None:
+            prev = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+            if prev and prev["windows_json"]:
+                wjson = prev["windows_json"]
+        conn.execute(
+            "INSERT INTO agent_limits (agent_type, limited, remaining_pct, used_pct, resets_at, resets_text, reason, "
+            "windows_json, source, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(agent_type) DO UPDATE SET limited=excluded.limited, remaining_pct=excluded.remaining_pct, "
+            "used_pct=excluded.used_pct, resets_at=excluded.resets_at, resets_text=excluded.resets_text, "
+            "reason=excluded.reason, windows_json=excluded.windows_json, source=excluded.source, "
+            "updated_at=excluded.updated_at",
+            (aid, 1 if limited else 0, rem_pct, used_pct, resets_at, resets_text, reason, wjson, source, iso(t)),
+        )
+    return agent_limit_status(conn, aid)
+
+
+def _format_limit_row(row, cur_now=None):
+    """Turn an agent_limits DB row into a public dict, clearing `limited` once `resets_at` has passed."""
+    cur_now = cur_now or now()
+    ad = _adapters().find(row["agent_type"])
+    resets_at = row["resets_at"]
+    expired = False
+    if resets_at:
+        try:
+            expired = parse_iso(resets_at) <= cur_now
+        except (ValueError, TypeError):
+            expired = False
+    active_limited = bool(row["limited"]) and not expired
+    try:
+        windows = json.loads(row["windows_json"]) if row["windows_json"] else []
+    except ValueError:
+        windows = []
+    rem, used = (None, None) if (row["limited"] and expired) else (row["remaining_pct"], row["used_pct"])
+    if windows:
+        # A window whose reset time passed since the reading starts again at 0% used.
+        for w in windows:
+            try:
+                gone = bool(w.get("resets_at")) and parse_iso(w["resets_at"]) <= cur_now
+            except (ValueError, TypeError):
+                gone = False
+            if gone and w.get("used_percent") is not None:
+                w.update(used_percent=0.0, remaining_percent=100.0, resets_at=None, resets_text=None, reset_since=True)
+        pcts = [float(w["remaining_percent"]) for w in windows if w.get("remaining_percent") is not None]
+        if pcts:
+            rem = round(min(pcts), 1)
+            used = round(100.0 - rem, 1)
+    return {
+        "agent_type": row["agent_type"],
+        "label": ad.label if ad is not None else row["agent_type"],
+        "known": True,
+        "limited": active_limited,
+        "remaining_pct": 0.0 if active_limited else rem,
+        "used_pct": 100.0 if active_limited else used,
+        "resets_at": None if expired else resets_at,
+        "resets_text": None if expired else row["resets_text"],
+        "reason": row["reason"] if active_limited else None,
+        "windows": windows,
+        "source": row["source"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def agent_limit_status(conn, agent_type):
+    """Current recorded usage/limit dict for `agent_type`, or None."""
+    aid = _limit_adapter_id(agent_type)
+    r = conn.execute("SELECT * FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    return _format_limit_row(r) if r else None
+
+
+def agent_is_limited(conn, agent_type):
+    """Return the limit status dict if `agent_type` is currently at its usage limit (before reset), else None."""
+    st = agent_limit_status(conn, agent_type)
+    return st if st and st["limited"] else None
+
+
+def agent_limits_list(conn):
+    """The usage of each agent type (#6348), in adapter registry order: every recorded row, and a row with known
+    False for Claude Code, Codex and Antigravity when nothing is recorded for them (mark 2026-11-20: the page shows
+    them also when no session of the agent runs)."""
+    cur = now()
+    order = {aid: i for i, aid in enumerate(_adapters().ids())}
+    rows = [_format_limit_row(r, cur) for r in conn.execute("SELECT * FROM agent_limits").fetchall()]
+    have = {r["agent_type"] for r in rows}
+    for aid in _adapters().TIER1:
+        ad = _adapters().find(aid)
+        if aid not in have and ad is not None:
+            rows.append({"agent_type": aid, "label": ad.label, "known": False, "limited": False,
+                         "remaining_pct": None, "used_pct": None, "resets_at": None, "resets_text": None,
+                         "reason": None, "windows": [], "source": None, "updated_at": None})
+    rows.sort(key=lambda r: (order.get(r["agent_type"], 999), r["agent_type"]))
+    return rows
+
+
+def record_log_limits(conn):
+    """A pass of maxpm serve (#6348): the plan limits that agents wrote to their newest log (Codex), recorded when
+    they changed, so the page shows them also when no session of the agent runs."""
+    out = {}
+    for aid in _adapters().ids():
+        ad = _adapters().find(aid)
+        if ad is None or not ad.has("latest_limits"):
+            continue
+        wins = ad.latest_limits()
+        if not wins:
+            continue
+        r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+        if r and r["windows_json"] == json.dumps(wins):
+            continue
+        full = [w for w in wins if (w.get("used_percent") or 0) >= 100]
+        record_agent_limit(conn, aid, limited=bool(full), windows=wins,
+                           resets_at=full[0].get("resets_at") if full else None, source="log")
+        out[aid] = wins
+    return out
+
+
+def fallback_agent(conn, agent_type, project_id=None):
+    """The agent that takes over from `agent_type` at its usage limit (#6348): the first agent of agent_order, other
+    than `agent_type`, that is not at its limit and has a launch entry. Returns (adapter_id, launch_label), or None
+    when the list names no such agent."""
+    aid = _limit_adapter_id(agent_type)
+    for cur in parse_agent_order(setting(conn, "agent_order", project_id=project_id)):
+        if cur == aid or agent_is_limited(conn, cur):
+            continue
+        ad = _adapters().find(cur)
+        plat = (ad.describe.get("platform") or ad.id) if ad is not None else cur
+        lbl = agent_for_type(conn, plat, project_id)
+        if lbl:
+            return cur, lbl
+    return None
+
+
+def _until_text(lim):
+    if lim.get("resets_at"):
+        return f" until {lim['resets_at']}"
+    if lim.get("resets_text"):
+        return f" (resets {lim['resets_text']})"
+    return ""
+
+
+def pick_available_agent(conn, agent, project_id=None, explicit=False):
+    """Ensure a new launch picks no agent that is at its usage limit until its reset time (#6348).
+    `agent`: a launch_agents label (or None for the first entry).
+    Returns (chosen_label, fallback_note_or_None). Raises RiverError if the agent is limited and explicit=True,
+    or if no non-limited fallback is available."""
+    entries = launch_entries(conn, project_id)
+    pick = entries[0] if agent is None else next((a for a in entries if a[0] == agent), None)
+    if pick is None:
+        return agent, None
+    prof = parse_profile(pick[1])
+    plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
+    if not plat:
+        return pick[0], None
+    lim = agent_is_limited(conn, plat)
+    if not lim:
+        return pick[0] if agent is not None else agent, None
+    until = _until_text(lim)
+    if explicit:
+        raise RiverError(f"{lim['label']} is at its usage limit{until}; pick another agent or wait until it resets")
+    fb = fallback_agent(conn, plat, project_id=project_id)
+    if fb is not None:
+        return fb[1], f"{lim['label']} is at its usage limit{until}; using {fb[1]}"
+    raise RiverError(f"{lim['label']} is at its usage limit{until}, and no fallback agent is available")
 
 
 def _levels(value):
@@ -21426,6 +21674,7 @@ def status(conn, recent=10):
         "spare_slots": cap["spare_slots"],
         "excess_sessions": cap["excess_sessions"],
         "advice": cap["advice"],
+        "agent_limits": agent_limits_list(conn),
     }
 
 
@@ -22654,6 +22903,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not p["path"] and top["kind"] == "review":
         # A deploy project has no folder: the reviewer starts in a folder of the release.
         p = _review_folder(conn, top) or p
+    explicit_agent = agent is not None
     if agent is None and top["agent"]:
         agent = agent_for_type(conn, top["agent"], p["id"])
         if agent is None:
@@ -22663,6 +22913,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         return {"project": p["name"], "path": p["path"] or None,
                 "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
                 "ready": len(pool), "why": why}
+    agent, fallback_why = pick_available_agent(conn, agent, project_id=p["id"], explicit=explicit_agent)
     p = start_folder(conn, p, folder, actor)
     plat = _launch_platform(conn, p["id"], agent)
     if model:
@@ -22696,7 +22947,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not model and cmd["adapter_default"]:  # #5284: the adapter names a default model; the item names none
         model, model_why = cmd["model"], f"#{top['id']} names no model: the default model of {platform_spec(plat)['label']}"
     return {"project": p["name"], "path": p["path"], "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
-            "ready": len(pool), "why": why, "session_title": name, **cmd, "model_why": model_why}
+            "ready": len(pool), "why": why, "session_title": name, **cmd, "model_why": model_why,
+            **({"fallback_why": fallback_why} if fallback_why else {})}
 
 
 def agent_for_type(conn, agent_type, project_id=None):
@@ -22755,6 +23007,7 @@ def role_agent(conn, role, project_id=None, item_id=None):
     if label is None:
         raise RiverError(f"the {role} runs {t}, and no launch entry runs it; add one: maxpm config set launch_agents "
                          f"\"...; {platform_spec(t)['label']}=@{t}\"")
+    label, _ = pick_available_agent(conn, label, project_id=project_id, explicit=False)
     return label
 
 
@@ -22786,6 +23039,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
     manager_autocompact): claude --autocompact, unless the profile's args already name one."""
     agents = launch_entries(conn, project_id)
+    agent, _ = pick_available_agent(conn, agent, project_id=project_id, explicit=agent is not None)
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
         raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
@@ -23252,6 +23506,7 @@ def state(conn, closed=True):
         "needs_you": [dict(r) for r in conn.execute(
             "SELECT id, kind, item_id, message_id, human, summary, opened_at FROM needs_you "
             "WHERE closed_at IS NULL ORDER BY id DESC")],
+        "agent_limits": agent_limits_list(conn),
     }
 
 
@@ -24729,6 +24984,18 @@ def workspace_of(conn, agent):
     r = conn.execute("SELECT * FROM workspaces WHERE agent=? AND removed_at IS NULL ORDER BY id DESC LIMIT 1",
                      (agent,)).fetchone()
     return dict(r) if r else None
+
+
+def workspace_reassign(conn, old_agent, new_agent):
+    """Hand an active worktree from `old_agent` to `new_agent` (#6348: fallback session continues uncommitted work
+    in the same worktree). Returns the reassigned workspace row, or None if `old_agent` had none."""
+    w = workspace_of(conn, old_agent)
+    if not w:
+        return None
+    with tx(conn):
+        conn.execute("UPDATE workspaces SET agent=? WHERE id=?", (new_agent, w["id"]))
+        _event(conn, None, "maxpm", f"{new_agent} continues in worktree {w['path']} from {old_agent}")
+    return workspace_of(conn, new_agent)
 
 
 def workspace_list(conn, removed=False):
