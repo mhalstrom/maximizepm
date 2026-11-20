@@ -3133,6 +3133,132 @@ class ActionChanges(Base):
         self.assertEqual((out["navigated"], out.get("changes"), out["outline"]), (True, None, ["[main] 1 link"]))
 
 
+TOASTS = (
+    b"<title>Toasts</title><main>"
+    b"<div id=static role=status>Always here</div>"
+    b"<div id=snack role=alert></div>"
+    b"<div id=live aria-live=polite></div>"
+    b"<div id=assertive aria-live=assertive></div>"
+    b"<button id=nothing>Nothing</button>"
+    b"<button id=flash>Create</button>"
+    b"<button id=rpc>Create RPC</button>"
+    b"<button id=secret_dlg>Show secret</button>"
+    b"<button id=pw_dlg>Login dialog</button>"
+    b"<button id=once_banner>Show token</button>"
+    b"<button id=echo_pw>Echo secret</button>"
+    b"<button id=form_dlg>Open form</button>"
+    b"<input id=appname aria-label='App name'>"
+    b"<div id=dlg_host></div>"
+    b"<script>"
+    b"const briefly = (el, txt) => { el.textContent = txt; setTimeout(() => { el.textContent = ''; }, 5); };"
+    b"flash.onclick = () => briefly(snack, 'Could not create app password');"
+    b"rpc.onclick = () => fetch('/fail').then(r => r.text()).then(t => briefly(snack, t));"
+    b"appname.addEventListener('input', () => {"
+    b"  if (appname.value === 'x') briefly(live, 'Name too short');"
+    b"  if (appname.value.includes('!')) briefly(live, 'Invalid character');"
+    b"});"
+    b"appname.addEventListener('keydown', e => {"
+    b"  if (e.key === 'Enter') briefly(assertive, 'Enter a name first');"
+    b"});"
+    b"secret_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><h2>Generated app password</h2>"
+    b"<div role=status>Your app password for your device: abcd efgh ijkl mnop</div><button>Done</button></div>'; };"
+    b"pw_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><input type=password value=topsecret>"
+    b"<div role=alert>Password required</div><button>Sign in</button></div>'; };"
+    b"once_banner.onclick = () => briefly(snack, \"Copy this token now, you won't be able to see it again: ghp_1234567890abcdef\");"
+    b"echo_pw.onclick = () => briefly(snack, 'Rejected SuperSecret99!');"
+    b"form_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><h2>Create a new app password</h2>"
+    b"<input type=text aria-label=Label><div role=alert>App name is required</div><button>Save</button></div>'; };"
+    b"</script></main>"
+)
+
+
+class TransientMessages(Base):
+    """#6303 in a real Chrome: click, fill, type and key report short toast/snackbar messages (role=alert, role=status,
+    aria-live) even when they disappear before the next read, while excluding secret dialogs and scrubbing passwords."""
+
+    def test_transient_toasts_reported_and_secrets_excluded(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/fail":
+                    time.sleep(0.03)
+                    body, ct = b"Something went wrong", "text/plain"
+                else:
+                    body, ct = TOASTS, "text/html"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+
+        # Pre-existing static status is not reported; Nothing stays 'no change' and fast (p147)
+        t0 = time.time()
+        self.assertEqual(act(action="click", selector="Nothing")["changes"], ["no change"])
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))
+
+        # Transient toast on click that disappears in 5 ms is still reported
+        out = act(action="click", selector="Create")
+        self.assertEqual(out["changes"], ['+ alert "Could not create app password"'])
+        self.assertIn('+ alert "Could not create app password"', cli._browser_result("click", out))
+
+        # Transient toast rendered after an async fetch is reported
+        self.assertEqual(act(action="click", selector="Create RPC")["changes"], ['+ alert "Something went wrong"'])
+
+        # Transient messages on fill, type, and key
+        out = act(action="fill", selector="App name", text="x")
+        self.assertIn('+ status "Name too short"', out["changes"])
+        out = act(action="type", text="!")
+        self.assertIn('+ status "Invalid character"', out["changes"])
+        out = act(action="key", key="Enter")
+        self.assertIn('+ alert "Enter a name first"', out["changes"])
+
+        # Secret dialog (one-time generated app password) is excluded
+        out = act(action="click", selector="Show secret")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("abcd efgh ijkl mnop", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # Dialog with a password field is excluded
+        out = act(action="click", selector="Login dialog")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("topsecret", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # One-time secret in a non-dialog alert banner is excluded
+        out = act(action="click", selector="Show token")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("ghp_1234567890abcdef", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # A filled sign-in password echoed in a toast is scrubbed
+        b.signin_values = {"SuperSecret99!"}
+        out = act(action="click", selector="Echo secret")
+        self.assertEqual(out["changes"], ['+ alert "Rejected ***"'])
+
+        # A normal form dialog (no password field, no one-time secret) still reports its validation alert
+        out = act(action="click", selector="Open form")
+        self.assertIn('+ alert "App name is required"', out["changes"])
+
+
 DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
        b"<h2>Alpha</h2><p>alpha text</p><h3>Alpha sub</h3><p>sub text</p><h2>Beta</h2>"
        + b"".join(b"<p>beta line %d</p>" % n for n in range(40)) + b"<aside>Side box</aside>"

@@ -3823,14 +3823,113 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
         for (let i = 0; i < s.length; i++) { th ^= s.charCodeAt(i); th = Math.imul(th, 16777619); }
       }
     }
+    // #6303: short transient messages (toasts, snackbars, live regions) that show during the action, even when they
+    // disappear before the next read. Exclude dialogs or messages with a password field or a one-time secret.
+    const LIVE = '[role~="alert" i],[role~="status" i],[aria-live]:not([aria-live="off" i]):not([aria-live=""]),output';
+    const DLG = 'dialog,[role=dialog],[role=alertdialog],[aria-modal=true]';
+    const SECRET_IN = 'input[type=password],[autocomplete*="password" i],[autocomplete="one-time-code"]';
+    const SECRET_RE = /(won['’]?t|will not|cannot|can['’]?t)\b.{0,30}\b(see|show|shown|view|viewed|display|displayed|retrieve|access)\b.{0,20}\bagain|\bshown?\s+(only\s+)?once\b|\bonly\s+(be\s+)?shown\s+once\b|\bcopy\s+(this|it|your)\b.{0,25}\b(now|before)\b|\b(generated|your|one-time|temporary)\s+(new\s+)?(app\s+)?(password|passcode|secret|api\s*key|access\s*token|private\s*key|client\s*secret|recovery\s*codes?|backup\s*codes?)\b/i;
+    const TOKEN_RE = /\b[a-z]{4}\s+[a-z]{4}\s+[a-z]{4}\s+[a-z]{4}\b|\b(gh[pous]_|github_pat_|sk-[A-Za-z0-9]{16,}|sk_(?:live|test)_|rk_(?:live|test)_|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16})/;
+    const secretBox = e => {
+      const box = e.closest(DLG);
+      if (box) {
+        if (box.querySelector(SECRET_IN)) return true;
+        const bt = (box.innerText || box.textContent || '').replace(/\s+/g, ' ').trim();
+        if (SECRET_RE.test(bt) || TOKEN_RE.test(bt)) return true;
+        if (box.querySelector('code,pre,kbd,input[readonly],textarea[readonly]') &&
+            /\b(password|passcode|secret|token|api\s*key|private\s*key|recovery\s*code|backup\s*code)\b/i.test(bt)) return true;
+      }
+      if (e.querySelector(SECRET_IN)) return true;
+      const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+      return SECRET_RE.test(t) || TOKEN_RE.test(t);
+    };
+    const liveKind = e => {
+      const r = (e.getAttribute('role') || '').toLowerCase().split(/\s+/);
+      const l = (e.getAttribute('aria-live') || '').toLowerCase().trim();
+      return (r.includes('alert') || l === 'assertive') ? 'alert' : 'status';
+    };
+    const liveText = e => {
+      if (!e || e.nodeType !== 1 || !e.isConnected || e.closest('[aria-hidden=true]') || !seen(e)) return '';
+      if (e.querySelectorAll(SEL).length > 5 || secretBox(e)) return '';
+      const raw = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!raw || raw.length > 500) return '';
+      return cut(raw, 240);
+    };
+    const scanLive = (root, fn) => {
+      if (!root) return;
+      if (root.nodeType === 1 && root.matches(LIVE)) fn(root);
+      if (root.querySelectorAll) root.querySelectorAll(LIVE).forEach(fn);
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      for (let e = w.currentNode; e; e = w.nextNode()) if (e.shadowRoot) scanLive(e.shadowRoot, fn);
+    };
     if (o.keys === 'before') {
+      if (R.mo) { R.mo.disconnect(); R.mo = null; }
+      const preMsgs = new Set();
+      scanLive(document.documentElement, e => { const t = liveText(e); if (t) preMsgs.add(t); });
+      const msgs = [], byText = new Map(), byEl = new Map();
+      const record = e => {
+        if (!e || e.nodeType !== 1) return;
+        const l = e.matches(LIVE) ? e : e.closest(LIVE);
+        if (!l) return;
+        const t = liveText(l);
+        if (!t || preMsgs.has(t)) return;
+        const k = liveKind(l);
+        const cur = byText.get(t);
+        if (cur) { if (k === 'alert') cur[0] = 'alert'; return; }
+        const prev = byEl.get(l);
+        if (prev && t.startsWith(prev[1])) {
+          byText.delete(prev[1]);
+          prev[1] = t;
+          if (k === 'alert') prev[0] = 'alert';
+          byText.set(t, prev);
+          return;
+        }
+        if (msgs.length >= 5) return;
+        const item = [k, t];
+        msgs.push(item);
+        byText.set(t, item);
+        byEl.set(l, item);
+      };
+      const onMut = list => {
+        for (const m of list) {
+          if (m.type === 'childList') {
+            record(m.target);
+            for (const nd of m.addedNodes) {
+              if (nd.nodeType === 1) { record(nd); scanLive(nd, record); }
+              else if (nd.nodeType === 3) record(nd.parentElement);
+            }
+          } else if (m.type === 'characterData') {
+            record(m.target.parentElement);
+          } else if (m.type === 'attributes') {
+            record(m.target);
+            if (m.target.nodeType === 1 && m.target.querySelectorAll) m.target.querySelectorAll(LIVE).forEach(record);
+          }
+        }
+      };
+      const obsOpts = {subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'open', 'role', 'aria-live']};
+      const mo = new MutationObserver(onMut);
+      mo.observe(document.documentElement, obsOpts);
+      const sw = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+      for (let e = sw.currentNode; e; e = sw.nextNode()) if (e.shadowRoot) mo.observe(e.shadowRoot, obsOpts);
+      R.mo = mo;
+      setTimeout(() => { if (R.mo === mo) { mo.disconnect(); R.mo = null; } }, 30000);
       R.pre = {sigs: now, url: location.href, title: document.title, regions: new Set([...els.values()].map(regionOf)),
-        heads, th, tl};
+        heads, th, tl, msgs, onMut, record};
       return {next: n};
     }
     const pre = R.pre;
-    if (!pre) return {next: n, none: true};
+    if (!pre) { if (R.mo) { R.mo.disconnect(); R.mo = null; } return {next: n, none: true}; }
+    if (R.mo) {
+      if (pre.onMut) pre.onMut(R.mo.takeRecords());
+      R.mo.disconnect();
+      R.mo = null;
+    }
+    if (pre.record) scanLive(document.documentElement, pre.record);
     R.pre = null;
+    const pws = [];
+    document.querySelectorAll('input[type=password]').forEach(e => { if (e.value && e.value.length >= 4) pws.push(e.value); });
+    const msgs = (pre.msgs || []).filter(([, t]) => !pws.some(p => t.includes(p)));
     const line = (ref, e) => { const r = role(e); return '@' + ref + ' ' + r + ' ' + JSON.stringify(cut(name(e), 60)) + extra(e, r); };
     const added = [], changed = [];
     now.forEach((s, ref) => {
@@ -3844,7 +3943,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     (pre.heads || []).forEach(s => had.set(s, (had.get(s) || 0) + 1));
     const newHeads = heads.filter(s => { const c = had.get(s); if (c) { had.set(s, c - 1); return false; } return true; });
     return {next: n, url: location.href, title: document.title, url0: pre.url, title0: pre.title, added: added.slice(0, o.max),
-      heads: newHeads.slice(0, o.max), text: pre.th === undefined || pre.th === th ? null : tl - pre.tl,
+      heads: newHeads.slice(0, o.max), msgs, text: pre.th === undefined || pre.th === th ? null : tl - pre.tl,
       more: Math.max(0, added.length - o.max), changed: changed.slice(0, o.max), gone: [...pre.sigs.keys()].filter(k => !now.has(k)),
       before: [...pre.regions], regions};
   }
@@ -4242,6 +4341,8 @@ def changes(b, pre=True):
     if gone:
         lines.append(f"- {len(gone)} gone: " + " ".join("@" + k for k in gone[:CHANGE_MAX])
                      + (" ..." if len(gone) > CHANGE_MAX else ""))
+    # #6303: short transient messages (toasts, snackbars, live regions) that showed during the action
+    lines += [f"+ {kind} {json.dumps(msg, ensure_ascii=False)}" for kind, msg in r.get("msgs") or []]
     # #5759: a heading with new text, and the page's text when no line above says what changed
     lines += ["~ heading " + h for h in r.get("heads") or []]
     if not lines and r.get("text") is not None:
@@ -4868,11 +4969,14 @@ def done(b, wait, mark, **out):
             moved = False  # Chrome started a load for the link, which became the download: the page stays
     # #5675: the requests that the action started end first (REQUESTS_WAIT at most), so their errors are in the reply
     started = [r for r, t in list(b.requests.items()) if t >= mark.get("at", time.time())]
+    waited = bool(started)
     end = time.time() + REQUESTS_WAIT
     while started and (wait or "auto") != "none" and not b.dialog and time.time() < end:
         started = [r for r in started if r in b.requests]
         if started:
             _pause(0.02)
+    if waited and not started and (wait or "auto") != "none" and not b.dialog:
+        _pause(0.02)  # #6303: let response handlers render a toast/snackbar before changes() reads it
     errs = errors_since(b, mark)
     if errs:
         out["page_errors"] = errs

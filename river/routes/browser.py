@@ -617,6 +617,9 @@ def _act(conn, a, who):
                 out["outline"] = browser.outline(b)["lines"]
             else:
                 out["changes"] = browser.changes(b, pre)
+                if any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]):
+                    from .. import signin  # #6303: never carry a filled or typed password in a reported message
+                    out["changes"] = signin.scrub(b, out["changes"])
         if a.get("snapshot"):
             out["snapshot"] = browser.snapshot(b, interactive=True)["snapshot"]
         return out
