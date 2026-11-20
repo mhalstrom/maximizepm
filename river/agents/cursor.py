@@ -235,8 +235,9 @@ def parse_models(text):
     return split_levels(rows)
 
 
-# `cursor-agent models` (about five seconds), read by a thread at most once in ten minutes (agents.CliList); until the
-# first read ends, and when it gives nothing, DESCRIBE['models'] stand. MODELS.runner: a test hook.
+# `cursor-agent models` (about five seconds; it asks api2.cursor.sh), read by maxpm serve in a thread at most once in
+# ten minutes (agents.CliList); until serve's first read ends, and when it gives nothing, DESCRIBE['models'] stand.
+# MODELS.runner: a test hook.
 MODELS = CliList(["cursor-agent", "models"], parse_models)
 
 

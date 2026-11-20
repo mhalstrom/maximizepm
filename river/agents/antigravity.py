@@ -129,8 +129,8 @@ def parse_models(text):
     return list(out.values())
 
 
-# The models of the installed agy (`agy models`, about two seconds), read by a thread at most once in ten minutes
-# (agents.CliList); MODELS_SEEN until the first read ends, and when agy does not answer. MODELS.runner: a test hook.
+# The models of the installed agy (`agy models`, about two seconds), read by maxpm serve in a thread at most once in
+# ten minutes (agents.CliList); MODELS_SEEN until serve's first read ends, and when agy does not answer. MODELS.runner: a test hook.
 MODELS = CliList(["agy", "models"], parse_models, fallback=parse_models(MODELS_SEEN))
 
 

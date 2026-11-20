@@ -158,27 +158,48 @@ def _version_of(m):
 
 
 class CliList:
-    """A list that a CLI prints (`agy models`, `cursor-agent models`, `pi --list-models`), read by a thread at most once
-    in `ttl` seconds (#6257). No caller waits for it (p147: a command answers in 100 ms): until the first read ends,
-    and when the CLI gives nothing, get() gives the fallback. parse(text) -> a list; runner: a test hook, a function
-    () -> the text, used instead of the command."""
+    """A list that a CLI prints (`agy models`, `cursor-agent models`, `pi --list-models`; #6257). Only maxpm serve
+    starts the CLI: each pass of its loop calls refresh_lists(), which reads a list older than `ttl` seconds in a
+    thread and keeps it in a file beside the queue (cli-lists/<exe>.json). get() starts nothing (#6510: a page build
+    in a fresh process started `cursor-agent models`, which asks api2.cursor.sh over the network; p147: a page build
+    answers in 100 ms): it gives the last read of this process or of serve's file, else the fallback. parse(text) ->
+    a list of JSON values; runner: a test hook, a function () -> the text, used instead of the command."""
+
+    LOOK = 30  # seconds between two looks at the file: serve's loop may run in another process (river/loop.py)
+    ALL = []
 
     def __init__(self, argv, parse, fallback=(), ttl=600, timeout=60):
         import threading
         self.argv, self.parse, self.fallback, self.ttl, self.timeout = list(argv), parse, list(fallback), ttl, timeout
         self.runner = None
-        self.state = {"at": 0.0, "list": None, "reader": None}
+        self.state = {"at": 0.0, "list": None, "reader": None, "looked": 0.0, "mtime": None}
         self.lock = threading.Lock()
+        CliList.ALL.append(self)
+
+    def path(self):
+        from .. import core
+        return core.db_path().parent / "cli-lists" / f"{Path(self.argv[0]).name}.json"
 
     def get(self):
+        import time
+        with self.lock:
+            now = time.time()
+            if now - self.state["looked"] >= self.LOOK:
+                self.state["looked"] = now
+                self._load()
+            got = self.state["list"]
+        return list(got if got is not None else self.fallback)
+
+    def refresh(self):
+        """Start a read in a thread when the list is older than ttl and no read runs (maxpm serve's loop)."""
         import threading
         import time
         with self.lock:
-            got = self.state["list"]
-            if (got is None or time.time() - self.state["at"] >= self.ttl) and self.state["reader"] is None:
+            self._load()
+            if self.state["reader"] is None and (self.state["list"] is None
+                                                 or time.time() - self.state["at"] >= self.ttl):
                 self.state["reader"] = threading.Thread(target=self._read, daemon=True, name=f"{self.argv[0]}-list")
                 self.state["reader"].start()
-        return list(got if got is not None else self.fallback)
 
     def wait(self):
         """Wait for a read that runs (tests)."""
@@ -187,22 +208,60 @@ class CliList:
             r.join()
 
     def reset(self):
+        """Forget the list, and remove its file (tests)."""
         with self.lock:
-            self.state.update(at=0.0, list=None, reader=None)
+            self.state.update(at=0.0, list=None, reader=None, looked=0.0, mtime=None)
+            try:
+                self.path().unlink()
+            except OSError:
+                pass
+
+    def _load(self):
+        """Take serve's file when it is newer than the list this process holds (inside the lock)."""
+        import json
+        try:
+            p = self.path()
+            mtime = p.stat().st_mtime
+            if mtime == self.state["mtime"]:
+                return
+            d = json.loads(p.read_text(encoding="utf-8"))
+            got, at = d["list"], float(d["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        self.state["mtime"] = mtime
+        if isinstance(got, list) and got and at > self.state["at"]:
+            self.state.update(list=got, at=at)
 
     def _read(self):
+        import json
         import subprocess
         import time
         got = []
         try:
             out = self.runner() if self.runner else subprocess.run(
-                self.argv, capture_output=True, text=True, timeout=self.timeout).stdout
+                self.argv, capture_output=True, text=True, timeout=self.timeout, stdin=subprocess.DEVNULL).stdout
             got = list(self.parse(out or ""))
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
         finally:
+            at = time.time()
             with self.lock:
-                self.state.update(at=time.time(), list=got or list(self.fallback), reader=None)
+                self.state.update(at=at, list=got or list(self.fallback), reader=None)
+            if got:
+                try:
+                    p = self.path()
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = p.with_name(f".{p.name}.{os.getpid()}")
+                    tmp.write_text(json.dumps({"at": at, "argv": self.argv, "list": got}), encoding="utf-8")
+                    os.replace(tmp, p)
+                except (OSError, TypeError, ValueError):
+                    pass
+
+
+def refresh_lists(conn=None):
+    """maxpm serve, each pass: read each CLI's list that is older than its ttl, in a thread (CliList.refresh)."""
+    for cl in CliList.ALL:
+        cl.refresh()
 
 
 def split_levels(rows, levels=("none", "minimal", "low", "medium", "high", "xhigh", "max")):

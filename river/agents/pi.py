@@ -94,7 +94,8 @@ def parse_models(text):
     return sorted(rows, key=lambda r: not r["pick"])
 
 
-# `pi --list-models`, read by a thread at most once in ten minutes (agents.CliList); until the first read ends, and
+# `pi --list-models`, read by maxpm serve in a thread at most once in ten minutes (agents.CliList); until serve's first
+# read ends, and
 # when Pi does not answer, these model_ladder names stand: Pi resolves each against its signed-in providers.
 MODELS = CliList(["pi", "--list-models"], parse_models,
                  fallback=[{"name": m, "efforts": list(LEVELS), "pick": True} for m in ("opus", "sonnet", "haiku")])

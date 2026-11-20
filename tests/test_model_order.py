@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from river import agents, core
+from river import agents, core, notify, server
 from river.agents import antigravity
 
 
@@ -149,7 +149,7 @@ class Antigravity(Db):
         mock.patch.object(antigravity.MODELS, "runner", lambda: "Fetching available models...\n"
                           "gemini-5-neon-low\tGemini 5 Neon (Low)\ngemini-5-neon-max\tGemini 5 Neon (Max)\n"
                           "gemini-4-neon-high\tGemini 4 Neon (High)\n").start()
-        antigravity.read_models()  # starts the read; until it ends the list is MODELS_SEEN
+        antigravity.MODELS.refresh()  # maxpm serve starts the read; until it ends the list is MODELS_SEEN
         antigravity.MODELS.wait()
         ms = core.platform_models(self.c, "antigravity")
         self.assertEqual([(m["name"], m["efforts"]) for m in ms],
@@ -192,6 +192,37 @@ class EachAgentsOwnList(Db):
                                 {"name": "gpt-5.3-codex-fast", "label": "Codex 5.3 Fast", "efforts": ["low"]},
                                 {"name": "composer-2.5", "label": "Composer 2.5", "efforts": []}])
 
+    def test_a_page_build_starts_no_cli_and_reads_the_list_serve_kept(self):
+        # #6510: a page build in a fresh process started `cursor-agent models`, which asks api2.cursor.sh.
+        from river.agents import cursor
+        cursor.MODELS.reset()
+        self.addCleanup(cursor.MODELS.reset)
+        calls = []
+        mock.patch.object(cursor.MODELS, "runner",
+                          lambda: calls.append(1) or "gpt-9-high - GPT-9 High\ncomposer-9 - Composer 9\n").start()
+        server.page_state(False)
+        core.launch_options(self.c)
+        self.assertIsNone(cursor.MODELS.state["reader"])
+        self.assertEqual(calls, [])
+        self.assertIsNone(cursor.read_models())  # DESCRIBE['models'] stand until serve's first read
+        notify.refresh_cli_lists(self.c)  # not maxpm serve: nothing
+        self.assertEqual(calls, [])
+        mock.patch.dict(notify.SERVE_PORT, {"port": 7777}).start()
+        notify.refresh_cli_lists(self.c)
+        cursor.MODELS.wait()
+        notify.refresh_cli_lists(self.c)  # within ten minutes: no second read
+        cursor.MODELS.wait()
+        self.assertEqual(calls, [1])
+        self.assertEqual([m["name"] for m in cursor.read_models()], ["gpt-9", "composer-9"])
+        # Another process (a CLI command, the page server while the loop runs in its own process) has the list from
+        # serve's file, and starts no CLI either.
+        other = agents.CliList(["cursor-agent", "models"], cursor.parse_models)
+        agents.CliList.ALL.remove(other)
+        other.runner = lambda: calls.append(2) or ""
+        self.assertEqual([m["name"] for m in other.get()], ["gpt-9", "composer-9"])
+        self.assertIsNone(other.state["reader"])
+        self.assertEqual(calls, [1])
+
     def test_cursor_reads_its_list_and_puts_the_level_back_at_launch(self):
         from river.agents import cursor
         cursor.MODELS.reset()
@@ -199,7 +230,7 @@ class EachAgentsOwnList(Db):
         mock.patch.object(cursor.MODELS, "runner", lambda: "Available models\n\nauto - Auto (default)\n"
                           "gpt-5.6-sol-high - GPT-5.6 Sol 1M High\ngpt-5.6-sol-xhigh-fast - GPT-5.6 Sol 1M Extra High Fast\n"
                           "claude-opus-5-5-low - Claude Opus 5.5 1M Low\ncomposer-2.5 - Composer 2.5\n").start()
-        cursor.read_models()
+        cursor.MODELS.refresh()
         cursor.MODELS.wait()
         ms = {m["name"]: m for m in core.platform_models(self.c, "cursor")}
         self.assertEqual((ms["gpt-5.6-sol"]["label"], ms["gpt-5.6-sol"]["efforts"]), ("GPT-5.6 Sol 1M", ["high"]))

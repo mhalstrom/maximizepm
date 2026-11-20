@@ -544,6 +544,14 @@ def release_check(conn):
         release.loop_step(conn)
 
 
+def refresh_cli_lists(conn):
+    """maxpm serve only: the model lists that agent CLIs print (agents.CliList), read in threads and kept in files that
+    a page build in any process reads (#6510)."""
+    if SERVE_PORT.get("port"):
+        from . import agents
+        agents.refresh_lists(conn)
+
+
 def agent_versions(conn):
     """maxpm serve only: the versions of the agent CLIs and their updates (river/agentupdate.py)."""
     if SERVE_PORT.get("port"):
@@ -610,6 +618,7 @@ def loop(stop, interval_s=None):
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
                 agent_versions,  # at the start, then once a day: each agent CLI's versions; queued updates (#6430)
+                refresh_cli_lists,  # each CLI's model list, in a thread; a page build starts no CLI (#6510)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []
