@@ -199,11 +199,12 @@ EFFORT = {"levels": ["low", "medium", "high", "xhigh", "max"], "map": {}, "flag"
 # ---------------------------------------------------------------------------------------------------------------
 
 # No session name on the command line (/rename in the session), no system prompt file, no hooks file, no fork flag.
-# --add-dir adds the queue folder to its workspace (agy asked no trust question for it); --conversation <id> resumes.
+# No extra folder: a folder that --add-dir names becomes where its shell commands run (#6278, build_command);
+# --conversation <id> resumes.
 # Background: agy runs a command that lasts more than a few seconds as a background task (its footer: '1 task(s)')
 # and wakes the session when it ends. In the end-to-end run of 2026-11-19 its maxpm wait ran so, returned STOP after a
 # stop request from the page, and the session woke, ran maxpm go and ended.
-LAUNCH = {"session_name": False, "system_prompt_file": False, "hooks_file": False, "extra_dirs": True, "fork": False,
+LAUNCH = {"session_name": False, "system_prompt_file": False, "hooks_file": False, "extra_dirs": False, "fork": False,
           "resume": True, "autocompact": False, "background": True}
 
 
@@ -231,9 +232,8 @@ MAXPM_NOTE = ("Run each maxpm command with BypassSandbox set to true: agy's sand
 
 def build_command(name, folder, model, effort, settings, prompt):
     """agy [--conversation <id>] [--model M] [--effort E] [--mode M] [--dangerously-skip-permissions] [--sandbox]
-    --add-dir <queue folder> --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a
-    session name. -i runs the first prompt and keeps the session open."""
-    from ..core import river_dir
+    --settings <SETTINGS_JSON> <args> [-i <prompt>, then MAXPM_NOTE]. agy has no flag for a session name. -i runs the
+    first prompt and keeps the session open."""
     s = settings
     words = ["agy"] + (["--conversation", s["resume"]] if s.get("resume") else [])
     # One way to set the level (#6256): --effort with the model's id. agy refuses an id with a level and an --effort
@@ -250,7 +250,12 @@ def build_command(name, folder, model, effort, settings, prompt):
         words += ["--mode", mode]
     words += ["--dangerously-skip-permissions"] if _on(s.get("skip_permissions")) else []
     words += ["--sandbox"] if _on(s.get("sandbox")) else []
-    words += ["--add-dir", river_dir(), "--settings", SETTINGS_JSON]
+    # No --add-dir (#6278): in a chat (-i), agy 1.5.13 runs a shell command with no folder of its own in a folder that
+    # --add-dir names, not in its start folder, so 'maxpm go' ran in ~/.maximizepm and found no project. Measured
+    # 2026-11-20 in panes (pwd, and maxpm go): with --add-dir <queue folder>, 6 of 7 starts ran it in that folder, also
+    # with '--add-dir .' after it; with no --add-dir, in the start folder each time (agy -p too). The maxpm commands
+    # need no queue folder in the workspace: they run outside agy's sandbox (BypassSandbox and SETTINGS_JSON).
+    words += ["--settings", SETTINGS_JSON]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
     words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}"] if prompt else []
     return words
@@ -289,7 +294,7 @@ def parse_command(words):
         elif t == "--sandbox":
             opts["sandbox"] = "on"
             i += 1
-        elif t == "--add-dir" and nxt is not None and (
+        elif t == "--add-dir" and nxt is not None and (  # an old start's queue folder (#6278: no longer added)
                 nxt == "{maxpm_dir}" or os.path.realpath(os.path.expanduser(nxt)) == os.path.realpath(river_dir())):
             i += 2
         elif t == "--settings" and nxt == SETTINGS_JSON:

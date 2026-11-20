@@ -74,7 +74,8 @@ class Launch(Home):
         argv = antigravity.build_command("w1", "/p", "gemini-3.8-flash", "high",
                                          {"mode": "plan", "skip_permissions": "on", "sandbox": "on",
                                           "args": "--log-file /tmp/x"}, "maxpm go")
-        allow = ["--add-dir", self.queue, "--settings", '{"permissions":{"allow":["command(maxpm)"],"deny":['
+        # No --add-dir: agy runs a shell command in a folder that --add-dir names, not in its start folder (#6278).
+        allow = ["--settings", '{"permissions":{"allow":["command(maxpm)"],"deny":['
                  '"command(tmux kill-server)","command(tmux -L maximizepm kill-server)",'
                  '"command(tmux -Lmaximizepm kill-server)"]}}']
         self.assertEqual(argv[:-3], ["agy", "--model", "gemini-3.8-flash", "--effort", "high", "--mode", "plan",
@@ -105,7 +106,7 @@ class Launch(Home):
                 self.assertEqual(denied(command), bool(core.tmux_guard(command)))
 
     def test_a_bare_start_lets_agy_choose(self):
-        allow = ["--add-dir", self.queue, "--settings", antigravity.SETTINGS_JSON]
+        allow = ["--settings", antigravity.SETTINGS_JSON]
         self.assertEqual(antigravity.build_command(None, None, None, None, {}, None), ["agy", *allow])
         # An effort that is no agy level and a mode that is no agy mode go nowhere.
         self.assertEqual(antigravity.build_command(None, None, None, "turbo", {"mode": "yolo"}, None), ["agy", *allow])
@@ -114,7 +115,7 @@ class Launch(Home):
         # Measured: 'agy --conversation <id> -i <prompt>' runs the prompt in the resumed chat; agy prints
         # 'agy --conversation=<id>' at its exit (pane_exit.txt).
         argv = antigravity.resume_command(CID, None, None, {"prompt": "go on"})
-        self.assertEqual(argv, ["agy", "--conversation", CID, "--add-dir", self.queue, "--settings",
+        self.assertEqual(argv, ["agy", "--conversation", CID, "--settings",
                                 antigravity.SETTINGS_JSON, "-i", "go on\n\n" + antigravity.MAXPM_NOTE])
         self.assertIsNone(antigravity.resume_command("", None, None, {}))
         self.assertIn(f"agy --conversation={CID}", (FIX / "pane_exit.txt").read_text(encoding="utf-8"))

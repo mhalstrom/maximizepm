@@ -367,6 +367,7 @@ or an exception. The end-to-end table under it proves what only a real run prove
 | `jobs` | `maxpm runner add/set` and `maxpm runner github/gitlab/pulumi` take `--cli <its program>` (`runners.CLIS`, `agent_job.SECRET`) | unit |
 | `shell_guard` | A hook before each shell command, so MaximizePM refuses a `tmux kill-server` of its server (`core.tmux_guard`) and a push while an alert is unread (`core.push_guard`) | unit; e2e Shell guard |
 | `secrets` | `maxpm secret` confirms the session from its process (`vault.AGENT_PROGRAMS`) | unit |
+| `first_go` | Started by MaximizePM in any project folder, its first `maxpm go` and every later command run in that folder, and it claims its item with no typed help (mark 2026-11-19, #6278) | unit (agy: its start names no `--add-dir`, as agy runs a command in such a folder, not in its start folder); e2e First go, in a project folder that is not biggestriver |
 
 Exceptions (each also in `EXCEPTIONS` of the test):
 
@@ -385,11 +386,11 @@ draws, also Copilot's and OpenCode's), `vault.AGENT_PROGRAMS` (the programs of e
 End-to-end runs of the tier 1 agents (#6253): a test serve on a queue of its own (`MAXPM_DB`) with its own tmux
 server, driven through the page's API and the page itself, with its desktop and 390 px screenshots.
 
-| Agent | Setup (install, check, sign-in) | Start, with its settings | Chat | Message box | States (working, idle, blocked, trust, approval) | Question card | / list | Stop | Resume after a stop | Roles (manager, reviewer) | Shell guard |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Claude Code | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| Codex | pass | pass | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
-| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | not reached: the model refused the command itself (#6251) |
+| Agent | Setup (install, check, sign-in) | Start, with its settings | First go (another project folder, no typed help) | Chat | Message box | States (working, idle, blocked, trust, approval) | Question card | / list | Stop | Resume after a stop | Roles (manager, reviewer) | Shell guard |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Claude Code | pass | pass | pass (the Dispatch runs) | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| Codex | pass | pass | pass (the Dispatch runs) | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
+| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | fail before #6278 (its maxpm go ran in the queue folder, which --add-dir named); pass after it (no --add-dir) | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | not reached: the model refused the command itself (#6251) |
 
 The runs of 2026-11-19, with Claude Code 2.1.329 (haiku, low), codex-cli 0.159.1 (gpt-6-luna, low) and agy 1.5.13
 (gemini-3.8-flash-medium). Each run: Dispatch of a worker item from the page (the agent asks the person a date format

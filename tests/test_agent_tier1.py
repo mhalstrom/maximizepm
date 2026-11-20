@@ -178,13 +178,26 @@ def _secrets(a):
     return None if p in vault.AGENT_PROGRAMS else f"vault.AGENT_PROGRAMS has no {p!r}: maxpm secret refuses it"
 
 
+# The agents that run a shell command with no folder of its own in a folder that --add-dir names, not in their start
+# folder (measured: agy 1.5.13 in a chat, #6278). Claude Code and Codex run it in their start folder: the end-to-end
+# run proves that.
+RUNS_IN_ADDED = {"antigravity"}
+
+
+def _first_go(a):
+    argv = a.build_command("tier1-test", "/tmp/tier1", None, None, {}, "maxpm go")
+    if a.id in RUNS_IN_ADDED and "--add-dir" in argv:
+        return "its start names --add-dir, so its first maxpm go may run there, not in the project folder"
+    return None
+
+
 # feature -> its check: a problem text, or None. The keys are the feature names of the doc's section.
 FEATURES = {
     "parts": _parts, "launch": _launch, "resume": _resume, "identity": _identity, "chat": _chat,
     "states": _states, "ask_card": _ask, "interrupt": _interrupt, "native_message": _native,
     "commands": _commands, "effort": _effort, "model_order": _model_order, "session_settings": _session_settings, "usage": _usage, "setup_files": _setup_files,
     "setup_main": _setup_main, "host_signin": _host_signin, "roles": _roles, "jobs": _jobs,
-    "shell_guard": _shell_guard, "secrets": _secrets,
+    "shell_guard": _shell_guard, "secrets": _secrets, "first_go": _first_go,
 }
 
 # (agent, feature) -> why it lacks the feature: its fix item, or why it cannot have it. The doc's section lists each.
