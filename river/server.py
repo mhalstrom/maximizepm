@@ -186,8 +186,11 @@ def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None
         _give_scope(conn, waiting, [f"tasks:{t['item']['id']}"], "Dispatch pushed it to this session", only_widen=True)
         return {**t, "pushed_to": waiting}
     _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go")
-    return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it",
-                           reuse_workspace_from=reuse_workspace_from)
+    started = _start_for_item(conn, t, runner, actor, "Dispatch started this session for it",
+                              reuse_workspace_from=reuse_workspace_from)
+    if agent is not None and not auto_agent:  # a person's or the manager's choice: a fresh session keeps it (#6419)
+        core.keep_dispatched_agent(conn, t["item"]["id"], t["agent"], core._project(conn, t["project"])["id"], actor)
+    return started
 
 
 def _start_for_item(conn, t, runner, actor, why, by="the page", reuse_workspace_from=None):

@@ -54,6 +54,34 @@ class LaunchAgent(unittest.TestCase):
                 os.environ["MAXPM_DB"] = old
         self.assertRegex(sent[0], r"MAXPM_DB=\S*q\.db'? MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude --name \S+ \S+ go")  # the path is quoted when it needs it
 
+    def test_a_fresh_session_starts_on_the_agent_the_item_was_dispatched_to(self):
+        """#6419: launch --item 5 --agent Pi; the session asked, released, and ended; after the answer the fresh session
+        started Claude Code (the first launch entry), which stopped at its trust question in that folder."""
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.config_set(self.c, "launch_agents", "Claude=@claude-code; Pi=@pi; Codex=@codex")
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        y = core.item_add(self.c, "shop", "publish the shop", models={"model": "opus"})["id"]
+        z = core.item_add(self.c, "shop", "publish the blog")["id"]
+
+        def ended(t):  # the session asked, released its item and ended: the item is open and nobody's
+            core.unregister(self.c, t["session_name"])
+            self.assertIsNone(core.item_show(self.c, t["item"]["id"])["reserved_for"])
+
+        t = server.dispatch_item(self.c, x, agent="Pi", actor="mark", runner=[].append)
+        self.assertEqual(t["agent"], "Pi")
+        ended(t)
+        self.assertEqual(core.item_show(self.c, x)["agent"], "pi")
+        self.assertEqual(server.start_fresh(self.c, x, "an answer came for it", runner=[].append)["agent"], "Pi")
+        # Codex runs no Claude model: an item whose own model is opus keeps no Codex, and says why.
+        t = server.dispatch_item(self.c, y, agent="Codex", actor="mark", runner=[].append)
+        ended(t)
+        self.assertIsNone(core.item_show(self.c, y)["agent"])
+        self.assertTrue(any("not kept as the item's agent" in e["change"] for e in core.item_show(self.c, y)["events"]))
+        # maxpm serve's own choice (auto_agent) is a preference, not the person's: the item keeps no agent.
+        t = server.dispatch_item(self.c, z, agent="Pi", runner=[].append, auto_agent=True)
+        ended(t)
+        self.assertIsNone(core.item_show(self.c, z)["agent"])
+
     def test_a_command_that_is_a_pipeline_gets_the_session_s_variables_too(self):
         # A variable put before a pipeline reached its first command only (#5239: Amp's 'printf <prompt> | amp').
         core.project_add(self.c, "shop", path=self.dir.name)

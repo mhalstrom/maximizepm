@@ -23510,6 +23510,33 @@ def agent_for_type(conn, agent_type, project_id=None):
     return None
 
 
+def keep_dispatched_agent(conn, item_id, label, project_id=None, actor=None):
+    """A person or the manager started a session for this item on a named agent (Dispatch, maxpm launch --item
+    --agent): that agent becomes the item's own (#6419), so the fresh session that continues the item (an answer
+    came, or its session idled) starts on it, not on the default agent. A Dispatch with Pi went on in Claude Code,
+    which stopped at its trust question. It stays a preference: a provider at its limit gives the item to the next
+    one of agent_order (#6361). Not recorded: an entry whose agent type is not known (a custom command), or an agent
+    whose models do not fit the item's own model and limits. Returns the agent type recorded, or None."""
+    cmd = next((c for lbl, c in launch_entries(conn, project_id) if lbl == label), None)
+    if cmd is None:
+        return None
+    prof = parse_profile(cmd)
+    plat = prof[0] if prof else _exe_platform(entry_exe(cmd))
+    if not plat or plat not in agent_types():
+        return None
+    with tx(conn):
+        it = _item(conn, item_id)
+        if it["agent"] == plat:
+            return None
+        try:
+            _set_models(conn, it, {"agent": plat}, actor or "maxpm")
+        except RiverError as e:
+            _event(conn, item_id, actor or "maxpm", f"started on {label}, not kept as the item's agent: {e}")
+            return None
+        _event(conn, item_id, actor or "maxpm", f"started on {label}: a fresh session for it starts on {label} too")
+    return plat
+
+
 def launch_entries(conn, project_id=None):
     """The launch_agents entries, then one implicit profile (label: the adapter's label, command: @<agent type>) for
     each registered agent that MaximizePM can start and that no entry runs (#5168): agent_for.<role>, default_agent,
