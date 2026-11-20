@@ -4,6 +4,7 @@
 // GROUPS (the first group whose test takes a key; Advanced takes the rest), so a new key always shows somewhere.
 import { $, esc, toast, act, ago, store, hooks } from "../lib.js";
 import { chip } from "../components/chip.js";
+import { usedText } from "../components/bar.js";
 import { button, iconButton } from "../components/button.js";
 import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
@@ -176,7 +177,7 @@ function focusKey(el) {
 function drawProviders(host, agents) {
   const P = S.providers || [], set = P.length && P[0].set;
   const rows = P.map((p, i) => {
-    const use = p.limited ? chip("c-warn", "at usage limit") : p.remaining_pct != null ? `${Math.round(p.remaining_pct)}% left` : "";
+    const use = p.limited ? chip("c-warn", "at usage limit") : p.remaining_pct != null ? usedText(100 - p.remaining_pct) : "";
     return `<div class="prov-row">
       <span class="prov-name"><span class="muted" title="Launch order">${p.pos}</span> ${esc(p.label)}</span>
       <label class="prov-f">Model${provField(i, "model", p)}</label>

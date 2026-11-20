@@ -293,7 +293,13 @@ class FallbackAndLaunchAvoidance(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("Agent usage:", out)
         self.assertIn("Antigravity CLI: AT LIMIT", out)
-        self.assertIn("Claude Code: 65% remaining", out)
+        # #6518: the part used, as the usage dialog and the providers' own pages say it.
+        self.assertIn("Claude Code: 35% used", out)
+        self.assertNotIn("% left", out)
+        self.assertNotIn("% remaining", out)
+        self.assertEqual(core.used_text(65.0), "35% used")
+        self.assertEqual(core.used_text(0), "100% used")
+        self.assertEqual(core.used_text(100.4), "0% used")
 
         # Page state carries agent_limits
         pst = core.state(self.conn)
@@ -345,7 +351,7 @@ class ModelGroupLimits(unittest.TestCase):
         for model in ("claude-opus-5-5-high", "opus", "gpt-oss-120b-medium"):
             self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model=model), model)
         lim = core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high")
-        self.assertEqual(lim["reason"], "Gemini models: 5-hour at 0% left")
+        self.assertEqual(lim["reason"], "Gemini models: 5-hour at limit")
         self.assertEqual(lim["resets_at"], "2026-11-20T19:40:00Z")
         # agy's own default model (agy_model) counts when the launch names none.
         core.config_set(self.conn, "agy_model", "gemini-4-neon")
@@ -373,7 +379,7 @@ class ModelGroupLimits(unittest.TestCase):
         self.assertNotIn("fallback_why", t)
         with self.assertRaises(core.RiverError) as ctx:
             core.launch_target(self.conn, item=it["id"], agent="Antigravity", model="gemini-4-neon-high")
-        self.assertIn("Gemini models: 5-hour at 0% left", str(ctx.exception))
+        self.assertIn("Gemini models: 5-hour at limit", str(ctx.exception))
 
 
 class LimitStopModelGroup(unittest.TestCase):
@@ -433,7 +439,7 @@ class LimitStopModelGroup(unittest.TestCase):
         self.assertEqual(t["platform"], "antigravity")
         with self.assertRaises(core.RiverError) as ctx:
             core.launch_target(self.conn, item=it["id"], agent="Antigravity CLI", model="gemini-4-neon-high")
-        self.assertIn("Gemini models: limit stop at 0% left", str(ctx.exception))
+        self.assertIn("Gemini models: limit stop", str(ctx.exception))
         # The group's limit ends at its reset.
         self.t0 += timedelta(hours=1, minutes=51)
         self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high"))
@@ -936,7 +942,7 @@ class ProviderSlots(unittest.TestCase):
         it = core.item_add(self.conn, "app", "Build feature")["id"]
         t = core.launch_target(self.conn, item=it)
         self.assertEqual((t["platform"], t["model"]), ("antigravity", "claude-opus-5-5"))
-        self.assertIn("Gemini models: 5-hour at 0% left", t["fallback_why"])
+        self.assertIn("Gemini models: 5-hour at limit", t["fallback_why"])
         # The quota restart of #6348 takes the same list: the next entry after the one that stopped.
         self.assertEqual(core.fallback_agent(self.conn, "antigravity", model="gemini-4-neon")[2]["model"],
                          "claude-opus-5-5")

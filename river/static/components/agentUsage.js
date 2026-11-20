@@ -8,7 +8,7 @@
 import { esc, getJson, act, ago } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button } from "./button.js";
-import { bar } from "./bar.js";
+import { bar, usedText } from "./bar.js";
 import { OPEN_MARK } from "./rowOpen.js";
 import { nav } from "../page.js";
 
@@ -20,11 +20,12 @@ const at = (iso) => {
     ...(ahead > 6 * 864e5 || ahead < -6 * 864e5 ? { month: "short", day: "numeric" } : {}) });
 };
 const resets = (x) => x.resets_at ? `resets ${at(x.resets_at)}` : (x.resets_text ? `resets ${x.resets_text}` : "");
-const pct = (n) => `${Math.round(n)}% left`;
+// r.remaining_pct is the least part left of its windows: the most used one.
+const pct = (rem) => usedText(100 - rem);
 // 'Claude and GPT models' -> 'Claude and GPT': the row is short.
 const groupShort = (name) => name.replace(/\s+models$/i, "");
 
-// What the row says: not known; the whole agent at its limit; each model group (agy); or the least percent left.
+// What the row says: not known; the whole agent at its limit; each model group (agy); or the most percent used.
 // With model groups (agy), each group says its own state and reset, also when every group is at its limit: one reset
 // for the whole agent would be the reset of one group only (#6414).
 function summary(r) {
@@ -92,7 +93,7 @@ function windowRow(w) {
   const when = w.reset_since ? "started again since the reading" : resets(w);
   const warn = used >= 100 && !w.older;
   return `<div class="usage-limit${warn ? " full" : ""}${old}"${tip}><div class="usage-row"><span class="muted">${esc(w.name)}</span>
-    <span${warn ? ` class="sl-lim-warn"` : ""}>${Math.round(used)}% used${used >= 100 ? " (at limit)" : ""}${
+    <span${warn ? ` class="sl-lim-warn"` : ""}>${usedText(used)}${used >= 100 ? " (at limit)" : ""}${
     when ? `, ${esc(when)}` : ""}</span></div>${bar(used)}</div>`;
 }
 

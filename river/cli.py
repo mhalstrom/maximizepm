@@ -5530,7 +5530,8 @@ def render_status(res):
             slots = (f"{p['used']} of {p['max']} session{'s' if p['max'] != 1 else ''}" if p["max"] is not None
                      else f"{p['used']} session{'s' if p['used'] != 1 else ''}, no limit")
             use = (f"AT USAGE LIMIT{' ' + p['until'] if p.get('until') else ''}" if p["limited"]
-                   else f"{p['remaining_pct']:.0f}% usage left" if p.get("remaining_pct") is not None else "usage not known")
+                   else f"usage {core.used_text(p['remaining_pct'])}" if p.get("remaining_pct") is not None
+                   else "usage not known")
             full = " (full: the next provider takes new work)" if p["full"] and not p["limited"] else ""
             print(f"  {p['pos']}. {p['label']}{f' ({me})' if me else ''}: {slots}{full}; {use}")
     if res.get("agent_limits"):
@@ -5550,13 +5551,13 @@ def render_status(res):
                 why = f": {al['reason']}" if al.get("reason") else ""
                 print(f"  {al['label']}: AT LIMIT{reset}{why}")
             elif al.get("remaining_pct") is not None:
-                print(f"  {al['label']}: {al['remaining_pct']:.0f}% remaining{reset}{read}")
+                print(f"  {al['label']}: {core.used_text(al['remaining_pct'])}{reset}{read}")
             else:
                 print(f"  {al['label']}: no limit reached{reset}{read}")
             wins = [w for w in al.get("windows") or () if w.get("remaining_percent") is not None]
             for w in wins if len(wins) > 1 else ():
                 at = core.show_time(w["resets_at"]) if w.get("resets_at") else w.get("resets_text") or ""
-                print(f"    {w['name']}: {w['remaining_percent']:.0f}% left{f', resets {at}' if at else ''}")
+                print(f"    {w['name']}: {core.used_text(w['remaining_percent'])}{f', resets {at}' if at else ''}")
     if res.get("due"):
         print()
         print("Due dates:")

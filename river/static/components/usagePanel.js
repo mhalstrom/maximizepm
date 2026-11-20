@@ -8,7 +8,7 @@
 import { esc } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button } from "./button.js";
-import { bar } from "./bar.js";
+import { bar, usedText } from "./bar.js";
 import { openTerminal } from "./terminalDialog.js";
 
 const k = (n) => n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? Math.round(n / 1000) + "k" : String(n);
@@ -46,11 +46,10 @@ function row(label, value, tip = "") {
 function limitRow(l) {
   if (l.used_percent == null && l.remaining_percent == null) return row(l.name, l.text || "");
   const used = l.used_percent != null ? l.used_percent : Math.max(0, 100 - l.remaining_percent);
-  const rem = l.remaining_percent != null ? l.remaining_percent : Math.max(0, 100 - used);
   const at = l.resets_at ? new Date(l.resets_at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })
     : (l.resets_text || "");
   return `<div class="usage-limit"><div class="usage-row"><span class="muted">${esc(l.name)}</span>
-    <span>${Math.round(rem)}% left, ${Math.round(used)}% used${at ? ` · resets ${esc(at)}` : ""}</span></div>${bar(Math.min(100, used))}</div>`;
+    <span>${usedText(used)}${at ? ` · resets ${esc(at)}` : ""}</span></div>${bar(Math.min(100, used))}</div>`;
 }
 
 export function usageHtml(u) {

@@ -6,7 +6,7 @@
 // Server: GET api/cost?period=<p> (river/cost.py); api/cost?period=<p>&csv=<table> for the file.
 import { $, esc, store, getJson } from "../lib.js";
 import { button } from "../components/button.js";
-import { bar } from "../components/bar.js";
+import { bar, usedText } from "../components/bar.js";
 import { empty } from "../components/empty.js";
 import { nav } from "../page.js";
 import { loadHealth } from "./health.js";
@@ -49,12 +49,12 @@ function plans(p) {
       const used = w.used_percent != null ? w.used_percent : Math.max(0, 100 - w.remaining_percent);
       const rem = w.remaining_percent != null ? w.remaining_percent : Math.max(0, 100 - used);
       const isLim = w.limited || rem <= 0;
-      const right = isLim ? `<b class="cost-over">At limit</b>` : `<b>${Math.round(rem)}% left</b>`;
+      const right = isLim ? `<b class="cost-over">At limit</b>` : `<b>${usedText(used)}</b>`;
       const reset = w.reset_since ? "Started again since the reading"
         : w.resets_at ? `Resets ${esc(when(w.resets_at))}` : (w.resets_text ? `Resets ${esc(w.resets_text)}` : "");
-      // The bar is what is left, as the number beside it says.
+      // The bar is the part used, as the number beside it says (#6518).
       return `<div class="cost-meter"><div class="cost-mh"><span>${esc(w.agent)}: ${esc(w.name)}</span><span class="spacer"></span>${right}</div>
-       ${bar(Math.max(0, Math.min(100, rem)))}${reset ? `<div class="muted t-s">${reset}</div>` : ""}</div>`;
+       ${bar(Math.max(0, Math.min(100, used)))}${reset ? `<div class="muted t-s">${reset}</div>` : ""}</div>`;
     }
     return `<div class="t-m">${esc(w.agent)}: ${esc(w.name)} ${esc(w.text || "")}</div>`;
   }).join("");

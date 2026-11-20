@@ -3620,6 +3620,17 @@ def _rule_agent(rules, it):
 DEFAULT_LIMIT_COOLDOWN = timedelta(minutes=30)
 
 
+def used_text(remaining):
+    """The usage of an agent says the part used in every place, as the providers' own usage pages and the page's
+    bars count it (#6518, mark 2026-11-20: '% left' in one place and '% used' in another read as two numbers)."""
+    return f"{max(0.0, min(100.0, 100.0 - float(remaining))):.0f}% used"
+
+
+def _limit_reason(name):
+    """Why a window limits a launch: 'Gemini models: 5-hour at limit'; a limit stop says it by its name."""
+    return name if name.endswith("limit stop") else f"{name} at limit"
+
+
 _ENTRY_KEYS = ("model", "effort", "max")
 
 
@@ -3873,7 +3884,7 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
     if limited:
         if reason is None and win_list:
             full = [w for w in win_list if (w.get("used_percent") or 0) >= 100]
-            reason = f"{full[0]['name']} at 0% left" if full else None
+            reason = _limit_reason(full[0]["name"]) if full else None
         if rem_pct is None:
             rem_pct, used_pct = 0.0, 100.0
         if resets_at is None:
@@ -4123,7 +4134,7 @@ def agent_is_limited(conn, agent_type, model=None, project_id=None):
     if hit is None:
         return None
     return {**st, "limited": True, "remaining_pct": 0.0, "used_pct": 100.0, "resets_at": hit.get("resets_at"),
-            "resets_text": hit.get("resets_text"), "reason": f"{hit['name']} at 0% left", "model": model}
+            "resets_text": hit.get("resets_text"), "reason": _limit_reason(hit["name"]), "model": model}
 
 
 def agent_limits_list(conn):
