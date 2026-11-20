@@ -7003,3 +7003,39 @@ class Exhibits(unittest.TestCase):
         # A question to a person names the thing the same way; serve takes its screenshot too.
         m = core.send(self.c, "question", "Look at https://example.com/a and say yes", to="mark", actor="w1")
         self.assertEqual([e["what"] for e in m["exhibits"]], ["shot"])
+
+
+class SharedRead(unittest.TestCase):
+    """shared_read (#6406): one computation for all pages in STATE_TTL, and a new one after an action."""
+
+    def setUp(self):
+        server._read_cache.clear()
+        self.addCleanup(server._read_cache.clear)
+        patch = mock.patch.object(server, "STATE_TTL", 60)  # tests set it to 0: each read builds anew
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.n = 0
+
+    def compute(self):
+        self.n += 1
+        return [self.n]
+
+    def test_pages_in_the_same_tick_share_one_computation(self):
+        self.assertEqual(server.shared_read("k", self.compute), [1])
+        self.assertEqual(server.shared_read("k", self.compute), [1])
+        self.assertEqual(self.n, 1)
+
+    def test_an_action_makes_the_next_read_compute_again(self):
+        server.shared_read("k", self.compute)
+        server.state_changed()
+        self.assertEqual(server.shared_read("k", self.compute), [2])
+
+    def test_the_answer_is_old_after_state_ttl(self):
+        server.shared_read("k", self.compute)
+        key, (t, gen, rows) = next(iter(server._read_cache.items()))
+        server._read_cache[key] = (t - server.STATE_TTL - 1, gen, rows)
+        self.assertEqual(server.shared_read("k", self.compute), [2])
+
+    def test_each_key_has_its_own_answer(self):
+        server.shared_read("a", self.compute)
+        self.assertEqual(server.shared_read("b", self.compute), [2])

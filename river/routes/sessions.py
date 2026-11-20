@@ -141,18 +141,21 @@ def cards(conn):
     """The cards of every running session (sessions.views), as GET /api/sessions gives them: the agents' statuses,
     the settings and the tmux pane list read once, as in a page state build (#5597). It writes nothing. Without it,
     the 834 agents cost 3,600 queries and 50 ms of the interpreter every 3 s."""
+    return server.shared_read("sessions", lambda: _cards(conn))  # once in STATE_TTL for all pages (#6406)
+
+
+def _cards(conn):
     from .. import sessions
-    with server.read_memo():
-        terminals = server.agent_terminals(conn)
-        try:
-            ended = {p["pane"] for p in server._tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
-        except RiverError:
-            ended = set()
-        rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
-        for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
-            does = server.stop_waits(conn, r["name"]) if r["name"] in server.STOPPED else None
-            if does:
-                r["stop_again"] = does
+    terminals = server.agent_terminals(conn)
+    try:
+        ended = {p["pane"] for p in server._tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
+    except RiverError:
+        ended = set()
+    rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
+    for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
+        does = server.stop_waits(conn, r["name"]) if r["name"] in server.STOPPED else None
+        if does:
+            r["stop_again"] = does
     return rows
 
 

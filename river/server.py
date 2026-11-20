@@ -6572,6 +6572,31 @@ def state_changed():
     _state_gen[0] += 1
 
 
+_read_cache = {}  # key -> (time, _state_gen at its start, rows): the answers of shared_read
+
+
+def shared_read(key, compute):
+    """The answer of a read-only request that every open page asks on its own tick (#6406), as page_state does for the
+    state: computed once in STATE_TTL seconds, and again after an action through this server. Live, GET /api/sessions
+    (50 to 200 ms) and GET /api/artifacts (540 ms) each ran once for each page, inside read_memo, and a state request
+    that came meanwhile waited for the lock (wait_ms 226 to 314 with no build of its own). A request that comes while
+    the answer is computed waits for it and takes it."""
+    def hit():
+        h = _read_cache.get(key)
+        return h[2] if h and h[1] == _state_gen[0] and time.time() - h[0] < STATE_TTL else None
+    got = hit()
+    if got is not None:
+        return got
+    with read_memo():
+        got = hit()
+        if got is not None:
+            return got
+        gen = _state_gen[0]  # an action during the computation makes this answer old at once
+        rows = compute()
+        _read_cache[key] = (time.time(), gen, rows)
+        return rows
+
+
 def _state_hit(key):
     hit = _state_cache.get(key)
     if hit and hit[1] == _state_gen[0] and time.time() - hit[0] < STATE_TTL:
