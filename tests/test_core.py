@@ -5351,6 +5351,49 @@ class Wait(Base):
             self.c.execute("UPDATE items SET fresh_start=? WHERE id=?", (core.iso(core.now()), i))
         self.assertEqual([a["id"] for a in core.next_item(self.c, "a", None, False, "fresh1", 5)], [i])
 
+    def _asked_and_released(self):
+        """w took an item, asked mark about it and released it (result_look ask_first), as Pi did in #6422."""
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "fresh_sessions", "on")
+        core.config_set(self.c, "question_hold", "0s")
+        i = self.add("a", "needs a look")
+        core.scope_start(self.c, "w", [f"tasks:{i}"], "Dispatch")
+        core.claim(self.c, i, "w")
+        q = core.send(self.c, "question", "Push?", to="mark", item=i, actor="w")
+        self.assertIn(f"If you release #{i} instead, run maxpm go and then maxpm wait", q["then"])
+        core.release(self.c, i, "w")
+        return i, q["id"]
+
+    def test_an_answer_goes_back_to_the_asker_that_waits_in_maxpm_wait(self):
+        # #6422: the answer started a fresh session (a cold start) while the asker waited for work.
+        i, q = self._asked_and_released()
+        self.assertEqual(self.wait()["result"], "again")
+        core.answer(self.c, q, "yes, push", "mark")
+        self.assertEqual(core.item_show(self.c, i)["reserved_for"], "w")
+        self.assertEqual(core.fresh_items(self.c), [])
+        self.assertEqual(self.wait()["why"], f"#{i} was pushed to you")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", i))
+        self.assertIn("[answer from mark] yes, push", b["item"]["notes"])
+
+    def test_an_answer_for_an_asker_that_left_its_wait_starts_a_fresh_session(self):
+        i, q = self._asked_and_released()
+        core.unregister(self.c, "w")
+        core.answer(self.c, q, "yes", "mark")
+        self.assertIsNone(core.item_show(self.c, i)["reserved_for"])
+        self.assertEqual(core.fresh_items(self.c), [i])
+
+    def test_go_tells_a_session_whose_item_waits_on_its_own_question_to_wait(self):
+        # #6422: 'tell the user' and 'the manager widens your scope' made Pi, Goose and Amp end their turn.
+        i, q = self._asked_and_released()
+        for b in (core.go(self.c, self.dir.name, "w"), core.go(self.c, self.dir.name, "w", focus=f"item:{i}")):
+            text = b["why"] + b.get("focus_note", "")
+            self.assertEqual(b["role"], "idle")
+            self.assertIn(f"your question #{q}".upper() if b.get("focus_note") else f"your question #{q}", text)
+            self.assertIn(f"the answer gives #{i} back to you in maxpm wait", text)
+            self.assertNotIn("tell the user", text)
+            self.assertNotIn("widens your scope", text)
+
     def test_capacity_still_warns_about_idle_sessions_that_do_not_wait(self):
         core.register(self.c, "idle1")
         self.wait()

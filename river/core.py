@@ -11967,6 +11967,11 @@ QUESTION_BY = "maxpm question"
 # The kinds of item that a fresh session takes when an answer comes (_want_fresh). A deploy item stays with its
 # target owner, and a review starts in a session that MaximizePM picks for it.
 ANSWER_KINDS = ("work", "fixes")
+# #6422: go's IDLE reason when the session's item waits on its own question. Pi, Goose and Amp read 'tell the user'
+# and 'the manager widens your scope' as the end of their task: they ended their turn after the first wait, and serve
+# ended them as idle; the answer then started a fresh session with a cold start.
+ANSWER_IN_WAIT = (": the answer gives #{item} back to you in maxpm wait. Run the wait below now, and run it again "
+                  "after each 'No work yet'")
 
 
 def _person_question(conn, item_id, agent):
@@ -11974,6 +11979,28 @@ def _person_question(conn, item_id, agent):
     return conn.execute("SELECT m.* FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
                         "WHERE m.kind='question' AND m.state='open' AND m.item_id=? AND m.from_agent=? "
                         "ORDER BY m.id DESC LIMIT 1", (item_id, agent)).fetchone()
+
+
+def _own_question_wait(conn, item_id, agent):
+    """The open question to a person that agent asked about item_id, when the item waits on its answer
+    (_wait_on_question); else None. The answer gives the item back to the agent while it waits in maxpm wait
+    (_want_fresh), so the agent waits there, not at its prompt (#6422)."""
+    it = conn.execute("SELECT blocked_set_by FROM items WHERE id=?", (item_id,)).fetchone()
+    if not it or it["blocked_set_by"] != QUESTION_BY:
+        return None
+    return _person_question(conn, item_id, agent)
+
+
+def _waiting_asker(conn, item_id):
+    """The agent that last claimed item_id, when it still waits for work in maxpm wait (registered, not stopped, not
+    an expert); else None. An answer for the item goes back to it, with its context, not to a fresh session (#6422)."""
+    r = conn.execute("SELECT actor FROM events WHERE item_id=? AND change LIKE 'claimed%' ORDER BY at DESC, rowid DESC "
+                     "LIMIT 1", (item_id,)).fetchone()
+    if not r or not r["actor"]:
+        return None
+    a = conn.execute("SELECT name FROM agents WHERE name=? AND kind='ai' AND waiting_since IS NOT NULL AND wait_token "
+                     "IS NOT NULL AND stop_at IS NULL AND COALESCE(role, '')<>'expert'", (r["actor"],)).fetchone()
+    return a["name"] if a else None
 
 
 def _wait_on_question(conn, it, holder):
@@ -11989,7 +12016,8 @@ def _wait_on_question(conn, it, holder):
     conn.execute("UPDATE items SET blocked_reason=?, blocked_until=NULL, blocked_set_by=?, blocked_at=? WHERE id=?",
                  (f"waits on {q['to_agent']}'s answer to question #{q['id']}", QUESTION_BY, iso(now()), it["id"]))
     _event(conn, it["id"], "maxpm", f"waits on {q['to_agent']}'s answer to question #{q['id']} of {holder}; "
-           f"the answer starts a fresh session (fresh_sessions)")
+           f"the answer gives it back to {holder} while it waits in maxpm wait, else starts a fresh session "
+           f"(fresh_sessions)")
     return q["id"]
 
 
@@ -17146,6 +17174,11 @@ def scope_state(conn, agent, parts, ann):
                 return {"state": "waits", "item": b, "holder": who,
                         "why": f"your scope ({scope_text(parts)}) waits on #{b} {ann[b]['title']}"
                                + (f" (held by {who})" if who else "")}
+        q = _own_question_wait(conn, a["id"], agent) if a["blocked_reason"] else None
+        if q:  # #6422: its own question; the answer comes back to it in maxpm wait
+            return {"state": "answer", "item": a["id"], "holder": None, "question": q["id"],
+                    "why": f"your scope ({scope_text(parts)}) waits on #{a['id']}: {q['to_agent']}'s answer to your "
+                           f"question #{q['id']}"}
         if a["blocked_reason"]:
             return {"state": "waits", "item": a["id"], "holder": None,
                     "why": f"your scope ({scope_text(parts)}) waits on #{a['id']}: {a['blocked_reason']}"}
@@ -19683,7 +19716,9 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                                f"\"<what is done, what is left, where>\" --item {item}). Then wait at your prompt: an "
                                f"answer within {end} comes to you here, and the wait costs nothing. After {end} maxpm "
                                f"serve ends this session; a later answer continues this chat when its context is small "
-                               f"(fresh_min), else a fresh session starts with the question, the answer and your notes")
+                               f"(fresh_min), else a fresh session starts with the question, the answer and your notes. "
+                               f"If you release #{item} instead, run maxpm go and then maxpm wait: the answer gives "
+                               f"#{item} back to you there")
             else:
                 res["then"] = "wait at your prompt for the answer (question_wait_end is 0s: maxpm serve ends no session)"
     if manager and not res["blocked"] and not _is_person(conn, actor):
@@ -25181,8 +25216,12 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             try:
                 item = claim(conn, f["id"], actor)
             except RiverError as e:
-                brief["focus_note"] = (f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
-                                       f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
+                q = _own_question_wait(conn, f["id"], actor)
+                brief["focus_note"] = (
+                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}. IT WAITS ON {q['to_agent']}'S ANSWER "
+                    f"TO YOUR QUESTION #{q['id']}" + ANSWER_IN_WAIT.format(item=f["id"]) + "." if q else
+                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
+                    f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
             else:
                 r = "reviewer" if item["kind"] == "review" else "worker"
                 brief.update(role=r, item=item, why=f"runner {os.environ['MAXPM_RUNNER']} started this session for "
@@ -25342,9 +25381,11 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         # A scoped session takes nothing outside its scope (#5973): it says why its scope cannot move, and the
         # manager hears it once.
         st = scope_state(conn, actor, scope, annotate(conn, closed=False))
-        _tell_scope_state(conn, actor, st)
+        if st["state"] != "answer":  # the question reaches the manager or the person already
+            _tell_scope_state(conn, actor, st)
         brief.update(role="idle", item=None, held_by_others=[], scope_state=st["state"],
                      why=st["why"] + (": the manager gives you a new scope" if st["state"] == "empty"
+                                      else ANSWER_IN_WAIT.format(item=st["item"]) if st["state"] == "answer"
                                       else ": the manager widens your scope or gives the task to another session"))
         _set_role_note(conn, actor, "idle", None)
         return brief
@@ -25779,12 +25820,22 @@ def _add_note(conn, item_id, text):
 def _want_fresh(conn, item_id, note):
     """An answer came for an agent item that an agent worked on before and nobody holds now (the agent filed a
     person's item and ended, or asked a question and ended): put the answer in the item's notes, and mark it
-    for maxpm serve, which starts a fresh session for it (fresh_sessions). Inside a tx."""
+    for maxpm serve, which starts a fresh session for it (fresh_sessions). When the agent that last claimed it still
+    waits for work in maxpm wait (_waiting_asker), the item is pushed back to it instead (#6422). Inside a tx."""
     it = _item(conn, item_id)
     if (it["status"] != "open" or it["doer"] == "human" or it["kind"] not in ANSWER_KINDS or it["reserved_for"]
             or not conn.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'claimed%'", (item_id,)).fetchone()):
         return False
     _add_note(conn, item_id, note)
+    asker = _waiting_asker(conn, item_id)
+    if asker:
+        # #6422: the session that worked on it waits for work in maxpm wait: the item goes back to it (a push, so its
+        # wait says WORK and its go takes it, with the answer in the notes), not to a fresh session with a cold start.
+        ttl = parse_duration(setting(conn, "reserve_ttl", item_id=item_id, agent=asker))
+        conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
+                     (asker, iso(now() + ttl), "maxpm", item_id))
+        _event(conn, item_id, "maxpm", f"an answer came: it goes back to {asker}, which waits for work (maxpm wait)")
+        return True
     if setting(conn, "fresh_sessions", item_id=item_id) != "on":
         return False  # the answer is in the notes; whoever runs go next takes the item
     conn.execute("UPDATE items SET fresh_start=? WHERE id=?", (iso(now()), item_id))
