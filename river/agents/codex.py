@@ -49,7 +49,13 @@ EFFORT = {
     "read": r"model_reasoning_effort=([a-z][a-z0-9_-]{0,31})\b",
 }
 
-LAUNCH = {"extra_dirs": True, "resume": True}
+# read_dirs (#6281): Codex's sandbox (read-only and workspace-write) reads the whole disk with no question and writes
+# only in its workspace, so a read folder needs no word on its command line. Its sandbox has no rule that refuses
+# one file: it can read a secret file of a read folder (a stated Tier 1 exception, docs/agent-adapters.md).
+# Measured 2026-11-20 with codex-cli 0.159.1 (workspace-write, on-request): cat of a read folder's files ran with no
+# question, and touch in a folder of ~/Projects was refused ('operation not permitted'). It writes in /tmp, so a
+# read folder there is writable.
+LAUNCH = {"extra_dirs": True, "resume": True, "read_dirs": True}
 
 # A Codex session records no task link: its web link is Codex's web app (core.CODEX_WEB).
 IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "pane": None, "url": "https://chatgpt.com/codex",

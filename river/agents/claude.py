@@ -33,7 +33,26 @@ EFFORT = {
 }
 
 LAUNCH = {"session_name": True, "system_prompt_file": True, "hooks_file": True, "fork": True, "resume": True,
-          "autocompact": True, "background": True, "mcp_config": True}
+          "autocompact": True, "background": True, "mcp_config": True, "read_dirs": True}
+
+# What a session may not do in a read folder (#6281): change a file, or read a secret file (mark's list: .env, .env.*,
+# .envrc, *.secret, *.secrets, a secrets folder). Claude Code's permission rules: '//' starts an absolute path, and
+# '**' is any depth, as in .gitignore. Edit covers every file change (Claude Code 2.1.329: 'Deny rule Write(...) never
+# matches · use Edit(...)'). Measured 2026-11-20: a session read a read folder's Cargo.toml with no question and was
+# refused its .env ('denied by your permission settings'). Claude Code asks once per start whether to add a folder
+# that it was never started in ('Adding a new directory'); a folder it was started in and trusted, it adds at once.
+READ_DIR_DENY = ("Edit({d}/**)", "Read({d}/**/.env)", "Read({d}/**/.env.*)", "Read({d}/**/.envrc)",
+                 "Read({d}/**/*.secret)", "Read({d}/**/*.secrets)", "Read({d}/**/secrets/**)")
+
+
+def read_dir_words(dirs):
+    """--add-dir for each read folder (Claude Code reads there with no question), then --disallowedTools with
+    READ_DIR_DENY for each. Both flags take several values, so they go after the prompt: a word after them that is
+    no flag would be taken as one more value."""
+    if not dirs:
+        return []
+    rules = [r.format(d="/" + d) for d in dirs for r in READ_DIR_DENY]
+    return [w for d in dirs for w in ("--add-dir", d)] + ["--disallowedTools", *rules]
 
 IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "pane": None, "url": None,
             "inside_env": ["CLAUDECODE"],
@@ -73,6 +92,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     words += ["--permission-mode", s["permission_mode"]] if s.get("permission_mode") else []
     words += [Raw(args.strip())] if args.strip() else []
     words.append(prompt)
+    words += read_dir_words(s.get("read_dirs") or ())  # #6281
     words += ["--remote-control"] + ([name] if name else []) if s.get("remote_control") == "on" else []
     return words
 

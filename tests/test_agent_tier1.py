@@ -191,6 +191,18 @@ def _first_go(a):
     return None
 
 
+def _read_dirs(a):
+    """#6281: the adapter takes the project's read_dirs, and its start refuses the secret file of a read folder."""
+    if not a.launch.get("read_dirs"):
+        return "LAUNCH has no read_dirs: the project's read folders do not reach its start"
+    argv = a.build_command("tier1-test", "/tmp/tier1", None, None,
+                           {"read_dirs": ["/tmp/tier1-read"], "secret_files": ["/tmp/tier1-read/.env"]}, "maxpm go")
+    text = " ".join(str(w) for w in argv if w)
+    if not re.search(r"tier1-read[^ ]*\.env", text):
+        return "its start names no rule that refuses the read folder's .env"
+    return None
+
+
 # feature -> its check: a problem text, or None. The keys are the feature names of the doc's section.
 FEATURES = {
     "parts": _parts, "launch": _launch, "resume": _resume, "identity": _identity, "chat": _chat,
@@ -198,12 +210,14 @@ FEATURES = {
     "commands": _commands, "effort": _effort, "model_order": _model_order, "session_settings": _session_settings, "usage": _usage, "setup_files": _setup_files,
     "setup_main": _setup_main, "host_signin": _host_signin, "roles": _roles, "jobs": _jobs,
     "shell_guard": _shell_guard, "secrets": _secrets, "first_go": _first_go,
+    "read_dirs": _read_dirs,
 }
 
 # (agent, feature) -> why it lacks the feature: its fix item, or why it cannot have it. The doc's section lists each.
 EXCEPTIONS = {
     ("antigravity", "native_message"): "no command, socket or flag",
     ("antigravity", "shell_guard"): "push_guard reads the queue's state",
+    ("codex", "read_dirs"): "its sandbox has no rule that refuses one file",
 }
 
 

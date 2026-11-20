@@ -392,9 +392,12 @@ or an exception. The end-to-end table under it proves what only a real run prove
 | `shell_guard` | A hook before each shell command, so MaximizePM refuses a `tmux kill-server` of its server (`core.tmux_guard`) and a push while an alert is unread (`core.push_guard`) | unit; e2e Shell guard |
 | `secrets` | `maxpm secret` confirms the session from its process (`vault.AGENT_PROGRAMS`) | unit |
 | `first_go` | Started by MaximizePM in any project folder, its first `maxpm go` and every later command run in that folder, and it claims its item with no typed help (mark 2026-11-19, #6278) | unit (agy: its start names no `--add-dir`, as agy runs a command in such a folder, not in its start folder); e2e First go, in a project folder that is not biggestriver |
+| `read_dirs` | The project's setting `read_dirs` (folders, comma-separated): the session reads them with no question for each file, writes nothing in them, and never reads their secret files (.env, .env.*, .envrc, *.secret, *.secrets, a secrets folder) (mark 2026-11-20, #6281). Claude Code: `--add-dir` and `--disallowedTools` rules; Antigravity CLI: `--settings` allow `read_file(<folder>)`, deny `write_file(<folder>)` and `read_file(<file>)` for each secret file found at the start (its rules take paths, not patterns; never `--add-dir`, #6278); Codex: none needed, its sandbox reads the whole disk and writes only in its workspace | unit; e2e 2026-11-20 (#6281, a fake .env): Claude Code and Antigravity CLI read the folder's Cargo.toml with no question and were refused its .env; Codex read both with no question (the exception) and was refused a write in a folder of ~/Projects. Claude Code asks once per start to add a folder it was never started in |
 
 Exceptions (each also in `EXCEPTIONS` of the test):
 
+- Codex, `read_dirs`: its sandbox has no rule that refuses one file, so a Codex session can read a secret file of a
+  read folder (it could read any file before too). Reads with no question and no writes there hold.
 - Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
   session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
   pane, which works at its prompt.

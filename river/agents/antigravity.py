@@ -182,7 +182,7 @@ EFFORT = {"levels": ["low", "medium", "high", "xhigh", "max"], "map": {}, "flag"
 # and wakes the session when it ends. In the end-to-end run of 2026-11-19 its maxpm wait ran so, returned STOP after a
 # stop request from the page, and the session woke, ran maxpm go and ended.
 LAUNCH = {"session_name": False, "system_prompt_file": False, "hooks_file": False, "extra_dirs": False, "fork": False,
-          "resume": True, "autocompact": False, "background": True}
+          "resume": True, "autocompact": False, "background": True, "read_dirs": True}
 
 
 def _on(value):
@@ -203,6 +203,19 @@ def _on(value):
 DENY_TMUX = ["command(tmux kill-server)", "command(tmux -L maximizepm kill-server)",
              "command(tmux -Lmaximizepm kill-server)"]
 SETTINGS_JSON = json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":"))
+
+
+def session_settings(read_dirs=(), secret_files=()):
+    """The --settings JSON of a start: SETTINGS_JSON, and for the project's read_dirs (#6281) read_file(<folder>) in
+    allow (agy reads in it and below with no question), write_file(<folder>) in deny, and read_file(<file>) in deny for
+    each secret file (agy's rules take a path, not a pattern; a deny wins over an allow; antigravity.google/docs/
+    permissions, read 2026-11-20). Never --add-dir: it moves where agy runs its shell commands (#6278). Measured
+    2026-11-20 with agy 1.5.13: a session read a read folder's Cargo.toml with no question and was refused its .env."""
+    if not read_dirs:
+        return SETTINGS_JSON
+    allow = ["command(maxpm)"] + [f"read_file({d})" for d in read_dirs]
+    deny = DENY_TMUX + [f"write_file({d})" for d in read_dirs] + [f"read_file({f})" for f in secret_files]
+    return json.dumps({"permissions": {"allow": allow, "deny": deny}}, separators=(",", ":"))
 MAXPM_NOTE = ("Run each maxpm command with BypassSandbox set to true: agy's sandbox cannot run maxpm, and this session "
               "allows maxpm with no question.")
 
@@ -232,7 +245,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     # 2026-11-20 in panes (pwd, and maxpm go): with --add-dir <queue folder>, 6 of 7 starts ran it in that folder, also
     # with '--add-dir .' after it; with no --add-dir, in the start folder each time (agy -p too). The maxpm commands
     # need no queue folder in the workspace: they run outside agy's sandbox (BypassSandbox and SETTINGS_JSON).
-    words += ["--settings", SETTINGS_JSON]
+    words += ["--settings", session_settings(s.get("read_dirs") or (), s.get("secret_files") or ())]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
     words += ["-i", f"{prompt}\n\n{MAXPM_NOTE}"] if prompt else []
     return words

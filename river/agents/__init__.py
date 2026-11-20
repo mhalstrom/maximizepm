@@ -308,7 +308,7 @@ EFFORT_KEYS = {"levels": (list, tuple, type(None)), "map": dict, "flag": (list, 
 # -> a profile {"settings": {key: value}, "prompt": str} read back from an old hand-written command (a list of words;
 # "{model}" and "{effort}" stand for the values MaximizePM fills in), or None when a profile cannot build it exactly.
 LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extra_dirs", "fork", "resume",
-                       "autocompact", "background", "fixed_on_resume", "mcp_config")
+                       "autocompact", "background", "fixed_on_resume", "mcp_config", "read_dirs")
 #    session_name: it takes a session name; system_prompt_file: the maxpm skill goes into its system prompt;
 #    hooks_file: MaximizePM's hooks file goes on its command line; extra_dirs: the queue folder goes on its command
 #    line as a folder it may write; fork: a session starts as a fork of another one; resume: build_command resumes a
@@ -316,7 +316,10 @@ LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extr
 #    the background and wakes the session when it ends (maxpm wait runs there, not in the foreground);
 #    fixed_on_resume: a resume keeps the settings the session started with and refuses a flag that differs (Hermes),
 #    so resume_command passes none, and the Settings dialog changes them live or not at all (#5252); mcp_config: it
-#    takes a file of MCP servers to add on its command line (the project browser's Playwright MCP, browser_mcp, #5405).
+#    takes a file of MCP servers to add on its command line (the project browser's Playwright MCP, browser_mcp, #5405);
+#    read_dirs: it reads the project's read_dirs with no question for each file, writes nothing in them and reads none
+#    of their secret files (#6281); build_command turns the keys read_dirs and secret_files into its own form, or
+#    needs none (Codex: its sandbox reads the whole disk).
 # The MaximizePM keys in settings, each only when the caller wants it and LAUNCH has its capability:
 LAUNCH_KEYS = {
     "system_prompt_file": "True: put the maxpm skill into the system prompt",
@@ -326,6 +329,8 @@ LAUNCH_KEYS = {
     "autocompact": "the token count to compact at",
     "mcp_config": "the path of a file of MCP servers to add (browser_mcp: Playwright MCP on the project's browser)",
     "noflags": "the words a person took out of the args setting (they stay out of what the adapter adds itself)",
+    "read_dirs": "[absolute folders] the session reads with no question for each file and writes nothing in (#6281)",
+    "secret_files": "[absolute paths] the secret files in read_dirs at the start (core.secret_files), never read",
 }
 
 

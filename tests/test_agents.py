@@ -1233,6 +1233,40 @@ class SessionFromEnv(Env):
             self.assertEqual(sessions.transcript(self.c, "w"), ("hermes", logs / "local-abc.jsonl"))
 
 
+class ReadDirs(Env):
+    """#6281: a project's read_dirs reach each agent's start in its own form, with the secret files refused."""
+
+    def test_the_setting_the_scan_and_the_start_words(self):
+        rd = Path(self.tmp.name, "core").resolve()
+        (rd / "secrets").mkdir(parents=True)
+        (rd / "deep" / "node_modules").mkdir(parents=True)
+        for f in ("Cargo.toml", ".env", ".env.local", ".envrc", "api.secret", "secrets/key.txt", "deep/.env",
+                  "deep/node_modules/.env"):
+            (rd / f).write_text("x", encoding="utf-8")
+        self.assertEqual(core.secret_files([str(rd)]),
+                         [str(rd / x) for x in (".env", ".env.local", ".envrc", "api.secret", "deep/.env",
+                                                "secrets/key.txt")])
+        with self.assertRaisesRegex(RiverError, "not an absolute path of a folder"):
+            core.config_set(self.c, "read_dirs", "relative/dir", project="p")
+        proj = Path(self.tmp.name, "proj")
+        proj.mkdir()
+        pid = core.project_add(self.c, "p", path=str(proj))["id"]
+        core.config_set(self.c, "read_dirs", str(rd), project="p")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex; agy=@antigravity")
+        claude = core._launch_agent_cmd(self.c, pid, "Claude Code")["command"]
+        self.assertIn(f"--add-dir {rd} --disallowedTools 'Edit(/{rd}/**)'", claude)
+        self.assertIn(f"'Read(/{rd}/**/.env)'", claude)
+        agy = core._launch_agent_cmd(self.c, pid, "agy")["command"]
+        self.assertIn(f"read_file({rd})", agy)
+        self.assertIn(f"write_file({rd})", agy)
+        self.assertIn(f"read_file({rd}/deep/.env)", agy)
+        self.assertNotIn("--add-dir", agy)  # it would move where agy runs its commands (#6278)
+        codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
+        self.assertNotIn(str(rd), codex)  # its sandbox reads the whole disk already
+        core.config_unset(self.c, "read_dirs", project="p")
+        self.assertNotIn("--disallowedTools", core._launch_agent_cmd(self.c, pid, "Claude Code")["command"])
+
+
 class Setup(Env):
     """#5184: the setup part. The MCP config writers, the instruction file names, the voice and the web link texts
     are in the adapters, and the page reads them from GET /api/agents instead of testing agent names."""

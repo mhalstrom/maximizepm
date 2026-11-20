@@ -217,6 +217,10 @@ DEFAULT_SETTINGS = {
     # controller rule and the sandbox. A command instead of on starts another Playwright MCP (a pinned version):
     # npx -y @playwright/mcp@0.0.40. Off by default: each session then runs one more Node process.
     "browser_mcp": "off",
+    # Extra folders that every agent session of the project reads with no question for each file, writes nothing in,
+    # and never reads a secret file of (#6281): absolute paths, comma-separated (set it with --project). Each adapter
+    # turns them into its own form (agents.LAUNCH_KEYS read_dirs and secret_files); docs/agent-adapters.md, Tier 1.
+    "read_dirs": "",
     # How fast a session moves and types in the project's browser (#5616): watch, at a person's pace while the side
     # panel shows the browser (a click glides to its point in about half a second, a text goes in key by key, and the
     # panel shows both), at once while nobody watches; person, always at a person's pace; fast, always at once.
@@ -3210,6 +3214,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "browser_mcp":
         from .browser import mcp_command
         mcp_command(value)
+    elif key == "read_dirs" and value:
+        parse_read_dirs(value, strict=True)
     elif key == "browser_size":  # #5885
         from .browser import size_spec
         size_spec(value)
@@ -21740,6 +21746,60 @@ def river_dir():
     return d
 
 
+def parse_read_dirs(value, strict=False):
+    """The folders of the read_dirs setting (#6281): absolute real paths, in order, each once. strict (config set):
+    RiverError for a path that is not absolute or not a folder; else such a path is left out (it may be gone)."""
+    out = []
+    for raw in (value or "").split(","):
+        p = raw.strip()
+        if not p:
+            continue
+        path = os.path.expanduser(p)
+        if not os.path.isabs(path) or not os.path.isdir(path):
+            if strict:
+                raise RiverError(f"read_dirs: {p!r} is not an absolute path of a folder; read_dirs is folders, "
+                                 "comma-separated, such as ~/Projects/core,~/Projects/docs")
+            continue
+        real = os.path.realpath(path)
+        if real not in out:
+            out.append(real)
+    return out
+
+
+# The secret files of a read folder (#6281, mark's list): .env, .env.*, .envrc, *.secret, *.secrets, and each file in
+# a folder named secrets. The folders below are not searched: they are large and hold no secret of the project's own.
+SECRET_FILE = re.compile(r"^(\.env(\..+)?|\.envrc|.+\.secrets?)$")
+_SECRET_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".next", ".cache"}
+# Entries looked at in one read folder; a larger folder stops the search there, and a secret file after that point is
+# not in the list. ~/Projects/toolscaledcore: 105,169 entries, 0.32 s, 66 files (2026-11-20).
+SECRET_SCAN_MAX = 200000
+
+
+def secret_files(dirs):
+    """The secret files in the read folders, absolute paths, for an agent whose rules name files, not patterns
+    (Antigravity CLI's deny read_file, #6281). A file that comes after the start is not in the list."""
+    out = []
+    for top in dirs:
+        seen = 0
+        for root, folders, files in os.walk(top):
+            folders[:] = sorted(f for f in folders if f not in _SECRET_SKIP)  # sorted: the same list each start
+            seen += len(folders) + len(files)
+            secret_dir = os.path.basename(root) == "secrets"
+            out += [os.path.join(root, f) for f in sorted(files) if secret_dir or SECRET_FILE.match(f)]
+            if seen > SECRET_SCAN_MAX:
+                break
+    return out
+
+
+def read_dir_keys(conn, project_id, adapter):
+    """The launch keys read_dirs and secret_files for a start of a project's session, when the adapter takes them
+    (LAUNCH read_dirs) and the project names read folders; else {}."""
+    if project_id is None or not (adapter.launch or {}).get("read_dirs"):
+        return {}
+    dirs = parse_read_dirs(setting(conn, "read_dirs", project_id=project_id))
+    return {"read_dirs": dirs, "secret_files": secret_files(dirs)} if dirs else {}
+
+
 def profile_options(conn, platform, inline=None, project_id=None, chosen=None):
     """A profile's option values: the launch dialog's choice, else the entry's own, else the settings (each option
     of a registered agent is a config key, <prefix><option>, #5169)."""
@@ -22680,6 +22740,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
             path = mcp_config_file(conn, project_id, name)
             if path:
                 built["mcp_config"] = path
+        built.update(read_dir_keys(conn, project_id, _adapters().get(prof[0])))  # the project's read_dirs (#6281)
         if autocompact and caps.get("autocompact") and "--autocompact" not in opts.get("args", ""):
             built["autocompact"] = autocompact
         else:
@@ -22807,6 +22868,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     settings = {**opts, "noflags": list(ov.get("noflags") or ())}
     if ad.launch.get("hooks_file") and opts.get("activity_hooks") == "on":
         settings["hooks_file"] = hook_file(ad)
+    settings.update(read_dir_keys(conn, project_id, ad))  # the project's read_dirs (#6281)
     tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
     if tokens and ad.launch.get("autocompact"):
         settings["autocompact"] = tokens
