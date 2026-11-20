@@ -5057,7 +5057,12 @@ def dispatch(conn, a, actor):
         if a.plan_file:
             if len(a.words) > 1:
                 raise RiverError("with --from, give at most a project: maxpm add [project] --from plan.md")
-            text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text(encoding="utf-8")
+            try:
+                text = (sys.stdin.read() if a.plan_file == "-"
+                        else Path(a.plan_file).expanduser().read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as e:  # no such file, a folder, no permission, not text (#9)
+                why = e.strerror if isinstance(e, OSError) and e.strerror else "it is not UTF-8 text"
+                raise RiverError(f"cannot read the plan file {a.plan_file}: {why}") from None
             project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None, text)
             return core.add_plan(conn, project, text, actor, a.priority, a.doer, a.dry_run)
         if a.dry_run:  # a one-item add has no preview: it would add the item
