@@ -108,6 +108,18 @@ def session_usage(h, path):
         conn.close()
 
 
+def agent_usage(h, path):
+    """The usage panel of an agent type (#6387): its windows, model groups, reading and sessions."""
+    from urllib.parse import parse_qs, urlsplit
+    conn = core.connect()
+    try:
+        return h._send(200, server.agent_usage(conn, parse_qs(urlsplit(h.path).query).get("agent", [""])[0]))
+    except RiverError as e:
+        return h._send(409, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 def full_screen(h, path):
     """Full screen in a tab of its own (#4620)."""
     from urllib.parse import parse_qs, urlsplit
@@ -179,6 +191,7 @@ GET = [
     (lambda path: path == "/api/session-prompts", session_prompts),
     (lambda path: path == "/api/session-commands", session_commands),
     (lambda path: path == "/api/session-usage", session_usage),
+    (lambda path: path == "/api/agent-usage", agent_usage),
     (lambda path: path in ("/view", "/api/view-key"), full_screen),
     (lambda path: path in ("/api/sessions", "/api/session"), running),
 ]
@@ -188,6 +201,7 @@ OPS = {
                                                           a.get("files"), hold=bool(a.get("hold"))),
     # Send now under a held message in the chat (#5587).
     "pending_send_now": lambda c, a, who: server.pending_send_now(c, a["agent"], a["id"], who),
+    "usage_read": lambda c, a, who: server.usage_read_now(c, a["agent"]),  # Read now of the usage panel (#6387)
     "session_upload": lambda c, a, who: server.session_upload(c, a["agent"], a.get("data"), a.get("name"), who),
     "session_upload_drop": lambda c, a, who: server.session_upload_drop(c, a["agent"], a.get("id"), who),
     "session_setting": lambda c, a, who: server.session_setting_live(c, a["agent"], a["key"], a.get("value"), who),

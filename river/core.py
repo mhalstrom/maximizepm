@@ -3649,7 +3649,7 @@ def _limit_group(conn, aid, model):
 
 
 def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
-                       reason=None, source="screen", model=None):
+                       reason=None, source="screen", model=None, session=None):
     """Record an agent type's remaining usage or limit-stop state (#6348).
     When `limited` is True and `resets_at` is None, sets a default cooldown (DEFAULT_LIMIT_COOLDOWN) so launches
     avoid the exhausted agent until it resets.
@@ -3657,11 +3657,14 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
     another group has quota left (#6370): agent_is_limited with the launch's model checks those windows.
     `model`: the model of a session that stopped at its limit (#6382). When the agent counts its quota per model group
     (_limit_group), the stop adds a full window '<group>: limit stop' to the windows read before, and limits the whole
-    agent only when they show every group full."""
+    agent only when they show every group full.
+    `session`: the session that stopped (#6387): the reason names it, and the page's usage panel shows it."""
     aid = _limit_adapter_id(agent_type)
     if not aid:
         return None
     t = now()
+    if session and reason:
+        reason = f"{reason} (session {session})"
     group_stop = None
     if limited and model and not windows:
         group_stop = _limit_group(conn, aid, model)
@@ -3681,7 +3684,9 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
                 w.update(used_percent=0.0, remaining_percent=100.0, resets_at=None, resets_text=None)
         stop_w = {"name": f"{group_stop}: limit stop", "used_percent": 100.0, "remaining_percent": 0.0,
                   "resets_at": resets_at or iso(t + DEFAULT_LIMIT_COOLDOWN),
-                  "resets_text": resets_text or (None if resets_at else "in 30m")}
+                  "resets_text": resets_text or (None if resets_at else "in 30m"), "at": iso(t)}
+        if session:
+            stop_w["session"] = session
         windows = [w for w in prev if w.get("name") != stop_w["name"]] + [stop_w]
         reason = f"{group_stop}: {reason}" if reason else None
         resets_at = resets_text = None  # the reset of the group's window; the row's comes from the windows
@@ -3767,6 +3772,7 @@ def _format_limit_row(row, cur_now=None):
         if pcts:
             rem = round(min(pcts), 1)
             used = round(100.0 - rem, 1)
+    groups = _limit_groups(windows, row["updated_at"], cur_now)
     return {
         "agent_type": row["agent_type"],
         "label": ad.label if ad is not None else row["agent_type"],
@@ -3778,9 +3784,72 @@ def _format_limit_row(row, cur_now=None):
         "resets_text": None if expired else row["resets_text"],
         "reason": row["reason"] if active_limited else None,
         "windows": windows,
+        "groups": groups,
         "source": row["source"],
         "updated_at": row["updated_at"],
     }
+
+
+def _limit_groups(windows, read_at=None, cur_now=None):
+    """The model groups of an agent's usage windows (#6387: agy's 'Gemini models' and 'Claude and GPT models'), in the
+    order of the windows: [{"name", "remaining_pct" (the least of its windows), "full" (a window at 0% left, as
+    agent_is_limited counts it), "resets_at", "resets_text" (of its full window, else of its least window)}]. [] for
+    an agent whose windows count every model."""
+    full = {id(w) for w in _full_group_windows(windows, read_at, cur_now)}
+    out = {}
+    for w in windows or ():
+        if _window_group(w.get("name")) is None:
+            continue
+        g = out.setdefault(w["name"].split(":", 1)[0].strip(), {"full": False, "remaining_pct": None, "_w": None})
+        rem = w.get("remaining_percent")
+        if rem is None and w.get("used_percent") is not None:
+            rem = max(0.0, 100.0 - float(w["used_percent"]))
+        if rem is not None and (g["remaining_pct"] is None or rem < g["remaining_pct"]):
+            g["remaining_pct"] = round(float(rem), 1)
+            if not g["full"]:
+                g["_w"] = w
+        if id(w) in full and not g["full"]:
+            g["full"], g["_w"] = True, w
+    return [{"name": name, "full": g["full"], "remaining_pct": 0.0 if g["full"] else g["remaining_pct"],
+             "resets_at": (g["_w"] or {}).get("resets_at"), "resets_text": (g["_w"] or {}).get("resets_text")}
+            for name, g in out.items()]
+
+
+# How the page names where a reading came from (#6387).
+LIMIT_SOURCES = {
+    "probe": "/usage, read by maxpm serve in a hidden window",
+    "screen": "the screen of a session",
+    "limit_stop": "a session that stopped at its usage limit",
+    "log": "its newest log",
+    "chat": "the chat log of a session",
+}
+
+
+def agent_usage(conn, agent_type):
+    """The usage panel of one agent type (#6387): its row of agent_limits_list (every window, the model groups, the
+    reason of a limit, the source and time of the reading) and the sessions of the agent that run now, each with its
+    model and the items it holds."""
+    aid = _limit_adapter_id(agent_type)
+    row = next((r for r in agent_limits_list(conn) if r["agent_type"] == aid), None)
+    if row is None:
+        ad = _adapters().find(aid)
+        if ad is None:
+            raise RiverError(f"unknown agent {agent_type!r}; known: {', '.join(agent_types())}")
+        row = {"agent_type": aid, "label": ad.label, "known": False, "limited": False, "remaining_pct": None,
+               "used_pct": None, "resets_at": None, "resets_text": None, "reason": None, "windows": [], "groups": [],
+               "source": None, "updated_at": None}
+    sessions = []
+    for a in conn.execute("SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL ORDER BY name"):
+        if _limit_adapter_id(a["agent_type"]) != aid:
+            continue
+        state = _agent_state(conn, a)
+        if state in ("gone", "stopped"):
+            continue
+        held = [dict(r) for r in conn.execute(
+            "SELECT id, title, short FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+            (a["name"],))]
+        sessions.append({"name": a["name"], "model": a["model"], "role": a["role"], "state": state, "items": held})
+    return {**row, "source_text": LIMIT_SOURCES.get(row["source"] or "", row["source"]), "sessions": sessions}
 
 
 def agent_limit_status(conn, agent_type):
@@ -3827,7 +3896,7 @@ def agent_limits_list(conn):
         if aid not in have and ad is not None:
             rows.append({"agent_type": aid, "label": ad.label, "known": False, "limited": False,
                          "remaining_pct": None, "used_pct": None, "resets_at": None, "resets_text": None,
-                         "reason": None, "windows": [], "source": None, "updated_at": None})
+                         "reason": None, "windows": [], "groups": [], "source": None, "updated_at": None})
     rows.sort(key=lambda r: (order.get(r["agent_type"], 999), r["agent_type"]))
     return rows
 

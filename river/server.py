@@ -3040,7 +3040,7 @@ def watch_prompts(conn):
                 LIMIT_SEEN[agent] = hit.get("message")
                 core.record_agent_limit(conn, ad.id, limited=True, resets_at=hit.get("resets_at"),
                                         resets_text=hit.get("resets_text"), reason=hit.get("message"),
-                                        source="limit_stop",
+                                        source="limit_stop", session=agent,
                                         model=_limit_model(conn, agent, ad, plain_text.splitlines()))
                 limit_hits[agent] = (ad, hit, pane)
                 STILL.pop(agent, None)
@@ -3269,7 +3269,7 @@ def _handle_limit_stops(conn, limit_hits):
     return out
 
 
-# The agents whose usage maxpm serve reads when no session of them runs (#6364). They write no limits to a log (Codex
+# The agents whose usage maxpm serve reads with a probe (#6364). They write no limits to a log (Codex
 # does: record_log_limits reads it), so serve opens the agent in a hidden tmux pane, types its usage command, reads the
 # screen with the adapter's screen_limits, closes it with Esc (p137) and ends the pane. "args": the flags of that
 # start. Claude Code loads only the person's own settings (no project hooks) and no MCP servers; agy trusts the folder
@@ -3279,7 +3279,9 @@ USAGE_PROBES = {
     "antigravity": {"args": [], "command": "/usage"},
 }
 PROBE_SESSION = "maxpm-usage"  # the tmux session of the probe panes: not the maxpm session, so no view or tidy sees them
-PROBE = {"running": False, "at": {}}  # whether a probe thread runs now, and when serve probed each agent last
+# Whether a probe thread runs now, when serve probed each agent last, the agent it reads now, and the error of each
+# agent's last probe (the page's usage panel shows the last two, #6387).
+PROBE = {"running": False, "at": {}, "now": None, "error": {}}
 PROBE_START_MAX = 60  # seconds for the agent's input line to show
 PROBE_READ_MAX = 30  # seconds for its usage screen to show the limits
 PROBE_POLL = 1.0  # seconds between two looks at the pane (tests: 0)
@@ -3309,16 +3311,14 @@ def _probe_folder(conn, aid):
 
 def usage_probes_due(conn, every=None):
     """[(adapter id, folder)] of the agents that probe_usage reads now: a probe of USAGE_PROBES whose adapter reads
-    the screen, whose CLI is installed, with no live session of it (its own screen shows /usage when a person asks),
-    and with no reading and no probe within usage_probe_every."""
+    the screen, whose CLI is installed, and with no reading and no probe within usage_probe_every. Also while
+    sessions of the agent run (#6387): they record no reading unless a person types /usage, so with ten Claude Code
+    sessions at work the page said 'not known'; the probe is a start of its own and touches none of them."""
     every = every or core.parse_duration(core.setting(conn, "usage_probe_every"))
-    live = {core._limit_adapter_id(r["agent_type"])
-            for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL")
-            if core._agent_state(conn, r) not in ("gone", "stopped")}
     t, out = core.now(), []
     for aid in USAGE_PROBES:
         ad = core._adapters().find(aid)
-        if ad is None or not ad.has("screen_limits") or aid in live:
+        if ad is None or not ad.has("screen_limits"):
             continue
         last = PROBE["at"].get(aid)
         if last and t - last < every:
@@ -3338,9 +3338,9 @@ def usage_probes_due(conn, every=None):
 
 
 def probe_usage(conn):
-    """A pass of maxpm serve (#6364): read the usage of Claude Code and Antigravity when no session of them runs, at
-    most once in usage_probe_every (0s: never) for each. The probes run one after the other in a thread of their own,
-    so the pass does not wait for an agent to start. Returns the adapter ids it probes."""
+    """A pass of maxpm serve (#6364): read the usage of Claude Code and Antigravity at most once in usage_probe_every
+    (0s: never) for each. The probes run one after the other in a thread of their own, so the pass does not wait for
+    an agent to start. Returns the adapter ids it probes."""
     every = core.parse_duration(core.setting(conn, "usage_probe_every"))
     if not every.total_seconds() or PROBE["running"]:
         return []
@@ -3351,30 +3351,87 @@ def probe_usage(conn):
     due = usage_probes_due(conn, every)
     if not due:
         return []
+    _start_probes(due)
+    return [aid for aid, _ in due]
+
+
+def _start_probes(due):
+    """Run probe_one for each (adapter id, folder) of `due`, one after the other, in a thread (tests: PROBE_SYNC)."""
     t = core.now()
     for aid, _ in due:  # also a probe that fails waits usage_probe_every before the next
         PROBE["at"][aid] = t
-    PROBE["running"] = True
+    PROBE["running"], PROBE["now"] = True, due[0][0]
 
     def run():
         c = core.connect()
         try:
             for aid, folder in due:
+                PROBE["now"] = aid
                 try:
                     got = probe_one(c, aid, folder)
                 except Exception as e:  # noqa: BLE001 - one agent's probe, not the loop
                     got = {"error": f"{type(e).__name__}: {e}"}
                 if got.get("error"):
+                    PROBE["error"][aid] = got["error"]
                     print(f"maxpm serve: usage of {aid}: {got['error']}", file=sys.stderr, flush=True)
+                else:
+                    PROBE["error"].pop(aid, None)
         finally:
             c.close()
-            PROBE["running"] = False
+            PROBE["running"], PROBE["now"] = False, None
 
     if PROBE_SYNC:
         run()
     else:
         threading.Thread(target=run, name="maxpm-usage-probe", daemon=True).start()
-    return [aid for aid, _ in due]
+
+
+def usage_read_now(conn, agent_type):
+    """Read now in the usage panel of an agent (#6387): the probe of the agent at once, also within
+    usage_probe_every, in its thread (the page reads the result with its next refresh); for an agent that writes its
+    limits to a log (Codex), that log now. Returns {"agent_type", "reading": True} for a probe that started, or the
+    agent's usage."""
+    aid = core._limit_adapter_id(agent_type)
+    ad = core._adapters().find(aid)
+    if ad is None:
+        raise RiverError(f"unknown agent {agent_type!r}")
+    if aid not in USAGE_PROBES:
+        if ad.has("latest_limits"):
+            wins = ad.latest_limits()
+            if not wins:
+                raise RiverError(f"{ad.label} wrote no usage to its logs yet: it writes it after a model call")
+            full = [w for w in wins if (w.get("used_percent") or 0) >= 100]
+            core.record_agent_limit(conn, aid, limited=bool(full), windows=wins,
+                                    resets_at=full[0].get("resets_at") if full else None, source="log")
+            return core.agent_usage(conn, aid)
+        raise RiverError(f"MaximizePM cannot read the usage of {ad.label}: run its usage command in its terminal")
+    if PROBE["running"]:
+        if PROBE["now"] == aid:
+            return {"agent_type": aid, "reading": True}
+        raise RiverError("MaximizePM reads the usage of another agent now; try again in a minute")
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        raise RiverError("reading the usage needs tmux: install it (brew install tmux)")
+    if not _probe_exe(ad.describe.get("exe")):
+        raise RiverError(f"{ad.label} is not installed here ({ad.describe.get('exe')} is not on the PATH)")
+    folder = _probe_folder(conn, aid)
+    if folder is None:
+        raise RiverError(f"{ad.label} trusts no project folder of this queue yet: open it once in a project folder "
+                         f"and answer its trust question")
+    PROBE["error"].pop(aid, None)
+    _start_probes([(aid, folder)])
+    return {"agent_type": aid, "reading": PROBE["running"]}
+
+
+def agent_usage(conn, agent_type):
+    """GET api/agent-usage (#6387): core.agent_usage with the state of the probe: whether Read now can read the
+    agent, whether a reading runs now, and the error of its last probe."""
+    got = core.agent_usage(conn, agent_type)
+    aid = got["agent_type"]
+    ad = core._adapters().find(aid)
+    at = PROBE["at"].get(aid)
+    return {**got, "can_read": aid in USAGE_PROBES or bool(ad is not None and ad.has("latest_limits")),
+            "reading": PROBE["running"] and PROBE["now"] == aid, "probe_error": PROBE["error"].get(aid),
+            "probed_at": core.iso(at) if at else None}
 
 
 def _probe_lines(pane):

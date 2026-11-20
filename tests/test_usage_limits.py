@@ -421,6 +421,8 @@ class LimitStopModelGroup(unittest.TestCase):
         st = core.agent_limit_status(self.conn, "antigravity")
         self.assertFalse(st["limited"])
         self.assertEqual([w["name"] for w in st["windows"]], ["Gemini models: limit stop"])
+        # #6387: the usage panel names the session that stopped, and when.
+        self.assertEqual((st["windows"][0]["session"], st["windows"][0]["at"]), ("agy-w", "2026-11-20T17:52:00Z"))
         self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="claude-opus-5-5-medium"))
         self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gpt-oss-120b-medium"))
         lim = core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon-high")
@@ -553,7 +555,7 @@ class UsageProbe(unittest.TestCase):
                                         "antigravity": (self.AGY_IDLE, self.AGY_USAGE)}
         self.typed = {}  # pane -> what was typed
         for k, v in {"TMUX_RUNNER": self._tmux, "PROBE_POLL": 0, "PROBE_SYNC": True, "PROBE_EXE": lambda e: True,
-                     "PROBE": {"running": False, "at": {}}, "CLAUDE_JSON": str(claude_json)}.items():
+                     "PROBE": {"running": False, "at": {}, "now": None, "error": {}}, "CLAUDE_JSON": str(claude_json)}.items():
             p = mock.patch.object(server, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -602,11 +604,12 @@ class UsageProbe(unittest.TestCase):
         # Within usage_probe_every: no probe again.
         self.assertEqual(server.probe_usage(self.conn), [])
 
-    def test_no_probe_while_a_session_runs_when_off_or_without_a_trusted_folder(self):
+    def test_probe_also_while_a_session_runs_but_not_when_off_or_without_a_trusted_folder(self):
+        # #6387: ten Claude Code sessions ran and the page said 'not known': they record no reading by themselves.
         core.register(self.conn, "cc1")
         self.conn.execute("UPDATE agents SET agent_type='claude-code' WHERE name='cc1'")
         self.conn.commit()
-        self.assertEqual([a for a, _ in server.usage_probes_due(self.conn)], ["antigravity"])
+        self.assertEqual([a for a, _ in server.usage_probes_due(self.conn)], ["claude", "antigravity"])
         core.unregister(self.conn, "cc1")
         server.CLAUDE_JSON = str(Path(self.tmp.name) / "none.json")
         self.assertEqual([a for a, _ in server.usage_probes_due(self.conn)], ["antigravity"])
@@ -622,6 +625,99 @@ class UsageProbe(unittest.TestCase):
         self.assertNotIn("/usage", self.typed["%usage-claude"])
         self.assertEqual(self.calls[-1][:3], ["kill-pane", "-t", "%usage-claude"])
         self.assertFalse(core.agent_limit_status(self.conn, "claude"))
+
+    def test_read_now_reads_within_the_probe_interval_and_the_panel_shows_the_error(self):
+        server.probe_usage(self.conn)
+        self.assertEqual(server.probe_usage(self.conn), [])  # within usage_probe_every
+        n = len([c for c in self.calls if c[0] in ("new-session", "new-window")])
+        got = server.OPS["usage_read"](self.conn, {"agent": "claude-code"}, "mark")
+        self.assertEqual(got, {"agent_type": "claude", "reading": False})  # PROBE_SYNC: it ended already
+        self.assertEqual(len([c for c in self.calls if c[0] in ("new-session", "new-window")]), n + 1)
+        # A failed reading: the panel says why; the next good one takes the line away.
+        self.screens["antigravity"] = (["Sign in with Google to continue"], self.AGY_USAGE)
+        with mock.patch.object(core._adapters().find("antigravity"), "detect",
+                               {"idle": r"\? for shortcuts", "blocked": [r"Sign in"]}):
+            server.usage_read_now(self.conn, "antigravity")
+        u = server.agent_usage(self.conn, "antigravity")
+        self.assertIn("asks first", u["probe_error"])
+        self.assertTrue(u["can_read"])
+        self.assertFalse(u["reading"])
+        self.screens["antigravity"] = (self.AGY_IDLE, self.AGY_USAGE)
+        server.usage_read_now(self.conn, "antigravity")
+        self.assertIsNone(server.agent_usage(self.conn, "antigravity")["probe_error"])
+        # An agent the probe cannot read: the refusal says what to do.
+        with self.assertRaises(core.RiverError):
+            server.usage_read_now(self.conn, "goose")
+
+
+class AgentUsagePanel(unittest.TestCase):
+    """#6387: a click on an agent in the usage list opens its usage: windows, model groups, why a limit, where and
+    when it was read, and the sessions of the agent now."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = _db(self.tmp.name)
+        self.t0 = datetime(2026, 11, 20, 18, 10, 0, tzinfo=timezone.utc)
+        p = mock.patch.object(core, "now", side_effect=lambda: self.t0)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+
+    def _usage(self, gemini=0.0, claude=99.0):
+        at = core.iso(self.t0 + timedelta(hours=1, minutes=30))
+        return [{"name": n, "remaining_percent": r, "used_percent": round(100 - r, 1), "resets_at": at,
+                 "resets_text": "in 1h 30m"}
+                for n, r in (("Gemini models: 5-hour", gemini), ("Claude and GPT models: 5-hour", claude))]
+
+    def test_a_usage_reading_clears_a_whole_agent_limit_from_before_and_names_the_group(self):
+        # The row of 2026-11-20 17:52: a whole-agy limit stop recorded before 9d7c7b5a, no windows.
+        core.record_agent_limit(self.conn, "antigravity", limited=True, reason="Individual quota reached.",
+                                resets_at=core.iso(self.t0 + timedelta(hours=1, minutes=32)), source="limit_stop")
+        self.assertTrue(core.agent_usage(self.conn, "antigravity")["limited"])
+        core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._usage(), source="probe")
+        u = core.agent_usage(self.conn, "antigravity")
+        self.assertFalse(u["limited"])
+        self.assertIsNone(u["reason"])
+        self.assertEqual([(g["name"], g["full"], g["remaining_pct"]) for g in u["groups"]],
+                         [("Gemini models", True, 0.0), ("Claude and GPT models", False, 99.0)])
+        self.assertEqual(u["groups"][0]["resets_at"], "2026-11-20T19:40:00Z")
+        self.assertEqual(u["source_text"], "/usage, read by maxpm serve in a hidden window")
+        row = next(r for r in core.agent_limits_list(self.conn) if r["agent_type"] == "antigravity")
+        self.assertEqual(row["groups"], u["groups"])  # the list row names the group too
+        # An agent whose windows count every model has no groups.
+        core.record_agent_limit(self.conn, "codex", windows=[{"name": "5-hour window", "used_percent": 1.0}],
+                                source="log")
+        self.assertEqual(core.agent_usage(self.conn, "codex")["groups"], [])
+
+    def test_the_sessions_of_the_agent_now_with_their_models_and_items(self):
+        for name, at, model in (("agy-1", "antigravity", "claude-opus-5-5-high"), ("agy-2", "antigravity", None),
+                                ("cc-1", "claude-code", "opus")):
+            core.register(self.conn, name)
+            with core.tx(self.conn):
+                self.conn.execute("UPDATE agents SET agent_type=?, model=? WHERE name=?", (at, model, name))
+        it = core.item_add(self.conn, "app", "Build feature")
+        core.claim(self.conn, it["id"], "agy-1")
+        core.unregister(self.conn, "agy-2")  # an ended session is not in the list
+        u = core.agent_usage(self.conn, "agy")
+        self.assertFalse(u["known"])
+        self.assertEqual([(s["name"], s["model"], [i["id"] for i in s["items"]]) for s in u["sessions"]],
+                         [("agy-1", "claude-opus-5-5-high", [it["id"]])])
+        self.assertEqual([s["name"] for s in core.agent_usage(self.conn, "claude")["sessions"]], ["cc-1"])
+        with self.assertRaises(core.RiverError):
+            core.agent_usage(self.conn, "no-such-agent")
+
+    def test_the_route_answers(self):
+        got = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/agent-usage?agent=codex"
+        h._send = lambda code, body, *a, **k: got.update(code=code, body=body)
+        from river.routes import sessions as rs
+        with mock.patch.dict("os.environ", {"MAXPM_DB": str(Path(self.tmp.name) / "test.db")}):
+            rs.agent_usage(h, "/api/agent-usage")
+        self.assertEqual(got["code"], 200)
+        self.assertEqual(got["body"]["agent_type"], "codex")
+        self.assertIn("can_read", got["body"])
 
 
 class ProviderSlots(unittest.TestCase):

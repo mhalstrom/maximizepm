@@ -20,6 +20,7 @@ import { openBrowser } from "../components/browserTool.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
 import { contextMeter, openUsage } from "../components/usagePanel.js";
+import { limitRowHtml, openAgentUsage } from "../components/agentUsage.js";
 import { endButton, endSession } from "../components/endSession.js";
 import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
@@ -468,38 +469,23 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     autoWait();
   }
 
-  // Agent usage & limits (#6348): compact summary per agent above Cost when known; a click opens Cost. The providers
-  // of agent_order come first, in launch order, each with its sessions against its limit (#6361); then the other
-  // agents with a usage reading. An entry is an agent and its model (one agent can have an entry for each model
-  // group), with that model's usage.
+  // Agent usage & limits (#6348): compact summary per agent above Cost. The providers of agent_order come first, in
+  // launch order, each with its sessions against its limit (#6361); then the other agents with a usage reading. An
+  // entry is an agent and its model (one agent can have an entry for each model group), with that model's usage. A
+  // click on a row opens the usage of its agent (#6387, agentUsage.js).
   function drawLimits() {
     const host = $("#sessLimits");
     if (!host) return;
     const lims = (S && S.agent_limits) || [], provs = (S && S.providers) || [];
     const byId = Object.fromEntries(lims.map(r => [r.agent_type, r]));
     const rows = provs.map(p => {
-      const r = byId[p.agent] || { known: false };
+      const r = byId[p.agent] || { known: false, agent_type: p.agent };
       return { ...r, label: p.name, limited: p.limited, remaining_pct: p.remaining_pct, prov: p,
                resets_at: p.limited ? r.resets_at : null, resets_text: p.limited ? (p.until || r.resets_text) : null };
     }).concat(lims.filter(r => !provs.some(p => p.agent === r.agent_type)));
     host.classList.toggle("hidden", !rows.length);
     if (!rows.length) return;
-    const fmtAt = (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
-    const html = rows.map(r => {
-      const reset = r.resets_at ? `resets ${fmtAt(r.resets_at)}` : (r.resets_text ? `resets ${r.resets_text}` : "");
-      const read = r.updated_at && !r.limited ? `read ${fmtAt(r.updated_at)}` : "";
-      const val = !r.known ? `<span class="muted">usage not known</span>`
-        : r.limited ? `<span class="sl-lim-warn">At limit</span>`
-        : r.remaining_pct != null ? `<span>${Math.round(r.remaining_pct)}% left</span>` : `<span>no limit reached</span>`;
-      const p = r.prov;
-      const slots = !p ? "" : p.max != null
-        ? `<span class="${p.full ? "sl-lim-warn" : ""}">${p.used}/${p.max} sessions</span>`
-        : `<span class="muted">${p.used} session${p.used === 1 ? "" : "s"}</span>`;
-      const note = [reset, read].filter(Boolean).join(" · ");
-      return `<div class="sl-lim-row">${p ? `<span class="muted t-s" title="Launch order">${p.pos}</span>` : ""}`
-        + `<span class="sl-lim-name">${esc(r.label)}</span>${slots}${val}${note ? `<span class="muted t-s">${esc(note)}</span>` : ""}</div>`;
-    }).join("");
-    putHtml(host, html);
+    putHtml(host, rows.map(r => limitRowHtml(r, byId[r.agent_type])).join(""));
   }
 
   // The Sessions line of the list (#5886: with the browsers that run), from the same read as the rows (sessionsLine):
@@ -1116,6 +1102,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     }
     const br = t.closest("[data-brw-row]");
     if (br) { openBrowserRow(br.dataset.brwRow).then(() => setTab("browsers")).catch(() => {}); return true; }
+    const au = t.closest("[data-agent-usage]");
+    if (au) { openAgentUsage(au.dataset.agentUsage); return true; }
     if (t.closest("#sessSettings")) { openListSettings(); return true; }
     return false;
   }
@@ -1137,7 +1125,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-art-session], [data-brw-row]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-art-session], [data-brw-row], [data-agent-usage]")) {
       e.preventDefault(); return listControl(e.target);
     }
     if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-cost]")) {

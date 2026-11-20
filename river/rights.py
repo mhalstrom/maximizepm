@@ -109,6 +109,7 @@ OPS = {op: ANY for op in (
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
+    "usage_read",  # #6387: a reading of an agent's usage, in a hidden window of its own
     "pipeline_fix", "pipeline_correct",
     "pipeline_operators", "pipeline_emergency",  # #6145: the functions check a person, or the pipeline's operators
     "pipeline_run_stage",  # #6138: the same
