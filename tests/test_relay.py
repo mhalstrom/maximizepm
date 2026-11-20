@@ -304,6 +304,8 @@ class WebSocketClient(Base):
 class LinkTest(Base):
     def setUp(self):
         super().setUp()
+        self.addCleanup(setattr, relay, "IDLE_WAIT", relay.IDLE_WAIT)
+        relay.IDLE_WAIT = 0.05
         self.fake = FakeRelay()
         self.addCleanup(self.fake.close)
         self.stop = threading.Event()

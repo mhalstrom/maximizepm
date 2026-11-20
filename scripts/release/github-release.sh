@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
-# The release of maximizepm-github in one command: the deploy hook of the
-# target (#6185, mark 2026-11-19: 'the deployment processes need to run
-# independently without an agent'). maxpm serve runs it in the main tree when
-# the deploy item is ready, also after Release now on the Deploy tab; no
-# session types a release command. The manager sets it once:
+# The release of maximizepm-github: the deploy hook of the target (#6185, mark 2026-11-19: 'the deployment processes
+# need to run independently without an agent'). maxpm serve runs it in the main tree when the deploy item is ready,
+# also after Release now on the Deploy tab; no session types a release command. The manager sets it once:
 #
 #   maxpm target hook maximizepm-github deploy 'bash scripts/release/github-release.sh'
+#   maxpm config set release_approval draft --project deploy-maximizepm-github
 #
 #   github-release.sh             a minor version: 1.3.0 -> 1.4.0 (a release
 #                                 of a week of work always holds features)
@@ -14,61 +13,65 @@
 #   github-release.sh --dry-run   the checks and the plan; changes nothing
 #                                 (DRY_RUN=1 does the same)
 #
-# The steps, each between '::step start' and '::step end' lines, so the
-# pipeline of the target shows them with their times (#6126):
-#   check     the main tree is on main with no change to a tracked file; the
-#             release pin (MAXPM_REV; with none, HEAD of main) is an ancestor
-#             of main; origin/main is an ancestor of main (no force push)
-#   version   the new version, from the version of pyproject.toml: when
-#             origin has its tag, one minor (or patch) more; when origin does
-#             not, an earlier run raised it and failed later: that version
-#             goes out with no second raise
-#   test      a detached worktree at main with the new version in
-#             pyproject.toml, river/__init__.py, desktop/package.json and its
-#             lock; python3 -m unittest discover -s tests -t . runs there,
-#             with no MAXPM_ variable of the hook and without the browser
-#             tests, as the desktop-release workflow runs them (mark
-#             2026-11-12). The tests run the tree that goes out: the pin and
-#             the commits after it on main
-#   commit    'Release vX.Y.Z (deploy #<id>)' on that worktree, then main of
-#             the main tree forward to it (merge --ff-only, the one git
-#             change the main tree takes)
-#   push      git push origin <commit>:refs/heads/main
-# The downloads branch (#6186): the steps named downloads/<step> show in the
-# stage 'downloads' of the target's pipeline, beside the watch of main:
-#   downloads/tag        git push of the annotated tag vX.Y.Z, which starts
-#                        the workflow desktop-release
-#   downloads/build-<job>  each job of that run (checks, mac, mac-intel,
-#                        publish), with its link (scripts/release/downloads.py
-#                        watch; RELEASE_WAIT seconds, default 60 minutes,
-#                        within deploy_timeout 2h). A failed job stops the
-#                        release with the run's link
-#   downloads/published  the GitHub release has both .dmg files, the code
-#                        archive and manifest.json of this version
-# Then the last step of the release:
-#   notes     gh release edit with the notes from maxpm target report
-#             <deploy id> (scripts/release/release_notes.py: the 'changed'
-#             line of each done task of project maximizepm, by goal, and the
-#             Download part of desktop/release-notes.md)
+# A release is one line of stages, and the tag is the last step (#6213, mark 2026-11-19: 'we actually want the tag to
+# be a final step with a manual approval'; 'this should not be a branching deploy workflow'):
+#   deploy    this script without MAXPM_APPROVED: it prepares the release, a draft, and exits 76 (HOOK_YES)
+#   approval  MaximizePM adds 'Approve release maximizepm-github: ...' for the person, with the last lines of this
+#             script (the draft's link, its commit and files); the person looks at the draft and approves it
+#   publish   this script again, with MAXPM_APPROVED (the id of the person's yes): the tag, then the draft is published
+#   watch     the target's checks, maximizepm-github/downloads with them
 #
-# It fails closed: the first step that fails prints its reason and the
-# script exits 1, so MaximizePM opens the fix item of the deploy for an agent.
-# It never force-pushes, never moves a tag, and changes no file of the main
-# tree except by the fast-forward. When origin has the tag at HEAD of main
-# already (the push went out and a later step failed), a new run only waits
-# for the build, checks the downloads and writes the notes.
+# The steps, each between '::step start' and '::step end' lines, so the pipeline of the target shows them with their
+# times (#6126). Before the yes:
+#   check     the main tree is on main with no change to a tracked file; the release pin (MAXPM_REV; with none, HEAD of
+#             main) is an ancestor of main; origin/main is an ancestor of main (no force push)
+#   version   the new version, from the version of pyproject.toml: when origin has its tag, one minor (or patch) more;
+#             when origin does not, an earlier run raised it and stopped before its tag: that version goes again with
+#             no second raise
+#   commit    'Release vX.Y.Z (deploy #<id>)' in a detached worktree, on top of main as it is at this step: the new
+#             version in pyproject.toml, river/__init__.py, desktop/package.json and its lock. Then main of the main
+#             tree moves forward to it (merge --ff-only, the one git change the main tree takes). Sessions merge into
+#             main all day (#6492: deploy #6211 failed when main moved during its 3 minutes of tests), so the commit
+#             comes before the tests: the window is the second between the commit and the fast-forward, and when
+#             main moved in it, the step makes the commit again on the new main (at most 5 tries). Merges after it
+#             go on top of the release commit and wait for the next release
+#   test      python3 -m unittest discover -s tests -t . in that worktree, at the release commit, with no MAXPM_
+#             variable of the hook and without the browser tests, as the desktop-release workflow runs them (mark
+#             2026-11-12). The tests run the tree that goes out: the pin and the commits after it on main. When they
+#             fail, nothing is pushed; main keeps the version commit, and the next run releases that version with no
+#             second raise
+#   push      git push origin <commit>:refs/heads/main (no tag)
+#   build     starts the workflow desktop-release for the commit (gh workflow run, with tag and sha); each of its jobs
+#             is a step build-<job> (checks, mac, mac-intel, publish) with its link (scripts/release/downloads.py
+#             watch; RELEASE_WAIT seconds, default 60 minutes, within deploy_timeout 2h). The run makes a DRAFT GitHub
+#             release: nothing is public. A failed job stops the release with the run's link
+#   draft     the draft of vX.Y.Z is made from the commit and has both .dmg files, the code archive and manifest.json
+#   notes     gh release edit of the draft with the notes from maxpm target report <deploy id>
+#             (scripts/release/release_notes.py: the report's summary, or before it is written the 'changed' line of
+#             each done task of project maximizepm; then the Download part of desktop/release-notes.md)
+# Then it prints what the person approves and exits 76. After the yes:
+#   check     as above, and the draft's commit is on origin/main
+#   version   the version of main; its draft names the commit that the person approved
+#   tag       git push of the annotated tag vX.Y.Z at that commit
+#   publish   the notes again from the report (its summary may be newer than the draft), then gh release edit vX.Y.Z
+#             --draft=false: the release and its downloads are public
+#   published the GitHub release vX.Y.Z is published and has every download of this version
 #
-# For the tests (tests/test_github_release.py): GH (the gh command),
-# MAXPM_BIN (the maxpm command), RELEASE_TEST_CMD (the test command),
-# RELEASE_WAIT and RELEASE_POLL (seconds).
+# It fails closed: the first step that fails prints its reason and the script exits 1, so MaximizePM opens the fix
+# item of the deploy for an agent, and the release starts again without the yes. It never force-pushes, never moves a
+# tag, never changes a published release, and changes no file of the main tree except by the fast-forward. When the
+# tag is out and its release is still a draft (the publish failed), a new run asks for the yes on that draft again.
 #
-# The body is one function that bash reads whole before it runs: the
-# fast-forward of main can change this file.
+# For the tests (tests/test_github_release.py): GH (the gh command), MAXPM_BIN (the maxpm command), RELEASE_TEST_CMD
+# (the test command), RELEASE_WAIT and RELEASE_POLL (seconds).
+#
+# The body is functions that bash reads whole before main runs, and the last line exits: the fast-forward of main can
+# change this file.
 
 main() {
   set -uo pipefail
-  # One stream: maxpm keeps the last lines of a hook's output, and the lines
-  # that name the failed step must come before the error of a tool.
+  # One stream: maxpm keeps the last lines of a hook's output, and the lines that name the failed step must come
+  # before the error of a tool.
   exec 2>&1
 
   local bump=minor dry_run="" arg
@@ -92,8 +95,8 @@ main() {
   local gh="${GH:-gh}" maxpm="${MAXPM_BIN:-$tree/bin/maxpm}"
   local test_cmd="${RELEASE_TEST_CMD:-python3 -m unittest discover -s tests -t .}"
   local wait_s="${RELEASE_WAIT:-3600}" poll="${RELEASE_POLL:-30}"
-  local deploy="${MAXPM_DEPLOY:-}" remote=origin
-  local step="" scratch="" wt=""
+  local deploy="${MAXPM_DEPLOY:-}" approved="${MAXPM_APPROVED:-}" remote=origin
+  local step="" scratch="" wt="" HOOK_YES=76
 
   step_start() {  # step_start <name> <kind>
     step="$1"
@@ -115,6 +118,11 @@ main() {
     step_end failed
     cleanup
     exit 1
+  }
+  release_state() {  # release_state <tag>: sets state (draft|published|none), draft_sha and url of its GitHub release
+    local line
+    line="$(python3 "$here/downloads.py" state --tag "$1")" || return 1
+    read -r state draft_sha url <<<"$line"
   }
 
   # ---- check
@@ -143,6 +151,7 @@ main() {
   local after
   after="$(git rev-list --count "$pin..$head")"
   echo "github-release: pin $pin; main $head ($after commit(s) after the pin go out with it)"
+  [ -z "$approved" ] || echo "github-release: the person approved the draft (yes #$approved): this run tags and publishes it"
   step_end passed
 
   # ---- version
@@ -181,44 +190,68 @@ PY
       $2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { plain = $1 }
       END { if (peeled != "") print peeled; else if (plain != "") print plain }'
   }
-  local cur_tag new resume=""
+  local cur_tag new commit="$head" state="" draft_sha="" url="" tagged=""
   cur_tag="$(remote_tag "v$cur")" || fail "git ls-remote $remote failed"
-  if [ -n "$cur_tag" ] && [ "$cur_tag" = "$head" ]; then
+  if [ -n "$approved" ]; then
+    # After the yes: the version of main, made from the commit that the person approved (its draft names it).
     new="$cur"
-    resume=1
-    echo "github-release: $remote has v$cur at HEAD of main already: only the build, the downloads and the notes are left"
+    release_state "v$new" || fail "could not read the GitHub release v$new"
+    [ "$state" != none ] \
+      || fail "GitHub has no draft of v$new, so there is nothing approved to publish; the release starts again"
+    commit="$draft_sha"
+    git cat-file -e "$commit^{commit}" 2>/dev/null \
+      || fail "the draft of v$new is made from $commit, which is not a commit of this repository"
+    git merge-base --is-ancestor "$commit" "$remote/main" \
+      || fail "the draft of v$new is made from $commit, which is not on $remote/main"
+    [ -z "$cur_tag" ] || [ "$cur_tag" = "$commit" ] \
+      || fail "$remote has a tag v$new at $cur_tag, not at the approved $commit; the release never moves a tag"
+    [ -n "$cur_tag" ] && tagged=1
+    echo "github-release: v$new, approved at $commit ($state: $url)"
   elif [ -n "$cur_tag" ]; then
-    local major minor patch
-    IFS=. read -r major minor patch <<<"$cur"
-    if [ "$bump" = patch ]; then
-      new="$major.$minor.$((patch + 1))"
+    release_state "v$cur" || fail "could not read the GitHub release v$cur"
+    if [ "$state" = draft ]; then
+      # The tag went out and the publish did not: the person approves that draft again; nothing is built again.
+      new="$cur"
+      commit="$cur_tag"
+      tagged=1
+      echo "github-release: $remote has the tag v$cur and its release is still a draft ($url): it asks for the yes on it again"
     else
-      new="$major.$((minor + 1)).0"
+      local major minor patch
+      IFS=. read -r major minor patch <<<"$cur"
+      if [ "$bump" = patch ]; then
+        new="$major.$minor.$((patch + 1))"
+      else
+        new="$major.$((minor + 1)).0"
+      fi
+      echo "github-release: v$cur is out; this release is v$new ($bump)"
     fi
-    echo "github-release: v$cur is out; this release is v$new ($bump)"
   else
     new="$cur"
-    echo "github-release: $remote has no tag v$cur: an earlier run raised the version and stopped; this release is v$new"
+    echo "github-release: $remote has no tag v$cur: an earlier run raised the version and stopped before its tag; this release is v$new"
   fi
-  if [ -z "$resume" ]; then
+  if [ -z "$approved" ] && [ -z "$tagged" ]; then
     [ -z "$(remote_tag "v$new")" ] || fail "$remote has a tag v$new already, at another commit; the release never moves a tag"
   fi
   step_end passed
 
   if [ -n "$dry_run" ]; then
-    echo "github-release: dry run: it would test main with the version $new, commit 'Release v$new (deploy #${deploy:-none})' when the version changes, move main to it, push it to $remote main, push the tag v$new, wait for the build of the downloads, check them and write the release notes"
+    if [ -n "$approved" ]; then
+      echo "github-release: dry run: it would push the tag v$new at $commit and publish the draft of v$new"
+    else
+      echo "github-release: dry run: it would commit 'Release v$new (deploy #${deploy:-none})' on main when the version changes, move main to it, test it, push it to $remote main, build the downloads as a draft of v$new, write its notes and ask for the person's yes; the tag comes after the yes"
+    fi
     return 0
   fi
 
-  local commit="$head"
-  if [ -z "$resume" ]; then
-    # ---- test
-    step_start test test
-    scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
-    wt="$scratch/tree"
-    git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
-    if [ "$new" != "$cur" ]; then
-      python3 - "$wt" "$cur" "$new" <<'PY' || fail "could not write the version $new"
+  [ -z "$approved" ] || publish
+  [ -n "$tagged" ] || prepare
+  ask
+}
+
+# ---- before the yes: test, commit, push main, build the draft, write its notes
+prepare() {
+  bump() {  # bump: the new version in the four files of the worktree
+    python3 - "$wt" "$cur" "$new" <<'PY'
 import json, re, sys
 d, old, new = sys.argv[1:4]
 def sub(path, pattern, repl, count=1):
@@ -236,78 +269,151 @@ lock = json.load(open(f"{d}/desktop/package-lock.json", encoding="utf-8"))
 if lock["version"] != new or lock["packages"][""]["version"] != new:
     sys.exit("desktop/package-lock.json: the two version lines are not those of the package")
 PY
-    fi
-    echo "github-release: $test_cmd (in $wt, version $new)"
-    (
-      local v
-      for v in $(compgen -e); do
-        case "$v" in MAXPM_*) unset "$v" ;; esac
-      done
-      export MAXPM_DB="$scratch/test-queue.db" MAXPM_NO_BROWSER=1
-      cd "$wt" && eval "$test_cmd"
-    ) || fail "the tests failed at main $head with the version $new; nothing was committed or pushed"
-    step_end passed
+  }
 
-    # ---- commit
-    step_start commit build
-    if [ "$new" != "$cur" ]; then
+  # ---- commit: on top of main as it is now; the tests come after it (#6492)
+  step_start commit build
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
+  wt="$scratch/tree"
+  git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
+  if [ "$new" != "$cur" ]; then
+    local try base made=""
+    for try in 1 2 3 4 5; do
+      base="$(git rev-parse --verify --quiet refs/heads/main)" || fail "the branch main is gone"
+      git merge-base --is-ancestor "$head" "$base" \
+        || fail "main went back from $head to $base while the release ran; the release never force-moves main"
+      git -C "$wt" checkout --quiet --detach "$base" || fail "git checkout of main $base in $wt failed"
+      bump || fail "could not write the version $new on main $base (a commit after the check changed a version file?)"
       git -C "$wt" commit --quiet -m "Release v$new (deploy #${deploy:-none})" -- \
         pyproject.toml river/__init__.py desktop/package.json desktop/package-lock.json \
         || fail "git commit of the version $new failed"
       commit="$(git -C "$wt" rev-parse HEAD)" || fail "no commit"
-      git merge --quiet --ff-only "$commit" \
-        || fail "main moved while the release ran (merge --ff-only $commit refused); the next run starts again"
-    fi
-    echo "github-release: main is at $commit (v$new)"
-    step_end passed
-
-    # ---- push
-    step_start push deploy
-    local tag_at
-    if tag_at="$(git rev-parse --verify --quiet "refs/tags/v$new^{commit}")"; then
-      [ "$tag_at" = "$commit" ] || fail "the local tag v$new is at $tag_at, not at $commit; the release never moves a tag"
-    else
-      git tag -a "v$new" -m "MaximizePM v$new" "$commit" || fail "git tag v$new failed"
-    fi
-    git push --quiet "$remote" "$commit:refs/heads/main" || fail "git push $remote main failed (never forced)"
-    echo "github-release: pushed main $commit to $remote"
-    step_end passed
-
-    # ---- the downloads branch (#6186): the tag starts the build of the apps
-    step_start downloads/tag deploy
-    git push --quiet "$remote" "refs/tags/v$new" || fail "git push of the tag v$new failed"
-    echo "github-release: pushed the tag v$new to $remote"
-    step_end passed
+      if git merge --quiet --ff-only "$commit"; then
+        made=1
+        break
+      fi
+      echo "github-release: main moved while the release committed (merge --ff-only $commit refused, try $try of 5); it commits again on the new main"
+      sleep "$try"
+    done
+    [ -n "$made" ] || fail "main moved at each of 5 tries to move it to the release commit; the next run starts again"
+    [ "$base" = "$head" ] \
+      || echo "github-release: $(git rev-list --count "$head..$base") commit(s) came into main after the check; they go out too, and the tests run them"
   fi
-
-  # ---- downloads: the workflow desktop-release builds the apps and makes the GitHub release of the tag; each of
-  # its jobs is a step downloads/build-<job>. A failed build stops the release with the run's link.
-  python3 "$here/downloads.py" watch --tag "v$new" --sha "$commit" --wait "$wait_s" --poll "$poll" \
-    || fail "the tag v$new is pushed and stays; fix the build, then a new run of this hook (after the fix, a new version) releases again"
-  step_start downloads/published check
-  python3 "$here/downloads.py" assets --tag "v$new" || fail "the GitHub release v$new lacks downloads"
+  echo "github-release: main is at $commit (v$new)"
   step_end passed
 
-  # ---- notes
+  # ---- test: the commit that goes out
+  step_start test test
+  echo "github-release: $test_cmd (in $wt, at $commit, version $new)"
+  (
+    local v
+    for v in $(compgen -e); do
+      case "$v" in MAXPM_*) unset "$v" ;; esac
+    done
+    export MAXPM_DB="$scratch/test-queue.db" MAXPM_NO_BROWSER=1
+    cd "$wt" && eval "$test_cmd"
+  ) || fail "the tests failed at $commit (v$new); nothing was pushed. Fix them on main: the next run releases v$new with no second raise"
+  step_end passed
+
+  # ---- push: main only; the tag comes after the person's yes
+  step_start push deploy
+  git push --quiet "$remote" "$commit:refs/heads/main" || fail "git push $remote main failed (never forced)"
+  echo "github-release: pushed main $commit to $remote"
+  step_end passed
+
+  # ---- build: the workflow desktop-release builds the downloads of the commit into a draft release
+  step_start build build
+  local since
+  since="$(date -u -v-2M +%FT%TZ 2>/dev/null || date -u -d '2 minutes ago' +%FT%TZ)"
+  "$gh" workflow run desktop-release.yml --ref main -f "tag=v$new" -f "sha=$commit" >/dev/null \
+    || fail "gh workflow run desktop-release.yml for v$new at $commit failed"
+  echo "github-release: started the draft build of v$new at $commit"
+  step_end passed
+  python3 "$here/downloads.py" watch --tag "v$new" --sha "$commit" --since "$since" --wait "$wait_s" --poll "$poll" \
+    || fail "the draft build of v$new failed; nothing is public. Fix the build: the next run of this hook builds again"
+
+  # ---- draft
+  step_start draft check
+  python3 "$here/downloads.py" assets --tag "v$new" --draft --sha "$commit" || fail "the draft of v$new is not complete"
+  step_end passed
+
+  # ---- notes, on the draft: the person reads them before the yes
   step_start notes deploy
   if [ -z "$deploy" ]; then
     echo "github-release: no deploy item (MAXPM_DEPLOY): the notes stay those of desktop/release-notes.md"
     step_end skipped
   else
-    [ -n "$scratch" ] || scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
-    "$maxpm" --json target report "$deploy" >"$scratch/report.json" 2>"$scratch/report.err" \
-      || fail "maxpm target report $deploy failed: $(tail -n 3 "$scratch/report.err")"
-    git show "v$new:desktop/release-notes.md" >"$scratch/release-notes.md" 2>/dev/null || : >"$scratch/release-notes.md"
-    python3 "$here/release_notes.py" "$scratch/report.json" "$new" "$scratch/release-notes.md" >"$scratch/notes.md" \
-      || fail "release_notes.py could not write the notes"
-    "$gh" release edit "v$new" --notes-file "$scratch/notes.md" >/dev/null || fail "gh release edit v$new failed"
-    echo "github-release: the notes of v$new come from the report of deploy #$deploy ($(wc -l <"$scratch/notes.md" | tr -d ' ') lines)"
+    notes
     step_end passed
   fi
+}
+
+# ---- the notes of the release from the report of the deploy item: its summary (#6493), the same text the person read
+notes() {
+  [ -n "$scratch" ] || scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
+  "$maxpm" --json target report "$deploy" >"$scratch/report.json" 2>"$scratch/report.err" \
+    || fail "maxpm target report $deploy failed: $(tail -n 3 "$scratch/report.err")"
+  git show "$commit:desktop/release-notes.md" >"$scratch/release-notes.md" 2>/dev/null || : >"$scratch/release-notes.md"
+  python3 "$here/release_notes.py" "$scratch/report.json" "$new" "$scratch/release-notes.md" >"$scratch/notes.md" \
+    || fail "release_notes.py could not write the notes"
+  "$gh" release edit "v$new" --notes-file "$scratch/notes.md" >/dev/null || fail "gh release edit v$new failed"
+  echo "github-release: the notes of v$new come from the report of deploy #$deploy ($(wc -l <"$scratch/notes.md" | tr -d ' ') lines)"
+}
+
+# ---- the end before the yes: what the person approves (the last lines go on their item), then exit HOOK_YES
+ask() {
+  if [ -n "$tagged" ]; then
+    step_start draft check
+    python3 "$here/downloads.py" assets --tag "v$new" --draft --sha "$commit" || fail "the draft of v$new is not complete"
+    step_end passed
+  fi
+  release_state "v$new" || fail "could not read the draft of v$new"
+  cleanup
+  echo "github-release: v$new is prepared and waits for your yes. Nothing is public yet."
+  echo "  the draft: $url"
+  echo "  its commit: $commit (on $remote main)"
+  echo "  its files: MaximizePM-$new-arm64.dmg, MaximizePM-$new-x64.dmg, MaximizePM-$new-code.tar.gz, manifest.json"
+  echo "  its notes: on the draft's page"
+  echo "  after the yes: the tag v$new at $commit, then the draft is published"
+  exit "$HOOK_YES"
+}
+
+# ---- after the yes: the tag, then the draft is published
+publish() {
+  if [ "$state" != published ]; then
+    step_start tag deploy
+    if [ -n "$tagged" ]; then
+      echo "github-release: $remote has the tag v$new at $commit already"
+    else
+      local tag_at
+      if tag_at="$(git rev-parse --verify --quiet "refs/tags/v$new^{commit}")"; then
+        [ "$tag_at" = "$commit" ] || fail "the local tag v$new is at $tag_at, not at $commit; the release never moves a tag"
+      else
+        git tag -a "v$new" -m "MaximizePM v$new" "$commit" || fail "git tag v$new failed"
+      fi
+      git push --quiet "$remote" "refs/tags/v$new" || fail "git push of the tag v$new failed"
+      echo "github-release: pushed the tag v$new at $commit to $remote"
+    fi
+    step_end passed
+
+    step_start publish deploy
+    # The summary of the report may have changed since the draft (an agent wrote it, the manager edited it): the
+    # published notes are the report's text of now (#6493).
+    [ -z "$deploy" ] || notes
+    "$gh" release edit "v$new" --draft=false >/dev/null || fail "gh release edit v$new --draft=false failed; the tag stays"
+    echo "github-release: published the release v$new: $url"
+    step_end passed
+  else
+    echo "github-release: the release v$new is published already ($url): only the check of its downloads is left"
+  fi
+
+  step_start published check
+  python3 "$here/downloads.py" assets --tag "v$new" --published || fail "the published release v$new lacks downloads"
+  step_end passed
 
   cleanup
   echo "github-release: released v$new at $commit"
-  return 0
+  exit 0
 }
 
-main "$@"
+main "$@"; exit

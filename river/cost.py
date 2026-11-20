@@ -168,8 +168,9 @@ def _home_project(conn, agent):
 
 
 def plans(conn, agents, root=None):
-    """The plan windows that running agents write to their log (Codex): one row per window, the newest reading of
-    each kind of agent. Agents whose log has none (Claude Code) are named, so the page can say where to look."""
+    """The plan windows that running agents write to their log (Codex) or that MaximizePM read from their screens
+    (#6348: Antigravity /usage, Claude Code /usage, Codex /usage, limit-stop messages): one row per window, plus
+    each agent's recorded summary (`agents`). Agents with no recorded usage are named in `silent`."""
     from . import sessions
     seen, rows, silent = set(), [], set()
     for name in agents:
@@ -178,14 +179,35 @@ def plans(conn, agents, root=None):
         except RiverError:
             continue
         label = u.get("label") or "Agent"
-        if u.get("limits"):  # [{name, used_percent, window_minutes, resets_at} or {name, text}] (codex.chat_limits)
+        if u.get("limits"):  # [{name, used_percent, remaining_percent, window_minutes, resets_at} or {name, text}]
             if label in seen:
                 continue
             seen.add(label)
             rows += [{"agent": label, **w} for w in u["limits"]]
+            if u.get("adapter_id") and u.get("limits_source") == "chat":
+                with core.unless_readonly():
+                    at_lim = any((w.get("used_percent") or 0) >= 100 for w in u["limits"])
+                    core.record_agent_limit(conn, u["adapter_id"], limited=at_lim, windows=u["limits"], source="chat")
         else:
             silent.add(label)
-    return {"windows": rows, "silent": sorted(silent - seen)}
+    recorded = core.agent_limits_list(conn)
+    for rec in recorded:
+        label = rec["label"]
+        if label in seen:
+            continue
+        if not rec.get("known", True):
+            silent.add(label)
+            continue
+        seen.add(label)
+        if rec["windows"]:
+            rows += [{"agent": label, **w} for w in rec["windows"]]
+        elif rec["limited"] or rec["remaining_pct"] is not None:
+            rows.append({"agent": label, "name": "Usage limit" if rec["limited"] else "Quota",
+                         "used_percent": rec["used_pct"] if rec["used_pct"] is not None else (100.0 if rec["limited"] else None),
+                         "remaining_percent": rec["remaining_pct"],
+                         "resets_at": rec["resets_at"], "resets_text": rec["resets_text"],
+                         "limited": rec["limited"], "reason": rec["reason"]})
+    return {"windows": rows, "agents": recorded, "silent": sorted(silent - seen)}
 
 
 # ---- the limit

@@ -249,7 +249,7 @@ def check_now(conn, secret=None, actor=None):
     users = _users(conn)
     keys = [k for k in users if secret is None or k[2] == secret]
     if not keys:
-        raise core.RiverError(f"no pipeline uses the token {secret}" if secret else "no pipeline uses a forge token")
+        raise core.RiverError(f"no pipeline uses the token {secret}" if secret else "no pipeline uses a Git host token")
     return [check(conn, k, users[k]) for k in keys]
 
 
@@ -284,7 +284,7 @@ def serve_pass(conn):
             if _alert(conn, f"{a['label']} refuses the token {k[2]} ({a['error']}). The pipelines {names} show old "
                             f"data and start nothing on {a['label']} until a new token works. Make a new token for "
                             f"{a['owner'] or 'that account'} and save it: maxpm secret put {k[2]}; ask the person only "
-                            f"for the forge's sign-in"):
+                            f"for the sign-in on {a['label']}"):
                 with core.tx(conn):
                     conn.execute("UPDATE pipeline_accounts SET alert_refused=? WHERE id=?", (core.iso(now), r["id"]))
                 alerts.append(("refused", k[2]))
@@ -316,7 +316,7 @@ NEEDS = {"github": "a fine-grained token for the repositories of the pipelines, 
 
 def _forge_args(forge, url):
     if forge not in FORGE_NAMES:
-        raise core.RiverError(f"the forge is one of {', '.join(FORGE_NAMES)}, not {forge!r}")
+        raise core.RiverError(f"the Git host is one of{', '.join(FORGE_NAMES)}, not {forge!r}")
     url = (url or "").strip().rstrip("/") or None
     if forge in ("gitea", "forgejo") and not url:
         raise core.RiverError(f"name the address of the {FORGE_NAMES[forge]} server: https://<host>")

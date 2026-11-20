@@ -1047,7 +1047,7 @@ class Passkey(Base):
         self.assertEqual(len(log), 3)
         log.clear()
         st["url"] = "https://myaccount.google.com/"  # after the touch the page goes on
-        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 0), mock.patch.object(browser, "PASSKEY_SETTLE", 0):
             b.passkey("done")
         self.assertEqual(log, [("hide", 4242), ("start", False, None), ("Storage.setCookies", ["sid"]),
                                ("open", st["url"])])  # hidden first, at once; then back into the panel
@@ -1082,7 +1082,7 @@ class Passkey(Base):
         log.clear()
         seen = iter(["https://accounts.google.com/challenge/pk?2", "about:blank", "https://myaccount.google.com/"])
         b.info = lambda: {"url": next(seen, "https://myaccount.google.com/")}
-        with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 0), mock.patch.object(browser, "PASSKEY_SETTLE", 0):
             b.passkey("done")
         self.assertEqual(log[-1], ("open", "https://myaccount.google.com/"))  # the next real page, not the blank one
 
@@ -1149,6 +1149,72 @@ class Passkey(Base):
         self.assertEqual(kinds, ["get"])
 
 
+class ChromePages(Base):
+    """#6301 (mark 2026-11-20: 'it works in other sessions ... that is a bug'): after a Google sign-in with a passkey,
+    the switch back to the panel attached to Chrome's own 'Sign in to Chrome?' page (chrome://signin-dice-web-intercept),
+    its Page.startScreencast failed with 'Screencast is already active', and the panel stayed blank. The panel never
+    attaches to Chrome's own pages, and a screencast left running starts again."""
+
+    DICE = "chrome://signin-dice-web-intercept.top-chrome/chrome-signin"
+
+    def test_the_switch_back_attaches_to_the_web_page_not_to_chrome_s_own_page(self):
+        b = browser.get("web")
+        pages = [{"targetId": "dice", "type": "page", "url": self.DICE, "title": "Sign in to Chrome?"},
+                 {"targetId": "web", "type": "page", "url": "https://myaccount.google.com/", "title": "App passwords"}]
+        b.call = lambda method, params=None, **k: {"targetInfos": pages} if method == "Target.getTargets" else {}
+        b._version = lambda port: {"webSocketDebuggerUrl": "ws://127.0.0.1:1/x"}
+        got = []
+        b._attach = lambda target: got.append(target)
+        with mock.patch.object(browser, "WS", lambda url: None), mock.patch.object(browser.threading, "Thread"):
+            b._connect()
+        self.assertEqual(got, ["web"])
+        self.assertEqual(list(b.targets), ["web"])
+        # Only Chrome's own page: a new tab, never that page.
+        pages[1:] = []
+        b.targets, got[:] = {}, []
+        b._new_target = lambda url="about:blank": "new"
+        with mock.patch.object(browser, "WS", lambda url: None), mock.patch.object(browser.threading, "Thread"):
+            b._connect()
+        self.assertEqual(got, ["new"])
+
+    def test_a_tab_that_becomes_chrome_s_own_page_leaves_the_panel(self):
+        b = browser.get("web")
+        b.target, b.targets = "web", {"web": {"url": "https://myaccount.google.com/", "title": "", "opener": None}}
+        switched = []
+        b._switch_quiet = lambda target: switched.append(target)
+        info = lambda tid, url, opener="web": {"targetInfo": {"targetId": tid, "type": "page", "url": url, "title": "",
+                                                              "openerId": opener}}
+        with mock.patch.object(browser.threading, "Thread", lambda target, args, **k: mock.Mock(
+                start=lambda: target(*args))):
+            b._event("Target.targetCreated", info("dice", self.DICE), None)  # opened by the shown page: not shown
+            self.assertEqual((list(b.targets), switched), (["web"], []))
+            b._event("Target.targetCreated", info("tab", "about:blank"), None)  # a new tab first shows about:blank
+            self.assertEqual(switched, ["tab"])
+            b.target = "tab"
+            b._event("Target.targetInfoChanged", info("tab", self.DICE), None)  # then becomes Chrome's own page
+            self.assertEqual((list(b.targets), switched), (["web"], ["tab", "web"]))
+
+    def test_a_screencast_left_running_starts_again(self):
+        b = browser.get("web")
+        calls = []
+
+        def call(method, params=None, session=None, **k):
+            calls.append(method)
+            if method == "Target.attachToTarget":
+                return {"sessionId": "s1"}
+            if method == "Page.startScreencast" and calls.count(method) == 1:
+                raise RiverError("the browser refused Page.startScreencast: Screencast is already active")
+            return {}
+        b.call = call
+        b._hook_passkeys = lambda s: None
+        b._fit = lambda: None
+        b._cast_quality = lambda: 60
+        b._attach("web")
+        self.assertEqual([m for m in calls if "Screencast" in m],
+                         ["Page.startScreencast", "Page.stopScreencast", "Page.startScreencast"])
+        self.assertEqual((b.session, b.target), ("s1", "web"))
+
+
 class Reattach(Base):
     """#5816: when serve starts, a Chrome of the last start that still runs gets its proxy again on its own port."""
 
@@ -1177,7 +1243,13 @@ class Reattach(Base):
         self.state("ag2", taken.getsockname()[1])
         self.state("ag3", self.free_port(), pid=2 ** 22 + 7)  # its Chrome ended: nothing to do
         killed = []
-        self.addCleanup(lambda: [b.proxy.server_close() for b in browser.BROWSERS.values() if b.proxy])
+        def _close_proxies():
+            for b in browser.BROWSERS.values():
+                if b.proxy:
+                    b.proxy.shutdown()
+                    b.proxy.server_close()
+                    b.proxy = None
+        self.addCleanup(_close_proxies)
         with mock.patch.object(browser.Browser, "_kill", lambda b, pid: killed.append(pid)):  # the pid is this test's
             got = browser.reattach()
             self.assertEqual(got, [("web", "ag1", "proxy"), ("web", "ag2", "stopped")])
@@ -2088,7 +2160,7 @@ class SnapshotLimits(Base):
         ref_of = lambda pat: "@" + __import__("re").search(r"@(e\d+) " + pat, lines).group(1)  # noqa: E731
         t0 = time.time()
         self.assertEqual(browser.resolve_target(b, "Invoice 1042"), rows[1].split()[1])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147: no page load, under 100 ms
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147: no page load, under 100 ms
         self.assertEqual(browser.resolve_target(b, 'link "Far link 24"'), ref_of('link "Far link 24"'))
         self.assertEqual(browser.resolve_target(b, "Remove", "card b"), ref_of(r'button "Remove" \(in "Card B"\)'))
         self.assertEqual(browser.resolve_target(b, "Edit", "Invoice 1043"), rows[2].split()[-2])
@@ -3054,7 +3126,7 @@ class ActionChanges(Base):
         self.assertIn('+ [menu "Account"] 3 elements:', cli._browser_result("click", out))
         t0 = time.time()
         self.assertEqual(act(action="click", selector="Nothing")["changes"], ["no change"])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147
         self.assertRegex(act(action="check", selector="Agree")["changes"][0], r'^~ @e\d+ checkbox "Agree" checked$')
         self.assertRegex(act(action="click", selector="Remove me")["changes"][0], r"^- 1 gone: @e\d+$")
         # #5759: a heading or a paragraph that changed is no 'no change'
@@ -3062,9 +3134,135 @@ class ActionChanges(Base):
         t0 = time.time()
         self.assertEqual(act(action="click", selector="Note")["changes"],
                          ["~ text changed (+10 characters): maxpm browser text"])
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147
         out = act(action="click", selector="Two")
         self.assertEqual((out["navigated"], out.get("changes"), out["outline"]), (True, None, ["[main] 1 link"]))
+
+
+TOASTS = (
+    b"<title>Toasts</title><main>"
+    b"<div id=static role=status>Always here</div>"
+    b"<div id=snack role=alert></div>"
+    b"<div id=live aria-live=polite></div>"
+    b"<div id=assertive aria-live=assertive></div>"
+    b"<button id=nothing>Nothing</button>"
+    b"<button id=flash>Create</button>"
+    b"<button id=rpc>Create RPC</button>"
+    b"<button id=secret_dlg>Show secret</button>"
+    b"<button id=pw_dlg>Login dialog</button>"
+    b"<button id=once_banner>Show token</button>"
+    b"<button id=echo_pw>Echo secret</button>"
+    b"<button id=form_dlg>Open form</button>"
+    b"<input id=appname aria-label='App name'>"
+    b"<div id=dlg_host></div>"
+    b"<script>"
+    b"const briefly = (el, txt) => { el.textContent = txt; setTimeout(() => { el.textContent = ''; }, 5); };"
+    b"flash.onclick = () => briefly(snack, 'Could not create app password');"
+    b"rpc.onclick = () => fetch('/fail').then(r => r.text()).then(t => briefly(snack, t));"
+    b"appname.addEventListener('input', () => {"
+    b"  if (appname.value === 'x') briefly(live, 'Name too short');"
+    b"  if (appname.value.includes('!')) briefly(live, 'Invalid character');"
+    b"});"
+    b"appname.addEventListener('keydown', e => {"
+    b"  if (e.key === 'Enter') briefly(assertive, 'Enter a name first');"
+    b"});"
+    b"secret_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><h2>Generated app password</h2>"
+    b"<div role=status>Your app password for your device: abcd efgh ijkl mnop</div><button>Done</button></div>'; };"
+    b"pw_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><input type=password value=topsecret>"
+    b"<div role=alert>Password required</div><button>Sign in</button></div>'; };"
+    b"once_banner.onclick = () => briefly(snack, \"Copy this token now, you won't be able to see it again: ghp_1234567890abcdef\");"
+    b"echo_pw.onclick = () => briefly(snack, 'Rejected SuperSecret99!');"
+    b"form_dlg.onclick = () => { dlg_host.innerHTML = '<div role=dialog><h2>Create a new app password</h2>"
+    b"<input type=text aria-label=Label><div role=alert>App name is required</div><button>Save</button></div>'; };"
+    b"</script></main>"
+)
+
+
+class TransientMessages(Base):
+    """#6303 in a real Chrome: click, fill, type and key report short toast/snackbar messages (role=alert, role=status,
+    aria-live) even when they disappear before the next read, while excluding secret dialogs and scrubbing passwords."""
+
+    def test_transient_toasts_reported_and_secrets_excluded(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/fail":
+                    time.sleep(0.03)
+                    body, ct = b"Something went wrong", "text/plain"
+                else:
+                    body, ct = TOASTS, "text/html"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+
+        # Pre-existing static status is not reported; Nothing stays 'no change' and fast (p147)
+        t0 = time.time()
+        self.assertEqual(act(action="click", selector="Nothing")["changes"], ["no change"])
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))
+
+        # Transient toast on click that disappears in 5 ms is still reported
+        out = act(action="click", selector="Create")
+        self.assertEqual(out["changes"], ['+ alert "Could not create app password"'])
+        self.assertIn('+ alert "Could not create app password"', cli._browser_result("click", out))
+
+        # Transient toast rendered after an async fetch is reported
+        self.assertEqual(act(action="click", selector="Create RPC")["changes"], ['+ alert "Something went wrong"'])
+
+        # Transient messages on fill, type, and key
+        out = act(action="fill", selector="App name", text="x")
+        self.assertIn('+ status "Name too short"', out["changes"])
+        out = act(action="type", text="!")
+        self.assertIn('+ status "Invalid character"', out["changes"])
+        out = act(action="key", key="Enter")
+        self.assertIn('+ alert "Enter a name first"', out["changes"])
+
+        # Secret dialog (one-time generated app password) is excluded
+        out = act(action="click", selector="Show secret")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("abcd efgh ijkl mnop", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # Dialog with a password field is excluded
+        out = act(action="click", selector="Login dialog")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("topsecret", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # One-time secret in a non-dialog alert banner is excluded
+        out = act(action="click", selector="Show token")
+        joined = "\n".join(out["changes"])
+        self.assertNotIn("ghp_1234567890abcdef", joined)
+        self.assertFalse(any(x.startswith(("+ alert ", "+ status ")) for x in out["changes"]))
+
+        # A filled sign-in password echoed in a toast is scrubbed
+        b.signin_values = {"SuperSecret99!"}
+        out = act(action="click", selector="Echo secret")
+        self.assertEqual(out["changes"], ['+ alert "Rejected ***"'])
+
+        # A normal form dialog (no password field, no one-time secret) still reports its validation alert
+        out = act(action="click", selector="Open form")
+        self.assertIn('+ alert "App name is required"', out["changes"])
 
 
 DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
@@ -3274,7 +3472,7 @@ class Fallbacks(Base):
         act(action="screenshot", selector="css:#go")
         t0 = time.time()
         act(action="click", selector="css:#go", changes=False)
-        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147, with the case logged
+        self.assertLess(time.time() - t0, timing.limit(0.1, below=browser.NAV_START, chrome=True))  # p147, with the case logged
         act(action="html")  # the failed name's case ended with the click
         r = rows()
         self.assertEqual([(x["kind"], x["action"], x["tried"], x["target"]) for x in r],

@@ -3,8 +3,8 @@
 // ...) get '<program>: <option>' from PROGRAMS and OPTIONS; a key that is in no list gets its words, so a new key
 // still shows.
 
-export const PROGRAMS = { aider: "Aider", amp: "Amp", claude: "Claude Code", codex: "Codex", copilot: "Copilot",
-  cursor: "Cursor", gemini: "Gemini CLI", goose: "Goose", grok: "Grok", hermes: "Hermes", opencode: "OpenCode", pi: "Pi" };
+export const PROGRAMS = { agy: "Antigravity CLI", aider: "Aider", amp: "Amp", claude: "Claude Code", codex: "Codex",
+  copilot: "Copilot", cursor: "Cursor", goose: "Goose", grok: "Grok", hermes: "Hermes", opencode: "OpenCode", pi: "Pi" };
 
 const OPTIONS = { args: "more arguments", prompt: "first prompt", model_ids: "model names", permission_mode: "permission mode",
   permissions: "permissions", sandbox: "sandbox", approval: "approval", approval_mode: "approval mode", mode: "mode",
@@ -15,11 +15,12 @@ const OPTIONS = { args: "more arguments", prompt: "first prompt", model_ids: "mo
   model_warnings: "model warnings", weak_model: "small model", fast: "fast mode", no_ide: "no IDE", quiet: "quiet output",
   settings_file: "settings file", visibility: "visibility", builtins: "built-in tools", max_turns: "most turns",
   checkpoints: "checkpoints", provider: "model provider", skills: "skills", toolsets: "tool sets", tools: "tools",
-  offline: "offline", standalone: "standalone", auto: "automatic mode" };
+  offline: "offline", standalone: "standalone", auto: "automatic mode", skip_permissions: "skip every permission" };
 
 export const LABELS = {
   // Agents
   launch_agents: "Agents the Start button offers", default_agent: "Agent program for new items", agent_rules: "Agent type by kind of item",
+  agent_order: "Agent providers in launch order, with session limits",
   default_model: "Model for new items", default_effort: "Effort for new items", default_min_model: "Weakest model allowed",
   default_max_model: "Strongest model allowed", effort_levels: "Effort levels", model_ladder: "Models, weakest to strongest",
   model_prices: "Model prices", prompt_pattern: "How a waiting prompt looks", prompt_wait: "Wait before a prompt counts",
@@ -38,6 +39,7 @@ export const LABELS = {
   expert_idle_end: "End a quiet expert after", fresh_min: "Fresh session above",
   session_idle_end: "End a quiet session with no item after", queue: "Use the queue",
   workspace: "Folder of each session", workspace_setup: "Setup command of a new worktree",
+  session_builds: "Build folders of sessions",
   manage_every: "Manager looks every", manage_settle: "Manager waits for more findings", manage_wait_high: "Wake the manager for a high message after",
   manage_wait_low: "Wake the manager for a low message after", manage_rewake: "Wake the manager again for an open message after",
   manage_unanswered: "An unanswered message is a finding after", manager_autocompact: "Manager context compacts at",
@@ -80,7 +82,8 @@ export const LABELS = {
   // Advanced
   serve_port: "Port of the page", serve_reload: "Restart serve after a code change", serve_reload_min: "Least time between restarts",
   serve_runners: "Fast commands (runners)", serve_loop_process: "Run the loop in its own process", tidy_every: "Close finished panes every",
-  update_check: "Look for a new version", relay_keep_awake: "Keep this computer awake for the relay", connect_within: "A started session must connect within",
+  update_check: "Look for a new version", agent_update_check: "Look for new agent versions",
+  agent_auto_update: "Agents that update by themselves",relay_keep_awake: "Keep this computer awake for the relay", connect_within: "A started session must connect within",
   setup_done: "Setup guide finished", cache_ttl: "Prompt cache lasts", sample_every: "Record session states every", sample_keep: "Keep session states for",
   db_max_size: "Largest queue file", folder_max_size: "Largest queue folder", archive_after: "Archive closed items after",
   archive_max_size: "Largest archive", space_ops_after: "Keep check runs at least", space_notices_after: "Keep notices at least",

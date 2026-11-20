@@ -49,6 +49,8 @@ DESCRIBE = {
     "default_model": "",  # Aider picks a model from the API keys it finds
     "model_ids": {},
     "prefix": "aider_",
+    # The command line names it (--model sonnet) before the first model line of the chat (#6280).
+    "model_read": r"(?:^|\s)--model[= ](\S+)",
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -153,13 +155,50 @@ def _skill_file():
     return words[-1] if words[-2:-1] == ["--append-system-prompt-file"] else None
 
 
+def instruction_files(folder):
+    """Each AGENTS.md from the repository root down to `folder`, as absolute paths (#6420). Aider reads no
+    instruction file by itself, so build_command gives each one with --read, as the other agents read them: the
+    root's rules first, the start folder's last. The walk stops at the first folder with a .git (a worktree has a
+    .git file); with no repository, only the folder's own file."""
+    if not folder:
+        return []
+    here = Path(folder).expanduser().resolve()
+    found = []
+    for d in (here, *here.parents):
+        f = d / SETUP["instructions"]
+        if f.is_file():
+            found.append(str(f))
+        if (d / ".git").exists():
+            return found[::-1]
+    own = here / SETUP["instructions"]
+    return [str(own)] if own.is_file() else []
+
+
+def _logged_reads(log):
+    """The AGENTS.md files that the last aider command line in a chat log read (--read) and that still exist: a
+    resume has no folder, so it reads the files that the session read at its start. Aider logs its argv joined by
+    spaces with no quotes (main.py), so a path with a space is not found."""
+    words = []
+    try:
+        lines = Path(log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        cmd = line.removeprefix("> ").split()
+        if cmd and Path(cmd[0]).name == "aider" and "--chat-history-file" in cmd:
+            words = cmd
+    return [w for k, w in zip(words, words[1:]) if k == "--read" and Path(w).name == SETUP["instructions"]
+            and Path(w).is_file()]
+
+
 def build_command(name, folder, model, effort, settings, prompt):
     """aider [--model M] [--reasoning-effort E] [settings] --chat-history-file <its log> --input-history-file <its
     prompts> [--restore-chat-history] --no-show-release-notes --set-env MAXPM_AIDER_SESSION=<name> [--read <skill>]
     [--read AGENTS.md] [args]. The session's log is chat_file(name); a resume (settings['resume']) appends to the log
     and the prompts of the session it resumes. With no name and no resume, Aider keeps both in the git root. The
-    prompt is not in the argv (FIRST_PROMPT). AGENTS.md of the folder goes in with --read, as Aider reads no
-    instruction file by itself. A start asks no question (#5270), as nobody watches a new pane yet: the release notes
+    prompt is not in the argv (FIRST_PROMPT). Each AGENTS.md from the repository root to the folder goes in with
+    --read (instruction_files), as Aider reads no instruction file by itself; with no folder (a resume),
+    settings['instruction_files']. A start asks no question (#5270), as nobody watches a new pane yet: the release notes
     question is off, and so are, by their settings' defaults, the .gitignore question, the analytics question and the
     model warnings (with
     them off, ollama_chat/<model> reaches the local Ollama at its default address with no OLLAMA_API_BASE)."""
@@ -189,8 +228,8 @@ def build_command(name, folder, model, effort, settings, prompt):
     skill = _skill_file() if s.get("system_prompt_file") else None
     if skill:
         argv += ["--read", skill]
-    if folder and Path(folder, SETUP["instructions"]).is_file():
-        argv += ["--read", SETUP["instructions"]]
+    for f in (s.get("instruction_files") if folder is None else None) or instruction_files(folder):
+        argv += ["--read", f]
     if (s.get("args") or "").strip():
         argv.append(Raw(s["args"].strip()))
     return argv
@@ -242,7 +281,6 @@ IDENTITY = {
     "source": "env",
     "env": SESSION_ENV,
     "id_pattern": r"[A-Za-z0-9][\w.-]{0,127}",
-    "log_glob": None,
     "pane": None,
     "url": None,
     "inside_env": [SESSION_ENV],
@@ -395,14 +433,49 @@ _MODEL_LINE = re.compile(r"^(?:> )?(?:Main model|Model): (\S+) with (\S+) edit f
 
 def chat_settings(lines):
     """{setting key: value} as the session runs now, from the last model announcement ('Model: <name> with <format>
-    edit format, reasoning high'): the edit format. Aider writes one at each start, /model, /chat-mode and
-    /reasoning-effort."""
+    edit format, reasoning high'): the edit format, model and effort. Aider writes one at each start, /model,
+    /chat-mode and /reasoning-effort. When the line names no reasoning level, Aider sends no reasoning_effort
+    parameter (aider/args.py default: not set; /settings: reasoning_effort: None), so the model runs at its own
+    default ('default', #6317)."""
     got = {}
     for line in lines:
         m = _MODEL_LINE.match(line.rstrip())
         if m:
-            got = {"edit_format": m.group(2)}
+            # The model and its reasoning level too (#6280, #6317): the line names both from the start.
+            level = re.search(r"\breasoning (\w+)", line)
+            got = {"edit_format": m.group(2), "model": m.group(1),
+                   "effort": level.group(1) if level else "default"}
     return got
+
+
+def config_settings(path=None):
+    """What an Aider session takes from ~/.aider.conf.yml (or Aider's own default) when neither the chat log nor the
+    command line names it (#6317). Aider's --reasoning-effort defaults to None (not set, so the model runs at its own
+    default: 'default'). A small reader of the two keys: no YAML library."""
+    out = {"effort": "default"}
+    try:
+        text = (Path(path) if path is not None else Path.home() / ".aider.conf.yml").read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line or raw[:1].isspace():
+            continue
+        k, v = (p.strip() for p in line.split(":", 1))
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1].strip()
+        if not v or v.lower() in ("null", "~", "none"):
+            continue
+        if k == "reasoning-effort":
+            out["effort"] = v
+        elif k == "model":
+            out["model"] = v
+    return out
+
+
+# Where the Settings dialog reads each setting of a running session (#6280, #6317): Aider's model line at its start,
+# and ~/.aider.conf.yml (with Aider's own default for effort when unset) before the log has that line.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config")}
 
 
 def read_effort(entries):
@@ -472,12 +545,15 @@ INPUT = {"native": None, "interrupt": ["C-c"]}
 def resume_command(session_ref, model, effort, settings, name=None):
     """aider on the chat log of session_ref (a session name) with --restore-chat-history, which reads the old turns
     back into the chat; None when that session has no log. The files of the chat and its chat mode do not come back.
-    A first prompt (settings['prompt']) goes in as at a start (FIRST_PROMPT)."""
-    if not session_ref or chat_path(session_ref) is None:
+    A first prompt (settings['prompt']) goes in as at a start (FIRST_PROMPT). The AGENTS.md files that the session
+    read at its start come from its log (_logged_reads), as a resume has no folder (#6420)."""
+    log = chat_path(session_ref) if session_ref else None
+    if log is None:
         return None
     ref = Path(str(session_ref)).name.removesuffix(".chat.history.md")
     s = {k: v for k, v in (settings or {}).items() if k not in ("fork", "prompt")}
-    return build_command(name or ref, None, model, effort, {**s, "resume": ref}, None)
+    return build_command(name or ref, None, model, effort,
+                         {**s, "resume": ref, "instruction_files": _logged_reads(log)}, None)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -554,12 +630,17 @@ COMMANDS = [
 # ---------------------------------------------------------------------------------------------------------------
 
 SETUP = {
-    # Aider reads no instruction file by itself; build_command passes this one with --read when the folder has it.
+    # Aider reads no instruction file by itself; build_command passes each one from the repository root to the
+    # start folder with --read (instruction_files).
     "instructions": "AGENTS.md",
     "skills_dir": None,
     "voice": "/voice records from the microphone and types the words as the prompt (it needs an OpenAI key).",
     "open_link": None,
 }
+
+# 12. Update (#6430): aider --message answers one request and exits (--no-git: the test folder is no repository);
+# PyPI publishes aider-chat. Its installer puts it in a uv tool, which uv updates.
+UPDATE = {"smoke": ["--message", "Reply OK", "--model", "{model}", "--no-git", "--yes-always"], "pypi": "aider-chat"}
 
 
 # How each command works from the page (#5220, #5291). Aider is a line-based program: a command prints its answer into

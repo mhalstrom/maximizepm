@@ -46,6 +46,20 @@ class ReportDialog(unittest.TestCase):
         self.assertLess(html.index("Risks"), html.index("checkout"))
         self.assertIn('class="rep-g risk"', html)
         self.assertIn('data-rep-task="4"', html)
+        self.assertIn('<details class="rep-tasks"><summary><b>The tasks</b>', html)  # closed below a written summary
+
+    def test_a_written_summary_leads_and_links_its_tasks(self):
+        # #6493: the summary is Markdown; each #<id> of a task of the release shows that task, another stays text.
+        html = run("m.leftHtml({...R, summary: {text: 'x', by: 'dev', at: null}}, "
+                   "() => '<h2>What changes for you</h2><ul><li>Pay by card (#1, #77)</li></ul>')")
+        self.assertIn("<h2>What changes for you</h2>", html)
+        self.assertIn('(<span class="link" data-rep-task="1" role="button" tabindex="0">#1</span>, #77)', html)
+        self.assertLess(html.index("What changes"), html.index("The tasks"))
+        plain = run("m.leftHtml({...R, summary: {text: 'An agent writes it now (#9).', by: 'maxpm', at: null}})")
+        self.assertIn('<details class="rep-tasks" open>', plain)  # no written summary yet: the list is open
+        self.assertIn("Written by MaximizePM from its records.", plain)
+        self.assertEqual(run("m.linkTasks('<a href=\"#1\">x</a> &#1; #1', R.tasks)"),
+                         '<a href="#1">x</a> &#1; <span class="link" data-rep-task="1" role="button" tabindex="0">#1</span>')
 
     def test_a_task_has_its_line_proof_and_decisions(self):
         html = run("m.taskHtml(R.tasks['1'])")

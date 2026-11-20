@@ -74,7 +74,7 @@ class Contract(Env):
     def test_the_mode_is_the_effort_and_max_is_ultra(self):
         self.assertEqual([self.a.effort_name(x) for x in ("low", "medium", "high", "xhigh", "max")],
                          ["low", "medium", "high", "ultra", "ultra"])
-        self.assertEqual(self.a.effort_choices(), ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(self.a.effort_choices(), ["low", "medium", "high", "max"])  # ultra once, as max (#6256)
         self.assertEqual(self.a.effort["label"], "Mode")
         rx = re.compile(amp.EFFORT["read"])
         self.assertEqual(rx.search("amp --mode ultra --no-ide").group(1), "ultra")
@@ -261,6 +261,53 @@ class Chat(Env):
                                                  "cache_write": 54341})
         self.assertEqual(amp.chat_settings(lines), {"effort": "medium", "model": "claude-opus-5-5"})
         self.assertEqual(amp.chat_settings(file_lines("thread_reply.json")), {"effort": "low", "model": "gpt-5.6-terra"})
+
+    def test_config_settings_reads_session_json_and_defaults_to_medium(self):
+        data_home = self.root / "data"
+        sf = data_home / "amp" / "session.json"
+        env = {"XDG_DATA_HOME": str(data_home)}
+        # Missing session.json: Amp's built-in default mode is medium (claude-opus-5-5).
+        self.assertEqual(amp.config_settings(env), {"effort": "medium", "model": "claude-opus-5-5"})
+        sf.parent.mkdir(parents=True)
+        for mode, model in (("low", "gpt-5.6-terra"), ("medium", "claude-opus-5-5"),
+                            ("high", "gpt-6-astra"), ("ultra", "claude-fable-5-2")):
+            sf.write_text(json.dumps({"agentMode": mode}), encoding="utf-8")
+            self.assertEqual(amp.config_settings(env), {"effort": mode, "model": model})
+        sf.write_text(json.dumps({"agentMode": "rush"}), encoding="utf-8")
+        self.assertEqual(amp.config_settings(env), {"effort": "low", "model": "gpt-5.6-terra"})
+        sf.write_text(json.dumps({"agentMode": "smart"}), encoding="utf-8")
+        self.assertEqual(amp.config_settings(env), {"effort": "medium", "model": "claude-opus-5-5"})
+        sf.write_text(json.dumps({"agentMode": "openai/gpt-6-astra"}), encoding="utf-8")
+        self.assertEqual(amp.config_settings(env), {"model": "openai/gpt-6-astra"})
+        sf.write_text("{bad json", encoding="utf-8")
+        self.assertEqual(amp.config_settings(env), {"effort": "medium", "model": "claude-opus-5-5"})
+
+    def test_screen_settings_reads_mode_from_input_box(self):
+        self.assertEqual(amp.screen_settings(fixture("pane_idle.txt").splitlines()), {"effort": "medium"})
+        self.assertEqual(amp.screen_settings(fixture("pane_connecting.txt").splitlines()), {"effort": "low"})
+        self.assertEqual(amp.screen_settings(fixture("pane_idle_reply.txt").splitlines()), {"effort": "low"})
+        self.assertEqual(amp.screen_settings(fixture("pane_approval.txt").splitlines()), {"effort": "medium"})
+        self.assertEqual(amp.screen_settings(fixture("pane_credits.txt").splitlines()), {})
+
+    def test_settings_dialog_shows_model_and_mode_before_first_reply(self):
+        data_home = self.root / "data"
+        sf = data_home / "amp" / "session.json"
+        sf.parent.mkdir(parents=True)
+        sf.write_text(json.dumps({"agentMode": "low"}), encoding="utf-8")
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "amp-1")
+        conn.execute("UPDATE agents SET agent_type='amp', pid_cmd='amp --no-ide' WHERE name='amp-1'")
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}):
+            got = {s["key"]: s for s in sessions.session_settings(conn, "amp-1")["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("gpt-5.6-terra", "config"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "config"))
+        # Command line mode wins over config_settings before a reply.
+        conn.execute("UPDATE agents SET pid_cmd='amp --mode high --no-ide' WHERE name='amp-1'")
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}):
+            got = {s["key"]: s for s in sessions.session_settings(conn, "amp-1")["settings"]}
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("high", "command line"))
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("gpt-5.6-terra", "config"))
 
     def test_refresh_appends_only_what_is_new_and_waits_between_exports(self):
         f = amp.threads_dir() / f"{TOOLS_THREAD}.jsonl"

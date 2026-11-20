@@ -1,0 +1,40 @@
+────────────────────────────────────────────────────────────
+> Use your tool for asking the user a question: ask me which color I prefer, with the options red, green and blue. Then
+  tell me my answer.
+
+? Which color do you prefer?
+> purple
+
+  Your answer was: purple.
+
+────────────────────────────────────────────────────────────
+> Call your ask_question tool once with two questions: first 'Which size?' with options small and large; second 'Which
+  fruits do you like?' with options apple, pear and plum, where I may pick several (multi-select). Then tell me my
+  answers.
+
+? Which size?
+> large
+? Which fruits do you like?
+> pear, plum
+
+  Here are your answers:
+
+  1. Which size?: large
+  2. Which fruits do you like?: pear, plum
+
+────────────────────────────────────────────────────────────
+> Write a 400-word story about a river.
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> /
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> /add-dir             Add a directory to the workspace
+  /agents              List available custom agents
+  /artifact            View and review artifacts
+  /btw                 Ask a side question without interrupting the current task
+  /changelog           Show release notes and changes
+   ↓ 45 more
+
+  ↑/↓ Navigate · enter Select · tab Complete
+esc to cancel                                                                                     Gemini 3.8 Flash · low

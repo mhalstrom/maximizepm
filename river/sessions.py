@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import core  # first: core loads the agent adapters while it loads (#5181)
@@ -379,11 +380,12 @@ _TAIL_CACHE = {}  # (path, tail) -> (size, mtime, the answer of entries(kind, pa
 
 
 def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
-    """{entries, cursor, turn, before}: the page lines of the transcript after cursor (None: its last part), at most
-    limit of them (the newest), the cursor of the next read, the state of the last turn (working, idle, or None), and
-    the byte where the line of the first entry starts: the earlier lines are before it (older_page)."""
+    """{entries, cursor, turn, turn_at, before}: the page lines of the transcript after cursor (None: its last part),
+    at most limit of them (the newest), the cursor of the next read, the state of the last turn (working, idle, or
+    None), when the file last changed (UTC ISO, for comparing with a newer screen report), and the byte where the line
+    of the first entry starts: the earlier lines are before it (older_page)."""
+    st = Path(path).stat()
     if cursor is None:
-        st = Path(path).stat()
         got = _TAIL_CACHE.get((str(path), tail))
         if not got or got[:2] != (st.st_size, st.st_mtime_ns):
             got = _TAIL_CACHE[(str(path), tail)] = (st.st_size, st.st_mtime_ns, _entries(kind, path, None, tail=tail))
@@ -391,8 +393,9 @@ def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
     else:
         r = _entries(kind, path, cursor)
     k = _first(r["offs"], limit)
-    return {"entries": r["entries"][k:], "cursor": r["cursor"], "turn": r["turn"], "cwd": r["cwd"],
-            "before": r["offs"][k] if k else r["start"]}
+    turn_at = core.iso(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc))
+    return {"entries": r["entries"][k:], "cursor": r["cursor"], "turn": r["turn"], "turn_at": turn_at,
+            "cwd": r["cwd"], "before": r["offs"][k] if k else r["start"]}
 
 
 def _first(offs, limit):
@@ -570,7 +573,16 @@ def older_page(conn, agent, file, before=None, root=None, croot=None):
     return {"agent": agent, "entries": got, "older": older, "refs": item_refs(conn, got)}
 
 
-def state(conn, a, turn, waiting=None):
+def _screen_idle(conn, a, turn_at=None):
+    """Whether the pane watcher's idle report is at least as new as the transcript's last write, for an agent whose
+    state comes from its screen (STATE 'detect', #6261): a turn cancelled with Esc can leave its prompt or an empty
+    step last in the log while the screen is back at the idle prompt."""
+    if a.get("activity_event") != "report:idle" or core._state_source(conn, a["name"]) != "detect":
+        return False
+    return not turn_at or (a.get("activity_at") or "") >= turn_at
+
+
+def state(conn, a, turn, waiting=None, turn_at=None):
     """(key, label) of what a session does now: stopping, prompt (a permission prompt), answer (an open question to
     a person), idle (in maxpm wait, or its turn ended), or working."""
     if a.get("stop_at"):
@@ -579,6 +591,8 @@ def state(conn, a, turn, waiting=None):
         return "prompt", STATES["prompt"]
     if a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]])):
         return "answer", STATES["answer"]
+    if turn == "working" and _screen_idle(conn, a, turn_at):
+        turn = "idle"
     if a.get("role") in ("expert", "assistant") and turn != "working":
         # An expert waits at its prompt for the person by design (#4955), and so does an assistant (#5110): not idle,
         # and nothing waits on the person.
@@ -595,17 +609,17 @@ def state(conn, a, turn, waiting=None):
     return "working", STATES["working"]
 
 
-def pane_state(conn, a, turn, prompt=None, pane=False, waiting=None):
+def pane_state(conn, a, turn, prompt=None, pane=False, waiting=None, turn_at=None):
     """state() with what the session's tmux pane shows now (server.pane_prompts): a prompt there is a prompt. For an
     agent whose state comes from its pane (its adapter's STATE['state'] is 'detect': Codex), a pane read now that
     shows no prompt wins over the blocked state that the watch of maxpm serve recorded up to notify_interval before
     (#5220: after mark chose in Codex's /model menu, the page said for half a minute that it waited at a permission
     prompt)."""
-    key, label = state(conn, a, turn, waiting)
+    key, label = state(conn, a, turn, waiting, turn_at)
     if prompt and key != "stopping":
         return "prompt", STATES["prompt"]
     if key == "prompt" and pane and not prompt and core._state_source(conn, a["name"]) == "detect":
-        return state(conn, dict(a, activity_prompt=None), turn, waiting)
+        return state(conn, dict(a, activity_prompt=None), turn, waiting, turn_at)
     return key, label
 
 
@@ -642,8 +656,7 @@ def running(conn, terminals=None):
     pane here, or it is active (or asked to stop and still holds work) and recorded no process (a sandbox that
     cannot run ps)."""
     out, here = [], core.this_host()
-    for r in conn.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY name"):
-        a = core.agent_status(conn, r["name"])
+    for a in core.agent_statuses(conn, kind="ai"):
         # A session asked to stop stays while it still holds its task or a target: its row shows 'ending' (#5041).
         # When it has released them (core.ended), it leaves the list.
         if core.ended(a) or a["state"] == "gone" or a.get("via") == "http":
@@ -653,13 +666,13 @@ def running(conn, terminals=None):
                 continue
         elif not ((terminals or {}).get(a["name"]) or (not a.get("pid") and a["state"] in ("active", "stopped"))):
             continue
-        out.append(a)
+        out.append(dict(a))  # its own copy, as agent_status gives: a caller may set a field
     return out
 
 
 def _open_questions(conn, name):
     # Not a question held for the manager (#5307): the person sees only what the manager forwards.
-    return conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent, m.created_at, m.level, m.blocked FROM messages m JOIN agents p ON "
+    return conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent, m.created_at, m.level, m.blocked, m.decision FROM messages m JOIN agents p ON "
                         "p.name=m.to_agent AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND "
                         "m.held_for IS NULL AND m.from_agent=? ORDER BY m.id", (name,)).fetchall()
 
@@ -689,6 +702,7 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
     qs = _open_questions(conn, a["name"])
     early = core.earlier_for(conn, "message", [r["id"] for r in qs]) if qs else {}  # g2 (#5955)
     shown = core.exhibits_for(conn, "message", [r["id"] for r in qs]) if qs else {}  # g3 (#5956)
+    arts = core.message_artifacts(conn, [r["id"] for r in qs]) if qs else {}  # what it is about (#6208)
     for r in qs:
         if said and (core._ts(r["created_at"]) or said) <= said:
             continue
@@ -697,6 +711,7 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
         out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"],
                     "asked_at": r["created_at"], "old": old, "note": core.forward_note(conn, r),
                     "earlier": early.get(r["id"], []), "exhibits": shown.get(r["id"], []), "from": a["name"],
+                    "artifact_links": arts.get(r["id"], []), "decision": core.decision_of(r),  # #6413
                     # the card's tag and level (#5998, #6002)
                     "type": core.action_type(r["body"], "decide"), "level": r["level"], "blocked": r["blocked"]})
     return out
@@ -823,7 +838,12 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         prompt = (prompts or {}).get(a["name"])
         # The override of pane_state only after a read of the panes (prompts given), not with no read at all.
         key, label = pane_state(conn, a, tail["turn"], prompt,
-                                prompts is not None and bool((terminals or {}).get(a["name"])), waiting)
+                                prompts is not None and bool((terminals or {}).get(a["name"])), waiting,
+                                tail.get("turn_at"))
+        # #6282: a prompt that waits for the manager first shows no card to the person (as a held question, #5307).
+        boss = core.prompt_held(conn, a["name"], prompt) if prompt else None
+        if boss:
+            prompt, label = None, f"waits at a prompt: the manager {boss} answers it first"
         if not path and not a.get("pid") and key not in ("stopping", "answer", "prompt"):
             # It ran no maxpm command and wrote no transcript: not working (#4621). Its pane shows a shell: it ended.
             # A prompt that the pane watcher reported (maxpm report --state blocked) waits on the person, also before
@@ -845,6 +865,9 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "owns": a.get("owns") or [], "goals": goals.get(a["name"], []), "state": key, "state_label": label,
                 # The shell commands that run in it now (#5830): [{pid, started, label}], None when not known.
                 "shells": a.get("shells"),
+                # Its background commands and subagents (#6454): [{id, kind, what, at, end, status, wait}], None when
+                # its CLI has no reader of them.
+                "tasks": a.get("tasks"),
                 # End (#5041): who asked it to stop and why, and End now for a process on this computer.
                 "stop_by": a.get("stop_by"), "stop_reason": a.get("stop_reason"), "pid": a.get("pid"),
                 # A session that ran no maxpm command records no process: End now ends the program in its own tmux
@@ -890,12 +913,15 @@ def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=Fals
     kind, path = transcript(conn, agent, root, croot)
     if not path:  # a session in a pane still gets the text bar
         key, label = pane_state(conn, a, None, prompt, pane)
+        # A prompt before its first turn (Claude Code's trust question in a new folder, #6242): the chat says so, not
+        # that a maxpm command records its log.
+        note = (f"No chat of {agent} yet: it waits at a prompt in its terminal, before its first turn."
+                if prompt else no_log_note(conn, agent, root, croot))
         return {"agent": agent, "transcript": None, "entries": [], "cursor": None, "turn": None, "state": key,
-                "state_label": label, "session_url": a.get("session_url"),
-                "note": no_log_note(conn, agent, root, croot)}
+                "state_label": label, "session_url": a.get("session_url"), "note": note}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
-    key, label = pane_state(conn, a, turn, prompt, pane)
+    key, label = pane_state(conn, a, turn, prompt, pane, turn_at=got.get("turn_at"))
     older = None
     if cursor is None:  # the first read: where the earlier lines start, for scrolling up (#5120)
         chain = transcript_chain(conn, agent, kind, path)
@@ -1080,12 +1106,26 @@ def session_usage(conn, name, root=None, croot=None):
             tot["eq"] = core.usage_eq({"input": tot["input"], "cache_read": tot["cache_read"], "write_1h": 0,
                                        "write_5m": tot["cache_write"]})
     limits = None
+    limits_source = None
     if ad is not None and path and ad.has("chat_limits"):
         try:
             text, _start, _end = _read(path, None, USAGE_TAIL)
             limits = ad.chat_limits(text.splitlines())
+            if limits is not None:
+                limits_source = "chat"
         except (OSError, ValueError, EOFError):
             limits = None
+    if limits is None and ad is not None:
+        rec = core.agent_limit_status(conn, ad.id)
+        if rec and (rec["windows"] or rec["limited"] or rec["remaining_pct"] is not None):
+            limits_source = rec["source"]
+            if rec["windows"]:
+                limits = rec["windows"]
+            else:
+                limits = [{"name": "Usage limit" if rec["limited"] else "Quota",
+                           "used_percent": rec["used_pct"] if rec["used_pct"] is not None else 100.0,
+                           "remaining_percent": rec["remaining_pct"] if rec["remaining_pct"] is not None else 0.0,
+                           "resets_at": rec["resets_at"], "resets_text": rec["resets_text"]}]
     label = ad.label if ad else "This agent"
     note = None
     if limits is None:
@@ -1093,11 +1133,12 @@ def session_usage(conn, name, root=None, croot=None):
                 f"its command there." if ad is None or not ad.has("chat_limits") else
                 f"{label} has written no plan limit to this session's log yet.")
     pct = round(100 * context / window, 1) if context is not None and window else None
-    return {"agent": name, "label": ad.label if ad else None, "model": model, "context": context, "window": window,
+    return {"agent": name, "label": ad.label if ad else None, "adapter_id": ad.id if ad else None,
+            "model": model, "context": context, "window": window,
             "percent": pct, "measured": measured,
             **({k: (round(v) if k == "eq" and v is not None else v) for k, v in tot.items()} if measured else
                dict.fromkeys(tot)),
-            "limits": limits, "limits_note": note}
+            "limits": limits, "limits_source": limits_source, "limits_note": note}
 
 
 # The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote
@@ -1515,12 +1556,16 @@ def session_settings(conn, agent, root=None, croot=None):
             seen = _transcript_settings(kind, path)
         except (OSError, ValueError, EOFError):
             seen = {}
+    shown = screen_settings(conn, agent, ad)  # what its screen shows now (agy's footer, #6260): newer than the log
+    own = ad.config_settings()  # the agent's own config, the last source (#6280)
     cmd = a.get("pid_cmd") or pane_command(conn, agent, ad)
     models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
     live = _live_settings(conn, agent)
     out = []
     for spec in ad.session_specs():
         value, source = seen.get(spec["key"]), "session"
+        if shown.get(spec["key"]) is not None:
+            value, source = shown[spec["key"]], "screen"
         got = live.get(spec["key"])
         if got and _live_holds(kind, path, spec["key"], got):
             # A change the page made in place, with no turn after it yet (#5288): newer than the transcript.
@@ -1533,6 +1578,9 @@ def session_settings(conn, agent, root=None, croot=None):
             value, source = ("on" if spec["flag"] in cmd.split() else "off"), "command line"
         if value is None and spec.get("default"):
             value, source = core.setting(conn, spec["default"], agent=agent) or None, "default"
+        if value is None and own.get(spec["key"]) is not None:
+            # What the agent takes from its own config when nothing names it (#6280: ~/.codex/config.toml).
+            value, source = own[spec["key"]], "config"
         row = {}
         if spec["kind"] == "model":
             # The models of the session's own provider (#4633), as the launch dialog lists them; the one it runs is
@@ -1540,7 +1588,9 @@ def session_settings(conn, agent, root=None, croot=None):
             # picks: the adapter's own models; the dialog lists them first when the list is long (OpenCode, #5242).
             row = {"kind": "choice", "choices": [m["name"] for m in models], "reported": value,
                    "notes": {m["name"]: f"{m['id']}{' · ' + m['note'] if m['note'] else ''}" for m in models},
-                   "picks": [m["name"] for m in models if m.get("pick")]}
+                   "picks": [m["name"] for m in models if m.get("pick")],
+                   # The name people read, where the adapter gives one (Antigravity: Gemini 4 Neon, #6256).
+                   "labels": {m["name"]: m["label"] for m in models if m.get("label")}}
             value = core.model_name_of(models, value) or value
         out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
                     **row,
@@ -1549,6 +1599,19 @@ def session_settings(conn, agent, root=None, croot=None):
                     "default_key": spec.get("default"),
                     "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
     return {"agent": agent, "provider": prov, "settings": out, "transcript": kind if path else None}
+
+
+def screen_settings(conn, agent, ad):
+    """The settings that the agent's tmux pane shows now, by its adapter's screen_settings (#6260); {} when the adapter
+    has no reader or the agent has no pane here."""
+    if not ad.has("screen_settings"):
+        return {}
+    from . import server
+    try:
+        text = server.terminal_screen(conn, agent)["text"]
+    except core.RiverError:
+        return {}
+    return ad.screen_settings(server._plain(text).splitlines())
 
 
 def pane_command(conn, agent, ad):

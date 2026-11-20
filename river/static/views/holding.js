@@ -16,31 +16,47 @@ const cache = {};  // pipeline name -> {sig, html}: the detail draws at once, th
 const short = (sha) => (sha || "").slice(0, 8);
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
+// A count of lines in a card: 33912 is 34k (#6209).
+const lines = (n) => n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+// The base in short: the release's #id ('the pin of release #6023' is #6023), else the label (#6209).
+const since = (label) => (String(label).match(/#\d+/) || [label])[0];
+
 // The inside of the holding stage card (views/pipeline.js stageCard).
 export function holdingCardHtml(h) {
   const n = h.commits || 0;
   return `<span class="pl-kind">holding</span><span class="pl-name">holding</span>
     <span class="pl-ver pl-words">${h.reading ? "reading…" : n ? plural(n, "commit") : h.folder ? "nothing waits" : "no git folder"}</span>
-    ${n ? `<span class="pl-st queued">● ${h.reviewed} of ${n} reviewed</span>` : `<span class="pl-st none">● empty</span>`}
-    <span class="pl-meta pl-more-line">${n ? `+${h.added} −${h.removed}` : ""}${h.base_label ? ` · since ${esc(h.base_label)}` : ""}</span>`;
+    ${!n ? `<span class="pl-st none">● empty</span>` : h.review_enabled
+      ? `<span class="pl-st queued">● ${h.reviewed} of ${n} reviewed</span>` : ""}
+    <span class="pl-meta pl-more-line">${n ? `+${lines(h.added)} −${lines(h.removed)}` : ""}${h.base_label ? ` · since ${esc(since(h.base_label))}` : ""}</span>`;
 }
 
 function table(H) {
-  return `<div class="pl-table pl-blocks"><table><tr><th>Commit</th><th>What</th><th>Task</th><th>By</th><th>Review</th><th>Changes</th><th></th></tr>
+  return `<div class="pl-table pl-blocks"><table><tr><th>Commit</th><th>What</th><th>Task</th><th>By</th>${H.review_enabled ? "<th>Review</th>" : ""}<th>Changes</th><th></th></tr>
     ${H.commits.map(c => `<tr><td class="mono">${esc(short(c.sha))}</td><td>${esc(c.subject)}</td>
       <td>${c.tasks.map(t => `<span class="link" data-open="${t.id}" title="${esc(t.title)}">#${t.id}</span>`).join(" ")}</td>
       <td class="t-s">${esc(c.session)}${c.by_session ? "" : ` <span class="muted">(git author)</span>`}</td>
-      <td class="t-s"><span class="pl-st ${CLS[c.review.state]}">${MARK[c.review.state]} ${esc(c.review.text)}</span>
-        ${c.review.release ? ` <span class="link" data-report="${c.review.release}">report</span>` : ""}</td>
+      ${c.review ? `<td class="t-s"><span class="pl-st ${CLS[c.review.state]}">${MARK[c.review.state]} ${esc(c.review.text)}</span>
+        ${c.review.release ? ` <span class="link" data-report="${c.review.release}">report</span>` : ""}</td>` : ""}
       <td class="mono">+${c.added} −${c.removed}</td>
       <td>${button("Diff", { cls: "plain", data: { "hd-diff": c.sha }, title: "Show this commit" })}</td></tr>`).join("")}
   </table></div>`;
 }
 
+function checksHtml(checks) {
+  return (checks || []).map(({ source, workflow, branch, last_run: run, error }) => {
+    const state = run?.state || "none";
+    return `<div class="pl-bar"><span>${esc(source)} ${esc(workflow)} on ${esc(branch)}</span>
+      <span class="pl-st ${esc(state)}">● ${esc(error ? "Couldn’t refresh" : run?.state || "No run yet")}</span>
+      ${run ? `<span class="mono">${esc(short(run.version))}</span>` : ""}
+      ${run?.url ? button("Open run", { cls: "plain", data: { url: run.url } }) : ""}</div>`;
+  }).join("");
+}
+
 function html(H) {
   const n = H.commits.length, c = H.counts, rel = H.release || {};
   if (!H.folder) {
-    return `<h3>Holding</h3><div class="muted t-s">The project of ${esc(H.pipeline)} has no git folder, so holding shows no commits. Link one: maxpm project path ${esc(H.project || "<project>")} &lt;folder&gt;</div>`;
+    return `<h3>Holding</h3>${checksHtml(H.checks)}<div class="muted t-s">The project of ${esc(H.pipeline)} has no git folder, so holding shows no commits. Link one: maxpm project path ${esc(H.project || "<project>")} &lt;folder&gt;</div>`;
   }
   // The release buttons are at the top of the pipeline's page with every release control (#6189).
   const acts = [
@@ -48,12 +64,13 @@ function html(H) {
     H.report ? `<span class="link t-m" data-report="${H.report}">Open the review report #${H.report}</span>` : "",
   ].filter(Boolean).join("");
   return `<h3>Holding · ${plural(n, "commit")} since ${esc(H.base_label || "the start")}</h3>
-    ${n ? `<div class="pl-bar"><span class="pl-st passed">✓ ${c.reviewed} reviewed</span><span class="pl-st running">◐ ${c.in_review} in review</span>
+    ${checksHtml(H.checks)}
+    ${n && H.review_enabled ? `<div class="pl-bar"><span class="pl-st passed">✓ ${c.reviewed} reviewed</span><span class="pl-st running">◐ ${c.in_review} in review</span>
       <span class="pl-st queued">○ ${c.not_reviewed} not reviewed</span></div>` : ""}
     <div class="pl-bar hd-acts">${acts}</div>
     <div class="t-s">The release after holding: ${esc(rel.text || "")}${rel.why ? ` · <span class="muted">${esc(rel.why)}</span>` : ""}${rel.plan ? ` · <span class="muted">${esc(rel.plan)}</span>` : ""}</div>
     ${n ? table(H) : `<div class="muted t-s">No commit waits: every commit up to ${esc(short(H.head))} has left holding.</div>`}
-    <div class="muted t-s">A release takes the reviewed commits in order, up to the first one that is not reviewed; Release all takes every one, for a pipeline whose review comes after the release.</div>`;
+    ${H.review_enabled ? `<div class="muted t-s">A release takes the reviewed commits in order, up to the first one that is not reviewed; Release all takes every one, for a pipeline whose review comes after the release.</div>` : ""}`;
 }
 
 // The detail of the holding stage: what was read last at once, then a new read (views/pipeline.js detail()).

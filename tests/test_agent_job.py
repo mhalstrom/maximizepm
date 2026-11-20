@@ -108,6 +108,15 @@ class AgentJob(Base):
         shown = agent_job.setup(self.c, "mpm", show=True, actor="mark", cli="codex")
         self.assertIn("codex exec --json", shown["text"])
         self.assertIn("CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}", shown["text"])
+        shown = agent_job.setup(self.c, "mpm", show=True, actor="mark", cli="agy")  # #6249
+        self.assertIn('install.sh | bash -s -- --dir $HOME/.local/bin\n          echo "$HOME/.local/bin" >> '
+                      '"$GITHUB_PATH"', shown["text"])
+        self.assertIn('agy -p "$MAXPM_PROMPT" --output-format json --mode accept-edits --settings', shown["text"])
+        self.assertIn('"modelProvider":"gemini"', shown["text"])
+        self.assertIn('"command(git status)"', shown["text"])
+        self.assertIn("GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}", shown["text"])
+        with self.assertRaisesRegex(RiverError, "one of: claude, codex, agy"):
+            agent_job.setup(self.c, "mpm", show=True, actor="mark", cli="gemini")
         self.assertIsNone(shown["file"])
 
     def test_setup_refuses_a_worker_another_source_and_another_checkout(self):
@@ -317,6 +326,9 @@ class AgentJobGitLab(Base):
         self.assertTrue(text.startswith(self.CI))
         shown = agent_job.setup(self.c, "shop", show=True, actor="mark", cli="codex", forge="gitlab")
         self.assertIn('CODEX_API_KEY="$CODEX_API_KEY" codex exec --json', shown["text"])
+        shown = agent_job.setup(self.c, "shop", show=True, actor="mark", cli="agy", forge="gitlab")  # #6249
+        self.assertIn("install.sh | bash -s -- --dir /usr/local/bin >", shown["text"])
+        self.assertIn('GEMINI_API_KEY="$GEMINI_API_KEY" agy -p "$MAXPM_PROMPT" --output-format json', shown["text"])
         with self.assertRaisesRegex(RiverError, "does not read GitHub.*maxpm runner gitlab shop"):
             agent_job.setup(self.c, "shop", file=self.file, actor="mark")
         with self.assertRaisesRegex(RiverError, "MAXPM_GITLAB_TOKEN"):
@@ -668,6 +680,13 @@ class PulumiAgentJob(Base):
             cli.run(["--as", "mark", "runner", "pulumi", "shop", "--env", "shop/agents"])
         self.assertIn("ESC environment shop/agents", out.getvalue())
         self.assertIn("MAXPM_GIT_TOKEN", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):  # #6249
+            cli.run(["--as", "mark", "runner", "pulumi", "shop", "--env", "shop/agents", "--cli", "agy"])
+        self.assertIn("(environmentVariables: GEMINI_API_KEY)", out.getvalue())
+        script = agent_job.pulumi_script(agent_job.conf(self.p()))
+        self.assertIn("install.sh | bash -s -- --dir /usr/local/bin >", script)
+        self.assertIn('GEMINI_API_KEY="$GEMINI_API_KEY" timeout 30m agy -p "$MAXPM_PROMPT"', script)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.run(["--as", "mark", "runner", "list"])

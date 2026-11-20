@@ -42,10 +42,6 @@ def row(conn, target):
     return conn.execute("SELECT * FROM pipelines WHERE name=? AND target IS NOT NULL", (target,)).fetchone()
 
 
-def _covered(conn, target):
-    return conn.execute("SELECT 1 FROM pipeline_envs WHERE target=? AND removed_at IS NULL", (target,)).fetchone()
-
-
 def _project(conn, target):
     r = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id LIMIT 1",
                      (target, f"deploy-{target}")).fetchone()
@@ -65,8 +61,7 @@ def ensure(conn, name):
     p = conn.execute("SELECT * FROM pipelines WHERE name=?", (name,)).fetchone()
     if p is not None and not is_target(p):
         return p
-    if p is None and (not conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone()
-                      or _covered(conn, name)):
+    if p is None and not conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
         return None
 
     def work():
@@ -188,6 +183,9 @@ def _items_at(conn, target, stage, first):
     if stage == "deploy":
         return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open'",
                                               (target,))]
+    if stage == "publish":  # #6213: the release that the person approved waits; the deploy hook does not publish it
+        return [d["id"] for d in conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' "
+                                              "AND cut_at IS NOT NULL", (target,)) if core._person_yes(conn, d["id"])]
     return []
 
 
@@ -208,9 +206,8 @@ def holds(conn):
     (stage: the first stage, left to right, whose closed transition holds it)."""
     want = {}
     for p in conn.execute(
-            # a target that a pipeline of its own covers now: that pipeline's environment controls it, not this row
-            "SELECT p.* FROM pipelines p WHERE p.target IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pipeline_envs e "
-            "WHERE e.target=p.target AND e.removed_at IS NULL) AND (p.held_reason IS NOT NULL OR EXISTS (SELECT 1 "
+            "SELECT p.* FROM pipelines p WHERE p.target IS NOT NULL "
+            "AND (p.held_reason IS NOT NULL OR EXISTS (SELECT 1 "
             "FROM pipeline_transitions t WHERE t.pipeline_id=p.id AND (t.block_reason IS NOT NULL OR t.disabled_at IS "
             "NOT NULL OR t.delay_until IS NOT NULL OR (t.freezes IS NOT NULL AND t.freezes NOT IN ('', '[]')) OR "
             "t.time_window IS NOT NULL OR t.fault_rule=1)))").fetchall():
@@ -258,7 +255,7 @@ def cut_refusal(conn, target):
     """Why a release of target may not be cut now (the arrow after holding is closed, or the pipeline is stopped), or
     None."""
     p = row(conn, target)
-    if p is None or _covered(conn, target):
+    if p is None:
         return None
     stages = _live(conn, p["id"])
     why = _closed(conn, p, stages[0]) if stages else None
@@ -279,8 +276,7 @@ def stage_versions(conn, p, stage, limit=store.STAGE_VERSIONS):
     reached the stage, newest first; a version sent on purpose names who sent it and why."""
     from . import targets
     releases = targets.release_runs(conn, p["target"], targets._deploys(conn, p["target"], limit))
-    # A branch after deploy (#6186, downloads) has no stored row: its runs come from the deploy hook's steps.
-    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"] + targets.branch_names(releases):
+    if stage not in [s["name"] for s in _live(conn, p["id"])] + ["holding"]:
         raise core.RiverError(f"pipeline {p['name']} has no stage {stage}")
     sends = {}
     for r in conn.execute("SELECT * FROM target_sends WHERE pipeline_id=? ORDER BY id", (p["id"],)):

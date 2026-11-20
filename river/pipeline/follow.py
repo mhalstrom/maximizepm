@@ -26,6 +26,12 @@ def check(conn, p, what):
     """Refuse an action of our flow on a followed pipeline: p is its row (or its name)."""
     if isinstance(p, str):
         p = store._pipeline(conn, p)
+    if p["forge"] == "github":
+        from . import targets
+        names = targets.check_targets(conn, p["id"])
+        if names:
+            raise core.RiverError(f"pipeline {p['name']} supplies GitHub checks to {', '.join(names)}. "
+                                  "Use the deploy target's release controls.")
     if is_followed(p):
         src = p["forge"] or ("events in over HTTP" if p["intake_secret"] else "its outside system")
         raise core.RiverError(f"pipeline {p['name']} is followed: {src} runs its flow, and MaximizePM {what} there "

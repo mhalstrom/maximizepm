@@ -50,7 +50,11 @@ FIND_JS = r"""(() => {
   if (user) user.setAttribute('data-maxpm-signin', 'user');
   const robot = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
     + 'iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile');
-  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].map(e => e.innerText.trim())
+  // Only an alert that shows (#6301): innerText of a hidden element is its whole text. On Google's passkey page the
+  // check read 'Too many failed attempts' while the page showed no such text and the passkey worked.
+  const shows = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.closest('[aria-hidden=true]'); };
+  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].filter(shows).map(e => e.innerText.trim())
     .filter(Boolean).join(' / ').slice(0, 200);
   return {pw: !!pw, otp: !!otp, user: !!user, user_value: user ? user.value : '', robot, said, url: location.href};
 })()"""
@@ -353,7 +357,11 @@ STOP_MARK = "[sign-in stopped on {site}]"
 SIGNS_JS = r"""(() => {
   const robot = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
     + 'iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile, #challenge-form');
-  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].map(e => e.innerText.trim())
+  // Only an alert that shows (#6301): innerText of a hidden element is its whole text. On Google's passkey page the
+  // check read 'Too many failed attempts' while the page showed no such text and the passkey worked.
+  const shows = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.closest('[aria-hidden=true]'); };
+  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].filter(shows).map(e => e.innerText.trim())
     .filter(Boolean).join(' / ').slice(0, 200);
   return {robot, said};
 })()"""
@@ -384,7 +392,7 @@ def agent_refusal(conn, who, url):
     if q is None:
         return None
     return (f"refused: your sign-in on {site} failed once, and MaximizePM asked for the next step (question #{q}, "
-            f"policy g5: one try, no retry). Wait for the answer: maxpm --as {who} inbox --wait, or take other work. "
+            f"policy g5: one try, no retry). Wait for the answer: {core.as_cmd(who)} inbox --wait, or take other work. "
             f"The person or the manager may withdraw it: maxpm withdraw {q} --note \"<why>\"")
 
 
@@ -437,7 +445,7 @@ def agent_after(conn, b, who, url, before=None):
         out["question"] = m["id"]
     out["line"] = (f"STOP: the sign-in on {site} failed ({why}). Policy g5: one try. "
                    + (f"MaximizePM asked {to} for the next step (question #{out['question']}); your next action on its "
-                      f"sign-in pages is refused until the answer. Take other work or run maxpm --as {who} inbox --wait."
+                      f"sign-in pages is refused until the answer. Take other work or run {core.as_cmd(who)} inbox --wait."
                       if to else "Ask the person before you try again."))
     return out
 

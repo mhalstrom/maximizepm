@@ -48,6 +48,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         window, frame = _chrome_window(size)
         got, result = threading.Event(), {}
         tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
+        fast_poll = b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);})();</script>'
         drive = (b'<script type="module">import "./app.js"; window.__appReady = true;</script>'
                  b'<script type="module" src="/__drive.js"></script>')
 
@@ -65,7 +66,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
                 page = server.page_html(self.path.split("?")[0])
                 if page is not None:
                     assert tag in page
-                    return self._send(200, page.replace(tag, tag + drive), "text/html; charset=utf-8")
+                    return self._send(200, page.replace(tag, fast_poll + tag + drive), "text/html; charset=utf-8")
                 return super().do_GET()
 
             def do_POST(self):
@@ -85,20 +86,30 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         httpd.daemon_threads = True
         httpd.handle_error = lambda request, address: None  # Chrome ends while it still polls: a dropped connection
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        chrome = subprocess.Popen([
-            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-            # The driver's clicks are no person's: no autoplay rule may hold an AudioContext (the microphone tests).
-            "--autoplay-policy=no-user-gesture-required",
-            *([f"--window-size={window}"] if window else []), *flags,
-            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            ran = got.wait(timing.limit(40))  # a slow GitHub macOS runner took longer (#5705)
-        finally:
-            chrome.kill()
-            chrome.wait()
-            httpd.shutdown()
-            httpd.server_close()
+        url = f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"
+        if flags:
+            chrome = subprocess.Popen([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+                # The driver's clicks are no person's: no autoplay rule may hold an AudioContext (the microphone tests).
+                "--autoplay-policy=no-user-gesture-required",
+                *([f"--window-size={window}"] if window else []), *flags, url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                ran = got.wait(timing.limit(40))  # a slow GitHub macOS runner took longer (#5705)
+            finally:
+                chrome.kill()
+                chrome.wait()
+                httpd.shutdown()
+                httpd.server_close()
+        else:
+            from tests import open_tab
+            try:
+                with open_tab(url, window=window):
+                    ran = got.wait(timing.limit(40))
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
         self.assertTrue(ran, "browser test did not report")
         self.assertNotIn("error", result, result.get("error"))
         return result
@@ -114,6 +125,44 @@ try {
 '''
         self.assertEqual(self.drive(driver, "/", size="390,844"), {"w": 390, "h": 844, "phone": True})
         self.assertEqual(self.drive(driver, "/", size="1280,900")["w"], 1280)
+
+    def test_setup_can_move_gemini_rules_on_desktop_and_phone(self):
+        driver = r'''
+try {
+  await until(() => window.__appReady && q("#openSetup"), "the setup guide control");
+  q("#openSetup").click();
+  await until(() => q("#setupSteps .folderForm"), "the folder form");
+  const form = q("#setupSteps .folderForm");
+  const details = form.closest("details");
+  if (details) details.open = true;
+  const field = form.querySelector('[data-ff="path"]');
+  field.focus();
+  field.value = PROJECT;
+  form.querySelector("[data-ff-go]").click();
+  await until(() => form.querySelector('[data-ff-move="1"]'), "the rules choice");
+  const move = form.querySelector('[data-ff-move="1"]');
+  check(form.textContent.includes("GEMINI.md"), "the file to move is named");
+  check(move.getBoundingClientRect().right <= innerWidth, "the move button fits");
+  move.click();
+  await until(() => !form.isConnected && q("#setupSteps").textContent.includes(PARENT_WARNING)
+    && !q("#setupSteps").textContent.includes(PROJECT_WARNING), "only the parent warning remains");
+  post({width: innerWidth});
+} catch (e) { post({error: String(e.stack || e)}); }
+'''
+        parent = Path(self.dir.name).resolve()
+        (parent / "GEMINI.md").write_text("Parent rule.\n", encoding="utf-8")
+        core.config_set(self.c, "setup_done", "on")
+        for width in (390, 1280):
+            with self.subTest(width=width):
+                folder = parent / f"rules-{width}"
+                folder.mkdir()
+                (folder / "GEMINI.md").write_text("Project rule.\n", encoding="utf-8")
+                js = (driver.replace("PROJECT_WARNING", json.dumps(f"agy also reads this file: {folder / 'GEMINI.md'}"))
+                      .replace("PARENT_WARNING", json.dumps(f"agy also reads this file: {parent / 'GEMINI.md'}"))
+                      .replace("PROJECT", json.dumps(str(folder))))
+                self.assertEqual(self.drive(js, size=f"{width},844"), {"width": width})
+                self.assertFalse((folder / "GEMINI.md").exists())
+                self.assertIn("Project rule.", (folder / "AGENTS.md").read_text(encoding="utf-8"))
 
     def test_the_item_drawer_fits_a_390_px_screen(self):
         """#5701: at 390 px (a real phone frame) no part of the item drawer, its buttons, its fields and a long
@@ -224,7 +273,7 @@ try {
             self.assertIn("⛔ blocked", r["test"], r)
             self.assertIn("abc1234 waits", r["test"], r)
             self.assertIn("🕒 closed", r["beta"], r)
-            self.assertIn("✋ mark's yes", r["prod"], r)
+            self.assertIn("✋ mark approves", r["prod"], r)  # #6482: the chip says what the step does
             self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
             self.assertEqual(r["tier"], "PROD", r)  # the tier badge on the stage card (#6137)
             self.assertIn("the test database is down", r["detail"], r)
@@ -390,6 +439,11 @@ try {
         person's approval item as them. Deploy now does not show while the yes waits. At 1920 and 390 px."""
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
         core.project_add(self.c, "web", target="toolscaled-prod")
+        from river.pipeline import define
+        define.pipeline_add(self.c, "web-checks", project="web")
+        define.stage_set(self.c, "web-checks", "tests", "test", workflow="tests.yml")
+        define.forge_set(self.c, "web-checks", "github", repo="example/web", secret="gh-token")
+        define.env_set(self.c, "web-checks", "prod", target="toolscaled-prod")
         core.config_set(self.c, "release_approval", "person", project="web")
         i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
@@ -404,11 +458,18 @@ try {
   q("#actor").value = "mark";
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
-  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  const separate = !!q('#dpList [data-dp-open="web-checks"]');
+  history.replaceState(null, "", "/deploy/pipeline/web-checks");
+  dispatchEvent(new PopStateEvent("popstate"));
   await until(() => q('.pl-next [data-pl-yes]'), "the next step");
   const b = q('.pl-next [data-pl-yes]').getBoundingClientRect();
   const out = { next: q(".pl-next").textContent.replace(/\s+/g, " "), waits: [...document.querySelectorAll(".pl-waits")].map(e => e.dataset.plStage || e.dataset.plArrow),
-    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]') };
+    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]'),
+    separate, address: location.pathname };
+  q('#plRow [data-pl-stage="holding"]').click();
+  await until(() => q('.hd')?.textContent.includes('GitHub tests.yml on main'), "the GitHub check in holding");
+  out.checkInView = [...document.querySelectorAll('.hd .pl-bar > *')].every(e =>
+    e.getBoundingClientRect().right <= innerWidth + 0.5);
   q('.pl-next [data-pl-yes]').click();
   await until(() => q('#plAskDlg:not(.hidden) [data-pl-askgo]'), "the confirm");
   out.confirm = q("#plAskDlg").textContent.replace(/\s+/g, " ");
@@ -423,11 +484,188 @@ try {
             self.assertEqual(r["waits"], ["approval"], r)
             self.assertTrue(r["inView"], r)  # no scroll
             self.assertFalse(r["deploy"], r)  # never around the yes
+            self.assertFalse(r["separate"], r)
+            self.assertTrue(r["checkInView"], r)
+            self.assertEqual(r["address"], "/deploy/pipeline/toolscaled-prod", r)
             self.assertIn(f"Approve release #{dep}?", r["confirm"], r)
             st = self.c.execute("SELECT status, assignee FROM items WHERE id=?", (appr,)).fetchone()
             self.assertEqual(st["status"], "done", r)
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
+
+    def test_a_target_with_github_checks_offers_release_now(self):
+        """At 1500 and 390 px, Release now appears in the list and on the target's page."""
+        from river.pipeline import define
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        core.target_cadence(self.c, "toolscaled-prod", "1w", "mark")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        with core.tx(self.c):  # the last release is out: the next one waits for the cadence
+            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE kind='deploy'", (core.iso(core.now()),))
+        i = core.item_add(self.c, "web", "Another change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        define.pipeline_add(self.c, "app", project="web", actor="mark")
+        define.forge_set(self.c, "app", "github", repo="o/app", secret="gh-app", actor="mark")
+        define.stage_set(self.c, "app", "tests", "test", workflow="tests.yml", actor="mark")
+        define.env_set(self.c, "app", "release", target="toolscaled-prod", actor="mark")
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('.dp-banner [data-relnow]'), "the banner's Release now");
+  const out = { banner: q('.dp-banner [data-relnow]').closest(".dp-banner").textContent.replace(/\s+/g, " "),
+    separate: !!q('#dpList [data-dp-open="app"]') };
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('.pl-next [data-relnow]'), "the Next bar's Release now");
+  const b = q('.pl-next [data-relnow]').getBoundingClientRect();
+  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  out.inView = b.bottom <= innerHeight && b.right <= innerWidth;
+  q('.pl-next [data-relnow]').click();
+  await until(() => q('#relNowDlg:not(.hidden) [data-relgo]'), "the dialog");
+  out.dlg = q("#relNowDlg").textContent.replace(/\s+/g, " ");
+  q('#relNowDlg [data-relclose]').click();
+  out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertIn("toolscaled-prod: 1 task wait for the next release", r["banner"], r)
+            self.assertFalse(r["separate"], r)
+            self.assertIn("Next: release 1 task", r["next"], r)
+            self.assertTrue(r["inView"], r)
+            self.assertIn("Release toolscaled-prod now?", r["dlg"], r)
+            self.assertEqual(r["steps"], ["holding", "deploy", "watch"], r)
+
+    def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
+        """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'): the Next bar names
+        the running release, its step and its time with a log link, and offers nothing that starts another release;
+        no count of stages, no paragraph under Versions in deploy, the stage's links are plain, and the holding card's
+        line is short. At 1500 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        for n in range(2):
+            i = core.item_add(self.c, "web", f"Change {n}", actor="mark")["id"]
+            core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MIN(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        t0 = core.iso(core.now() - core.timedelta(minutes=2))
+        h = self.c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, item_id, rev, queued_at, started_at) "
+                           "VALUES ('toolscaled-prod','deploy','make it',?,?,'9783eb1abcdef',?,?)", (dep, dep, t0, t0)).lastrowid
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at, ended_at, seconds) "
+                       "VALUES (?,'check','passed',?,?,1)", (h, t0, t0))
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'test','running',?)", (h, t0))
+        self.c.commit()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  q("#actor").value = "mark";
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q(".pl-next"), "the Next bar");
+  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " ").trim(), buttons: q(".pl-next").querySelectorAll("button").length,
+    note: q("#plNote").textContent.replace(/\s+/g, " ").trim() };
+  q('.pl-next [data-pl-stage="deploy"]').click();
+  await until(() => q("#plStageRuns .pl-runs"), "Versions in deploy");
+  out.runs = q("#plStageRuns").textContent.replace(/\s+/g, " ");
+  out.links = [...q("#plDetail").querySelectorAll(".pl-opts button")].map(b => [b.textContent.trim(), b.className]);
+  out.page = q("#deploy-pipeline").textContent.replace(/\s+/g, " ");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", size=size)
+            self.assertRegex(r["next"], r"Releasing 9783eb1 · step test · 2m 0\ds · log · report", r)  # #6210: it counts
+            self.assertEqual(r["buttons"], 0, r)  # nothing that starts another release
+            self.assertNotIn("stage", r["note"].replace("Hold all stages", ""), r)
+            self.assertNotIn("Each row is a release", r["runs"], r)
+            self.assertEqual([x[0] for x in r["links"]], ["The transition before it", "Send a version here…"], r)
+            self.assertTrue(all("plain" in x[1] and "warn" not in x[1] for x in r["links"]), r)
+            for words in ("starts an agent session", "as a pipeline", "Deploy now"):
+                self.assertNotIn(words, r["page"], r)
+
+    def test_a_running_release_moves_on_its_own_and_a_new_step_comes_in_place(self):
+        """#6210 (mark 2026-11-19: 'animations/ updates that are showing progress continuously not
+        discontinuously'): while a release runs, its times count each second and the running step's bar grows with
+        no new read; a new step reaches the page within about a second and is patched into the same bars (no new
+        draw); the running card and the transition into it carry the moving light. At 1500 and 390 px."""
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        dep = self.c.execute("SELECT MIN(id) FROM items WHERE kind='deploy'").fetchone()[0]
+        core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
+        self.c.commit()
+
+        def start():  # a fresh run for each size: a check that passed and a test that runs, 20 s ago
+            c = core.connect()
+            try:
+                with core.tx(c):
+                    c.execute("DELETE FROM hook_steps"); c.execute("DELETE FROM hook_runs")
+                    t0 = core.iso(core.now() - core.timedelta(seconds=20))
+                    h = c.execute("INSERT INTO hook_runs(target, event, command, deploy_id, item_id, rev, queued_at, "
+                                  "started_at) VALUES ('toolscaled-prod','deploy','make it',?,?,'9783eb1abcdef',?,?)",
+                                  (dep, dep, t0, t0)).lastrowid
+                    t5 = core.iso(core.now() - core.timedelta(seconds=15))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at, ended_at, seconds) "
+                              "VALUES (?,'check','passed',?,?,5)", (h, t0, t5))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'test','running',?)",
+                              (h, t0))
+            finally:
+                c.close()
+
+        def step():  # the test passes and a push starts
+            c = core.connect()
+            try:
+                with core.tx(c):
+                    t = core.iso(core.now())
+                    h = c.execute("SELECT MAX(id) FROM hook_runs").fetchone()[0]
+                    c.execute("UPDATE hook_steps SET state='passed', ended_at=? WHERE name='test'", (t,))
+                    c.execute("INSERT INTO hook_steps(hook_run, name, state, started_at) VALUES (?,'push','running',?)",
+                              (h, t))
+            finally:
+                c.close()
+        start()
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  await fetch("/__step/start");
+  q('nav button[data-tab="deploy"]').click();
+  await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('#plDetail .pl-gantt .pl-seg.running'), "the running step");
+  const g = q("#plDetail .pl-gantt"); g.__kept = 1;
+  const seg = () => q('#plDetail .pl-gantt [data-pl-k^="1|test"] .pl-seg');
+  const tickText = () => q(".pl-next [data-pl-tick]").textContent;
+  const out = { t1: tickText(), w1: parseFloat(seg().style.width), passed1: parseFloat(q('#plDetail .pl-gantt .pl-seg.passed').style.width),
+    moving: [...document.querySelectorAll("#plRow .pl-moving")].map(e => e.dataset.plStage || "→" + e.dataset.plArrow),
+    transition: getComputedStyle(seg()).transitionProperty };
+  await sleep(2200);
+  out.t2 = tickText(); out.passed2 = parseFloat(q('#plDetail .pl-gantt .pl-seg.passed').style.width);
+  out.keptBefore = q("#plDetail .pl-gantt").__kept === 1;
+  await fetch("/__step/step");
+  await until(() => q('#plDetail .pl-gantt [data-pl-k^="2|push"]'), "the new step");
+  out.kept = q("#plDetail .pl-gantt").__kept === 1;
+  out.test = seg().className;
+  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("1500,900", "390,844"):
+            r = self.drive(driver, "/", steps={"start": start, "step": step}, size=size)
+            self.assertNotIn("error", r, r)
+            self.assertRegex(r["t1"], r"^2\ds$", r)
+            self.assertNotEqual(r["t1"], r["t2"], r)  # the time counts with no new read of the page
+            self.assertLess(r["passed2"], r["passed1"], r)  # the running bar grows, so the others get narrower
+            self.assertEqual(r["moving"], ["→deploy", "deploy"], r)
+            self.assertIn("width", r["transition"], r)
+            self.assertTrue(r["keptBefore"], r)  # the reads each second draw no new bars
+            self.assertTrue(r["kept"], r)  # the new step is patched into the same bars
+            self.assertIn("passed", r["test"], r)
+            self.assertIn("step push", r["next"], r)
 
     def test_the_window_of_a_transition_is_marked_on_a_week_calendar(self):
         """#6205 (mark 2026-11-19: 'probably a better way to do this is with a calander'): the Window of a transition
@@ -889,7 +1127,7 @@ try {
   await until(() => window.__appReady && q("#sessYouRow .srow"), "Sessions, the first page");
   q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
   const out = { moved: [], hovered: {} };
-  const look = async (where) => { await sleep(700); const [n, m] = sweep(where); out.hovered[where] = n; out.moved.push(...m); };
+  const look = async (where) => { await sleep(200); const [n, m] = sweep(where); out.hovered[where] = n; out.moved.push(...m); };
   for (const tab of [...document.querySelectorAll("nav button[data-tab]")].map(b => b.dataset.tab)) {
     q(`nav button[data-tab="${tab}"]`).click();
     await until(() => !q("#tab-" + tab).classList.contains("hidden"), "the tab " + tab);
@@ -934,7 +1172,7 @@ try {
   await until(() => window.__appReady && q("#sessCol .msg, #sessCol .bubble, #sessCol > *"), "the chat of ag");
   await document.fonts.ready;
   // The page settles first (its fonts, the first answers): the frame of the chat stays the same for longer than a poll.
-  for (let last = "", still = 0; still < 2500; ) {
+  for (let last = "", still = 0; still < 500; ) {
     const r = q("#sessBody").getBoundingClientRect(), now = `${r.top},${r.height},${q("#sessBody").scrollTop}`;
     still = now === last ? still + 100 : 0; last = now; await sleep(100);
   }
@@ -1288,39 +1526,221 @@ try {
                          (1200, ["start", "compacted", "compacted"], True, [False, False], "Start of the session", False))
         self.assertTrue(got["jumps"] and all(abs(j) <= 1 for j in got["jumps"]), got["jumps"])
 
-    def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
-        """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
-        keeps it closed until something new waits."""
-        core.config_set(self.c, "setup_done", "on")
-
+    def _question_step(self):
         def question():
             c = core.connect()
             try:
                 core.send(c, "question", "Push the header?", to="mark", item=self.it, actor="ag")
+                with core.tx(c):  # as the CLI does after each command: the page's poll reads the rows as they are
+                    core.sync_needs_you(c)
             finally:
                 c.close()
+        return question
+
+    def test_a_new_prompt_or_question_of_the_open_session_shows_in_its_panel_once(self):
+        """#4663, #6438: what the open session waits on (a prompt, a question) shows by itself in the session's panel
+        above its message box, never as a dialog over the page; a hide keeps it hidden until something new waits."""
+        core.config_set(self.c, "setup_done", "on")
         driver = r'''
-const open = () => !q("#waitDlg").classList.contains("hidden");
+const open = () => !q("#sessAsk").classList.contains("hidden");
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
 try {
-  await until(() => window.__appReady && open(), "the dialog opens by itself for the prompt");
-  check(q("#waitList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
-  q("#waitDismiss").click();
-  await sleep(7000);  // two refreshes of the Sessions tab
-  check(!open(), "Dismiss keeps the same prompt closed");
-  check(q("#sessWait [data-wait-open]"), "the wait line links to the dialog");
+  await until(() => window.__appReady && open(), "the panel shows by itself for the prompt");
+  check(q("#sessAskList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
+  check(!dlg(), "no dialog over the page");
+  check(document.activeElement === document.body || !q("#sessAsk").contains(document.activeElement), "it takes no focus by itself");
+  q("#sessAskClose").click();
+  await until(() => q("#sessWait [data-wait-open]"), "the wait line links to the panel");
+  await sleep(600);  // several refreshes of the Sessions tab (150 ms in tests)
+  check(!open(), "the hide keeps the same prompt hidden");
   check(!q("#sessWait").textContent.includes("type the answer below"), "no text about typing the answer below");
   await fetch("/__step/question");
-  await until(open, "a new question opens it again");
-  check(q("#waitList").textContent.includes("Push the header?"), "it shows the question");
-  q("#waitDismiss").click();
-  await sleep(4000);
-  check(!open(), "and Dismiss keeps it closed");
+  await until(open, "a new question shows it again");
+  check(q("#sessAskList").textContent.includes("Push the header?"), "it shows the question");
+  check(!dlg(), "still no dialog over the page");
+  q("#sessAskClose").click();
+  await sleep(600);
+  check(!open(), "and the hide keeps it hidden");
   q("#sessWait [data-wait-open]").click();
-  check(open(), "Answer it opens it");
+  check(open(), "Answer it shows it");
   post({ ok: true });
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''
-        self.assertEqual(self.drive(driver, "/sessions/ag", {"question": question}), {"ok": True})
+        self.assertEqual(self.drive(driver, "/sessions/ag", {"question": self._question_step()}), {"ok": True})
+
+    def test_a_question_opens_nothing_over_the_page_and_shows_in_the_session_that_asked(self):
+        """#6438 (mark 2026-11-20: 'it also should not take over the screen'): a question that comes while the person
+        is on another view opens no dialog, and the count goes up. A click on it in Your action items opens the session
+        that asked, with the question in that session's panel; at desktop and at phone width."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"  # no prompt in the pane: only the question waits
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#needsYou"), "the You view");
+  await fetch("/__step/question");
+  await until(() => q("#needsYou [data-nyt]"), "the question in Your action items");
+  await sleep(600);
+  check(!dlg(), "no dialog over the page: " + (dlg() && dlg().id));
+  check(/^\(\d+\)/.test(document.title), "the count in the title");
+  check(q("#sessAsk").classList.contains("hidden"), "no panel outside the session");
+  const n = document.querySelectorAll("#needsYou [data-nyt]").length;
+  await until(() => q('#sessions [data-session="ag"] .wbadge'), "the asking session's badge");
+  check(q('#sessions [data-session="ag"] .wbadge').textContent.trim() === (n > 1 ? "! " + n : "!"), "its badge counts them");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "the asking session with its panel");
+  check(q("#sessAskList").textContent.includes("Push the header?"), "the panel holds the question");
+  check(!dlg(), "still no dialog over the page");
+  const r = q("#sessAsk").getBoundingClientRect();
+  check(r.width > 0 && r.left >= -0.5 && r.right <= innerWidth + 0.5, "the panel fits the width: " + JSON.stringify(r));
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1280,900", "390,844"):
+            self.assertEqual(self.drive(driver, "/you", {"question": self._question_step()}, size=size),
+                             {"ok": True})
+
+    def test_a_decision_a_session_put_as_the_person_shows_in_that_session(self):
+        """#6438 with #6436: the needs-you session puts a person item's decision as the person (decision.by). Its
+        card shows in that session's panel, and a click on the item in Your action items opens that session."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"
+        it = core.item_add(self.c, "site", "Decide the header color", doer="human")["id"]
+        decision = core.decision_parse(["A: blue", "B: green"], "A", "Which color?")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET decision=? WHERE id=?", (json.dumps(dict(decision, by="ag")), it))
+            core.sync_needs_you(self.c)
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#needsYou [data-nyt]"), "the item in Your action items");
+  check(!dlg(), "no dialog over the page");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "the session that put it, with its panel");
+  check(q("#sessAskList").textContent.includes("Which color?"), "the panel holds the decision");
+  check(q('#sessAskList form[data-kind="item"]').dataset.nopane === "1", "its answer is not typed into the chat");
+  check(q("#sessWait").textContent.includes("It waits for your decision."), "the wait line says so");
+  check(q('#sessions [data-session="ag"] .wbadge').textContent.trim() === "!", "the session's row has the badge");
+  check(q("#sessBadge .wbadge").textContent.trim() === "!", "and its head");
+  check(!dlg(), "still no dialog over the page");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        self.assertEqual(self.drive(driver, "/you"), {"ok": True})
+
+    def _tasks(self, size):
+        """#6454: the session row counts the background tasks that run (not a river wait), and the clock in the head
+        of the opened session lists them, the ended ones too. MAXPM_TASK_SHOTS=<folder>: screenshots of each step."""
+        import base64
+        import socket
+        import urllib.request
+        from datetime import timedelta
+        from unittest import mock
+        from river import browser
+        t = core.now()
+        at = lambda m: core.iso(t - timedelta(minutes=m))  # noqa: E731
+        rows = [{"id": "b2", "kind": "command", "what": "Run the full test suite", "command": "python3 -m unittest",
+                 "at": at(6), "end": None, "status": None, "wait": False},
+                {"id": "a1", "kind": "subagent", "what": "Review the pricing commits", "command": "", "at": at(3),
+                 "end": None, "status": None, "wait": False},
+                {"id": "b3", "kind": "command", "what": "Wait for work", "command": "maxpm --as ag wait", "at": at(2),
+                 "end": None, "status": None, "wait": True},
+                {"id": "b1", "kind": "command", "what": "Build the desktop app", "command": "npm run build",
+                 "at": at(40), "end": at(31), "status": "completed", "wait": False}]
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET tasks=?, tasks_at=? WHERE name='ag'", (json.dumps(rows), core.iso(t)))
+        # maxpm serve's own read would find no log of ag and write its empty list over the fixture's.
+        patched = mock.patch.object(core, "record_tasks", lambda conn: {})
+        patched.start()
+        self.addCleanup(patched.stop)
+        shots, tag, cdp_port = os.environ.get("MAXPM_TASK_SHOTS"), size.replace(",", "x"), None
+        if shots:  # a free port for the test browser's own CDP: never a Chrome of the person
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                cdp_port = s.getsockname()[1]
+
+        def shot(name):
+            def go():
+                if not shots:
+                    return
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                tabs = json.loads(opener.open(f"http://127.0.0.1:{cdp_port}/json").read())
+                ws = browser.WS(next(x for x in tabs if x["type"] == "page" and x["url"].startswith("http://127.0.0.1:")
+                                     and ("/sessions/ag" in x["url"] or x["url"].endswith("/__frame")))[
+                    "webSocketDebuggerUrl"])
+                ws.send(json.dumps({"id": 1, "method": "Page.captureScreenshot", "params": {"format": "png"}}))
+                while True:
+                    m = json.loads(ws.recv())
+                    if m.get("id") == 1:
+                        break
+                ws.close()
+                Path(shots, f"{tag}-{name}.png").write_bytes(base64.b64decode(m["result"]["data"]))
+            return go
+        driver = r'''try {
+  await until(() => window.__appReady && q('#sessions [data-session="ag"] .tbadge') && !q("#sessTasks").classList.contains("hidden"),
+              "the row's count and the head's clock");
+  document.head.insertAdjacentHTML("beforeend", "<style>.dlg, dialog { display: none !important; }</style>");
+  const badge = q('#sessions [data-session="ag"] .tbadge');
+  const out = { row: badge.textContent.trim(), title: badge.title, head: q("#sessTasksBtn").textContent.trim() };
+  await fetch("/__step/row");
+  q("#sessTasksBtn").click();
+  await until(() => q("#sessTasks").classList.contains("open"), "the list open");
+  const card = q("#sessTasksCard"), box = card.getBoundingClientRect();
+  out.rows = [...card.querySelectorAll(".bgt")].map(r => r.querySelector(".chip").textContent + ": " + r.querySelector(".bgt-w").textContent);
+  out.head_line = card.querySelector(".bgt-h").textContent;
+  out.ended = card.querySelector(".bgt-end .bgt-t").textContent.includes("completed");
+  out.fits = box.left >= 0 && box.right <= innerWidth + 1;
+  await fetch("/__step/list");
+  document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  out.closes = !q("#sessTasks").classList.contains("open");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        return self.drive(driver, "/sessions/ag", size=size, steps={"row": shot("1-row"), "list": shot("2-list")},
+                          flags=(f"--remote-debugging-port={cdp_port}",) if shots else ())
+
+    def test_background_tasks_at_desktop_and_phone_width(self):
+        for size in ("1280,900", "390,844"):
+            with self.subTest(size=size):
+                self.assertEqual(self._tasks(size), {
+                    "row": "2", "title": "2 background tasks", "head": "2", "head_line": "2 background tasks run now",
+                    "rows": ["command: Run the full test suite", "subagent: Review the pricing commits",
+                             "wait: Wait for work", "command: Build the desktop app"],
+                    "ended": True, "fits": True, "closes": True})
+
+    def test_a_manager_forwarded_decision_shows_in_the_manager_panel_and_badge(self):
+        """#6472: a decision the manager forwarded (with decision.by = manager, or an older one with no decision.by)
+        shows in the manager session's #sessAsk panel with the ! badge on the manager row and in Your action items."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='ag'")
+        it1 = core.item_add(self.c, "site", "Approve built-in manager policies", doer="human")["id"]
+        it2 = core.item_add(self.c, "site", "Approve docs row", doer="human")["id"]
+        d1 = core.decision_parse(["A: Ship all three", "B: Ship with changes"], "A", "Ship built-in policies?")
+        d2 = core.decision_parse(["A: Approve", "B: Skip"], "A", "Commit docs row?")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET decision=?, held_for='' WHERE id=?", (json.dumps(dict(d1, by="ag")), it1))
+            self.c.execute("UPDATE items SET decision=?, held_for='' WHERE id=?", (json.dumps(d2), it2))
+            core.sync_needs_you(self.c)
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#sessMgr [data-session='ag'] .wbadge"), "the ! badge on the manager row");
+  check(q("#sessMgr [data-session='ag'] .wbadge").textContent.trim() === "! 2", "manager row badge counts both forwarded decisions");
+  await until(() => !q("#sessAsk").classList.contains("hidden") && q("#sessAskList").textContent.includes("Ship built-in policies?"), "manager panel shows forwarded decisions");
+  check(q("#sessAskList").textContent.includes("Commit docs row?"), "legacy decision without by also shows in manager panel");
+  check(q("#sessBadge .wbadge").textContent.trim() === "! 2", "manager head badge counts both");
+  check(!dlg(), "no dialog over the page");
+  // Clicking Your action items shows both items, and clicking one opens the manager panel.
+  q("#sessYouRow [data-you]").click();
+  await until(() => !q("#sessYou").classList.contains("hidden") && document.querySelectorAll("#needsYou [data-nyt]").length >= 2, "Your action items lists both");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "click opens manager session with panel");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1280,900", "390,844"):
+            self.assertEqual(self.drive(driver, "/sessions/ag", size=size), {"ok": True})
 
     def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
         """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
@@ -1334,6 +1754,33 @@ try {
   post({ ok: true });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+
+    def test_a_link_to_a_view_of_the_page_goes_there(self):
+        """#6425 (mark: 'we need to be able to link to sessions in maxpm directly'): a link in a chat to the page
+        itself (http://127.0.0.1:<port>/sessions/<name>/browser, the address maxpm link prints) showed the whole page
+        in a frame of the side panel. Now the page goes to that view, as a new history entry; another local page, or
+        an address of serve that is no view (api/...), still opens in the panel."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  const { openInPanel, pageView } = await import("/components/sidePanel.js");
+  const here = "http://127.0.0.1:" + location.port;
+  check(pageView(here + "/sessions/ag/browser") === "/sessions/ag/browser", "a session's Browser is a view");
+  check(pageView(location.origin + "/?item=3") === "/?item=3", "an item is a view");
+  check(pageView(here + "/api/state") === null, "api/state is no view");
+  check(pageView(here + "/") === null, "the bare root opens nothing new");
+  check(pageView("http://127.0.0.1:9/sessions/ag") === null, "another port is another program");
+  check(pageView("https://example.com/sessions/ag") === null, "an outside site is no view");
+  openInPanel(here + "/plan/items", "ag");
+  await until(() => location.pathname === "/plan/items" && !q("#tab-plan").classList.contains("hidden"), "Plan's items show");
+  openInPanel(location.origin + "/sessions/ag", "ag");
+  await until(() => location.pathname === "/sessions/ag" && !q("#tab-sessions").classList.contains("hidden"), "back on the session");
+  check(!q("#spBody iframe"), "no frame of the page in the side panel");
+  history.back();
+  await until(() => location.pathname === "/plan/items", "Back returns to Plan");
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+        self.assertEqual(self.drive(driver, "/sessions/ag", size="390,844"), {"ok": True})  # p57
 
     def test_a_collapsed_row_on_a_phone_lists_only_the_columns_with_a_value(self):
         """#5085: at 390 px an item table puts the columns that do not fit under each row; a column with no value
@@ -2135,9 +2582,10 @@ try {
   const FULL = innerHeight, vv = Object.assign(new EventTarget(), { height: Math.round(innerHeight * 0.55), offsetTop: 230, width: innerWidth });
   Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
   if (IOS) Object.defineProperty(window, "innerHeight", { get: () => vv.height, configurable: true });
-  // The session waits on the person: the page opens its dialog once by itself, which takes the focus. Close it first.
-  await until(() => q("#waitDlg") && !q("#waitDlg").classList.contains("hidden"), "the wait dialog").catch(() => {});
-  if (q("#waitDlg")) q("#waitDlg").classList.add("hidden");
+  // The session waits on the person: its panel shows by itself (#6438) and takes no focus. Hide it, as the test
+  // measures the message box alone.
+  await until(() => !q("#sessAsk").classList.contains("hidden"), "the session's panel").catch(() => {});
+  q("#sessAsk").classList.add("hidden");
   box.focus();
   await sleep(450);
   const r = lay.getBoundingClientRect(), bar = q("#sessBar").getBoundingClientRect();

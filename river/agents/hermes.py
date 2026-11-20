@@ -216,10 +216,13 @@ def parse_command(words):
 # (#5211) is no help: it passes names from the gateway's own environment, which never had MaximizePM's variables. So
 # MAXPM_AGENT, MAXPM_DB and the others reach maxpm only after `hermes config set terminal.client_env_passthrough ...`
 # (CLIENT_ENV); before it, every maxpm command of a Hermes session reads the default queue as an unnamed agent.
+# With that setting, Hermes 0.22.7 stores the values in the session's policy, but its terminal tool still starts
+# without them, and without the client's PATH too (a test on 2026-11-20, #5241). So a maxpm command that finds
+# HERMES_SESSION_ID and none of MaximizePM's variables reads them from that stored policy (session_values).
 # The first process above a maxpm command of a Hermes session is that shared gateway (a Python with no terminal,
 # started once for every session), not the CLI in the pane: MaximizePM records it only when it runs on a terminal, so
 # the busy checks and maxpm stop --kill never act on the gateway (#5247).
-IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "pane": None, "url": None,
             "inside_env": ["HERMES_SESSION_ID"], "process": "terminal"}
 
 # The variables of MaximizePM that a maxpm command inside Hermes needs, for terminal.client_env_passthrough. Hermes
@@ -231,6 +234,33 @@ def client_env_command():
     """The command that lets MaximizePM's variables reach the shell commands of Hermes (a person runs it once; it
     applies to the sessions that start after it)."""
     return ["hermes", "config", "set", "terminal.client_env_passthrough", "[" + ", ".join(CLIENT_ENV) + "]"]
+
+
+# The row of $HERMES_HOME/state.db (table state_meta) that holds a local session's policy, fixed at its creation.
+POLICY_KEY = "gateway.local_policy.v1:"
+
+
+def session_values(env=None):
+    """MaximizePM's variables (CLIENT_ENV) that the CLI of this Hermes session sent its gateway, read from the
+    session's stored policy (state_meta, POLICY_KEY + HERMES_SESSION_ID; its client_env_json), or {}. A maxpm
+    command in Hermes's terminal tool lacks them (#5241); the CLI in the pane had them. Hermes keeps the values of
+    the session's creation: a resume keeps those too."""
+    env = os.environ if env is None else env
+    sid = env.get("HERMES_SESSION_ID") or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", sid):
+        return {}
+    try:
+        con = sqlite3.connect(f"{(hermes_home(env) / 'state.db').as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            row = con.execute("SELECT value FROM state_meta WHERE key=?", (POLICY_KEY + sid,)).fetchone()
+        finally:
+            con.close()
+        sent = json.loads(json.loads(row[0])["policy"]["client_env_json"]) if row else {}
+    except (sqlite3.Error, ValueError, KeyError, TypeError):
+        return {}
+    if not isinstance(sent, dict):
+        return {}
+    return {k: v for k, v in sent.items() if k in CLIENT_ENV and isinstance(v, str)}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -558,9 +588,26 @@ def chat_usage(lines):
 
 
 def chat_settings(lines):
-    """The provider that the session runs on (its billing provider)."""
+    """The provider that the session runs on (its billing provider) and its model (the session row's model, from its
+    start: gpt-6.1-terra on 2026-11-20, #6280)."""
     s = _session(lines) or {}
-    return {"provider": s["billing_provider"]} if s.get("billing_provider") else {}
+    got = {"provider": s.get("billing_provider"), "model": s.get("model")}
+    return {k: v for k, v in got.items() if v}
+
+
+def config_settings(env=None):
+    """What a Hermes session takes from its config.yaml when nothing names it (#6280): the agent's reasoning_effort
+    (medium on 2026-11-20). The session row names no effort. A small reader of the one key: no YAML library."""
+    try:
+        text = (hermes_home(env) / "config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    m = re.search(r"^\s*reasoning_effort:\s*[\"']?([a-z]+)", text, re.M)
+    return {"effort": m.group(1)} if m else {}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("chat",), "effort": ("config",)}
 
 
 def chat_texts(raw):
@@ -748,3 +795,6 @@ def read_commands(folder):
 SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.hermes/skills",
          "voice": "/voice on: Hermes listens and speaks (its own voice mode)",
          "open_link": None}
+
+# 12. Update (#6430): hermes update updates its own install (a git folder); no newest version can be read before it.
+UPDATE = {"self": ["update"]}

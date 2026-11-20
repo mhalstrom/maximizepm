@@ -154,6 +154,9 @@ class HostSetup(unittest.TestCase):
         res = server.OPS["host_setup"](self.conn, {"target": "mini", "move": False}, "mark")
         self.assertEqual(res["phone"]["url"], URL)
         self.assertIn("<svg", res["qr"])
+        # #6255: a sign-in button for each agent that signs in with no browser, Antigravity CLI too
+        self.assertEqual([a["agent"] for a in res["signin"]], ["claude", "codex", "agy"])
+        self.assertEqual(res["signin"][2]["name"], "Antigravity CLI")
         self.assertIn("https://auth.openai.com/codex/device",
                       server.OPS["host_signin"](self.conn, {"target": "mini", "agent": "codex"}, "mark")["url"])
         for op in ("host_setup", "host_signin"):

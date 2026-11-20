@@ -110,13 +110,15 @@ item), so a link, a reload, and Back show the same view.
 
 ![The Sessions tab: an agent's chat, with a file it wrote open in the side panel](site/img/sessions-light.png)
 
-When the open session comes to a permission prompt or asks you a question, the
-! dialog opens by itself. You pick an answer, or tell the agent what to do
-instead. For a session that runs in a tmux pane (every session MaximizePM
+When a session comes to a permission prompt or asks you a question, its row
+gets a ! badge, and the question shows in a panel above that session's message
+box. Nothing opens by itself over the page: open the session, or click the
+question in Your action items, which opens the session that asks. You pick an
+answer, or tell the agent what to do instead. For a session that runs in a tmux pane (every session MaximizePM
 starts), the answer goes into its terminal, and so does what you type in the message box, with
 files and pictures.
 
-![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
+![A permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
 
 The message box keeps what you typed for each session: switch to another
 session, or reload the page, and the draft (with the files you attached) is
@@ -244,7 +246,7 @@ Open setup guide in Settings (the ⋯ menu) opens it again.
 
 Every button on the page that starts an agent opens one launch dialog (see
 [Model and effort](#model-and-effort)). The Start button offers Claude Code
-at first; add Codex, Grok, OpenCode, or Gemini in the setup guide when the
+at first; add Codex, Antigravity CLI, Grok, or OpenCode in the setup guide when the
 page finds them on this computer. The Codex command gets `--add-dir
 <MaximizePM data folder>`, so its sandbox can write the queue.
 
@@ -522,6 +524,8 @@ An agent that cannot run shell commands can use MaximizePM through MCP:
 words). Each tool returns the same text as the command, and the server keeps
 the agent name that `go`, `plan`, or `manage` gives.
 For Claude Code: `claude mcp add maxpm -- maxpm mcp`.
+To plan from a chat app without the rest of the tools, use `maxpm mcp --plan`
+(see Plan from a chat app, below).
 
 ### Claude desktop app
 
@@ -567,6 +571,74 @@ chat, MaximizePM works as it does for the Claude desktop app (above). Codex CLI
 sessions see the MaximizePM server too, and in a project folder they work as
 usual. `--remove` takes MaximizePM out again.
 
+### Plan from a chat app
+
+You can plan with a chat app while the manager runs the work. The planner
+connection gives the chat app planning tools only: it reads and changes
+projects, goals, tasks and the order between them. It can't take a task,
+finish one, deploy, or start a session. What it adds shows up in the history
+as you, with the app's name after it (`mark@claude-ai`), and the manager
+starts agents for the new tasks as it does for any task.
+
+The tools: `list_projects`, `show_project`, `add_project`,
+`describe_project`, `list_goals`, `show_goal`, `add_goal`, `list_tasks`,
+`search_tasks`, `show_task`, `add_task`, `edit_task`, `link_tasks`,
+`unlink_tasks`, `backlog_task`, `activate_task`, `drop_task`, and
+`planning_guide`.
+
+The planner can also keep a design document for a topic, the way an expert
+session does. `start_doc` starts one for a task or a goal, with the parts
+Brief, Discovery, Decisions, Plan and Risks, and opens it in the MaximizePM
+page. You read it, edit it and comment on it there, and the sessions that do
+the tasks read it too. `write_section` fills in a part, `read_doc` reads it
+back (with `plan`, the versions of the plan and where each task stands),
+`doc_comments` reads your comments and your answers to its decisions,
+`reply_comment` answers a comment, and `answer_decision` records an answer
+you give in the chat. `list_docs` lists the documents, `read_notes` reads an
+expert's notes, and `show_goal` includes the goal's handoff.
+
+An app on this computer runs the planner with `maxpm mcp --plan` (stdin and
+stdout), or reaches it at `http://127.0.0.1:<port>/mcp/plan` in `maxpm serve`
+(Streamable HTTP; like `/mcp`, it answers only on this computer).
+
+Claude desktop app: add this to `claude_desktop_config.json` under
+`mcpServers`, then quit and reopen the app:
+
+```json
+"maxpm-plan": {"command": "maxpm", "args": ["mcp", "--plan"]}
+```
+
+ChatGPT desktop app and the Codex CLI: add this to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.maxpm-plan]
+command = "maxpm"
+args = ["mcp", "--plan"]
+```
+
+Antigravity CLI: run this once:
+
+```sh
+agy mcp add maxpm-plan -- maxpm mcp --plan
+```
+
+Claude on the web, ChatGPT on the web and the Gemini web app connect from
+their own servers, so they need a public address. The MaximizePM relay gives
+you one (it needs a relay plan or its trial): add a custom connector with the
+address `https://<your relay address>/mcp/plan`. Your relay account page shows
+it under Chat apps. The first time, the chat app opens the relay: sign in and
+press Allow. The account page lists the apps you allowed, each with
+Disconnect. That sign-in opens only the planner, never the rest of MaximizePM.
+
+- Claude: Settings, Connectors, Add custom connector. Every plan has custom
+  connectors; the Free plan allows one.
+- ChatGPT: turn on developer mode, then add a custom MCP server.
+- Gemini: Settings, Connected apps, custom app (for now, personal Google
+  accounts in the US).
+
+The planner refuses to run inside a session that MaximizePM started: a session
+changes tasks with its own `maxpm` commands.
+
 ## Tests
 
 ```sh
@@ -582,8 +654,9 @@ blocker trees, the agent registry, capacity, settings, and the web page.
 
 - Sessions tab: each running agent session (Claude Code or Codex) as a chat,
   read from its transcript on this computer, with its item, its state, and
-  what waits for you in it. The ! dialog answers a permission prompt or a
-  question, and opens by itself when a new one comes. For a session in a tmux
+  what waits for you in it. A permission prompt or a question shows in a
+  panel above the session's message box, and its row gets a ! badge; nothing
+  opens by itself over the page. For a session in a tmux
   pane, the message box types into its terminal, with files and pictures.
   Items and Artifacts show what the session took and wrote. The message box
   keeps a draft for each session through a switch and a reload. After a
@@ -636,8 +709,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   When a prompt (a permission prompt, a folder trust question;
   `prompt_pattern`) stays on the screen for `prompt_wait` (20s), each person
   gets an alert with the question, each option and the keys that choose it,
-  the item the agent holds, and a link to the session. Answer it in the ! dialog
-  on the Sessions tab, or with Open in terminal. A Claude Code session that MaximizePM starts
+  the item the agent holds, and a link to the session. Answer it in the panel
+  above the session's message box on the Sessions tab, or with Open in terminal. A Claude Code session that MaximizePM starts
   also reports each tool call, permission prompt, and turn end through hooks
   (`claude_activity_hooks`). When the agent holds an item, a permission
   prompt alerts the manager at once, and so does a turn end, but not while

@@ -199,7 +199,9 @@ def _mode(conn, r, t):
     if mode == "auto" or (mode == "forge" and r["outside"]):  # #6164: the outside system starts it: it asked first
         return True, None
     if mode == "forge":  # #6119: a push or a tag starts it on the forge; its plugin links that run to this one
-        return False, "the forge starts it by itself (a push or a tag); MaximizePM reads its run"
+        f = conn.execute("SELECT forge FROM pipelines WHERE id=?", (r["pipeline_id"],)).fetchone()
+        return False, (f"{transitions.host_name(f['forge'] if f else None)} starts it by itself (a push or a tag); "
+                       "MaximizePM reads its run")
     if r["approved_at"]:
         return True, None
     if mode == "delay":
@@ -341,7 +343,8 @@ def approve(conn, pipeline, stage, rev=None, actor=None):
     r = _waiting_run(conn, p, stage, rev)
     t = transitions.get(conn, r["stage_id"])
     if t["mode"] in ("auto", "forge"):
-        raise core.RiverError(f"the transition into stage {stage} is {transitions.mode_text(t['mode'], t['mode_arg'])}"
+        raise core.RiverError(f"the transition into stage {stage} is "
+                              f"{transitions.mode_text(t['mode'], t['mode_arg'], transitions.host_name(p['forge']))}"
                               f": it takes no yes. To let {(r['rev'] or '')[:12]} past its controls: maxpm pipeline "
                               f"pass {p['name']} {stage} --rev {(r['rev'] or '')[:12]} --reason \"<why>\"")
     why = _yes_refusal(conn, t, stage, actor)
@@ -579,6 +582,9 @@ def _waves(conn, r, folder, limit, limit_text, env):
 
 def _hand_on(conn, r):
     """A stage passed: its environment runs the version now (a deploy stage), and the next stage gets it."""
+    from . import targets
+    if r["forge"] == "github" and targets.check_targets(conn, r["pipeline_id"]):
+        return
     if r["kind"] == "deploy" and r["env_id"]:
         e = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (r["env_id"],)).fetchone()
         if e:
@@ -896,13 +902,16 @@ def serve_pass(conn):
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
     transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
-    from . import plugin
+    from . import plugin, targets
     plugin.poll_due(conn)  # and the pipelines whose source is a plugin: GitHub, Gitea, Forgejo too (#6159, #6160)
+    check_sources = targets.check_source_ids(conn)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
     for row in rows:
         r = _row(conn, row["id"])
+        if r["pipeline_id"] in check_sources:
+            continue
         forge = r["workflow"] and not r["cmd"]
         if forge and not r["outside"] and (r["runner"] or not plugin.is_plugin(r["forge"])):
             continue  # started in its system already (its plugin reads the run), or no plugin serves its source

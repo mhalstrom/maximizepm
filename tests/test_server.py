@@ -17,7 +17,12 @@ from unittest import mock
 
 from river import core, server
 from river.core import RiverError
-from tests import timing
+from tests import own_sleep, timing
+
+
+def _codex():
+    """The start of a Codex command line: codex and its guard hook's -c words (#6254)."""
+    return core.shell_command(["codex", *core.hook_words(core._adapters().get("codex"))])
 
 
 class LaunchAgent(unittest.TestCase):
@@ -48,6 +53,34 @@ class LaunchAgent(unittest.TestCase):
             else:
                 os.environ["MAXPM_DB"] = old
         self.assertRegex(sent[0], r"MAXPM_DB=\S*q\.db'? MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude --name \S+ \S+ go")  # the path is quoted when it needs it
+
+    def test_a_fresh_session_starts_on_the_agent_the_item_was_dispatched_to(self):
+        """#6419: launch --item 5 --agent Pi; the session asked, released, and ended; after the answer the fresh session
+        started Claude Code (the first launch entry), which stopped at its trust question in that folder."""
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.config_set(self.c, "launch_agents", "Claude=@claude-code; Pi=@pi; Codex=@codex")
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        y = core.item_add(self.c, "shop", "publish the shop", models={"model": "opus"})["id"]
+        z = core.item_add(self.c, "shop", "publish the blog")["id"]
+
+        def ended(t):  # the session asked, released its item and ended: the item is open and nobody's
+            core.unregister(self.c, t["session_name"])
+            self.assertIsNone(core.item_show(self.c, t["item"]["id"])["reserved_for"])
+
+        t = server.dispatch_item(self.c, x, agent="Pi", actor="mark", runner=[].append)
+        self.assertEqual(t["agent"], "Pi")
+        ended(t)
+        self.assertEqual(core.item_show(self.c, x)["agent"], "pi")
+        self.assertEqual(server.start_fresh(self.c, x, "an answer came for it", runner=[].append)["agent"], "Pi")
+        # Codex runs no Claude model: an item whose own model is opus keeps no Codex, and says why.
+        t = server.dispatch_item(self.c, y, agent="Codex", actor="mark", runner=[].append)
+        ended(t)
+        self.assertIsNone(core.item_show(self.c, y)["agent"])
+        self.assertTrue(any("not kept as the item's agent" in e["change"] for e in core.item_show(self.c, y)["events"]))
+        # maxpm serve's own choice (auto_agent) is a preference, not the person's: the item keeps no agent.
+        t = server.dispatch_item(self.c, z, agent="Pi", runner=[].append, auto_agent=True)
+        ended(t)
+        self.assertIsNone(core.item_show(self.c, z)["agent"])
 
     def test_a_command_that_is_a_pipeline_gets_the_session_s_variables_too(self):
         # A variable put before a pipeline reached its first command only (#5239: Amp's 'printf <prompt> | amp').
@@ -133,6 +166,28 @@ class LaunchAgent(unittest.TestCase):
                            (core.iso(core.now()),))
         r = server.dispatch_item(self.c, top, runner=sent.append)
         self.assertEqual((r["pushed_to"], len(sent)), ("idle", 1))  # a waiting session gets it; no new Terminal
+
+    def test_a_new_session_never_gets_the_name_of_a_stopped_or_ended_one(self):
+        # #6359: a launch drew the 4-hex name of a session that a manager had killed minutes before; register kept that
+        # row with its stop request, and the new session's first maxpm go read the stop and ended with no work.
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "shop-aaaa")
+        core.stop_agent(self.c, "shop-aaaa", "usage limit; the item moves to Claude Code", actor="mark")
+        core.register(self.c, "shop-bbbb")
+        core.unregister(self.c, "shop-bbbb")
+        x = core.item_add(self.c, "shop", "first")["id"]
+        with mock.patch("secrets.token_hex", side_effect=["aaaa", "bbbb", "cccc"]):
+            t = server.dispatch_item(self.c, x, runner=[].append)
+        self.assertEqual(t["session_name"], "shop-cccc")
+        self.assertIsNone(core.stop_request(self.c, "shop-cccc"))
+        b = core.go(self.c, self.dir.name, "shop-cccc", focus=f"item:{x}")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", x))
+        # The stopped session keeps its request: it may still run and must still end.
+        self.assertEqual(core.stop_request(self.c, "shop-aaaa")["stop_by"], "mark")
+        # After 50 used names the name takes six hex digits.
+        with mock.patch("secrets.token_hex", side_effect=["aaaa"] * 50 + ["abcdef"]):
+            self.assertEqual(core.new_agent_name(self.c, "shop"), "shop-abcdef")
 
     def test_launch_starts_a_reviewer_for_a_ready_release_review_and_skips_its_authors(self):
         # #902: launch --item <review> refused the review, and launch --project <deploy project> found nothing.
@@ -268,7 +323,7 @@ class LaunchAgent(unittest.TestCase):
         said, naps = io.StringIO(), []
         busy = ["the deploy hook of target web (since 01:00)", None]
         with mock.patch.object(server, "restart_blocked", lambda c: busy.pop(0)), \
-                mock.patch.object(server.time, "sleep", naps.append), contextlib.redirect_stdout(said):
+                mock.patch.object(server.time, "sleep", own_sleep(naps.append)), contextlib.redirect_stdout(said):
             server._restart_wait("restart asked")
         self.assertEqual(naps, [5])
         self.assertIn("restart asked: the restart waits until this ends: the deploy hook of target web", said.getvalue())
@@ -605,7 +660,10 @@ class LaunchAgent(unittest.TestCase):
         core.target_add(self.c, "web")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
         core.config_set(self.c, "review", "on")
-        core.ship(self.c, core.item_add(self.c, "site", "page")["id"])  # the release waits on open work
+        page = core.item_add(self.c, "site", "page")["id"]
+        core.done(self.c, page, "done", "dev")
+        core.ship(self.c, page)
+        core.reopen(self.c, page)  # the release waits on open work
         with mock.patch.object(core, "annotate", side_effect=AssertionError("no graph")):
             self.assertEqual(server.auto_release(self.c, runner=[].append),
                              {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": [], "asked": {}})
@@ -729,6 +787,9 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["result"], "again")
         z = core.item_add(self.c, "site", "about page")["id"]
         core.register(self.c, "plain")
+        # The cuts added the tasks that write the summaries of the releases (#6493): a fresh session takes those.
+        for (t,) in self.c.execute("SELECT id FROM items WHERE kind='operational' AND title LIKE 'Write the summary%'").fetchall():
+            core.drop(self.c, t, "ops", note="written")
         self.assertEqual(core.wait(self.c, self.dir.name, "plain", **nap)["why"], f"#{z} is ready: about page")
 
     def test_a_target_with_no_owner_gets_a_deployer_standing_starts_it_during_the_review_and_off_starts_none(self):
@@ -1150,6 +1211,127 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "shared"):
             core.config_set(self.c, "workspace", "own")
 
+    def test_a_worktree_made_by_maxpm_is_trusted_before_antigravity_codex_copilot_and_grok_start(self):
+        """#6339: a worktree maxpm makes is trusted before the agent starts (agy --settings trustedWorkspaces,
+        codex -c projects={<wt>={trust_level=...}}, copilot config.json trustedFolders, grok trusted_folders.toml); a folder
+        maxpm did not make keeps its prompt; removing the worktree cleans up the trusted-folders files."""
+        import json
+        import shlex
+        import subprocess
+        from unittest import mock
+        from river.agents import antigravity, codex, copilot, grok
+
+        root = os.path.join(os.path.realpath(self.dir.name), "web")
+        os.makedirs(root)
+
+        def git(*a, cwd=root):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        core.project_add(self.c, "web", path=root)
+        core.config_set(self.c, "launch_agents",
+                        "Antigravity=@antigravity; Codex=@codex; Copilot=@copilot; Grok=@grok")
+        add = lambda title: core.item_add(self.c, "web", title)["id"]
+
+        chome = Path(self.dir.name) / "copilot_home"
+        ghome = Path(self.dir.name) / "grok_home"
+        chome.mkdir()
+        (chome / "config.json").write_text(
+            '// comment with https://example.com\n{"firstLaunchAt": "2026-08-10", "trustedFolders": ["/keep"]}\n',
+            encoding="utf-8",
+        )
+        ghome.mkdir()
+        (ghome / "trusted_folders.toml").write_text(
+            '[folders."/keep"]\ntrusted = true\ndecided_at = 100\n', encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(chome), "GROK_HOME": str(ghome)}):
+            # Shared folder (not made by maxpm): Codex (#6432, its -c flag) and agy (#6456, its session-only
+            # --settings) trust the project's linked folder for this start only, and write no file; Copilot and
+            # Grok keep their trust prompt.
+            for label in ("Antigravity", "Codex", "Copilot", "Grok"):
+                sent = []
+                t = server.dispatch_item(self.c, add(f"shared {label}"), agent=label, runner=sent.append)
+                if label == "Codex":
+                    self.assertIn(f'projects={{{json.dumps(root)}={{trust_level="trusted"}}}}',
+                                  shlex.split(t["command"]))
+                    self.assertTrue(sent[-1].endswith(t["command"]))
+                elif label == "Antigravity":
+                    words = shlex.split(t["command"])
+                    self.assertIn(root, json.loads(words[words.index("--settings") + 1])["trustedWorkspaces"])
+                    self.assertTrue(sent[-1].endswith(t["command"]))
+                else:
+                    self.assertNotIn("trustedWorkspaces", t["command"])
+                    self.assertNotIn("trust_level", t["command"])
+                core.unregister(self.c, t["session_name"])
+            # A folder that no project links keeps Codex's trust prompt.
+            other = os.path.join(os.path.realpath(self.dir.name), "elsewhere")
+            os.makedirs(other)
+            spec = {"path": other, "command": "codex hi", "platform": "codex"}
+            server._open_terminal(spec, {}, [].append, self.c)
+            self.assertEqual(spec["command"], "codex hi")
+            self.assertEqual(json.loads((chome / "config.json").read_text().split("\n", 1)[1])["trustedFolders"],
+                             ["/keep"])
+            self.assertNotIn(root, (ghome / "trusted_folders.toml").read_text())
+
+            # Worktree mode: each CLI trusts the new worktree before launch.
+            core.config_set(self.c, "workspace", "worktree", project="web")
+            wts = {}
+            for label in ("Antigravity", "Codex", "Copilot", "Grok"):
+                sent = []
+                t = server.dispatch_item(self.c, add(f"wt {label}"), agent=label, runner=sent.append)
+                wt = t["workspace"]
+                wts[label] = wt
+                self.assertTrue(sent[-1].endswith(t["command"]))
+                core.unregister(self.c, t["session_name"])
+                if label == "Antigravity":
+                    words = shlex.split(t["command"])
+                    cfg = json.loads(words[words.index("--settings") + 1])
+                    self.assertIn(wt, cfg["trustedWorkspaces"])
+                    self.assertIn("command(maxpm)", cfg["permissions"]["allow"])
+                elif label == "Codex":
+                    words = shlex.split(t["command"])
+                    table = words[words.index("-c") + 1]
+                    self.assertTrue(table.startswith("projects={"), table)  # one inline table (#6437)
+                    self.assertIn(f'{json.dumps(wt)}={{trust_level="trusted"}}', table)
+                    self.assertIn(f'{json.dumps(root)}={{trust_level="trusted"}}', table)  # #6415
+                elif label == "Copilot":
+                    data = json.loads((chome / "config.json").read_text())
+                    self.assertIn(wt, data["trustedFolders"])
+                    self.assertIn("/keep", data["trustedFolders"])
+                elif label == "Grok":
+                    txt = (ghome / "trusted_folders.toml").read_text()
+                    self.assertIn(f"[folders.{json.dumps(wt)}]", txt)
+                    self.assertIn('[folders."/keep"]', txt)
+
+            # Removing the worktrees cleans up Copilot's and Grok's trusted-folders files, keeping /keep.
+            out = server.workspace_sweep(self.c)
+            for label, wt in wts.items():
+                self.assertEqual(out[wt], "removed")
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"], ["/keep"])
+            txt = (ghome / "trusted_folders.toml").read_text()
+            self.assertNotIn(wts["Grok"], txt)
+            self.assertIn('[folders."/keep"]', txt)
+
+            # Edge cases on adapter helpers directly: idempotency, custom commands, false->true update.
+            self.assertEqual(antigravity.trust_workspace(root, "agy -i hi"),
+                             shlex.join(["agy", "--settings", json.dumps({"trustedWorkspaces": [root]},
+                                                                         separators=(",", ":")), "-i", "hi"]))
+            cmd1 = codex.trust_workspace(root, "codex resume tid hi")
+            self.assertEqual(codex.trust_workspace(root, cmd1), cmd1)
+            (ghome / "trusted_folders.toml").write_text(f"[folders.{json.dumps(root)}]\ntrusted = false\n",
+                                                        encoding="utf-8")
+            grok.trust_workspace(root, "grok hi")
+            self.assertIn("trusted = true", (ghome / "trusted_folders.toml").read_text())
+            grok.untrust_workspace(root)
+            self.assertEqual((ghome / "trusted_folders.toml").read_text(), "")
+            copilot.trust_workspace(root, "copilot -i hi")
+            copilot.trust_workspace(root, "copilot -i hi")
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"].count(root), 1)
+            copilot.untrust_workspace(root)
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"], ["/keep"])
+
     def test_go_where_the_queue_is_off_gives_a_session_with_no_item(self):
         """#5851: queue off for a project: its maxpm go gives no item, goal or wait, and says how to turn it on."""
         from river import cli
@@ -1447,11 +1629,12 @@ class LaunchAgent(unittest.TestCase):
         server.setup_agent_add(self.c, "Codex")
         core.config_set(self.c, "launch_agents", core.setting(self.c, "launch_agents") + "; Mine=myagent go")
         opts = {o["label"]: o for o in core.state(self.c)["launch_options"]}
+        # Newest and strongest first (#6256).
         self.assertEqual((opts["Claude Code"]["family"], [m["name"] for m in opts["Claude Code"]["models"]]),
-                         ("claude", ["haiku", "sonnet", "opus", "fable"]))
+                         ("claude", ["fable", "opus", "sonnet", "haiku"]))
         self.assertEqual(opts["Claude Code"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual((opts["Codex"]["family"], [m["name"] for m in opts["Codex"]["models"]]),
-                         ("openai", ["luna", "terra", "sol", "astra"]))
+                         ("openai", ["astra", "sol", "luna", "terra"]))  # terra is gpt-5.6, an older generation
         self.assertTrue(opts["Codex"]["takes_model"] and opts["Codex"]["takes_effort"])
         self.assertTrue(all(m["note"] for o in ("Claude Code", "Codex") for m in opts[o]["models"]))
         self.assertEqual((opts["Mine"]["family"], len(opts["Mine"]["models"]), opts["Mine"]["takes_model"]), (None, 8, False))
@@ -1512,8 +1695,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertTrue(sent[0].startswith(f"cd {shlex.quote(t['path'])} && "))  # the folder quoted for the pane's shell
         core.config_set(self.c, "launch_agents", 'Claude Code=claude go; Codex=codex "run maxpm go and follow it"')
         t = server.launch_agent(self.c, runner=sent.append, agent="Codex")
-        self.assertEqual((t["agent"], t["command"]), ("Codex", 'codex "run maxpm go and follow it"'))
-        self.assertIn('codex "run maxpm go and follow it"', sent[-1])
+        # Codex trusts the project's linked folder for this start (#6432); the hand-written prompt stays.
+        self.assertEqual(t["agent"], "Codex")
+        words = shlex.split(t["command"])
+        self.assertEqual((words[0], words[1], words[-1]), ("codex", "-c", "run maxpm go and follow it"))
+        self.assertIn(json.dumps(os.path.realpath(folder)) + '={trust_level="trusted"}', words[2])
+        self.assertTrue(sent[-1].endswith(t["command"]))
         self.assertEqual(server.launch_agent(self.c, runner=sent.append)["agent"], "Claude Code")  # first is default
         # The entries first, in their order, then each other registered agent (#5234).
         self.assertEqual(core.state(self.c)["launch_agents"][:2], ["Claude Code", "Codex"])
@@ -1707,8 +1894,11 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIsNotNone(r["pid_start"])
         # The session's own commands (this test's process is below that shell) run as the token's agent.
         from river import cli
-        who = core.token_session(self.c, tok, cli._caller_chain())
-        self.assertEqual((who["agent"], who["role"], who["checked"]), (t["session_name"], "manager", True))
+        chain = cli._caller_chain()
+        who = core.token_session(self.c, tok, chain)
+        # #6191: in an agent's sandbox the kernel gives no process chain (None): the token is then not checked against
+        # the pane's shell, and the session is unchecked. The test asserts the case of the machine it runs on.
+        self.assertEqual((who["agent"], who["role"], who["checked"]), (t["session_name"], "manager", chain is not None))
         # A person's Start (no item) gets a token too, with no role and no scope.
         t2 = server.start_session(self.c, self.dir.name)
         who = core.token_session(self.c, self._token_of(), None)
@@ -1749,6 +1939,44 @@ class LaunchInTmux(unittest.TestCase):
         # A token this queue did not make is refused.
         with self.assertRaisesRegex(RiverError, "did not make"):
             run("now", "x", env={core.TOKEN_ENV: core.TOKEN_PREFIX + "x" * 40})
+
+    def test_token_session_texts_name_commands_without_as(self):
+        """#6423: a session with a token reads its briefing, its hints and its footer with plain maxpm commands; a
+        --as there only printed 'maxpm: --as is not needed' on each command the agent copied. A text for another
+        agent, or a command with no token, keeps --as."""
+        from river import cli
+        self.tmux.pane_pid = os.getppid()
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        tok = self._token_of()
+        core.register(self.c, "mark", human=True)
+        core.send(self.c, "note", "a note for you", to=name, actor="mark")
+
+        def run(*words):
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {core.TOKEN_ENV: tok}), mock.patch.object(cli, "_caller_chain",
+                                                                                      return_value=None), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                cli.run(list(words))
+            return out.getvalue() + err.getvalue()
+
+        text = run("go", "--project", "shop")
+        self.assertIn(f"#{x}", text)
+        self.assertIn(f"When finished:  maxpm done {x} --output", text)
+        self.assertNotIn("--as", text)
+        text = run("inbox")
+        self.assertNotIn("--as", text)
+        text = run("done", str(x), "--output", "published", "--no-proof", "a test")
+        self.assertIn("next: maxpm go", text)
+        self.assertNotIn("--as", text)
+        # The helper: plain only for the token's own agent.
+        tk = core.TOKEN_AGENT.set(name)
+        try:
+            self.assertEqual(core.as_cmd(name), "maxpm")
+            self.assertEqual(core.as_cmd("other"), "maxpm --as other")
+        finally:
+            core.TOKEN_AGENT.reset(tk)
+        self.assertEqual(core.as_cmd(name), f"maxpm --as {name}")
 
     def test_token_is_replaced_and_cancelled_on_end_kill_and_takeover(self):
         from river import cli
@@ -3628,6 +3856,49 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(core.DEFAULT_SETTINGS["fresh_min"], "70k")
         self.assertEqual(core.DEFAULT_SETTINGS["question_wait_end"], "55m")
 
+    def test_the_chat_record_of_an_asker_is_json_with_the_log_path_as_text(self):
+        """#6227: the adapters give the chat log as a Path, and end_for_answer stores the record as JSON: 'Object of
+        type PosixPath is not JSON serializable' failed every pass of fresh_sessions while an asker sat at its prompt."""
+        from pathlib import Path
+        from unittest import mock
+        from river import sessions
+        log = Path(self.dir.name) / "chat.jsonl"
+        log.write_text("{}\n", encoding="utf-8")
+        core.register(self.c, "asker")
+        with mock.patch.object(sessions, "transcript", lambda conn, agent: ("claude", log)), \
+                mock.patch.object(sessions, "session_ref", lambda *a, **k: "s-1"), \
+                mock.patch.object(sessions, "entries", lambda *a, **k: {"cwd": self.dir.name}), \
+                mock.patch.object(sessions, "cache_state", lambda *a, **k: {"context": 30_000}):
+            rec = server._chat_of(self.c, "asker")
+        self.assertEqual((rec["path"], rec["sid"], rec["context"]), (str(log), "s-1", 30_000))
+        self.assertEqual(json.loads(json.dumps(rec))["path"], str(log))
+
+    def test_the_loop_logs_the_traceback_of_each_distinct_step_error_once(self):
+        """#6227: serve.log held seven 'maxpm notify: fresh_sessions: ...' lines and no line that said where."""
+        import io
+        import threading
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from river import notify
+        stop, passes = threading.Event(), []
+
+        def broken(conn):
+            passes.append(1)
+            if len(passes) == 3:
+                stop.set()
+            raise TypeError("Object of type PosixPath is not JSON serializable")
+        self.addCleanup(notify.TRACED.clear)
+        out = io.StringIO()
+        with mock.patch.object(server, "watch_prompts", lambda c: None), \
+                mock.patch.object(server, "fresh_sessions", broken), \
+                mock.patch.object(stop, "wait", lambda t: None), redirect_stdout(out):
+            notify.loop(stop, interval_s=1)
+        text = out.getvalue()
+        self.assertEqual(passes, [1, 1, 1])
+        self.assertEqual(text.count("maxpm notify: broken: Object of type PosixPath"), 3)
+        self.assertEqual(text.count("Traceback (most recent call last)"), 1)
+        self.assertIn("in broken", text)
+
     def test_a_session_that_waits_at_its_prompt_for_an_answer_ends_and_the_answer_starts_a_fresh_one(self):
         """#5776 (mark 2026-11-13, policy p154): four sessions waited 6h to 7.5h at their prompts for mark's 'deploy'
         or 'push', and each answer read the whole context again at the cache write price. The ask tells the worker to
@@ -4387,6 +4658,33 @@ class SetupGuide(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
+    def test_desktop_apps_show_only_when_present_and_the_click_adds_maxpm(self):
+        # #6477 (GitHub #8): an optional step for each desktop chat app on this computer; the click writes its config.
+        from pathlib import Path
+        from river.agents import claude, codex
+        home = Path(self.dir.name)
+        cfg = home / "Claude" / "claude_desktop_config.json"
+        codex_home = home / "codex"
+        self.addCleanup(setattr, claude, "DESKTOP_APPS", claude.DESKTOP_APPS)
+        self.addCleanup(setattr, codex, "DESKTOP_APPS", codex.DESKTOP_APPS)
+        claude.DESKTOP_APPS = codex.DESKTOP_APPS = ()
+        apps = lambda: {d["agent"]: d for d in server.setup_status(self.c)["desktop_apps"]}
+        with mock.patch.object(claude, "desktop_config_path", return_value=cfg), \
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            self.assertEqual(apps(), {})
+            with self.assertRaises(RiverError):
+                server.OPS["setup_desktop"](self.c, {"agent": "claude"}, None)
+            cfg.parent.mkdir()  # the Claude app made its folder
+            codex.DESKTOP_APPS = (str(home / "ChatGPT.app"),)
+            (home / "ChatGPT.app").mkdir()
+            got = apps()
+            self.assertEqual({k: (v["name"], v["added"]) for k, v in got.items()},
+                             {"claude": ("Claude desktop app", False), "codex": ("ChatGPT desktop app", False)})
+            self.assertIn("added MaximizePM", server.OPS["setup_desktop"](self.c, {"agent": "claude"}, None))
+            self.assertIn("added MaximizePM", server.OPS["setup_desktop"](self.c, {"agent": "codex"}, None))
+            self.assertTrue(all(d["added"] for d in apps().values()))
+            self.assertIn("maxpm", json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"])
+
     def test_block_fix_writes_agents_md_and_status_follows(self):
         before = server.setup_status(self.c)
         self.assertFalse(before["done"])
@@ -4425,10 +4723,272 @@ class SetupGuide(unittest.TestCase):
         self.assertIn("No tabs.", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
+    def test_setup_moves_both_legacy_files_and_warns_about_other_gemini_files(self):
+        root = Path(self.dir.name).resolve()
+        folder = Path(self.folder).resolve()
+        gemini = folder / "GEMINI.md"
+        claude = folder / "CLAUDE.md"
+        parent = root / "GEMINI.md"
+        global_file = root / ".gemini" / "GEMINI.md"
+        global_file.parent.mkdir()
+        parent.write_text("Parent rule.\n", encoding="utf-8")
+        global_file.write_text("Global rule.\n", encoding="utf-8")
+        gemini.write_text("Gemini rule.\n\n@AGENTS.md\n", encoding="utf-8")
+        claude.write_text("Claude rule.\n", encoding="utf-8")
+        from river.agents import antigravity
+        with mock.patch.object(antigravity, "global_instructions", return_value=global_file):
+            added = server.folder_add(self.c, str(folder))
+            self.assertCountEqual(added["old_with_rules"], ["GEMINI.md", "CLAUDE.md"])
+            self.assertIn(f"agy also reads this file: {gemini}", added["agy_instruction_warnings"])
+            kept = server.folder_add(self.c, str(folder), move=False)
+            self.assertEqual(kept["old_with_rules"], added["old_with_rules"])
+            self.assertTrue(gemini.is_file())
+            server.setup_block(self.c, str(folder), move=True)
+            status = server.setup_status(self.c)
+            self.assertEqual(status["folders"][0]["old_with_rules"], [])
+            self.assertNotIn(f"agy also reads this file: {gemini}", status["agy_instruction_warnings"])
+            for path in (parent, global_file):
+                self.assertIn(f"agy also reads this file: {path}", status["agy_instruction_warnings"])
+            from river.cli import setup_instructions
+            setup_instructions(global_file.parent, move=True)
+        self.assertFalse(gemini.exists())
+        self.assertFalse(claude.exists())
+        rules = (folder / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("Gemini rule.", rules)
+        self.assertIn("Claude rule.", rules)
+        self.assertNotIn("@AGENTS.md", rules)
+        self.assertEqual(parent.read_text(encoding="utf-8"), "Parent rule.\n")
+        self.assertEqual(global_file.read_text(encoding="utf-8"), "Global rule.\n")
+
+    def test_the_apps_own_tmux_comes_first_and_runs_its_own_server(self):
+        """#6237: the app carries tmux in river-app/tmux/bin; MaximizePM uses it before any other, and every tmux
+        command for it names the server maximizepm (-L), so the person's own tmux stays apart. With no app tmux, the
+        command line is the tmux found, as before."""
+        from tests import REAL_TMUX_PATH
+        bundle = os.path.join(self.dir.name, "river-app")
+        exe = os.path.join(bundle, "tmux", "bin", "tmux")
+        os.makedirs(os.path.dirname(exe))
+        Path(exe).write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(exe, 0o755)
+        old = core.tmux_path
+        self.addCleanup(setattr, core, "tmux_path", old)
+        os.environ["MAXPM_APP_BUNDLE"] = bundle
+        self.addCleanup(os.environ.pop, "MAXPM_APP_BUNDLE", None)
+        self.assertEqual(core.bundled_tmux(), exe)
+        core.tmux_path = REAL_TMUX_PATH
+        self.assertEqual(core.tmux_path(), exe)
+        self.assertEqual(server._tmux_cmd(), [exe, "-L", "maximizepm"])
+        self.assertEqual(server.tmux_line(), f"{exe} -L maximizepm")
+        os.environ.pop("MAXPM_APP_BUNDLE")
+        core.tmux_path = lambda: "/opt/homebrew/bin/tmux"
+        self.assertIsNone(core.bundled_tmux())
+        self.assertEqual(server._tmux_cmd(), ["/opt/homebrew/bin/tmux"])
+
+    def _agent_bin(self, *names):
+        """A folder where an installer put these programs, as the only folder the search reads (#6239)."""
+        from river import agentinstall
+        b = os.path.join(self.dir.name, "bin")
+        os.makedirs(b, exist_ok=True)
+        for n in names:
+            Path(b, n).write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(Path(b, n), 0o755)
+        old = agentinstall.DIRS, server._login_shell_which
+        self.addCleanup(lambda: (setattr(agentinstall, "DIRS", old[0]), setattr(server, "_login_shell_which", old[1])))
+        agentinstall.DIRS = [b, os.path.join(self.dir.name, "missing")]
+        server._login_shell_which = lambda names: {n: None for n in names}  # Finder's short PATH: a login shell finds none
+        return b
+
+    def test_choose_an_agent_shows_each_agent_by_a_real_check_with_claude_code_and_codex_first(self):
+        """#6239 (mark 2026-11-19): every agent is in the list with its state from a real check, also when the app has
+        Finder's short PATH: codex in an installer's folder (~/.local/bin, Homebrew's bin) counts as installed.
+        Claude Code is always there (it was left out when it was on the Start button), with Install when missing.
+        #6248 (mark 2026-11-19): Antigravity CLI is the third main agent; on a Mac with Homebrew it installs with
+        Homebrew's cask, else with Google's script."""
+        from river import agentinstall
+        b = self._agent_bin("codex")
+        old = agentinstall.BREW, core.PLATFORM
+        self.addCleanup(lambda: (setattr(agentinstall, "BREW", old[0]), setattr(core, "PLATFORM", old[1])))
+        agentinstall.BREW, core.PLATFORM = "", "darwin"
+        clis = {a["label"]: a for a in server.setup_status(self.c)["agent_clis"]}
+        claude, codex, agy = clis["Claude Code"], clis["Codex"], clis["Antigravity CLI"]
+        self.assertEqual((claude["found"], claude["added"], claude["main"]), (False, True, True))
+        self.assertEqual(claude["install"], {"command": "curl -fsSL https://claude.ai/install.sh | bash"})
+        self.assertTrue(claude["signin"])
+        self.assertEqual((codex["found"], codex["path"], codex["added"], codex["main"]),
+                         (True, os.path.join(b, "codex"), False, True))
+        self.assertEqual((agy["found"], agy["main"], agy["signin"], agy["install"]["command"]),
+                         (False, True, True, "curl -fsSL https://antigravity.google/cli/install.sh | bash"))
+        self.assertNotIn("Gemini CLI", clis)
+        self.assertEqual([a["label"] for a in clis.values() if a["main"]], ["Claude Code", "Codex", "Antigravity CLI"])
+        agentinstall.BREW = "/opt/homebrew/bin/brew"
+        self.assertEqual(agentinstall.install_command("antigravity"), "/opt/homebrew/bin/brew install --cask antigravity-cli")
+        core.PLATFORM = "linux"  # casks are for macOS
+        self.assertEqual(agentinstall.install_command("antigravity"), "curl -fsSL https://antigravity.google/cli/install.sh | bash")
+        self.assertEqual(agentinstall.install_command("codex"), agentinstall.METHODS["codex"]["install"])
+        # The Start button's list counts the same check: Codex added becomes the default (Claude Code is missing).
+        self.assertEqual(server.setup_agent_add(self.c, "Codex"), ["Codex", "Claude Code"])
+
+    def test_the_installers_folders_go_on_the_path_of_the_panes(self):
+        """#6239: a pane of the app's tmux finds what the guide found, also when the app started from Finder."""
+        b = self._agent_bin()
+        from river import agentinstall
+        self.assertEqual(agentinstall.extra_path("/usr/bin:/bin"), f"/usr/bin:/bin:{b}")
+        self.assertEqual(agentinstall.extra_path(f"{b}:/usr/bin"), f"{b}:/usr/bin")
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            self.assertEqual(server._tmux_env()["PATH"], f"/usr/bin:/bin:{b}")
+
+    def test_install_and_sign_in_run_in_a_window_of_the_terminal_tab(self):
+        """#6239: Install runs the vendor's install command, and Sign in the CLI's own sign-in, in a window of the
+        Terminal tab (the person reads it there and answers a question or a password), with the installers' folders on
+        its PATH. Only a person; Node.js first for an npm install; no window for a CLI with no sign-in command."""
+        from river import agentinstall
+        self._agent_bin()
+        calls = []
+
+        def tmux(a):
+            calls.append(a)
+            return None if a[0] == "has-session" else "%7" if a[0] in ("new-session", "new-window") else ""
+        old = server.TMUX_RUNNER
+        self.addCleanup(setattr, server, "TMUX_RUNNER", old)
+        server.TMUX_RUNNER = tmux
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "bot")
+        r = server.OPS["setup_agent_install"](self.c, {"platform": "claude-code"}, "mark")
+        self.assertEqual(r, {"pane": "%7", "name": "Install Claude Code",
+                             "command": "curl -fsSL https://claude.ai/install.sh | bash"})
+        new = next(a for a in calls if a[0] == "new-session")
+        self.assertEqual(new[new.index("-s") + 1], "maxpm-shell")
+        self.assertIn("-e", new)
+        self.assertTrue(new[new.index("-e") + 1].startswith("PATH="))
+        self.assertIn("curl -fsSL https://claude.ai/install.sh | bash\n", new[-1])
+        self.assertIn(["set-option", "-p", "-t", "%7", "@maxpm_job", "install:claude-code"], calls)
+        r = server.OPS["setup_agent_signin"](self.c, {"platform": "codex"}, "mark")
+        self.assertEqual((r["name"], r["command"]), ("Sign in to Codex", "codex login --device-auth"))
+        with self.assertRaisesRegex(core.RiverError, "only a person"):
+            server.OPS["setup_agent_install"](self.c, {"platform": "codex"}, "bot")
+        # Antigravity CLI signs in at its own start: agy, then the person picks the method in the window.
+        r = server.OPS["setup_agent_signin"](self.c, {"platform": "antigravity"}, "mark")
+        self.assertEqual((r["name"], r["command"]), ("Sign in to Antigravity CLI", "agy"))
+        with self.assertRaisesRegex(core.RiverError, "no sign-in command"):
+            server.OPS["setup_agent_signin"](self.c, {"platform": "copilot"}, "mark")
+        self.assertIn("setup_agent_install", server.TYPING_OPS)
+
+    def test_the_guide_shows_the_last_lines_of_a_running_install(self):
+        """#6239: a window of an install runs until its last step records the exit status on its pane (@maxpm_exit)."""
+        from river import agentinstall
+        screen = {"%7": "Downloading Claude Code\n\nInstalling to ~/.local/bin\n  50%\n", "%8": "Done\n"}
+
+        def tmux(a):
+            if a[0] == "has-session":
+                return ""
+            if a[0] == "list-panes":
+                return "%7|install:claude-code|Install Claude Code|\n%8|signin:codex|Sign in to Codex|0\n%9||shell 1|"
+            if a[0] == "capture-pane":
+                return screen[a[a.index("-t") + 1]]
+            return ""
+        old = server.TMUX_RUNNER
+        self.addCleanup(setattr, server, "TMUX_RUNNER", old)
+        server.TMUX_RUNNER = tmux
+        self.assertEqual(agentinstall.jobs(), {
+            "claude-code": {"install": {"pane": "%7", "name": "Install Claude Code", "running": True,
+                                        "exit": None, "tail": ["Downloading Claude Code", "Installing to ~/.local/bin", "  50%"]}},
+            "codex": {"signin": {"pane": "%8", "name": "Sign in to Codex", "running": False, "exit": 0, "tail": ["Done"]}}})
+
+    def test_the_sign_in_state_comes_from_the_clis_own_status_and_is_kept_for_a_while(self):
+        """#6239: claude auth status and codex login status exit 0 when signed in; the guide asks at most every
+        STATUS_TTL seconds. A CLI with no status command has no sign-in state."""
+        from river import agentinstall
+        asked = []
+        old = agentinstall.STATUS_RUNNER
+        self.addCleanup(setattr, agentinstall, "STATUS_RUNNER", old)
+        self.addCleanup(agentinstall.forget_status)
+        agentinstall.forget_status()
+        agentinstall.STATUS_RUNNER = lambda argv: (asked.append(argv), 0)[1]
+        self.assertTrue(agentinstall.signed_in("claude-code", "/x/claude"))
+        self.assertTrue(agentinstall.signed_in("claude-code", "/x/claude"))
+        self.assertEqual(asked, [["/x/claude", "auth", "status"]])
+        self.assertIsNone(agentinstall.signed_in("copilot", "/x/copilot"))
+        self.assertIsNone(agentinstall.signed_in("codex", None))
+
+    def test_a_tmux_that_crashes_with_no_output_names_its_signal(self):
+        """#6240: the app's tmux crashed at its first server start and printed nothing, so the start error said only
+        'tmux new-session: '. It now names the signal, or the exit status."""
+        import sys
+        old = server._tmux_cmd
+        self.addCleanup(setattr, server, "_tmux_cmd", old)
+        # SIGTERM, not SIGSEGV: a crash of Python opens the macOS dialog 'Python quit unexpectedly' at each run (#6244).
+        server._tmux_cmd = lambda: [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
+        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: stopped by SIGTERM \(it printed nothing\)$"):
+            server._tmux("new-session", "-d")
+        server._tmux_cmd = lambda: [sys.executable, "-c", "raise SystemExit(3)"]
+        with self.assertRaisesRegex(core.RiverError, r"^tmux new-session: exit status 3 \(it printed nothing\)$"):
+            server._tmux("new-session", "-d")
+
+    def test_install_tmux_is_one_click_on_a_mac_and_a_command_on_linux(self):
+        """#6237: without the app's tmux and with no tmux, the setup guide has the step Install tmux. On a Mac a
+        Terminal window runs brew install tmux, after Homebrew's own installer when brew is missing; Linux gets the
+        command, which needs sudo. With tmux there is no step."""
+        scripts = []
+        old = (server.INSTALL_RUNNER, core.PLATFORM, core.brew_path)
+        self.addCleanup(lambda: (setattr(server, "INSTALL_RUNNER", old[0]), setattr(core, "PLATFORM", old[1]),
+                                 setattr(core, "brew_path", old[2])))
+        server.INSTALL_RUNNER = scripts.append
+        core.PLATFORM = "darwin"
+        core.brew_path = lambda: "/opt/homebrew/bin/brew"
+        st = server.setup_status(self.c)
+        self.assertEqual((st["tmux"], st["tmux_click"], st["brew"]), (False, True, True))
+        r = server.OPS["setup_tmux"](self.c, {}, "mark")
+        self.assertEqual((r["opened"], r["homebrew_first"]), (True, False))
+        self.assertIn('"$BREW" install tmux', scripts[-1])
+        self.assertNotIn(server.HOMEBREW_INSTALLER, scripts[-1])
+        core.brew_path = lambda: None
+        r = server.install_tmux()
+        self.assertTrue(r["homebrew_first"])
+        self.assertIn(server.HOMEBREW_INSTALLER, scripts[-1])
+        self.assertLess(scripts[-1].index(server.HOMEBREW_INSTALLER), scripts[-1].index("install tmux ||"))
+        core.PLATFORM = "linux"
+        self.assertFalse(server.setup_status(self.c)["tmux_click"])
+        self.assertIn("apt install tmux", server.install_tmux()["command"])
+        self.assertEqual(len(scripts), 2)
+        old_path = core.tmux_path
+        self.addCleanup(setattr, core, "tmux_path", old_path)
+        core.tmux_path = lambda: "/usr/bin/tmux"
+        self.assertTrue(server.setup_status(self.c)["tmux"])
+        self.assertEqual(server.install_tmux(), {"note": "tmux is installed already"})
+
+    def test_a_new_folder_is_made_after_the_person_says_create(self):
+        """#6236: a folder that does not exist is a question, not an error; Create (create=True) makes it with its
+        missing parents and adds it as any folder. A folder of the system or one under a parent this user cannot
+        write is refused before the question."""
+        new = os.path.join(self.dir.name, "Projects", "Garden Notes")
+        r = server.OPS["folder_add"](self.c, {"path": new, "description": "notes"}, "mark")
+        self.assertEqual(r, {"missing": True, "path": new})
+        self.assertFalse(os.path.exists(new))
+        self.assertFalse(any(p["name"] == "garden-notes" for p in core.project_list(self.c)))
+        r = server.OPS["folder_add"](self.c, {"path": new, "description": "notes", "create": True}, "mark")
+        self.assertTrue(os.path.isdir(new))
+        self.assertEqual((r["project"], r["path"]), ("garden-notes", os.path.realpath(new)))
+        self.assertEqual(core._project(self.c, "garden-notes")["path"], os.path.realpath(new))
+        self.assertIn("MaximizePM", Path(os.path.join(new, "AGENTS.md")).read_text(encoding="utf-8"))
+        for bad in ("/System/shop", "/usr/local/shop", "/etc/shop"):
+            with self.assertRaisesRegex(RiverError, "a folder of the system"):
+                server.folder_add(self.c, bad, create=True)
+        locked = os.path.join(self.dir.name, "locked")
+        os.mkdir(locked)
+        os.chmod(locked, 0o500)
+        self.addCleanup(lambda: os.path.isdir(locked) and os.chmod(locked, 0o700))
+        if os.access(locked, os.W_OK):
+            self.skipTest("runs as a user who may write everywhere")
+        with self.assertRaisesRegex(RiverError, "you cannot write in"):
+            server.folder_add(self.c, os.path.join(locked, "a", "b"))
+        self.assertFalse(os.path.exists(os.path.join(locked, "a")))
+
     def test_add_a_project_folder_refuses_bad_paths_and_a_name_in_use_elsewhere(self):
-        for bad in ("", "relative/path", os.path.join(self.dir.name, "missing")):
+        afile = os.path.join(self.dir.name, "a-file")
+        Path(afile).write_text("x", encoding="utf-8")
+        for bad in ("", "relative/path", afile, os.path.join(afile, "below")):
             with self.assertRaises(RiverError):
-                server.folder_add(self.c, bad)
+                server.folder_add(self.c, bad, create=True)
         other = os.path.join(self.dir.name, "other")
         os.mkdir(other)
         with self.assertRaisesRegex(RiverError, "--move"):
@@ -4563,11 +5123,11 @@ class LaunchProfiles(unittest.TestCase):
         rd = core._shell_quote(core.river_dir())
         codex = core.profile_options(self.c, "codex")
         self.assertEqual(core.build_command("codex", codex, "sol", "xhigh"),
-                         f"codex -m sol -c model_reasoning_effort=xhigh --add-dir {rd} "
+                         f"{_codex()} -m sol -c model_reasoning_effort=xhigh --add-dir {rd} "
                          "'run maxpm go in this folder and follow the briefing'")
         self.assertEqual(core.build_command("codex", {**codex, "sandbox": "workspace-write", "approval": "never",
                                                       "prompt": "go"}),
-                         f"codex --sandbox workspace-write --ask-for-approval never --add-dir {rd} go")
+                         f"{_codex()} --sandbox workspace-write --ask-for-approval never --add-dir {rd} go")
 
     def test_a_session_for_an_item_with_a_goal_gets_the_goal_name(self):
         core.goal_add(self.c, "shop", "ship-v2")
@@ -4608,7 +5168,8 @@ class LaunchProfiles(unittest.TestCase):
         (prof,) = server.setup_status(self.c)["launch_profiles"]
         self.assertEqual([o["setting"] for o in prof["options"]],
                          ["claude_remote_control", "claude_permission_mode", "claude_model_ids", "claude_args",
-                          "claude_skill_prompt", "claude_prompt", "claude_activity_hooks"])
+                          "claude_skill_prompt", "claude_prompt", "claude_activity_hooks", "claude_model",
+                          "claude_effort"])
 
     def test_a_started_claude_code_session_reports_its_activity(self):
         from river import agents
@@ -4717,11 +5278,12 @@ class LaunchProfiles(unittest.TestCase):
         rd = core._shell_quote(core.river_dir())
         codex_home = tempfile.TemporaryDirectory()
         self.addCleanup(codex_home.cleanup)
-        os.environ["CODEX_HOME"] = codex_home.name
-        self.addCleanup(os.environ.pop, "CODEX_HOME", None)
+        env = mock.patch.dict(os.environ, {"CODEX_HOME": codex_home.name})
+        env.start()
+        self.addCleanup(env.stop)
         core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex; Mine=codex -m {model} go")
         t = core._launch_agent_cmd(self.c, pid, "Codex", "astra", "high")
-        self.assertEqual(t["command"], f"codex -m gpt-6-astra -c model_reasoning_effort=high --add-dir {rd} "
+        self.assertEqual(t["command"], f"{_codex()} -m gpt-6-astra -c model_reasoning_effort=high --add-dir {rd} "
                                        "'run maxpm go in this folder and follow the briefing'")
         self.assertEqual((t["model"], t["model_id"], t["env"]), ("astra", "gpt-6-astra", {"MAXPM_MODEL": "astra"}))
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Mine", "terra")["command"], "codex -m gpt-5.6-terra go")
@@ -4749,8 +5311,11 @@ class LaunchProfiles(unittest.TestCase):
             core._launch_agent_cmd(self.c, None, "Codex", "luna", "max")
         # The dialog offers each agent the models of its family only, and the CLI's effort levels.
         opts = {o["label"]: o for o in core.state(self.c)["launch_options"]}
-        self.assertEqual([m["name"] for m in opts["Codex"]["models"]], ["luna", "terra", "sol", "astra"])
-        self.assertEqual([m["name"] for m in opts["Claude Code"]["models"]], ["haiku", "sonnet", "opus", "fable"])
+        self.assertEqual([m["name"] for m in opts["Codex"]["models"]], ["astra", "sol", "luna", "terra"])
+        self.assertEqual([m["name"] for m in opts["Claude Code"]["models"]], ["fable", "opus", "sonnet", "haiku"])
+        # The Codex model cache lists luna's levels: the dialog offers only them for luna (#6256).
+        luna = next(m for m in opts["Codex"]["models"] if m["name"] == "luna")
+        self.assertEqual(luna["efforts"], ["low", "medium", "high"])
         self.assertEqual(opts["Codex"]["efforts"], ["low", "medium", "high", "xhigh", "max"])
 
     def test_a_launch_with_options_through_a_fake_runner(self):
@@ -4867,7 +5432,7 @@ class LaunchProfiles(unittest.TestCase):
         self.assertEqual((core.setting(self.c, "codex_sandbox", project_id=pid),
                           core.setting(self.c, "codex_prompt", project_id=pid)), ("read-only", "run maxpm go and follow it"))
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Codex", "sol")["command"],
-                         f"codex -m gpt-6.1-sol --sandbox read-only --add-dir {rd} 'run maxpm go and follow it'")
+                         f"{_codex()} -m gpt-6.1-sol --sandbox read-only --add-dir {rd} 'run maxpm go and follow it'")
         self.assertEqual(core._launch_agent_cmd(self.c, pid, "Planner")["command"],
                          "claude --permission-mode plan go --remote-control")
         # A remote-control name, or no prompt: custom, since a profile would change them.
@@ -4981,6 +5546,29 @@ class ServeReload(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 server.restart_now()
             self.assertEqual(ran, [(sys.executable, [sys.executable, "/x/bin/maxpm", "serve", "--port", "8765"])])
+
+    def test_drain_runners_waits_for_inflight_commands_and_rejects_new_ones(self):
+        # #6475: restart_now drains in-flight /api/run commands before exec and refuses new ones with restarting.
+        import threading
+        self.addCleanup(lambda: server._RUN_STATE.update(restarting=False, inflight=0))
+        self.assertTrue(server._enter_run())
+        done = threading.Event()
+
+        def drain():
+            server.drain_runners(timeout=2.0)
+            done.set()
+        t = threading.Thread(target=drain)
+        t.start()
+        deadline = time.monotonic() + 1.0
+        while not server._RUN_STATE["restarting"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(server._RUN_STATE["restarting"])
+        self.assertFalse(server._enter_run())
+        self.assertEqual(server.run_command({}), {"busy": True, "restarting": True})
+        self.assertFalse(done.is_set())
+        server._leave_run()
+        t.join(timeout=2.0)
+        self.assertTrue(done.is_set())
 
     def test_only_the_loop_of_river_serve_starts_again(self):
         import threading
@@ -5565,6 +6153,8 @@ class StaticFiles(unittest.TestCase):
         for p in files:
             for n in re.findall(r"^export (?:async )?function (\w+)", p.read_text(encoding="utf-8"), re.M):
                 exports.setdefault(n, set()).add(p)
+        decl_rx = re.compile(r"(?:function\s+|const\s+|let\s+|var\s+)(\w+)\b")
+        call_rx = re.compile(r"(?<![\w.$])(\w+)\s*\(")
         missing = []
         for p in files:
             s = p.read_text(encoding="utf-8")
@@ -5572,10 +6162,10 @@ class StaticFiles(unittest.TestCase):
             imported = set()
             for m in re.finditer(r"import\s*\{([^}]*)\}\s*from", s):
                 imported |= {x.strip().split(" as ")[-1].strip() for x in m.group(1).split(",") if x.strip()}
-            for n, where in exports.items():
-                if p in where or n in imported or re.search(r"(?:function\s+|const\s+|let\s+|var\s+)" + n + r"\b", s):
-                    continue
-                if re.search(r"(?<![\w.$])" + n + r"\s*\(", code):
+            defined = imported | set(decl_rx.findall(s))
+            called = set(call_rx.findall(code))
+            for n in sorted(called & exports.keys()):
+                if p not in exports[n] and n not in defined:
                     missing.append(f"{p.relative_to(server.STATIC)}: {n}")
         self.assertEqual(missing, [])
 
@@ -6512,6 +7102,32 @@ class StartThatStops(unittest.TestCase):
         self.assertIn(f"Claude Code asks first whether it may trust {work}: answer 'Yes, I trust this folder'",
                       out.getvalue())
 
+    def test_a_start_in_a_folder_with_no_rules_file_says_so(self):
+        """#6411: agents worked in toolscaled-local with no AGENTS.md (no secret file rules, no build folder). The
+        reply of a start names the file that the agent reads; a file in the folder or above it, or Claude Code's old
+        CLAUDE.md, counts."""
+        work = Path(self.dir.name, "repo", "sub")
+        work.mkdir(parents=True)
+        if server.missing_instructions(work, "codex") is None:
+            self.skipTest("a folder above the test folder holds an AGENTS.md")
+        t = {"project": "shop", "path": str(work), "session_title": "x", "command": "agy go", "platform": "antigravity"}
+        server._open_terminal(t, {})
+        self.assertEqual(t["no_instructions"], "AGENTS.md")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.print_trust({**t, "agent": "Antigravity"})
+        self.assertIn(f"{work} and the folders above it have no AGENTS.md, the rules file that Antigravity reads",
+                      out.getvalue())
+        Path(work.parent, "CLAUDE.md").write_text("rules\n")
+        self.assertIsNone(server.missing_instructions(work, "claude-code"))  # its old file, one folder above
+        self.assertEqual(server.missing_instructions(work, "codex"), "AGENTS.md")  # Codex does not read CLAUDE.md
+        Path(work.parent, "AGENTS.md").write_text("rules\n")
+        t = {"project": "shop", "path": str(work), "session_title": "y", "command": "agy go", "platform": "antigravity"}
+        server._open_terminal(t, {})
+        self.assertIsNone(t["no_instructions"])
+        self.assertIsNone(server.missing_instructions(work, None))  # no agent known: nothing to say
+
 
 class Exhibits(unittest.TestCase):
     """#5956 (policy g3): a person's Look or Approve card carries the thing itself: the screenshot of a page it names
@@ -6596,3 +7212,39 @@ class Exhibits(unittest.TestCase):
         # A question to a person names the thing the same way; serve takes its screenshot too.
         m = core.send(self.c, "question", "Look at https://example.com/a and say yes", to="mark", actor="w1")
         self.assertEqual([e["what"] for e in m["exhibits"]], ["shot"])
+
+
+class SharedRead(unittest.TestCase):
+    """shared_read (#6406): one computation for all pages in STATE_TTL, and a new one after an action."""
+
+    def setUp(self):
+        server._read_cache.clear()
+        self.addCleanup(server._read_cache.clear)
+        patch = mock.patch.object(server, "STATE_TTL", 60)  # tests set it to 0: each read builds anew
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.n = 0
+
+    def compute(self):
+        self.n += 1
+        return [self.n]
+
+    def test_pages_in_the_same_tick_share_one_computation(self):
+        self.assertEqual(server.shared_read("k", self.compute), [1])
+        self.assertEqual(server.shared_read("k", self.compute), [1])
+        self.assertEqual(self.n, 1)
+
+    def test_an_action_makes_the_next_read_compute_again(self):
+        server.shared_read("k", self.compute)
+        server.state_changed()
+        self.assertEqual(server.shared_read("k", self.compute), [2])
+
+    def test_the_answer_is_old_after_state_ttl(self):
+        server.shared_read("k", self.compute)
+        key, (t, gen, rows) = next(iter(server._read_cache.items()))
+        server._read_cache[key] = (t - server.STATE_TTL - 1, gen, rows)
+        self.assertEqual(server.shared_read("k", self.compute), [2])
+
+    def test_each_key_has_its_own_answer(self):
+        server.shared_read("a", self.compute)
+        self.assertEqual(server.shared_read("b", self.compute), [2])

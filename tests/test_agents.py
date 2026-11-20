@@ -142,7 +142,7 @@ class Contract(Env):
                     "flag": ["--thinking", "{value}"], "live": None, "read": None},
             LAUNCH={"session_name": True, "fork": False, "background": True},
             build_command=lambda name, folder, model, effort, settings, prompt: ["pi", "--model", model, prompt],
-            IDENTITY={"source": "env", "env": "PI_SESSION", "log_glob": None, "pane": None, "url": None,
+            IDENTITY={"source": "env", "env": "PI_SESSION", "pane": None, "url": None,
                       "inside_env": ["PI_SESSION"]},
             CHAT={"compressed": False, "file_tools": ["write"]},
             chat_path=lambda ref, folder: f"/logs/{ref}.jsonl",
@@ -155,6 +155,7 @@ class Contract(Env):
             COMMANDS=[{"name": "compact", "description": "compact the chat", "hint": ""}],
             read_commands=lambda folder: [{"name": "mine", "description": "", "hint": "<x>"}],
             SETUP={"instructions": "AGENTS.md", "skills_dir": None, "voice": None, "open_link": None},
+            UPDATE={"smoke": ["-p", "Reply OK"], "npm": "@earendil-works/pi-coding-agent"},
         )
         self.assertEqual(agents.check(m, "pi"), [])
         a = agents.Adapter(m, "test")
@@ -353,7 +354,8 @@ class StartPaths(Env):
 
     def test_a_user_module_changes_what_core_builds(self):
         before = core.build_command("codex", {"prompt": "go"}, "gpt-6-luna")
-        self.assertTrue(before.startswith("codex -m gpt-6-luna "), before)
+        self.assertIn(" -m gpt-6-luna ", before)
+        self.assertTrue(before.startswith("codex -c "), before)  # the guard hook's words (#6254)
         self.user_module("codex", """
             from river.agents import Raw
             DESCRIBE = {"id": "codex", "label": "Codex", "exe": "codex", "family": "openai"}
@@ -372,7 +374,7 @@ class StartPaths(Env):
         self.assertEqual(core.profile_from_command("codex -m {model} -s read-only 'run go'"),
                          ("codex", {"sandbox": "read-only", "prompt": "run go"}))
         self.assertIsNone(core.profile_from_command("claude --model opus go"))  # a fixed model stays custom
-        self.assertIsNone(core.profile_from_command("gemini go"))
+        self.assertIsNone(core.profile_from_command("agy go"))  # a bare prompt: agy takes it only with -i
 
     def test_effort_flags_and_the_effort_read_back_are_the_adapters(self):
         cl, cx = agents.get("claude"), agents.get("codex")
@@ -451,6 +453,38 @@ class HookState(Env):
         with self.assertRaisesRegex(RiverError, "--state working"):
             cli.run(["--as", "w1", "report"])
 
+    def test_a_codex_session_gets_the_guard_before_a_shell_command(self):
+        """#6254: Codex takes a PreToolUse hook from -c with the hash it computes; its state still comes from the
+        screen. Measured with codex-cli 0.159.1 on 2026-11-20: it ran a hook whose hash was this one, gave it this
+        input, and Claude Code's deny answer blocked the command."""
+        a = agents.get("codex")
+        self.assertEqual(a.state["state"], "detect")
+        self.assertEqual(agents.get("codex").module.hook_hash(
+            "python3 /tmp/claude-501/cxhook/probe.py /tmp/claude-501/cxhook/log.jsonl"),
+            "sha256:08e0fbd3682ecce55affa95aaa6ade528c63c1bea22f4f8971cc56675d87ce18")
+        words = core.hook_words(a)
+        self.assertEqual([words[0], words[2]], ["-c", "-c"])
+        self.assertTrue(words[1].startswith("hooks.PreToolUse=[{hooks=[{type=\"command\",command=") and
+                        " report --hook codex\"" in words[1], words[1])
+        self.assertIn('"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:', words[3])
+        cmd = core.build_command("codex", {"prompt": "maxpm go"})
+        self.assertTrue(cmd.startswith("codex -c "), cmd)
+        payload = {"session_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": "TMUX_TMPDIR=/tmp/x tmux kill-server"}, "tool_use_id": "exec-1"}
+        self.assertEqual(a.read_hook(payload)["run"], "TMUX_TMPDIR=/tmp/x tmux kill-server")
+        self.assertIsNone(a.read_hook({**payload, "tool_name": "apply_patch"}))
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "codex"]), 0)
+        got = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(got["permissionDecision"], "deny")
+        self.assertIn("tmux kill-server", got["permissionDecisionReason"])
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps({**payload, "tool_input": {"command": "ls"}}))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "codex"]), 0)
+        self.assertEqual(out.getvalue(), "")
+
     def test_the_defaults_are_the_adapters_data(self):
         """The prompt_pattern default reads the same screens as the built-in adapters' blocked words, and the
         native_message default is Codex's INPUT; B5 (#5185) removes the copies in the settings."""
@@ -462,8 +496,8 @@ class HookState(Env):
                          [(agents.get(m).label,
                            " ".join(agents.get(m).input["native"]).replace("{text}", "{message}"))
                           for m in ("codex", "pi", "opencode", "copilot", "hermes", "claude")])
-        # Every other built-in adapter has no native path (#5691 read their docs): Gemini CLI, Cursor CLI, Grok, Amp,
-        # Goose and Aider document none that reaches a running session without an install in their home folder.
+        # Every other built-in adapter has no native path (#5691 read their docs): Antigravity CLI, Cursor CLI, Grok,
+        # Amp, Goose and Aider document none that reaches a running session without an install in their home folder.
         self.assertEqual({m for m in agents.BUILTIN if agents.get(m).input.get("native")},
                          {"codex", "pi", "opencode", "copilot", "hermes", "claude"})
         self.assertEqual(agents.get("claude").detect["image_paste"].format(n=1), "[Image #1]")
@@ -1071,16 +1105,18 @@ class SettingsAndEffort(Env):
         opt = next(o for o in core.launch_options(self.c) if o["label"] == "Xyz")
         self.assertEqual(opt["platform"], "xyz")
         self.assertEqual([m["name"] for m in opt["models"]], ["acme/small", "acme/large"])
-        self.assertEqual(opt["efforts"], ["low", "high", "max"])  # the levels whose Xyz name is one of its levels
+        # Each Xyz level once (#6256): high and max are both Xyz's deep, so max, the higher, stands for it.
+        self.assertEqual(opt["efforts"], ["low", "max"])
         self.assertEqual(agents.get("pi").effort_choices(), list(agents.MAXPM_EFFORTS))  # map: only max -> xhigh
         self.assertTrue(opt["takes_effort"])
         self.assertEqual([(o["name"], o["label"], o["value"], o["fixed"]) for o in opt["options"]],
                          [("mode", "Mode", "careful", False), ("trust", "Trust", "off", True)])
         prof = next(p for p in core.launch_profiles(self.c) if p["platform"] == "xyz")
-        self.assertEqual((prof["label"], [o["name"] for o in prof["options"]]), ("Xyz CLI", ["mode", "trust", "args", "prompt"]))
+        self.assertEqual((prof["label"], [o["name"] for o in prof["options"]]), ("Xyz CLI", ["mode", "trust", "args", "model", "effort", "prompt"]))  # #6264: each agent's default model and effort
         self.assertEqual(core.setting(self.c, "xyz_prompt"), core.FIRST_PROMPT)  # #5168: every agent has a first prompt
         self.assertEqual(core.profile_options(self.c, "xyz", {"trust": "off"}, chosen={"mode": "fast"}),
-                         {"mode": "fast", "trust": "off", "args": "", "prompt": core.FIRST_PROMPT})
+                         {"mode": "fast", "trust": "off", "args": "", "model": "", "effort": "",
+                          "prompt": core.FIRST_PROMPT})
 
     def test_an_agent_with_no_effort_offers_none(self):
         self.user_module("plain", '''
@@ -1101,7 +1137,7 @@ class SettingsAndEffort(Env):
         got = {s["key"]: s for s in sessions.session_settings(self.c, "x1")["settings"]}
         self.assertEqual(list(got), ["model", "effort", "mode", "yolo"])
         self.assertEqual((got["model"]["value"], got["model"]["live"]), ("acme/large", True))
-        self.assertEqual((got["effort"]["label"], got["effort"]["choices"]), ("Thinking", ["low", "high", "max"]))
+        self.assertEqual((got["effort"]["label"], got["effort"]["choices"]), ("Thinking", ["low", "max"]))
         self.assertEqual((got["mode"]["value"], got["mode"]["source"], got["mode"]["default_key"]),
                          ("fast", "command line", "xyz_mode"))
         self.assertEqual((got["yolo"]["value"], got["yolo"]["default_key"]), ("on", None))
@@ -1128,7 +1164,7 @@ class SettingsAndEffort(Env):
                        "--force --sandbox enabled --mode plan go' WHERE name='c1'")
         got = {s["key"]: s for s in sessions.session_settings(self.c, "c1")["settings"]}
         self.assertEqual(list(got), ["model", "effort", "force", "auto_review", "sandbox", "mode"])
-        self.assertEqual(got["model"]["value"], "opus")
+        self.assertEqual(got["model"]["value"], "claude-opus-5-5")  # Cursor's own id, as its list names it (#6257)
         self.assertEqual(got["effort"]["value"], "high")
         self.assertEqual((got["force"]["value"], got["sandbox"]["value"], got["mode"]["value"]),
                          ("on", "enabled", "plan"))
@@ -1199,6 +1235,166 @@ class SessionFromEnv(Env):
             self.assertEqual(sessions.transcript(self.c, "w"), ("hermes", logs / "local-abc.jsonl"))
 
 
+class ReadDirs(Env):
+    """#6281: a project's read_dirs reach each agent's start in its own form, with the secret files refused."""
+
+    def test_the_setting_the_scan_and_the_start_words(self):
+        rd = Path(self.tmp.name, "core").resolve()
+        (rd / "secrets").mkdir(parents=True)
+        (rd / "deep" / "node_modules").mkdir(parents=True)
+        for f in ("Cargo.toml", ".env", ".env.local", ".envrc", "api.secret", "secrets/key.txt", "deep/.env",
+                  "deep/node_modules/.env"):
+            (rd / f).write_text("x", encoding="utf-8")
+        self.assertEqual(core.secret_files([str(rd)]),
+                         [str(rd / x) for x in (".env", ".env.local", ".envrc", "api.secret", "deep/.env",
+                                                "secrets/key.txt")])
+        with self.assertRaisesRegex(RiverError, "not an absolute path of a folder"):
+            core.config_set(self.c, "read_dirs", "relative/dir", project="p")
+        proj = Path(self.tmp.name, "proj")
+        proj.mkdir()
+        pid = core.project_add(self.c, "p", path=str(proj))["id"]
+        core.config_set(self.c, "read_dirs", str(rd), project="p")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex; agy=@antigravity")
+        claude = core._launch_agent_cmd(self.c, pid, "Claude Code")["command"]
+        self.assertIn(f"--add-dir {rd} --disallowedTools 'Edit(/{rd}/**)'", claude)
+        self.assertIn(f"'Read(/{rd}/**/.env)'", claude)
+        agy = core._launch_agent_cmd(self.c, pid, "agy")["command"]
+        self.assertIn(f"read_file({rd})", agy)
+        self.assertIn(f"write_file({rd})", agy)
+        self.assertIn(f"read_file({rd}/deep/.env)", agy)
+        self.assertNotIn("--add-dir", agy)  # it would move where agy runs its commands (#6278)
+        codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
+        self.assertIn('default_permissions="maxpm"', codex)
+        self.assertIn(f'"{rd}/**/.env"="deny"', codex)
+        self.assertIn(f'"{rd}/**/secrets/**"="deny"', codex)
+        # Active profile comes from CODEX_HOME/config.toml (default_permissions), or :workspace; --sandbox
+        # read-only/workspace-write moves into extends so Codex does not drop the profile (#6304).
+        ch = Path(self.tmp.name, "codex-home")
+        ch.mkdir()
+        (ch / "config.toml").write_text('default_permissions = "custom-local"\n', encoding="utf-8")
+        old_ch = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(ch)
+        try:
+            ad = agents.get("codex")
+            w_start = ad.build_command("n", str(proj), None, None, {"read_dirs": [str(rd)]}, "go")
+            self.assertIn(f'permissions.maxpm={{extends="custom-local",filesystem={{', " ".join(w_start))
+            w_res = ad.resume_command("tid-1", None, None, {"read_dirs": [str(rd)], "prompt": "go"})
+            self.assertIn('default_permissions="maxpm"', w_res)
+            self.assertIn(f'"{rd}/**/.env"="deny"', " ".join(w_res))
+            w_ro = ad.build_command("n", str(proj), None, None,
+                                    {"read_dirs": [str(rd)], "sandbox": "read-only"}, "go")
+            self.assertNotIn("--sandbox", w_ro)
+            self.assertIn('extends=":read-only"', " ".join(w_ro))
+            (ch / "config.toml").unlink()
+            w_def = ad.build_command("n", str(proj), None, None, {"read_dirs": [str(rd)]}, "go")
+            self.assertIn('extends=":workspace"', " ".join(w_def))
+        finally:
+            if old_ch is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old_ch
+        core.config_unset(self.c, "read_dirs", project="p")
+        self.assertNotIn("--disallowedTools", core._launch_agent_cmd(self.c, pid, "Claude Code")["command"])
+        codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
+        self.assertNotIn("default_permissions", codex)  # the tests run with no queue guard (QueueGuard has it)
+
+
+class QueueGuard(Env):
+    """#6412: no session that MaximizePM starts writes the queue file; only maxpm serve does."""
+
+    def setUp(self):
+        super().setUp()
+        core.QUEUE_GUARD = True
+        self.addCleanup(setattr, core, "QUEUE_GUARD", False)
+
+    def test_claude_starts_deny_writes_to_the_queue_files_with_and_without_hooks(self):
+        db = core.db_path()
+        files = core.queue_files()
+        self.assertEqual([Path(f).name for f in files], [db.name, db.name + "-wal", db.name + "-shm"])
+        self.assertTrue(all(Path(f).parent == db.resolve().parent for f in files))
+        pid = core.project_add(self.c, "p")["id"]
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex")
+        for hooks in ("on", "off"):
+            core.config_set(self.c, "claude_activity_hooks", hooks)
+            cmd = core._launch_agent_cmd(self.c, pid, "Claude Code")["command"]
+            name = "claude-hooks.json" if hooks == "on" else "claude-guard.json"
+            path = Path(core.river_dir()) / name
+            self.assertIn(f"--settings {path}", cmd)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], files)
+            self.assertEqual(data["permissions"]["deny"], [f"Edit(/{f})" for f in files])
+            self.assertEqual("hooks" in data, hooks == "on")
+
+    def test_codex_marks_the_queue_files_read_unless_it_has_no_sandbox(self):
+        ad = agents.get("codex")
+        ch = Path(self.tmp.name, "codex-home")
+        ch.mkdir()
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(ch)
+        self.addCleanup(lambda: os.environ.pop("CODEX_HOME", None) if old is None
+                        else os.environ.__setitem__("CODEX_HOME", old))
+        line = " ".join(ad.build_command("n", None, None, None, {}, "go"))
+        for f in core.queue_files():
+            self.assertIn(f'"{f}"="read"', line)
+        self.assertIn('extends=":workspace"', line)
+        line = " ".join(ad.build_command("n", None, None, None, {"sandbox": "workspace-write"}, "go"))
+        self.assertNotIn("--sandbox", line)  # the flag would drop the profile
+        self.assertIn('extends=":workspace"', line)
+        line = " ".join(ad.build_command("n", None, None, None, {"sandbox": "danger-full-access"}, "go"))
+        self.assertIn("--sandbox danger-full-access", line)
+        self.assertNotIn("default_permissions", line)
+        (ch / "config.toml").write_text('sandbox_mode = "danger-full-access"\n', encoding="utf-8")
+        self.assertNotIn("default_permissions", " ".join(ad.build_command("n", None, None, None, {}, "go")))
+        (ch / "config.toml").write_text('default_permissions = "maxpm_read_dirs"\n', encoding="utf-8")
+        self.assertIn('extends=":workspace"', " ".join(ad.build_command("n", None, None, None, {}, "go")))
+
+    def test_setup_agent_guard_adds_and_removes_the_rule_and_keeps_the_persons_own(self):
+        f = Path(self.tmp.name, "settings.json")
+        f.write_text(json.dumps({"permissions": {"deny": ["Bash(rm *)"]}, "model": "opus"}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--config", str(f)])
+        data = json.loads(f.read_text(encoding="utf-8"))
+        files = core.queue_files()
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm *)"] + [f"Edit(/{x})" for x in files])
+        self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], files)
+        self.assertEqual(data["model"], "opus")
+        self.assertTrue(Path(str(f) + ".bak").exists())
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--config", str(f)])
+        self.assertIn("already has the queue guard", out.getvalue())
+        with contextlib.redirect_stdout(out):
+            cli.run(["setup-agent", "--guard", "--remove", "--config", str(f)])
+        data = json.loads(f.read_text(encoding="utf-8"))
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm *)"])
+        self.assertEqual(data["sandbox"]["filesystem"]["denyWrite"], [])
+
+    def test_state_preview_does_not_scan_read_dirs_and_launch_scans_once(self):
+        # #6342: core.state -> _start_next -> launch_target(preview=True) must not build the launch command or walk
+        # read_dirs, and a real launch_target must scan read_dirs only once (not twice).
+        rd = Path(self.tmp.name, "read").resolve()
+        rd.mkdir()
+        (rd / ".env").write_text("x", encoding="utf-8")
+        proj = Path(self.tmp.name, "proj")
+        proj.mkdir()
+        core.project_add(self.c, "p", path=str(proj))
+        core.config_set(self.c, "read_dirs", str(rd), project="p")
+        core.config_set(self.c, "default_agent", "antigravity")
+        it = core.item_add(self.c, "p", "do work")["id"]
+        calls = []
+        real = core.secret_files
+        core.secret_files = lambda dirs: (calls.append(list(dirs)), real(dirs))[1]
+        try:
+            st = core.state(self.c, closed=False)
+            self.assertEqual((st["start_next"]["id"], st["start_next"]["project"]), (it, "p"))
+            self.assertEqual(calls, [])
+            t = core.launch_target(self.c, item=it)
+            self.assertIn(f"read_file({rd}/.env)", t["command"])
+            self.assertEqual(len(calls), 1)
+        finally:
+            core.secret_files = real
+
+
 class Setup(Env):
     """#5184: the setup part. The MCP config writers, the instruction file names, the voice and the web link texts
     are in the adapters, and the page reads them from GET /api/agents instead of testing agent names."""
@@ -1207,24 +1403,10 @@ class Setup(Env):
         # #6024: Claude Code reads AGENTS.md too; CLAUDE.md is only the old file whose rules maxpm init moves.
         self.assertEqual(agents.get("claude").setup["instructions"], "AGENTS.md")
         self.assertEqual(agents.get("codex").setup["instructions"], "AGENTS.md")
-        self.assertEqual(agents.replaced_files(), [("CLAUDE.md", "Claude Code")])
+        self.assertEqual(agents.replaced_files(), [("CLAUDE.md", "Claude Code"), ("GEMINI.md", "Antigravity CLI")])
         self.assertEqual(cli._old_rules("@AGENTS.md\n" + cli.AGENT_SNIPPET), "")
         self.assertEqual(cli._old_rules("# rules\n@AGENTS.md\n"), "# rules")
         self.assertIn("maxpm init --move", cli.move_hint("CLAUDE.md"))
-
-    def test_a_user_adapter_with_its_own_file_name_changes_what_init_writes(self):
-        # A user module that replaces claude with another file name: init and the layout follow it.
-        self.user_module("claude", """
-            DESCRIBE = {"id": "claude", "label": "Claude Code", "exe": "claude", "family": "claude"}
-            SETUP = {"instructions": "CLAUDE.local.md", "import": "@{file}"}
-        """)
-        d = Path(self.tmp.name, "proj")
-        d.mkdir()
-        lines = cli.setup_instructions(d)
-        self.assertEqual((d / "CLAUDE.local.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
-        self.assertFalse((d / "CLAUDE.md").exists())
-        self.assertTrue(any("CLAUDE.local.md: created" in x for x in lines))
-        self.assertEqual(cli.instructions_layout(d), "none")
 
     def test_the_voice_text_comes_from_the_adapter(self):
         self.assertEqual(sessions.provider("claude-code")["voice_cli"], agents.get("claude").setup["voice"])
@@ -1278,7 +1460,7 @@ class CliAncestor(Env):
                 self.assertEqual(core.agent_process(100), (70, "claude --name ag --model opus"))
             with mock.patch.object(core, "_cli_process_name", lambda env=None: None):
                 self.assertEqual(core.agent_process(100)[0], 90)  # no agent CLI named: the first ancestor, as before
-            with mock.patch.object(core, "_cli_process_name", lambda env=None: "gemini"):
+            with mock.patch.object(core, "_cli_process_name", lambda env=None: "agy"):
                 self.assertEqual(core.agent_process(100)[0], 90)  # the CLI is not among them: the first one
         with mock.patch.object(core, "proc_info", self.NODE.get), \
                 mock.patch.object(core, "_cli_process_name", lambda env=None: "codex"):
@@ -1454,3 +1636,73 @@ class FixedSettings(Env):
                 server.session_setting_live(self.c, "oc", "model", "opencode/glm-5.3-flash-free")
         bad = module(DESCRIBE={**GOOD, "id": "x", "model_restart": "no"})
         self.assertIn("DESCRIBE['model_restart'] is a str", " ".join(agents.check(bad, "x")))
+
+
+class CodexWorktreeTrust(unittest.TestCase):
+    """#6415: Codex applies trust to the repository root of a worktree, so trust_workspace names the worktree and the
+    repository's main folder, also when Codex has not trusted that folder before."""
+
+    def test_a_worktree_of_an_untrusted_repository_trusts_its_root_too(self):
+        import shlex
+        import subprocess
+        from river.agents import codex
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = os.path.realpath(tmp.name)
+        repo, wt = os.path.join(base, "repo"), os.path.join(base, "repo.worktrees", "s1")
+        os.makedirs(repo)
+
+        def git(*a):
+            subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                           capture_output=True)
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        git("worktree", "add", "-q", "-b", "s1", wt, "main")
+
+        words = shlex.split(codex.trust_workspace(wt, "codex hi"))
+        trusted = [words[i + 1] for i, w in enumerate(words) if w == "-c" and "trust_level" in words[i + 1]]
+        # One inline table (#6437): codex-cli 0.171.0 ignores the dotted form projects."<path>".trust_level.
+        self.assertEqual(trusted, ["projects={" + f'{json.dumps(wt)}={{trust_level="trusted"}},'
+                                   + f'{json.dumps(repo)}={{trust_level="trusted"}}' + "}"])
+        self.assertEqual(words[-1], "hi")
+        cmd = codex.trust_workspace(wt, "codex hi")
+        self.assertEqual(codex.trust_workspace(wt, cmd), cmd)
+        self.assertEqual(codex._trust_root(os.path.join(wt, "sub")), repo)
+        # The main folder of a repository and a folder outside one: only the folder itself.
+        self.assertIsNone(codex._trust_root(repo))
+        self.assertIsNone(codex._trust_root(base))
+        # A project linked to a folder inside a repository's main folder (#6432): Codex trusts the repository root.
+        self.assertEqual(codex._trust_root(os.path.join(repo, "app")), repo)
+        self.assertEqual(shlex.split(codex.trust_workspace(repo, "codex hi")).count("-c"), 1)
+
+
+class CodexMcpDisable(Env):
+    """#6443: when ~/.codex/config.toml has [mcp_servers.maxpm] (from setup-agent --chatgpt-desktop), Codex starts
+    and resumes disable it with -c mcp_servers.maxpm.enabled=false so the session uses the shell maxpm with its own
+    token and queue; without that entry, the flag is omitted (Codex 0.171.0 refuses it with 'invalid transport')."""
+
+    def test_launch_and_resume_disable_maxpm_mcp_only_when_configured(self):
+        from river.agents import codex
+        ch = Path(self.tmp.name) / "codex_home"
+        ch.mkdir()
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(ch)}):
+            # No config.toml: no override.
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.build_command("w", None, None, None, {}, "go"))
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.resume_command("tid", None, None, {"prompt": "go"}))
+            # Other MCP server only: no override.
+            (ch / "config.toml").write_text('[mcp_servers.other]\ncommand = "echo"\n', encoding="utf-8")
+            self.assertNotIn("mcp_servers.maxpm.enabled=false",
+                             codex.build_command("w", None, None, None, {}, "go"))
+            # With [mcp_servers.maxpm] (as written by setup-agent --chatgpt-desktop): both launch and resume disable it.
+            codex.write_mcp_config(ch / "config.toml")
+            launch = codex.build_command("w", None, "gpt-6-luna", None, {}, "go")
+            resume = codex.resume_command("tid", "gpt-6-luna", None, {"prompt": "go"})
+            for words in (launch, resume):
+                idx = words.index("mcp_servers.maxpm.enabled=false")
+                self.assertEqual(words[idx - 1], "-c")
+            # An explicit override in args is respected.
+            custom = codex.build_command("w", None, None, None,
+                                         {"args": "-c mcp_servers.maxpm.enabled=true"}, "go")
+            self.assertNotIn("mcp_servers.maxpm.enabled=false", custom)

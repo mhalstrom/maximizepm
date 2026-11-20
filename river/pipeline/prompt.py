@@ -80,7 +80,7 @@ def failure_prompt(conn, run_id):
             lines += ["   " + x for x in t["detail"].splitlines()[:DETAIL_LINES]]
     lines += ["", "The full output: maxpm pipeline run " + str(run_id)
               + (f"; the test report: {stage['junit']} in {folder or 'the project folder'}" if stage and stage["junit"] else "")
-              + (f"; the run on the forge: {run['url']}" if run.get("url") else "") + ".",
+              + (f"; the run on the Git host: {run['url']}" if run.get("url") else "") + ".",
               "For each failure: find the cause, say whether it is in the code, the test or the environment, and "
               "propose the fix."]
     return {"text": "\n".join(lines), "version": run["version"], "passed": passed, "commits": commits,

@@ -111,6 +111,16 @@ class Helper(unittest.TestCase):
         t = time.monotonic()
         self.assertLess(time.monotonic() - t, timing.limit(1))
 
+    def test_a_step_in_chrome_gets_more_time_on_ci_only(self):
+        """#6218: the 'no change' click took 0.79 s on the macOS runner against 0.1 x 5; a developer's Mac keeps 0.1."""
+        from unittest import mock
+        with mock.patch.object(timing, "SCALE", 1.0), mock.patch.object(timing, "CHROME", 1.0):
+            self.assertEqual(timing.limit(0.1, below=3.0, chrome=True), 0.1)
+        with mock.patch.object(timing, "SCALE", 5.0), mock.patch.object(timing, "CHROME", 3.0):
+            self.assertAlmostEqual(timing.limit(0.1, below=3.0, chrome=True), 1.5)
+            self.assertAlmostEqual(timing.limit(0.1, chrome=False), 0.5)
+            self.assertAlmostEqual(timing.limit(1.0, below=3.0, chrome=True), 2.4)  # under the defect's wait
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -160,6 +160,15 @@ class TargetControls(unittest.TestCase):
             self.assertEqual([(r["rev"], r["live"]) for r in rows], [("bbbbbbb", False), ("aaaaaaa", True)], stage)
             self.assertEqual({(r["what"], r["why"]) for r in rows}, {(None, None)}, stage)
         self.assertEqual(self.c.execute("SELECT cut_rev FROM items WHERE id=?", (out,)).fetchone()[0], "aaaaaaa")
+        # #6222: the text names each release's deploy item, with no 'run #None' and no 'None:'.
+        from river import cli
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "mark", "pipeline", "runs", "web-prod", "deploy"])
+        lines = text.getvalue().splitlines()
+        self.assertNotIn("None", text.getvalue())
+        self.assertTrue(lines[2].startswith(f"  deploy #{out}  aaaaaaa  passed"), lines)
+        self.assertIn("(live)", lines[2])
 
     def test_release_now_is_offered_only_for_a_release_that_waits(self):
         """#6189 (mark 2026-11-19: 'I cannot figure out how to deploy maximizepm-github'): the Deploy tab and the
@@ -184,6 +193,33 @@ class TargetControls(unittest.TestCase):
         p = row()
         self.assertEqual([w["item"] for w in p["waits"]], [core._approvals(self.c, dep)[0]["id"]], p)
         self.assertIsNone(p["release"])
+
+    def test_a_target_with_github_checks_offers_release_now_and_approval(self):
+        from river.pipeline import define
+        from river.routes import pipeline as routes
+        core.config_unset(self.c, "release_approval", project="web")
+        core.target_cadence(self.c, "web-prod", "1w", "mark")
+        self.release("aaaaaaa", "First change", done=True)
+        i = core.item_add(self.c, "web", "Second change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        define.pipeline_add(self.c, "web", project="web", actor="mark")
+        define.forge_set(self.c, "web", "github", repo="example/web", secret="github", actor="mark")
+        define.stage_set(self.c, "web", "tests", "test", workflow="tests.yml", actor="mark")
+        define.env_set(self.c, "web", "release", target="web-prod", actor="mark")
+        rows = lambda: {p["name"]: p for p in routes.deploy(self.c, "/api/deploy")["pipelines"]}  # noqa: E731
+        self.assertNotIn("web", rows())
+        r = rows()["web-prod"]["release"]
+        self.assertEqual((r["target"], r["tasks"], bool(r["until"])), ("web-prod", 1, True))
+        self.assertEqual(routes.pipeline(self.c, "/api/pipeline/web")["release"], r)
+        core.release_now(self.c, "web-prod", "Released by mark from the Deploy tab", "mark")
+        self.assertIsNone(rows()["web-prod"]["release"])
+        core.config_set(self.c, "release_approval", "person", project="web")
+        dep = self.release("bbbbbbb", "Third change")
+        core.release_yes_pass(self.c)
+        yes = core._approvals(self.c, dep)[0]["id"]
+        row = rows()["web-prod"]
+        self.assertIsNone(row["release"])
+        self.assertEqual([w["item"] for w in row["waits"]], [yes])
 
     def test_a_worker_may_not_and_an_operator_agent_may_only_when_agents_may(self):
         self.release("aaaaaaa", "First change", done=True)

@@ -12,7 +12,7 @@ import { nameChoices, OTHER } from "./modelPick.js";
 
 const dlg = makeDialog($("#setDlg"));
 let cur = null, onDone = null;
-const SRC = { session: "from the session", "command line": "from its command line", default: "the default",
+const SRC = { session: "from the session", screen: "from its screen", config: "from its own config", "command line": "from its command line", default: "the default",
   // Sent from this page with no turn after it yet (#5288): the session names it at its next turn.
   "changed now": "changed from this page; the session names it at its next turn" };
 
@@ -22,7 +22,7 @@ function field(s, i) {
   // a field that finds the rest by typing, as the launch dialog does (#5242).
   const { shown, all } = s.kind === "choice" ? nameChoices(s.choices, s.picks, val) : { shown: [], all: [] };
   const input = s.kind === "choice"
-    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${shown.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}</option>`).join("")}${
+    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${shown.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${s.labels && s.labels[c] ? esc(s.labels[c]) : `${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}`}</option>`).join("")}${
       all.length ? `<option value="${OTHER}">Other model…</option>` : ""}</select>${all.length ? `
       <input data-other="${i}" class="hidden" list="setAll${i}" autocomplete="off" spellcheck="false"
         placeholder="Type to find one of ${all.length} models" aria-label="Other ${esc(s.label.toLowerCase())}">
@@ -32,10 +32,10 @@ function field(s, i) {
     : `<span class="muted" title="Changes at next start">restart</span>`;
   // A setting that neither Change now nor a restart can change (OpenCode's model, #5285): its value only; the note
   // says how a person changes it. It sends no change.
-  if (s.fixed) return `<div class="set-row"><label>${esc(s.label)}</label><span>${val ? esc(val) : "not known"}</span>
+  if (s.fixed) return `<div class="sdlg-row"><label>${esc(s.label)}</label><span>${val ? esc(val) : "not known"}</span>
     <span class="muted" title="A restart keeps it">fixed</span>
     <div class="set-sub muted">${val ? esc(SRC[s.source] || s.source || "") : "MaximizePM cannot tell"}${s.note ? ` · ${esc(s.note)}` : ""}</div></div>`;
-  return `<div class="set-row"><label>${esc(s.label)}</label>${input}${how}
+  return `<div class="sdlg-row"><label>${esc(s.label)}</label>${input}${how}
     <div class="set-sub muted">${val ? esc(SRC[s.source] || s.source || "") : "MaximizePM cannot tell"}${s.reported && s.reported !== val ? ` (it reports ${esc(s.reported)})` : ""}${s.default_key ? ` · default ${esc(s.default_key)} = ${esc(s.default_value || "(the CLI's own)")}` : ""}${s.note ? ` · ${esc(s.note)}` : ""}</div></div>`;
 }
 
@@ -43,7 +43,7 @@ function field(s, i) {
 function pageSection(agent) {
   const v = viewOf(agent);
   return `<div class="muted set-head">This page</div>
-    <div class="set-row"><label for="setTools">Show tool calls</label>
+    <div class="sdlg-row"><label for="setTools">Show tool calls</label>
       <select id="setTools" data-view="showTools" data-agent="${esc(agent)}"><option value="on"${v.showTools ? " selected" : ""}>on</option><option value="off"${v.showTools ? "" : " selected"}>off</option></select>
       <span class="muted">now</span>
       <div class="set-sub muted">The tool call lines (Bash, Write, ...) between the messages of its chat; off: a marker such as "12 tool calls" opens them. Kept for this session in this browser</div></div>`;
@@ -89,7 +89,7 @@ export async function openSettings(agent, { done, focus } = {}) {
     sync();
     const at = focus ? j.settings.findIndex(x => x.key === focus) : -1;
     const el = at >= 0 && document.querySelector(`#setList [data-i="${at}"]`);
-    if (el) { el.closest(".set-row").classList.add("on"); el.focus(); el.scrollIntoView({ block: "nearest" }); }
+    if (el) { el.closest(".sdlg-row").classList.add("on"); el.focus(); el.scrollIntoView({ block: "nearest" }); }
   } catch (e) { $("#setList").innerHTML = pageSection(agent) + `<div class="muted">${esc(e.message)}</div>`; cur = null; }
 }
 

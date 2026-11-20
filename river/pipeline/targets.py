@@ -1,9 +1,9 @@
 """Each deploy target of today as a default pipeline (#6115), computed from the records MaximizePM keeps now.
 
-Nothing is stored and nothing that works today changes: a read builds the pipeline of a target from its deploy items
-(one release each), their review items, the person's approval items (release_approval person), the hook runs
-(release-cut, deploy) and the runs of the target's checks after each release (the watch). So toolscaled-prod and
-maximizepm-github show in the pipeline view before they move to a pipeline of their own.
+A target owns its release flow. A read builds it from its deploy items (one release each), review and approval items,
+hook runs, and the checks after each release. MaximizePM starts the hook on schedule or through Release now.
+An attached GitHub source reports tests of the release branch as checks. Test results leave release controls and the
+live version to the target. When the deploy hook starts an external build, its reported jobs belong to that release.
 
 The stages, left to right, as a target has them:
     holding  (holding) the commits that wait for the next release; the release fixes the release's list (cut_at)
@@ -12,8 +12,11 @@ The stages, left to right, as a target has them:
     approval (approve) the person's yes, when release_approval is person
     deploy   (deploy)  the deploy item, with the deploy hook's runs as its steps; its environment is the target
     watch    (check)   the target's checks after the release, until its last watch time (24h with none)
-and, on rows of their own after deploy, a branch for each '<branch>/<step>' name of the deploy hook's steps (#6186:
-maximizepm-github's downloads: the tag, each job of the build of the apps, the published files).
+With release_approval draft (#6213, maximizepm-github) the person's yes comes after the deploy, and the stages are one
+line: holding, deploy (the deploy hook's runs until it prepared the release and exited core.HOOK_YES: test, commit,
+push main, the draft build of the downloads), approval (the yes item that the hook's exit added), publish (its runs
+after the yes: the tag, the published GitHub release), watch. A target's stages never branch (mark 2026-11-19: 'this
+should not be a branching deploy workflow').
 
 The result has the form of store.show (name, project, stages with last_run, envs) and of store.versions (releases),
 with "default": true.
@@ -25,10 +28,12 @@ of the project's folder since the last version that left it: for a pipeline, the
 stage; for a deploy target, the pin of its last done release (or the last version tag). Each commit has its tasks
 (#<id> in its message), the session that wrote it (its Claude-Session link), its changes, and its review: passed in or
 in the review of a release that covers it (a cut release of the target), approved or sent back in the Changes view of
-its task, else not reviewed. The transition after holding is the release: release() sends the commits on, a pipeline's
+its task, else not reviewed. Review counts apply to flows that have review. The transition after holding is the
+release: release() sends the commits on, a pipeline's
 with maxpm pipeline start, a target's with its release cut (core.target_cut), pinned at the last commit it takes.
 """
 
+import json
 import re
 import threading
 import time
@@ -60,11 +65,24 @@ def _hook_run(h):
         state = "queued"
     elif h["ended_at"] is None:
         state = "running"
+    elif _prepared(h):
+        state = "passed"
     else:
         state = "passed" if h["exit_code"] == 0 and not h["timed_out"] else "failed"
     return {"name": h["event"], "state": state, "started_at": h["started_at"], "ended_at": h["ended_at"],
             "seconds": h["seconds"], "output": h["output"], "note": f"exit {h['exit_code']}" if state == "failed"
-            else None}
+            else "prepared: waits for a person's yes" if _prepared(h) else None}
+
+
+def _approved(h):
+    """A run of the deploy hook after the person's yes on the prepared release (#6213, core._run_approved)."""
+    return core._run_approved(dict(h))
+
+
+def _prepared(h):
+    """A run of the deploy hook that prepared the release and asked for the person's yes (exit core.HOOK_YES)."""
+    return (h["event"] == "deploy" and h["ended_at"] is not None and h["exit_code"] == core.HOOK_YES
+            and not h["timed_out"] and not _approved(h))
 
 
 def _steps(conn, hooks):
@@ -83,34 +101,6 @@ def _steps(conn, hooks):
                         "started_at": s["started_at"], "ended_at": s["ended_at"] or (h["ended_at"] if state == "stopped"
                                                                                        else None),
                         "seconds": s["seconds"], "output": None, "note": s["note"]})
-    return out
-
-
-# A branch after the deploy stage (#6186): a deploy hook's step named '<branch>/<step>' (downloads/tag,
-# downloads/build-mac) belongs to the stage <branch>, which the default pipeline draws after deploy, beside the watch.
-# maximizepm-github: the push of main is the deploy; the tag, the build of the apps and the published downloads are the
-# branch 'downloads'. A branch never takes the name of a stage of the target.
-_BRANCH = re.compile(r"^([a-z][a-z0-9-]{0,30})/(\S+)$")
-_STAGE_NAMES = ("holding", "build", "review", "approval", "deploy", "watch")
-
-
-def _branch_steps(steps):
-    """The steps of a deploy hook split: (the deploy stage's own, {branch: its steps with the short name})."""
-    own, branches = [], {}
-    for s in steps:
-        m = _BRANCH.match(s["name"] or "")
-        if m and m.group(1) not in _STAGE_NAMES:
-            branches.setdefault(m.group(1), []).append(dict(s, name=m.group(2)))
-        else:
-            own.append(s)
-    return own, branches
-
-
-def branch_names(releases):
-    """The branch stages that the releases of a target ran (release_runs), in the order of their first run."""
-    out = []
-    for r in reversed(releases):
-        out += [n for n in r["runs"] if n not in _STAGE_NAMES and n not in out]
     return out
 
 
@@ -237,33 +227,45 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
                 st = "failed"
             out["review"] = _run("review", st, rv["claimed_at"], rv["closed_at"], item=rv["id"],
                                  errors="the review sent the release back with fixes" if st == "failed" else None)
-    if approval:
+    def yes_stage():
         yes = core._approvals(conn, dep["id"])
         if yes:
             a = yes[0]
             out["approval"] = _run("approval", _ITEM_STATE.get(a["status"], "queued"), a["created_at"], a["closed_at"],
                                    item=a["id"])
+
+    if approval == "person":
+        yes_stage()
     deploy_hooks = [h for h in hooks if h["event"] in ("deploy", "deployed")]
+    after = []
+    if approval == "draft":  # #6213: the runs after the person's yes, and the deployed hook, are the stage publish
+        after = [h for h in deploy_hooks if _approved(h) or h["event"] == "deployed"]
+        deploy_hooks = [h for h in deploy_hooks if h not in after]
     deploy_steps = [_hook_run(h) for h in deploy_hooks]
+    done = dep["status"] == "done"
     st = _ITEM_STATE.get(dep["status"], "queued")
     runs = [s for s in deploy_steps if s["name"] == "deploy"]
-    if st == "queued" and runs and runs[-1]["state"] in ("running", "failed"):
+    ended = dep["closed_at"] if done else None
+    last = next((h for h in reversed(deploy_hooks) if h["event"] == "deploy"), None)
+    if last is not None and _prepared(last):  # #6213: it prepared the release; the yes and publish come after it
+        st, ended = "passed", last["ended_at"]
+    elif st == "queued" and runs and runs[-1]["state"] in ("running", "failed"):
         st = runs[-1]["state"]
-    steps, branched = _branch_steps(_steps(conn, deploy_hooks))
-    out["deploy"] = _run("deploy", st, dep["claimed_at"] or (runs[0]["started_at"] if runs else None),
-                         dep["closed_at"] if dep["status"] == "done" else None, steps=steps, item=dep["id"],
+    out["deploy"] = _run("deploy", st, dep["claimed_at"] or (runs[0]["started_at"] if runs else None), ended,
+                         steps=_steps(conn, deploy_hooks), item=dep["id"],
                          errors=runs[-1]["note"] if runs and runs[-1]["state"] == "failed" else None)
+    if approval == "draft":
+        yes_stage()
+        if after:
+            pruns = [_hook_run(h) for h in after if h["event"] == "deploy"]
+            pst = "passed" if done else pruns[-1]["state"] if pruns else "queued"
+            out["publish"] = _run("publish", pst, (pruns or [_hook_run(after[0])])[0]["started_at"],
+                                  dep["closed_at"] if done else pruns[-1]["ended_at"] if pruns and pst != "running"
+                                  else None, steps=_steps(conn, after), item=dep["id"],
+                                  errors=pruns[-1]["note"] if pruns and pst == "failed" else None)
     w = _watch(conn, t, dep, next_at, checks)
     if w:
         out["watch"] = w
-    hook_ends = bool(deploy_hooks) and all(h["ended_at"] for h in deploy_hooks)
-    for name, ss in branched.items():
-        failed = next((s for s in ss if s["state"] in ("failed", "stopped")), None)
-        state = "failed" if failed else "passed" if hook_ends else "running"
-        out[name] = _run(name, state, ss[0]["started_at"],
-                         ss[-1]["ended_at"] if state != "running" else None, steps=ss, item=dep["id"],
-                         errors=(f"step {failed['name']} {failed['state']}" + (f": {failed['note']}" if failed["note"]
-                                                                                else "")) if failed else None)
     label = rev or f"deploy #{dep['id']}"
     for r in out.values():
         r["version"] = label
@@ -271,7 +273,7 @@ def _release(conn, t, dep, next_at, reviews, approval, checks):
 
 
 KINDS = {"holding": "holding", "build": "build", "review": "review", "approval": "approve", "deploy": "deploy",
-         "watch": "check"}
+         "publish": "deploy", "watch": "check"}
 
 
 def _deploys(conn, name, limit=RELEASES):
@@ -295,6 +297,18 @@ def _has_build(conn, name, deps):
                                       f"({','.join('?' * len(ids))}) LIMIT 1", ids).fetchone() is not None
 
 
+def _approval_mode(conn, name, deps):
+    mode = core.release_approval(conn, name)["approval"]
+    if mode or not deps:
+        return mode
+    ids = [d["id"] for d in deps]
+    prepared = conn.execute(
+        f"SELECT 1 FROM hook_runs WHERE deploy_id IN ({','.join('?' * len(ids))}) AND event='deploy' "
+        "AND ended_at IS NOT NULL AND exit_code=? AND NOT COALESCE(timed_out, 0) LIMIT 1",
+        (*ids, core.HOOK_YES)).fetchone()
+    return "draft" if prepared else ""
+
+
 def shape(conn, name, deps=None):
     """The stages of target name, left to right, holding first: the names that its default pipeline shows (#6176:
     the stored pipeline of its controls has the same ones, less holding)."""
@@ -304,8 +318,11 @@ def shape(conn, name, deps=None):
         out.append("build")
     if _has_reviews(conn, name, deps):
         out.append("review")
-    if core.release_approval(conn, name)["approval"] == "person":
+    gate = _approval_mode(conn, name, deps)
+    if gate == "person":
         out.append("approval")
+    if gate == "draft":  # #6213: the deploy hook prepares the release, the person approves it, the hook publishes it
+        return out + ["deploy", "approval", "publish", "watch"]
     return out + ["deploy", "watch"]
 
 
@@ -314,7 +331,7 @@ def release_runs(conn, name, deps=None):
     t = _target(conn, name)
     deps = _deploys(conn, name) if deps is None else deps
     reviews = _has_reviews(conn, name, deps)
-    approval = core.release_approval(conn, name)["approval"] == "person"
+    approval = _approval_mode(conn, name, deps)
     checks = _checks(conn, name)
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
     out = []
@@ -340,7 +357,11 @@ def default_pipeline(conn, name):
                                                "NULL", (own["id"],))} if own else {}
     cache = {}
     stages = []
-    for stage in shape(conn, name, deps):
+    names = shape(conn, name, deps)
+    # The stage that puts a release in the target: deploy, or publish with release_approval draft (#6213: a deploy
+    # that waits for the yes is a draft, not live).
+    lands = "publish" if "publish" in names else "deploy"
+    for stage in names:
         last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
         # The arrow after holding is the release (#6140): the manager or the cadence makes it. The arrow into approval
         # is the person's yes; the others are automatic. These modes come from the target's settings; the controls
@@ -350,17 +371,12 @@ def default_pipeline(conn, name):
         arrow = transitions.plain("auto") if stage == "holding" else \
             target_flow.arrow(conn, own, rows.get(stage), stage, mode, cache)
         stages.append({"name": stage, "pos": len(stages) + 1, "kind": KINDS[stage],
-                       "run": hook.get("release-cut") if stage == "build" else hook.get("deploy") if stage == "deploy"
-                       else None, "workflow": None,
-                       "env": name if stage == "deploy" else None, "transition": arrow,
-                       "tier": "prod" if stage in ("deploy", "watch") else None,  # #6137: the target is production
+                       "run": hook.get("release-cut") if stage == "build" else hook.get("deploy")
+                       if stage in ("deploy", "publish") else None, "workflow": None,
+                       "env": name if stage == lands else None, "transition": arrow,
+                       # #6137: the target is production
+                       "tier": "prod" if stage in ("deploy", "publish", "watch") else None,
                        "junit": None, "last_run": last})
-    for stage in branch_names(releases):  # #6186: after deploy, a row of its own beside the watch
-        last = next((r["runs"][stage] for r in releases if stage in r["runs"]), None)
-        stages.append({"name": stage, "pos": len(stages) + 1, "kind": "deploy", "run": hook.get("deploy"),
-                       "workflow": None, "env": None, "prev": ["deploy"],
-                       "transition": dict(transitions.plain("auto"), **{"from": ["deploy"]}), "tier": "prod",
-                       "junit": None, "last_run": last, "branch": True})
     live = done[0] if done else None
     env = {"name": name, "target": name, "url": None, "notes": t["description"],
            "rev": (live["cut_rev"] or f"deploy #{live['id']}") if live else None,
@@ -370,6 +386,7 @@ def default_pipeline(conn, name):
     project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id "
                            "LIMIT 1", (name, f"deploy-{name}")).fetchone()  # not the deploy project of the target
     return {"name": name, "project": project["name"] if project else None, "default": True, "stages": stages,
+            "checks": release_checks(conn, name),
             "controls": True,  # #6176: its arrows, operators, emergency actions, triggers and audit log act
             "held_reason": own["held_reason"] if own else None, "held_by": own["held_by"] if own else None,
             "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
@@ -379,10 +396,51 @@ def default_pipeline(conn, name):
 
 
 def default_list(conn):
-    """The targets that no pipeline covers yet (no pipeline environment names them), as default pipelines."""
-    covered = {r["target"] for r in conn.execute("SELECT DISTINCT target FROM pipeline_envs WHERE target IS NOT NULL "
-                                                 "AND removed_at IS NULL")}
-    return [{"name": t["name"], "project": None, "default": True} for t in _targets(conn) if t["name"] not in covered]
+    """Every deploy target owns its release flow."""
+    return [{"name": t["name"], "project": None, "default": True} for t in _targets(conn)]
+
+
+_CHECK_LINKS = ("FROM pipelines p JOIN pipeline_envs e ON e.pipeline_id=p.id "
+                "JOIN targets t ON t.name=e.target "
+                "WHERE p.target IS NULL AND p.forge='github' AND e.removed_at IS NULL")
+
+
+def check_targets(conn, pipeline_id):
+    """The release flows that read this pipeline's GitHub tests."""
+    return [r[0] for r in conn.execute("SELECT DISTINCT t.name " + _CHECK_LINKS + " AND p.id=? ORDER BY t.name",
+                                      (pipeline_id,))]
+
+
+def check_source_ids(conn):
+    return {r[0] for r in conn.execute("SELECT DISTINCT p.id " + _CHECK_LINKS)}
+
+
+def check_aliases(conn):
+    """Old pipeline links open the target when the source serves just one release flow."""
+    return dict(conn.execute("SELECT p.name, MIN(t.name) " + _CHECK_LINKS
+                             + " GROUP BY p.id HAVING COUNT(DISTINCT t.name)=1"))
+
+
+def release_checks(conn, target):
+    """Read the latest eligible GitHub runs. The source retains all its original run history."""
+    from . import plugin, store
+    out = []
+    sources = conn.execute("SELECT DISTINCT p.* " + _CHECK_LINKS + " AND t.name=? ORDER BY p.name", (target,))
+    for p in sources:
+        branch = plugin._config(p)["settings"].get("ref") or "main"
+        observed = (json.loads(p["plugin_state"] or "null") or {}).get("release_checks") or {}
+        for stage in conn.execute("SELECT id, name, workflow FROM pipeline_stages WHERE pipeline_id=? "
+                                  "AND removed_at IS NULL AND kind='test' AND workflow IS NOT NULL ORDER BY pos, id",
+                                  (p["id"],)):
+            keys = observed.get(stage["name"]) or []
+            run = None
+            if keys:
+                marks = ",".join("?" * len(keys))
+                run = conn.execute(f"SELECT * FROM stage_runs WHERE stage_id=? AND key IN ({marks}) "
+                                   "ORDER BY queued_at DESC, id DESC LIMIT 1", (stage["id"], *keys)).fetchone()
+            out.append({"name": stage["name"], "source": "GitHub", "workflow": stage["workflow"],
+                        "branch": branch, "last_run": store._run_dict(conn, run), "error": p["poll_error"]})
+    return out
 
 
 # ---------------------------------------------------------------- the holding stage (#6140)
@@ -543,15 +601,18 @@ def holding(conn, name, fresh=False):
     from .. import review
     p, target, project = _where(conn, name)
     root = _root_of(conn, project)
+    review_enabled = p is not None or _has_reviews(conn, target, _deploys(conn, target))
     out = {"pipeline": name, "target": target, "project": project, "folder": root, "default": p is None,
            "base": None, "base_label": None, "head": None, "head_label": None, "commits": [], "added": 0,
-           "removed": 0, "counts": {"reviewed": 0, "in_review": 0, "not_reviewed": 0}, "upto": None, "report": None}
+           "removed": 0, "review_enabled": review_enabled,
+           "counts": {"reviewed": 0, "in_review": 0, "not_reviewed": 0} if review_enabled else {},
+           "upto": None, "report": None}
     head, head_label = review._branch_head(root) if root else (None, None)
     if root and head:
         head_sha = (_git(root, "rev-parse", head + "^{commit}") or "").strip()
         base, base_label = _base(conn, root, p, target, head)
         rows = _commits(conn, root, base, head)
-        found = _reviews(conn, root, target, base)
+        found = _reviews(conn, root, target, base) if review_enabled else {}
         ids = sorted({t for c in rows for t in c["tasks"]})
         items = {r["id"]: r for r in conn.execute(
             f"SELECT id, title, short, status FROM items WHERE id IN ({','.join('?' * len(ids)) or 'NULL'})", ids)}
@@ -563,25 +624,27 @@ def holding(conn, name, fresh=False):
         for c in rows:
             tasks = [{"id": i, "title": items[i]["short"] or items[i]["title"], "status": items[i]["status"]}
                      for i in c["tasks"] if i in items]
-            rv = found.get(c["sha"])
-            if rv is None:
-                marks = {review.state_of(conn, f"item:{t['id']}", "-") for t in tasks}
-                rv = ("bad", "changes requested in Changes", None) if "changes" in marks else \
-                    ("ok", "approved in Changes", None) if tasks and marks == {"approved"} else \
-                    ("wait", "not reviewed", None)
-            state, text, dep = rv
-            key = "reviewed" if state == "ok" else "in_review" if state == "run" else "not_reviewed"
-            out["counts"][key] += 1
-            if state == "ok" and open_run:
-                upto = c["sha"]
-            else:
-                open_run = False
+            status = None
+            if review_enabled:
+                rv = found.get(c["sha"])
+                if rv is None:
+                    marks = {review.state_of(conn, f"item:{t['id']}", "-") for t in tasks}
+                    rv = ("bad", "changes requested in Changes", None) if "changes" in marks else \
+                        ("ok", "approved in Changes", None) if tasks and marks == {"approved"} else \
+                        ("wait", "not reviewed", None)
+                state, text, dep = rv
+                key = "reviewed" if state == "ok" else "in_review" if state == "run" else "not_reviewed"
+                out["counts"][key] += 1
+                open_run = open_run and state == "ok"
+                if open_run:
+                    upto = c["sha"]
+                status = {"state": state, "text": text, "release": dep}
+                out["report"] = out["report"] or dep
             session = next((who[x] for x in c["links"] if x in who), None)
             out["commits"].append({"sha": c["sha"], "subject": c["subject"], "tasks": tasks,
                                    "session": session or c["author"], "by_session": bool(session),
                                    "added": c["added"], "removed": c["removed"],
-                                   "review": {"state": state, "text": text, "release": dep}})
-            out["report"] = out["report"] or dep
+                                   "review": status})
         out.update(base=base, base_label=base_label, head=head_sha or head, head_label=head_label, upto=upto,
                    added=sum(c["added"] for c in rows), removed=sum(c["removed"] for c in rows))
     out["release"] = _release_rule(conn, p, target)
@@ -634,6 +697,8 @@ def release(conn, name, upto=None, everything=False, actor=None):
         rev = next((s for s in shas if s.startswith(upto)), None)
         if not rev:
             raise core.RiverError(f"{upto} is not a commit in holding of {name}: maxpm pipeline holding {name}")
+    elif not h["review_enabled"]:
+        rev = shas[-1]
     else:
         rev = h["upto"]
         if not rev:
@@ -687,6 +752,7 @@ def holding_stage(h):
     k = next((i + 1 for i, x in enumerate(h["commits"]) if x["sha"] == h.get("upto")), 0) if h.get("upto") else 0
     return {"name": "holding", "pos": 0, "kind": "holding", "run": None, "workflow": None, "env": None,
             "transition": None, "holding": {"commits": n, **c, "added": h["added"], "removed": h["removed"],
+                                            "review_enabled": h.get("review_enabled", True),
                                             "base_label": h["base_label"], "folder": bool(h["folder"]),
                                             "reading": bool(h.get("reading")),
                                             "release": {"can": bool(rel.get("can")), "reviewed": k,

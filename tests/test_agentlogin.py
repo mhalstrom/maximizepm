@@ -44,7 +44,7 @@ class FakeTmux:
 
 class AgentLogin(unittest.TestCase):
     def setUp(self):
-        self.signed = {"claude": False, "codex": False}
+        self.signed = {"claude": False, "codex": False, "agy": False}
         agentlogin.STATUS_RUNNER = lambda argv: 0 if self.signed[argv[0]] else 1
         self.addCleanup(setattr, agentlogin, "STATUS_RUNNER", None)
         old = (agentlogin.WAIT, agentlogin.DONE_WAIT, agentlogin.POLL)
@@ -83,6 +83,28 @@ class AgentLogin(unittest.TestCase):
         self.assertIn(["kill-window", "-t", "=maxpm:signin-codex"], t.calls)  # an older one goes first
         with self.assertRaisesRegex(core.RiverError, "takes no code here"):
             agentlogin.paste("codex", "ABCD-12345")
+
+    def test_agy_takes_the_first_login_method_then_shows_the_link_and_takes_the_code_back(self):
+        """#6248: agy asks for the login method first (the manager saw 'Select login method: 1. Google OAuth 2. Use a
+        Google Cloud project' on 2026-11-19); Enter takes Google OAuth, then the link shows. The link's screen here is
+        made up: no host without a browser was at hand."""
+        t = self.tmux("Select login method:\n> 1. Google OAuth\n  2. Use a Google Cloud project\n")
+        sent = []
+
+        def keys(args, t=t, call=t.__call__):
+            if args[0] == "send-keys" and args[-1] == "Enter" and not sent:
+                sent.append(args)
+                t.screen = ("Open this link to sign in:\nhttps://accounts.google.com/o/oauth2/auth?client_id=a&state=b\n"
+                            "Enter the authorization code:")
+            return call(args)
+        server.TMUX_RUNNER = keys
+        res = agentlogin.start("agy")
+        self.assertEqual(sent, [["send-keys", "-t", "=maxpm:signin-agy", "Enter"]])
+        self.assertEqual((res["url"], res["paste"]), ("https://accounts.google.com/o/oauth2/auth?client_id=a&state=b", True))
+        self.assertIn(["new-session", "-d", "-s", "maxpm", "-n", "signin-agy", "-x", "200", "-y", "50", "agy"], t.calls)
+        self.signed["agy"] = True
+        self.assertIn("Antigravity CLI is signed in here.", self.run_cli("agent-login", "agy", "--code", "4/0Ab-x"))
+        self.assertIn(["send-keys", "-t", "=maxpm:signin-agy", "-l", "4/0Ab-x"], t.calls)
 
     def test_a_signed_in_cli_starts_nothing(self):
         t = self.tmux("")

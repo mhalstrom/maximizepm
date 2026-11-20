@@ -110,8 +110,12 @@ ends the session, and tell the user.
   the target: `review` (a release goes out when its review passes; this turns
   review on for that project) or `person` (maxpm serve adds one item for a person
   to each ready release, "Approve release <target>: ...", and the deploy waits on
-  that yes; after a failed deploy it asks again). `maxpm config set
-  release_approval review|person --project <name>`; there is no global value, and
+  that yes; after a failed deploy it asks again) or `draft` (the deploy hook
+  prepares the release, for example a draft GitHub release, and exits 76;
+  MaximizePM adds the person's "Approve release" item with the hook's last
+  lines; after the yes the hook runs again with `MAXPM_APPROVED` and publishes
+  it). `maxpm config set
+  release_approval review|person|draft --project <name>`; there is no global value, and
   `maxpm target show` says when a target has none. Ask the person which one fits
   when you set up a target, with the project's needs: a service with users can
   ship on review, and a release that only the person may approve takes `person`.
@@ -137,17 +141,16 @@ ends the session, and tell the user.
   its review, cut it then: `maxpm target cut <target> --rev <commit>`; the commit
   goes into the history and the notes of the deploy item. A fix that the review of
   the cut release asks for still goes out with that release.
-- **Offer the report of a cut release**: at the cut you get a notice. Read the
-  release's review report (`maxpm target report <deploy id>`: the groups, risks
-  first, each task with what changed, its proof and its decisions), then write
-  its summary for the person: one paragraph, risks first (a revert, a review
-  fix, an open fault), in plain words: `maxpm target summary <deploy id>
-  "<paragraph>"`. The first summary sends the person one Read card; the page
-  shows the report from the target's pipeline in Deploy (Report) and from the
-  deploy item.
+- **The report of a cut release**: at the cut MaximizePM adds a task whose new
+  session writes the summary of the release's report (what changes for a user
+  by area, the risks and what to check); the GitHub release notes use the same
+  text. You need not write it. To correct it: `maxpm target summary <deploy id>`
+  prints it; edit it and save it with `--file <file>`. The first summary sends
+  the person one Read card; the page shows the report from the target's
+  pipeline in Deploy (Report) and from the deploy item.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
-  review-passed, review-failed, deployed, deploy; `--clear` removes one; no event lists
+  review-passed, review-failed, deployed, deploy, merged; `--clear` removes one; no event lists
   them; only a person or you set, change, or remove a hook). The maxpm command
   that causes the event runs the hook before it returns (when that command is
   in the sandbox of an agent session, maxpm serve runs it, outside the
@@ -158,6 +161,10 @@ ends the session, and tell the user.
   by hand. A hook never undoes and never refuses its event: when it fails or
   runs longer than `hook_timeout` (10m), the target owner (you, with no owner)
   gets an alert with the exit code and the last lines of its output.
+  The event merged (a push target has it too): an item of a project of the
+  target is done; maxpm serve runs the hook about two minutes later in that
+  project's folder, with MAXPM_ITEM, for example to remove the builds that
+  only the item used.
 - **A target with a deploy plan releases by a deploy hook** (mark: "the deploy
   should be a hook"): `maxpm target hook <target> deploy "<release command>"`,
   and `maxpm config set review on --project deploy-<target>`. No session types
@@ -204,6 +211,17 @@ ends the session, and tell the user.
   you. Read the screen (`maxpm view`, or the Terminal button). Send the person
   an alert with the question and the keys when only a person can answer it;
   else stop the agent and launch again.
+- **A prompt held for you** ("<agent> waits at a prompt in its terminal (alert
+  #<id>) ... It comes to you first"): a session's approval prompt (allow a
+  file read, a command, an edit) comes to you before the person, as a person
+  item does (#6282). Answer it when the person is not needed:
+  `maxpm approve <agent> <option number>`, or `--text "<what to do
+  instead>"`. Approve a read of a file that is no secret in the project's
+  folders or in a folder the task names, and an edit or a command that the
+  task needs. Send on to the person a secret, a deletion, a push, a payment, a
+  sign-in to an account, or what you cannot judge: `maxpm forward <id>`. With
+  neither within `question_hold` (10m), the person gets it. MaximizePM never
+  holds the auto mode classifier's prompt: that one needs the person (p3).
 - **An activity alert to you** ("<agent> stands still: ..."): the Claude Code
   hooks of a session that MaximizePM started say that it holds an item and
   waits on a permission prompt, ended its turn at its prompt, or reported
@@ -247,8 +265,12 @@ ends the session, and tell the user.
   thread shows your answer for the user, who can read it later. Send it on
   when only the user can decide (a release to production, a deletion of data,
   money, public text, a choice the user did not make yet):
-  `maxpm forward <id> --note "<what you checked, your recommendation>"`. The
-  user then sees it in 'Waits for you', needs-you, and on the phone. With
+  `maxpm forward <id> --question "<one short sentence>" --option "<label>:
+  <one line: what happens>" --option ... --recommend <label> --note "<what you
+  checked>"`. Give 2 to 4 options for every decision; your pick shows first.
+  The page opens it for the user as a dialog: the options to pick and a box
+  for other words. The pick reaches the asker as a field (`choice`). The
+  user also sees it in 'Waits for you', needs-you, and on the phone. With
   neither within `question_hold` (10m), the user gets it.
 - **An alert held for you** (a session sent the user `maxpm alert`; it comes
   to you first, like a question): do what it asks when you can, and close it:
@@ -260,9 +282,11 @@ ends the session, and tell the user.
   with the reason: `maxpm done <id> --note "<what you did>"` (or `drop`).
   Before you relay a "Look at" item, check what the session made
   (`maxpm artifacts --item <found-during>`). Send it on when only the user can
-  do it: `maxpm forward --item <id> --note "<what you checked>"`. With
+  do it: `maxpm forward --item <id> --note "<what you checked>"`; a decision
+  takes the same `--question`, `--option` and `--recommend`. With
   nothing within `question_hold` (10m), the user gets it. Items that the user,
-  you, or MaximizePM added go to the user at once.
+  you, or MaximizePM added go to the user at once; give such a decision its
+  options with the same `maxpm forward --item <id> --option ...`.
 - **QUESTION** to the user (one you forwarded, or one that `question_hold`
   sent on) or **WAITS ON THE USER**: tell the user in chat, one decision at a
   time (`maxpm guide decisions`). Do not answer for them.

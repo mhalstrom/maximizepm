@@ -29,6 +29,15 @@
 .rep-r { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); }
 .rep-scope { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }
 .rep-sum p { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; }
+/* A written summary is Markdown (#6493): '## What changes for you', an area heading for each group of points. */
+.rep-sum h2 { margin: var(--sp-5) 0 var(--sp-2); font-size: var(--fs-l); }
+.rep-sum h2:first-child { margin-top: 0; }
+.rep-sum h3 { margin: var(--sp-4) 0 var(--sp-1); font-size: var(--fs-xs); text-transform: uppercase; color: var(--muted); }
+.rep-sum ul { margin: 0 0 var(--sp-2); padding-left: var(--sp-6); }
+.rep-sum li { margin-bottom: var(--sp-2); overflow-wrap: anywhere; }
+.rep-tasks > summary { cursor: pointer; margin-bottom: var(--sp-2); }
+.rep-tasks { display: flex; flex-direction: column; gap: var(--sp-3); }
+.rep-tasks[open] > .rep-g { margin-bottom: var(--sp-3); }
 .rep-nums { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .rep-g { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-2) var(--sp-3); }
 .rep-g.risk { border-color: var(--warn); background: var(--warn-bg); }

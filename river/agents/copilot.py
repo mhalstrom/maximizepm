@@ -82,14 +82,23 @@ EFFORT = {
 LAUNCH = {"session_name": True, "extra_dirs": True, "resume": True}
 
 # The hook reports the id (sessionStart); COPILOT_CLI is set in the environment of its hooks and commands.
-IDENTITY = {"source": "hook", "env": None, "log_glob": None, "pane": None,
+IDENTITY = {"source": "hook", "env": None, "pane": None,
             "url": None, "inside_env": ["COPILOT_CLI"]}
 
 
+# The rule that lets a session run maxpm with no question (#6417). Without it, Copilot 1.0.109 asked 'Do you want to
+# run this command?' at the first maxpm go of each new session, in a trusted worktree, so the session waited for a
+# person before it registered. ':*' matches maxpm with any arguments, and the rule lasts for that run only. The '='
+# form keeps the variadic --allow-tool from reading the next words as more rules. allow-all-tools and allow-all
+# cover every shell command already.
+ALLOW_MAXPM = "--allow-tool=shell(maxpm:*)"
+
+
 def build_command(name, folder, model, effort, settings, prompt):
-    """copilot [--resume <id> | --name N] [--model M] [--reasoning-effort E] [--<permissions>] [--mode M]
-    --add-dir <queue folder> <args> [-i <prompt>]. -i starts the interactive session and runs the prompt; with no
-    prompt it waits at its own prompt. A resumed session keeps its name, so --name goes only on a new one."""
+    """copilot [--resume <id> | --name N] [--model M] [--reasoning-effort E] [--<permissions> | --allow-tool=
+    shell(maxpm:*)] [--mode M] --add-dir <queue folder> <args> [-i <prompt>]. -i starts the interactive session and
+    runs the prompt; with no prompt it waits at its own prompt. A resumed session keeps its name, so --name goes only
+    on a new one."""
     from ..core import river_dir
     s = settings
     words = ["copilot"]
@@ -97,6 +106,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     words += (["--model", model] if model else [])
     words += ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
     words += [f"--{s['permissions']}"] if s.get("permissions") else []
+    words += [] if s.get("permissions") in ("allow-all-tools", "allow-all") else [ALLOW_MAXPM]
     words += ["--mode", s["mode"]] if s.get("mode") else []
     words += ["--add-dir", river_dir()]
     words += [Raw(s["args"].strip())] if (s.get("args") or "").strip() else []
@@ -113,7 +123,8 @@ def resume_command(session_ref, model, effort, settings, name=None):
 
 def parse_command(words):
     """A hand-written copilot command that a profile builds exactly: --model {model}, --reasoning-effort {effort},
-    a known permission flag, --mode with a known mode, --add-dir of the queue folder, and -i <prompt>."""
+    a known permission flag, the maxpm allow rule, --mode with a known mode, --add-dir of the queue folder, and
+    -i <prompt>."""
     from ..core import river_dir
     if not words or Path(words[0]).name.lower() != "copilot":
         return None
@@ -126,6 +137,8 @@ def parse_command(words):
             i += 2
         elif t.startswith("--") and t[2:] in perms and "permissions" not in opts:
             opts["permissions"] = t[2:]
+            i += 1
+        elif t == ALLOW_MAXPM:  # build_command adds it by itself
             i += 1
         elif t == "--mode" and nxt in modes:
             opts["mode"] = nxt
@@ -319,6 +332,10 @@ DETECT = {
     # The key lines of its menus: "↑/↓ to navigate · enter to select · esc to cancel" and, in the ask_user form,
     # "↑/↓ select · enter accept · ctrl+d decline · esc cancel".
     "hint": r"\benter to (select|confirm)\b|\benter accept\b",
+    # The ask_user form (#6235): its message, a tab for each question when it asks more, the question as a label,
+    # the options (boxes for more answers), 'Other (type your answer)'; read and answered by river/ask_forms.
+    "ask": r"^\s*Copilot needs information\.?\s*$",
+    "ask_form": "copilot",
 }
 
 # Stop on the Sessions tab (#5547): Ctrl+C ends the turn ('ctrl+c interrupt'); a second one at the prompt quits.
@@ -348,9 +365,104 @@ def _s():
     return sessions
 
 
-def home():
+def home(env=None):
     """Copilot's own folder: $COPILOT_HOME, else ~/.copilot."""
-    return Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+    base = (env or {}).get("COPILOT_HOME") or os.environ.get("COPILOT_HOME")
+    return Path(base or Path.home() / ".copilot").expanduser()
+
+
+def _strip_jsonc(text):
+    """Strip // and /* */ comments outside JSON strings (Copilot's config.json starts with // comments)."""
+    out, i, n, in_str, esc = [], 0, len(text), False, False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _read_config_json(path):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    try:
+        data = json.loads(_strip_jsonc(text))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_config_json(path, data):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def trust_workspace(folder, command, env=None):
+    """Add a worktree that MaximizePM made to trustedFolders in $COPILOT_HOME/config.json (#6339), so interactive
+    Copilot starts there without its folder trust prompt (--trust-folder applies to -p prompt mode only)."""
+    if not folder:
+        return command
+    path = home(env) / "config.json"
+    data = _read_config_json(path)
+    if data is None:
+        return command
+    real = os.path.realpath(str(folder))
+    trusted = data.get("trustedFolders")
+    if not isinstance(trusted, list):
+        trusted = []
+    if real not in trusted:
+        trusted.append(real)
+        data["trustedFolders"] = trusted
+        _write_config_json(path, data)
+    return command
+
+
+def untrust_workspace(folder, env=None):
+    """Remove a deleted MaximizePM worktree from trustedFolders in $COPILOT_HOME/config.json (#6339)."""
+    if not folder:
+        return
+    path = home(env) / "config.json"
+    if not path.is_file():
+        return
+    data = _read_config_json(path)
+    if data is None or not isinstance(data.get("trustedFolders"), list):
+        return
+    drop = {str(folder), os.path.realpath(str(folder))}
+    kept = [p for p in data["trustedFolders"] if p not in drop]
+    if len(kept) != len(data["trustedFolders"]):
+        data["trustedFolders"] = kept
+        _write_config_json(path, data)
 
 
 def chat_path(session_ref, folder=None, root=None):
@@ -452,6 +564,21 @@ def chat_usage(lines):
         out["cache_read"] += cr
         out["cache_write"] += cw
     return out
+
+
+def config_settings():
+    """What a Copilot session runs with when nothing names it (#6280): Copilot's own defaults. On 2026-11-20 this Mac had
+    no ~/.copilot/settings.json; Copilot starts in the interactive mode, asks before each tool call that changes
+    something (no permission flag), and with a model of its own choice ('auto', which the log names) it gives no
+    reasoning effort: the model's default. With no --model it runs on 'auto' (the log's first session.model_change:
+    cause initial_resolution, newModel auto), before the log has that line."""
+    return {"model": "auto", "mode": "interactive", "permissions": "ask", "effort": "default"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): the log's session.model_change, from
+# the first one (cause initial_resolution).
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config"), "permissions": ("config",),
+                 "mode": ("config",)}
 
 
 def chat_settings(lines):
@@ -611,6 +738,10 @@ SETUP = {
     "voice": "/voice on turns on dictation, transcribed on this computer (macOS on Apple silicon, Windows, Linux x64).",
     "open_link": None,
 }
+
+# 12. Update (#6430): copilot -p answers one request and exits; copilot update downloads its newest version; npm
+# publishes its versions.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["update"], "npm": "@github/copilot"}
 
 
 def write_mcp_config(path=None, remove=False):

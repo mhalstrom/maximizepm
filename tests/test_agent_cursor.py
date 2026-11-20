@@ -123,10 +123,160 @@ class Launch(Env):
         self.assertIsNone(self.a.parse_command(["cursor-agent", "--model", "auto", "hi"]))  # a fixed model
         self.assertIsNone(self.a.parse_command(["agent", "hi"]))  # the Grok CLI's name
 
+    def test_trust_workspace_adds_the_trust_flag_once(self):
+        """#6416: --trust goes after the program word, once; a command that has it already stays as it is."""
+        self.assertEqual(cursor.trust_workspace("/wt", "cursor-agent --model auto 'run go'"),
+                         "cursor-agent --trust --model auto 'run go'")
+        self.assertEqual(cursor.trust_workspace("/wt", "A=1 cursor-agent go"), "A=1 cursor-agent --trust go")
+        self.assertEqual(cursor.trust_workspace("/wt", "cursor-agent --trust go"), "cursor-agent --trust go")
+        self.assertEqual(cursor.trust_workspace("", "cursor-agent go"), "cursor-agent go")
+
+    def test_a_worktree_made_by_maxpm_starts_cursor_with_trust(self):
+        """#6416, #6439: a worktree that MaximizePM made starts cursor-agent with --trust and allows Shell(maxpm) in
+        .cursor/cli.json (excluded in info/exclude); the project's own folder (shared, not made by MaximizePM) keeps
+        Cursor's trust and command questions."""
+        import subprocess
+        c = core.connect()
+        self.addCleanup(c.close)
+        root = str(self.root / "web")
+        os.makedirs(root)
+        for a in (("init", "-q", "-b", "main"), ("commit", "-q", "--allow-empty", "-m", "first")):
+            subprocess.run(["git", "-C", root, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                           capture_output=True)
+        core.project_add(c, "web", path=root)
+        core.config_set(c, "launch_agents", "Cursor=@cursor")
+        add = lambda title: core.item_add(c, "web", title)["id"]
+        t = server.dispatch_item(c, add("shared"), agent="Cursor", runner=lambda line: None)
+        self.assertNotIn("--trust", shlex.split(t["command"]))
+        self.assertFalse((Path(root) / ".cursor" / "cli.json").exists())
+        core.unregister(c, t["session_name"])
+        core.config_set(c, "workspace", "worktree", project="web")
+        sent = []
+        t = server.dispatch_item(c, add("in a worktree"), agent="Cursor", runner=sent.append)
+        self.assertTrue(t["workspace"])
+        self.assertIn("--trust", shlex.split(t["command"]))
+        self.assertTrue(sent[-1].endswith(t["command"]))
+        cli_json = Path(t["path"]) / ".cursor" / "cli.json"
+        self.assertEqual(json.loads(cli_json.read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(maxpm)"], "deny": []}})
+        # Excluded in the main repository's info/exclude so git status stays clean.
+        ex = (Path(root) / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertIn("/.cursor/cli.json", ex.splitlines())
+        st = subprocess.run(["git", "-C", t["path"], "status", "--porcelain"], check=True, capture_output=True, text=True)
+        self.assertEqual(st.stdout, "")
+
+    def test_trust_workspace_preserves_global_permissions_and_skips_when_already_allowed_or_forced(self):
+        """#6439: .cursor/cli.json carries over ~/.cursor/cli-config.json allow/deny rules (Cursor replaces arrays
+        rather than joining them), skips writing when Run Everything is on or cli-config.json already allows maxpm,
+        merges into an existing .cursor/cli.json, and leaves invalid JSON alone."""
+        cfg = self.root / "home" / ".cursor" / "cli-config.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"permissions": {"allow": ["Shell(ls)"], "deny": ["Shell(rm)"]}}), encoding="utf-8")
+
+        wt1 = self.root / "wt1"
+        wt1.mkdir()
+        cursor.trust_workspace(str(wt1), "cursor-agent go")
+        self.assertEqual(json.loads((wt1 / ".cursor" / "cli.json").read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(ls)", "Shell(maxpm)"], "deny": ["Shell(rm)"]}})
+
+        # With --force, --yolo or -f, no .cursor/cli.json is written.
+        for flag in ("--force", "--yolo", "-f"):
+            wt_f = self.root / f"wt_{flag.lstrip('-')}"
+            wt_f.mkdir()
+            cursor.trust_workspace(str(wt_f), f"cursor-agent {flag} go")
+            self.assertFalse((wt_f / ".cursor" / "cli.json").exists(), flag)
+
+        # Existing .cursor/cli.json: keeps its rules and adds Shell(maxpm) once.
+        wt2 = self.root / "wt2"
+        (wt2 / ".cursor").mkdir(parents=True)
+        (wt2 / ".cursor" / "cli.json").write_text(
+            json.dumps({"permissions": {"allow": ["Shell(git)"], "deny": []}}), encoding="utf-8")
+        cursor.trust_workspace(str(wt2), "cursor-agent --trust go")
+        self.assertEqual(json.loads((wt2 / ".cursor" / "cli.json").read_text(encoding="utf-8")),
+                         {"permissions": {"allow": ["Shell(git)", "Shell(maxpm)"], "deny": []}})
+
+        # Malformed .cursor/cli.json: left untouched.
+        wt3 = self.root / "wt3"
+        (wt3 / ".cursor").mkdir(parents=True)
+        (wt3 / ".cursor" / "cli.json").write_text("{bad json", encoding="utf-8")
+        cursor.trust_workspace(str(wt3), "cursor-agent go")
+        self.assertEqual((wt3 / ".cursor" / "cli.json").read_text(encoding="utf-8"), "{bad json")
+
+        # Global cli-config.json already allows Shell(maxpm): no project file is written.
+        cfg.write_text(json.dumps({"permissions": {"allow": ["Shell(maxpm)"], "deny": []}}), encoding="utf-8")
+        wt4 = self.root / "wt4"
+        wt4.mkdir()
+        cursor.trust_workspace(str(wt4), "cursor-agent go")
+        self.assertFalse((wt4 / ".cursor" / "cli.json").exists())
+
     def test_a_built_command_parses_back(self):
         s = {"force": "on", "sandbox": "enabled", "mode": "ask"}
         argv = self.a.build_command(None, None, None, None, s, "go")
         self.assertEqual(self.a.parse_command(argv), {"settings": s, "prompt": "go"})
+
+
+class ConfigSettings(Env):
+    """#6319: config_settings reads the effort from cli-config.json even when modelId names no level."""
+
+    def _write(self, data):
+        p = self.root / "home" / ".cursor" / "cli-config.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_selected_model_parameters_effort(self):
+        self._write({
+            "model": {"modelId": "claude-fable-5-2", "displayName": "Claude Fable 5.2 300K Low"},
+            "selectedModel": {"modelId": "claude-fable-5-2", "parameters": [
+                {"id": "context", "value": "300k"}, {"id": "effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "claude-fable-5-2", "effort": "low", "sandbox": "disabled", "mode": "agent"})
+
+    def test_model_parameters_reasoning_effort(self):
+        self._write({
+            "model": {"modelId": "grok-4.7"},
+            "modelParameters": {"grok-4.7": [
+                {"id": "context", "value": "256k"}, {"id": "reasoning_effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "grok-4.7", "effort": "low", "sandbox": "disabled", "mode": "agent"})
+
+    def test_display_name_and_extra_high_normalization(self):
+        self._write({
+            "model": {"modelId": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol 1M Extra High"},
+        })
+        self.assertEqual(cursor.config_settings()["effort"], "xhigh")
+        self._write({"model": {"modelId": "gpt-5.5-extra-high"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]),
+                         ("gpt-5.5", "xhigh"))
+
+    def test_auto_and_missing_config_and_bare_model_fallback(self):
+        self.assertEqual(cursor.config_settings(),
+                         {"model": "auto", "effort": "none", "sandbox": None, "mode": "agent"})
+        self._write({"model": {"modelId": "default"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]), ("auto", "none"))
+        self._write({"model": {"modelId": "grok-4.7"}})
+        self.assertEqual((cursor.config_settings()["model"], cursor.config_settings()["effort"]),
+                         ("grok-4.7", "default"))
+
+    def test_session_settings_uses_config_effort_when_command_names_none(self):
+        from river import sessions
+        self._write({
+            "model": {"modelId": "claude-fable-5-2"},
+            "selectedModel": {"modelId": "claude-fable-5-2", "parameters": [{"id": "effort", "value": "low"}]},
+            "sandbox": {"mode": "disabled"},
+        })
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "cur1")
+        conn.execute("UPDATE agents SET agent_type='cursor', pid_cmd='cursor-agent go' WHERE name='cur1'")
+        got = {s["key"]: s for s in sessions.session_settings(conn, "cur1")["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("claude-fable-5-2", "config"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "config"))
+        self.assertEqual((got["sandbox"]["value"], got["sandbox"]["source"]), ("disabled", "config"))
+        self.assertEqual((got["mode"]["value"], got["mode"]["source"]), ("agent", "config"))
 
 
 class Chat(Env):

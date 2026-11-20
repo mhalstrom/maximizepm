@@ -104,7 +104,7 @@ EFFORT = {
 
 LAUNCH = {"resume": True}  # no session name, no system prompt flag, no hooks file, no extra folders, no fork
 
-IDENTITY = {"source": "env", "env": "AMP_CURRENT_THREAD_ID", "log_glob": None, "pane": None,
+IDENTITY = {"source": "env", "env": "AMP_CURRENT_THREAD_ID", "pane": None,
             "url": "https://ampcode.com/threads/{id}", "inside_env": ["AMP_CURRENT_THREAD_ID"]}
 
 _THREAD = re.compile(r"T-[0-9A-Za-z][0-9A-Za-z-]{7,63}\Z")
@@ -488,6 +488,62 @@ def chat_settings(lines):
     return got
 
 
+# Where the Settings dialog reads each setting of a running session (#6280, #6318): the input box's top edge shows
+# the live mode on the screen, the thread's meta line and usage name mode and model once written, and Amp's saved
+# session state (session.json, else built-in medium) gives both before the first reply.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "screen", "config")}
+
+# Amp's built-in mode -> model mapping (Amp CLI 0.0.1795161645: MED is the built-in default; LOW ran gpt-5.6-terra
+# in #5179 on 2026-11-11 and #6280 on 2026-11-20, MED ran claude-opus-5-5, HIGH uses gpt-6-astra, ULTRA uses
+# claude-fable-5-2). Deprecated mode names map as Amp maps them.
+DEFAULT_MODE = "medium"
+MODE_MODELS = {
+    "low": "gpt-5.6-terra",
+    "medium": "claude-opus-5-5",
+    "high": "gpt-6-astra",
+    "ultra": "claude-fable-5-2",
+}
+_MODE_ALIASES = {"rush": "low", "smart": "medium", "deep": "medium", "large": "medium"}
+_MODE_BORDER = re.compile(r"^\s*╭─+.*\s(low|medium|high|ultra)\s+─╮\s*$")
+
+
+def session_file(env=None):
+    """Amp's saved session state: amp/session.json in $XDG_DATA_HOME or ~/.local/share."""
+    e = os.environ if env is None else env
+    base = e.get("XDG_DATA_HOME")
+    return (Path(base).expanduser() if base else Path.home() / ".local" / "share") / "amp" / "session.json"
+
+
+def config_settings(env=None):
+    """What an Amp session takes when nothing on the command line or thread names it (#6318): the saved agentMode
+    from session.json (else Amp's built-in default 'medium'), and the model that mode runs."""
+    raw = ""
+    try:
+        data = json.loads(session_file(env).read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("agentMode"), str):
+            raw = data["agentMode"].strip()
+    except (OSError, ValueError):
+        pass
+    low = raw.lower()
+    mode = _MODE_ALIASES.get(low, low)
+    if mode in MODE_MODELS:
+        return {"effort": mode, "model": MODE_MODELS[mode]}
+    if "/" in raw:
+        return {"model": raw}
+    return {"effort": DEFAULT_MODE, "model": MODE_MODELS[DEFAULT_MODE]}
+
+
+def screen_settings(lines):
+    """The mode on the top edge of Amp's input box ('╭───... medium ─╮', '╭───... $···· ─ low ─╮'), so the Settings
+    dialog sees the live mode before the first turn and after Ctrl+S (#6318). Leaves model alone so a reply's real
+    usage.model is never overwritten by the screen."""
+    for line in reversed(list(lines)):
+        m = _MODE_BORDER.match(line)
+        if m:
+            return {"effort": m.group(1)}
+    return {}
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------------------------------------------
@@ -501,6 +557,10 @@ SETUP = {
     "voice": None,
     "open_link": None,
 }
+
+# 12. Update (#6430): amp -x answers one request and exits; amp update updates its own install; npm publishes its
+# versions.
+UPDATE = {"smoke": ["-x", "Reply OK"], "self": ["update"], "npm": "@sourcegraph/amp"}
 
 
 def settings_file():

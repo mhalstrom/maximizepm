@@ -60,6 +60,8 @@ def pipeline_add(conn, name, project=None, notes=None, actor=None):
     name = store._name(name, "pipeline")
     with core.tx(conn):
         _may(conn, actor)
+        if conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
+            raise core.RiverError(f"deploy target {name} already has a release flow: maxpm pipeline show {name}")
         if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
             raise core.RiverError(f"a pipeline named {name} exists already: maxpm pipeline show {name}")
         pid = conn.execute("INSERT INTO pipelines(name, project, notes, created_by, created_at) VALUES (?,?,?,?,?)",
@@ -92,6 +94,17 @@ def env_set(conn, pipeline, name, target=None, url=None, notes=None, remove=Fals
             conn.execute("UPDATE pipeline_envs SET removed_at=? WHERE id=?", (store._now(), row["id"]))
             _change(conn, p["id"], actor, f"environment {name} removed")
             return {"pipeline": p["name"], "env": name, "changed": "removed"}
+        check_target = target and conn.execute("SELECT 1 FROM targets WHERE name=?", (target,)).fetchone()
+        if check_target and (p["forge"] != "github" or not conn.execute(
+                "SELECT 1 FROM pipeline_stages WHERE pipeline_id=? AND kind='test' AND workflow IS NOT NULL "
+                "AND removed_at IS NULL", (p["id"],)).fetchone()):
+            raise core.RiverError(f"deploy target {target} owns its release flow. Only a GitHub source with a test "
+                                  "workflow can attach checks to it")
+        if check_target and conn.execute(
+                "SELECT 1 FROM pipeline_stages WHERE pipeline_id=? AND removed_at IS NULL "
+                "AND (kind<>'test' OR workflow IS NULL)", (p["id"],)).fetchone():
+            raise core.RiverError(f"deploy target {target} owns its release flow. Use a pipeline that contains only "
+                                  "GitHub test workflows to attach checks")
         given = {k: v for k, v in (("target", target), ("url", url), ("notes", notes)) if v is not None}
         if row is None:
             conn.execute("INSERT INTO pipeline_envs(pipeline_id, name, target, url, notes, created_at) "
@@ -108,7 +121,12 @@ def env_set(conn, pipeline, name, target=None, url=None, notes=None, remove=Fals
         detail = {k: new[k] for k in ("name", "target", "url", "notes")}
         _change(conn, p["id"], actor, f"environment {name} {changed}"
                 + "".join(f", {k} {v or 'none'}" for k, v in given.items()), detail)
-    return {"pipeline": p["name"], "env": name, "changed": changed, "detail": detail}
+        if check_target:
+            conn.execute("UPDATE pipelines SET polled_at=NULL WHERE id=?", (p["id"],))
+    out = {"pipeline": p["name"], "env": name, "changed": changed, "detail": detail}
+    if check_target:
+        out["message"] = f"GitHub tests join the release flow of {target}. The target owns release and approval."
+    return out
 
 
 def _stage_row(conn, pid, name):

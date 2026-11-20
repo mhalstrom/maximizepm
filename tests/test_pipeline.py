@@ -1774,10 +1774,10 @@ class DefaultPipelines(Base):
             cli.run(["--as", "mark", "pipeline", "show", "web-prod"])
         self.assertIn("step activate on cell-1: failed, 210s, ended 2026-11-18T10:14:00Z", out.getvalue())
 
-    def test_steps_named_branch_slash_step_are_a_branch_after_deploy(self):
-        """#6186: maximizepm-github's deploy hook pushes main (the deploy), then the tag, the build of the apps and the
-        published files as downloads/<step>: the default pipeline draws 'downloads' on a row of its own after deploy,
-        beside the watch, with each job's link and its state."""
+    def test_a_target_s_stages_never_branch(self):
+        """#6213 (mark 2026-11-19: 'this should not be a branching deploy workflow'): the steps that #6186 named
+        downloads/<step> stay steps of the deploy stage, with their full names; no stage after deploy has a row of its
+        own."""
         dep = self.release("aaaaaaa", "A change")
         link = "https://github.example/actions/runs/7/job/9"
         lines = ["::step start push kind=deploy at=2026-11-19T10:00:00Z",
@@ -1792,25 +1792,16 @@ class DefaultPipelines(Base):
         core._run_hook(self.c, self.hook_run("deploy", cmd, dep), cwd=self.dir.name)
         p = self.targets.default_pipeline(self.c, "web-prod")
         self.assertEqual([(s["name"], s.get("prev")) for s in p["stages"]],
-                         [("holding", None), ("deploy", None), ("watch", None), ("downloads", ["deploy"])])
-        deploy = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
-        self.assertEqual([s["name"] for s in deploy["step_list"]], ["push"])
-        down = next(s for s in p["stages"] if s["name"] == "downloads")
-        self.assertEqual(down["transition"]["from"], ["deploy"])
-        run = down["last_run"]
+                         [("holding", None), ("deploy", None), ("watch", None)])
+        run = next(s for s in p["stages"] if s["name"] == "deploy")["last_run"]
         self.assertEqual([(s["name"], s["state"]) for s in run["step_list"]],
-                         [("tag", "passed"), ("build-checks", "passed"), ("build-mac", "failed")])
+                         [("push", "passed"), ("downloads/tag", "passed"), ("downloads/build-checks", "passed"),
+                          ("downloads/build-mac", "failed")])
         self.assertEqual(run["state"], "failed")
-        self.assertEqual(run["errors"], f"step build-mac failed: {link}")
-        self.assertEqual(p["releases"][0]["stages"]["downloads"]["state"], "failed")
-        # Versions in downloads: the release that reached it, as for any stage of the target.
+        self.assertEqual(set(p["releases"][0]["stages"]), {"holding", "deploy"})
         from river.pipeline import store
-        versions = store.stage_versions(self.c, "web-prod", "downloads")
-        self.assertEqual([(r["deploy"], r["state"]) for r in versions["runs"]], [(dep, "failed")])
-        # A deploy hook with no such steps has no branch.
-        core.target_add(self.c, "plain-prod", "deploys", None)
-        self.assertEqual([s["name"] for s in self.targets.default_pipeline(self.c, "plain-prod")["stages"]],
-                         ["holding", "deploy", "watch"])
+        with self.assertRaisesRegex(core.RiverError, "has no stage downloads"):
+            store.stage_versions(self.c, "web-prod", "downloads")
 
     def test_the_steps_show_while_the_hook_runs(self):
         import threading
@@ -1843,7 +1834,7 @@ class DefaultPipelines(Base):
                         if s["name"] == "approval")
         self.assertEqual(approval["transition"]["mode"], "yes")
 
-    def test_list_and_show_and_a_target_that_a_pipeline_covers(self):
+    def test_list_and_show_and_a_target_refuses_a_replacement_pipeline(self):
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
@@ -1853,10 +1844,28 @@ class DefaultPipelines(Base):
         self.assertIn("web-prod  (a deploy target: its default pipeline)", out.getvalue())
         self.assertIn("(the default pipeline of deploy target web-prod, from its releases)", out.getvalue())
         define.pipeline_add(self.c, "web", project="web")
-        define.env_set(self.c, "web", "prod", target="web-prod")
-        self.assertEqual(self.targets.default_list(self.c), [])
+        with self.assertRaisesRegex(RiverError, "owns its release flow"):
+            define.env_set(self.c, "web", "prod", target="web-prod")
+        self.assertEqual([t["name"] for t in self.targets.default_list(self.c)], ["web-prod"])
         with self.assertRaises(RiverError):
             self.targets.default_pipeline(self.c, "nowhere")
+
+    def test_the_hook_supplies_the_draft_build_and_approval_without_a_github_deploy_stage(self):
+        from river.routes import pipeline
+        core.target_hook(self.c, "web-prod", "deploy", "build the draft", actor="mark")
+        dep = self.release("aaaaaaa", "A change")
+        at = core.iso(core.now())
+        self.hook(dep, "deploy", core.HOOK_YES, "aaaaaaa", at)
+        run = self.c.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=?", (dep,)).fetchone()[0]
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, kind, state, started_at, ended_at) "
+                       "VALUES (?, 'build-mac', 'build', 'passed', ?, ?)", (run, at, at))
+        approval = core._draft_yes(self.c, dep, "The draft is ready")
+        d = pipeline.pipeline(self.c, "/api/pipeline/web-prod")
+        self.assertEqual([s["name"] for s in d["stages"]], ["holding", "deploy", "approval", "publish", "watch"])
+        self.assertEqual(d["stages"][1]["run"], "build the draft")
+        self.assertEqual(d["stages"][1]["last_run"]["step_list"][0]["name"], "build-mac")
+        self.assertEqual(d["stages"][2]["last_run"]["item"], approval)
+        self.assertIsNone(d["envs"][0]["rev"])
 
     def test_ten_releases_read_under_100_ms(self):
         for n in range(12):
@@ -2017,6 +2026,57 @@ class GitHub(Base):
         return {r["stage"]: r for r in self.c.execute(
             "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
 
+    def test_linked_github_checks_keep_one_target_flow_and_its_release_record(self):
+        from river.pipeline import target_flow
+        from river.routes import pipeline
+        core.target_add(self.c, "site", "", None)
+        core.project_add(self.c, "web", target="site")
+        core.target_cadence(self.c, "site", "1w", "mark")
+        i = core.item_add(self.c, "web", "First", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        core.target_cut(self.c, "site", rev="1234567", actor="mark")
+        old = core.iso(core.now() - core.timedelta(days=2))
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE kind='deploy' AND target='site'", (old,))
+        i = core.item_add(self.c, "web", "Second", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+
+        store.deployed(self.c, "mpm", "beta", "f" * 40, source="github")
+        with self.assertRaisesRegex(RiverError, "only GitHub test workflows"):
+            define.env_set(self.c, "mpm", "beta", target="site", actor="mark")
+        # A legacy link can already have a deploy stage. It contributes test runs only.
+        self.c.execute("UPDATE pipeline_envs SET target='site' WHERE name='beta'")
+        self.assertTrue(target_flow.ensure(self.c, "site"))
+        with self.assertRaisesRegex(RiverError, "supplies GitHub checks"):
+            self.runner.start(self.c, "mpm", rev="a" * 40, actor="mark")
+
+        # A newer branch run was collected under the old model. It stays in history but never becomes the check.
+        store.run_start(self.c, "mpm", "tests", "b" * 40, key="gh-run-999", source="github")
+        self.runs["tests.yml"] = [
+            dict(gh_run(104, "d" * 40), event="push", head_repository={"full_name": "fork/r"}),
+            dict(gh_run(103, "c" * 40, conclusion="action_required"), event="pull_request"),
+            dict(gh_run(102, "b" * 40, conclusion="failure"), event="push", head_branch="feature"),
+            dict(gh_run(101, "a" * 40), event="push"),
+        ]
+        self.jobs(101, ("test", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        self.assertEqual(self.gh.poll(self.c, self.p())["runs"], 1)
+        self.assertTrue(any("branch=main&event=push" in call[1] for call in self.api.calls))
+        self.assertFalse(any("desktop-release.yml/runs" in call[1] for call in self.api.calls))
+        self.assertFalse(any("/deployments" in call[1] for call in self.api.calls))
+        self.assertNotIn("beta", self.stage_runs())  # test success never schedules the desktop workflow
+        payload = pipeline.deploy(self.c, "/api/deploy")
+        self.assertEqual(payload["aliases"], {"mpm": "site"})
+        self.assertEqual(pipeline.pipeline(self.c, "/api/pipeline/mpm")["name"], "site")
+        d = payload["pipelines"]
+        self.assertEqual([p["name"] for p in d], ["site"])
+        self.assertEqual((d[0]["envs"][0]["rev"], d[0]["envs"][0]["since"]), ("1234567", old))
+        self.assertEqual(d[0]["release"]["tasks"], 1)
+        check, = d[0]["checks"]
+        self.assertEqual((check["branch"], check["last_run"]["key"]), ("main", "gh-run-101"))
+        define.stage_set(self.c, "mpm", "beta", remove=True, actor="mark")
+        result = define.env_set(self.c, "mpm", "beta", target="site", actor="mark")
+        self.assertIn("GitHub tests join the release flow of site", result["message"])
+
     def test_a_push_run_its_jobs_and_tests_then_the_gate_then_github_runs_the_next_stage(self):
         self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
         self.jobs(101, ("test (3.10)", "success"), ("standalone", "success"))
@@ -2057,6 +2117,81 @@ class GitHub(Base):
         self.assertEqual((beta["key"], beta["state"], beta["approved_by"]), ("gh-run-202", "passed", "mark"))
         self.assertEqual(store.show(self.c, "mpm")["envs"][0]["rev"], "a" * 40)
 
+    def test_pull_request_runs_are_skipped_and_action_required_does_not_fail(self):
+        # External fork PR runs come back with event 'pull_request' and conclusion 'action_required' (#6473):
+        # the plugin skips pull-request runs and maps action_required to skipped rather than failed.
+        self.runs["tests.yml"] = [
+            dict(gh_run(103, "c" * 40, conclusion="action_required"), event="pull_request"),
+            dict(gh_run(102, "b" * 40, conclusion="failure"), event="pull_request_target"),
+            dict(gh_run(101, "a" * 40, conclusion="success"), event="push"),
+        ]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        out = self.gh.poll(self.c, self.p())
+        self.assertEqual(out["runs"], 1)
+        listed = [c[1] for c in self.api.calls if c[1].startswith("/repos/o/r/actions/workflows/tests.yml/runs")]
+        self.assertIn("exclude_pull_requests=true", listed[-1])
+        keys = [r["key"] for r in self.c.execute(
+            "SELECT key FROM stage_runs WHERE stage_id=(SELECT id FROM pipeline_stages WHERE name='tests')").fetchall()]
+        self.assertEqual(keys, ["gh-run-101"])
+        # A non-PR run held for approval (action_required) records as skipped, never failed.
+        self.runs["tests.yml"] = [dict(gh_run(104, "d" * 40, conclusion="action_required"), event="workflow_dispatch")]
+        self.jobs(104)
+        self.api.routes[("GET", "/repos/o/r/actions/runs/104/artifacts")] = (200, {"artifacts": []})
+        self.c.execute("UPDATE pipelines SET polled_at=NULL")
+        self.gh.poll(self.c, self.p())
+        r104 = self.c.execute("SELECT state, errors FROM stage_runs WHERE key='gh-run-104'").fetchone()
+        self.assertEqual((r104["state"], r104["errors"]), ("skipped", "action_required"))
+
+    def test_a_stored_held_pr_run_is_not_the_last_run_and_the_arrow_names_github(self):
+        # #6482: a run stored before #6473 (an outside PR's run that GitHub held: errors action_required) is not the
+        # stage's last run; the stage shows the run of main before it. The arrow names GitHub, never 'forge'.
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        self.gh.poll(self.c, self.p())
+        tests_id = self.c.execute("SELECT id FROM pipeline_stages WHERE name='tests'").fetchone()["id"]
+        self.c.execute("INSERT INTO stage_runs(pipeline_id, stage_id, key, state, ended_at, source, errors) "
+                       "VALUES (?,?,?,?,?,?,?)", (self.p()["id"], tests_id, "gh-run-99", "failed",
+                                                  "2026-11-20T20:36:27Z", "github", "action_required"))
+        tests = next(s for s in store.show(self.c, "mpm")["stages"] if s["name"] == "tests")
+        self.assertEqual((tests["last_run"]["state"], tests["last_run"]["version"]), ("passed", "a" * 40))
+        define.stage_set(self.c, "mpm", "beta", gate="forge")
+        beta = next(s for s in store.show(self.c, "mpm")["stages"] if s["name"] == "beta")["transition"]
+        self.assertEqual((beta["host"], beta["text"]), ("GitHub", "GitHub starts it by itself (a push or a tag)"))
+        self.assertNotIn("forge", json.dumps(beta["text"]) + beta["state_text"])
+        from river.pipeline import transitions
+        self.assertEqual(transitions.parse_mode("host"), ("forge", None))  # the page's word for the mode
+
+    def test_a_refused_artifact_download_skips_its_report_and_never_reads_as_a_refused_token(self):
+        # The storage host of the artifact answers 401 (#6459): the run is read, its report is skipped, and the
+        # pipeline keeps no error that the token check reads as GitHub's refusal of the token.
+        self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
+        self.jobs(101, ("test (3.10)", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": [
+            {"name": "junit-3.13", "expired": False, "archive_download_url": "https://api.github.com/download/1"}]})
+        self.api.routes[("GET", "/download/1")] = (401, b"<Error><Code>InvalidAuthenticationInfo</Code></Error>")
+        out = self.gh.poll(self.c, self.p())
+        self.assertEqual((out["runs"], out["tests"]), (1, 0))
+        self.assertFalse(self.p()["poll_error"])
+        self.assertEqual(self.stage_runs()["tests"]["state"], "passed")
+
+    def test_the_token_goes_only_to_the_host_it_was_sent_to(self):
+        import importlib.util
+        import urllib.request
+        path = os.path.join(os.path.dirname(store.__file__), "plugins", "github", "plugin.py")
+        spec = importlib.util.spec_from_file_location("maxpm_plugin_github_redirect", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        req = urllib.request.Request("https://api.github.com/repos/o/r/actions/artifacts/1/zip",
+                                     headers={"Authorization": "Bearer t", "User-Agent": "maxpm-pipeline"})
+        h = mod._Redirect()
+        blob = h.redirect_request(req, None, 302, "Found", {}, "https://blob.core.windows.net/x?sig=s")
+        self.assertNotIn("Authorization", blob.headers)
+        self.assertEqual(blob.headers["User-agent"], "maxpm-pipeline")
+        same = h.redirect_request(req, None, 302, "Found", {}, "https://api.github.com/repos/o/r/other")
+        self.assertEqual(same.headers["Authorization"], "Bearer t")
+
     def test_a_forge_gate_waits_for_the_tag_run_and_takes_it(self):
         define.stage_set(self.c, "mpm", "beta", gate="forge")
         self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
@@ -2066,7 +2201,7 @@ class GitHub(Base):
         self.c.execute("UPDATE pipelines SET polled_at=?", (core.iso(core.now()),))
         out = self.runner.serve_pass(self.c)
         beta = self.stage_runs()["beta"]
-        self.assertIn("the forge starts it by itself", out["waiting"][beta["id"]])
+        self.assertIn("GitHub starts it by itself", out["waiting"][beta["id"]])  # #6482: the host's own name
         self.assertFalse([c for c in self.api.calls if c[0] == "POST"])  # MaximizePM starts nothing
         self.runs["desktop-release.yml"] = [gh_run(404, "a" * 40, title="v0.9.0")]  # the manager's tag
         self.jobs(404)
@@ -2607,6 +2742,9 @@ class Holding(RunnerBase):
         sha = self.commit(f"A change (#{t})")
         h = self.targets.holding(self.c, "site", fresh=True)
         self.assertEqual(([c["sha"] for c in h["commits"]][-1], h["default"]), (sha, True))
+        self.assertFalse(h["review_enabled"])
+        self.assertEqual(h["counts"], {})
+        self.assertTrue(all(c["review"] is None for c in h["commits"]))
         self.assertFalse(h["release"]["can"])  # nothing is collected yet
         core.claim(self.c, t, "w1")
         core.done(self.c, t, output="done", actor="w1", ship_it=True, force="test")

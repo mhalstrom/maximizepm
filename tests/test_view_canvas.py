@@ -261,7 +261,7 @@ try {
         driver = self.tvs.DRIVE_HEAD + r"""
 try {
   await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
-  await sleep(3500);
+  await sleep(500);
   const before = !!q("iframe.sp-canvas");
   await fetch("/__open_ag");
   await until(() => q("iframe.sp-canvas"), "the canvas opens on request");
