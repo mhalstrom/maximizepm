@@ -1900,6 +1900,18 @@ class PlanFile(Base):
         self.assertEqual(core.add_plan(self.c, "shop", "a\n  b\n", dry_run=True)["items"][1]["parent"], 0)
         self.assertEqual(len(core.item_list(self.c, "shop")), 6)
 
+    def test_add_from_a_plan_file_it_cannot_read_says_so_in_one_line(self):
+        # A missing plan file, or a folder: maxpm prints a RiverError as one line; an OSError was a traceback (#9).
+        from river import cli
+        core.project_add(self.c, "shop")
+        with tempfile.TemporaryDirectory() as d:
+            for plan in (os.path.join(d, "no-such-plan.md"), d):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RiverError) as e:
+                    cli.run(["add", "shop", "--from", plan])
+                self.assertIn(f"cannot read the plan file {plan}: ", str(e.exception))
+                self.assertEqual(len(str(e.exception).splitlines()), 1)
+        self.assertEqual(core.item_list(self.c, "shop"), [])
+
     def test_add_dry_run_without_a_plan_file_is_refused_and_adds_nothing(self):
         from river import cli
         core.project_add(self.c, "shop")
