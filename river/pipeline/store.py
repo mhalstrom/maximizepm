@@ -405,9 +405,16 @@ APPLY = {"pipelinerun": _apply_pipelinerun, "taskrun": _apply_taskrun, "testsuit
          "testcaserun": _apply_testcaserun, "service": _apply_service, "environment": _apply_environment}
 
 
+# The subjects whose events are not kept in pipeline_events: test_suites and test_results are their record, and the
+# same event again writes the same row (its run and key; its run, suite and name). A CI run of maxpm's own tests
+# sends about 19,000 of them, 14 MB of event text, for each push (#6520: the queue grew 28 MB in 75 minutes).
+NOT_KEPT = ("testsuiterun", "testcaserun")
+
+
 def _ingest_one(conn, ev, pipeline=None):
     """Keep one parsed event and apply it, inside the caller's tx. The same event again (its source and id) does
-    nothing: a forge adapter that asks every minute may send it twice."""
+    nothing: a forge adapter that asks every minute may send it twice. A test event (NOT_KEPT) is applied and not
+    kept: its "event" is None."""
     old = conn.execute("SELECT id, run_id FROM pipeline_events WHERE source=? AND event_id=?",
                        (ev["source"], ev["id"])).fetchone()
     if old:
@@ -415,10 +422,12 @@ def _ingest_one(conn, ev, pipeline=None):
     pid = _pipeline_of(conn, ev, pipeline)
     fn = APPLY.get(ev["subject"])
     run_id, note = fn(conn, pid, ev) if fn else (None, f"{ev['subject']}: kept; no record for this subject")
-    eid = conn.execute("INSERT INTO pipeline_events(event_id, source, type, at, received_at, pipeline_id, run_id, body) "
-                       "VALUES (?,?,?,?,?,?,?,?)",
-                       (ev["id"], ev["source"], ev["type"], ev["at"], _now(), pid, run_id,
-                        json.dumps(ev["event"], separators=(",", ":")))).lastrowid
+    eid = None
+    if ev["subject"] not in NOT_KEPT:
+        eid = conn.execute(
+            "INSERT INTO pipeline_events(event_id, source, type, at, received_at, pipeline_id, run_id, body) "
+            "VALUES (?,?,?,?,?,?,?,?)", (ev["id"], ev["source"], ev["type"], ev["at"], _now(), pid, run_id,
+                                         json.dumps(ev["event"], separators=(",", ":")))).lastrowid
     out = {"event": eid, "run": run_id, "type": ev["type"]}
     if note:
         out["note"] = note

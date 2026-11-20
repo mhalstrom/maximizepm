@@ -150,6 +150,24 @@ class Database(SpaceBase):
         left = [r[0] for r in self.c.execute("SELECT version FROM canvas_versions ORDER BY version")]
         self.assertEqual(left, [1, 4, 10])  # the first, the commented one, the newest
 
+    def test_copies_of_test_results_go_first_at_any_age(self):
+        """#6520: the test events that pipeline_events kept before go first, new ones too; other events stay."""
+        new = core.iso(core.now())
+        with core.tx(self.c):
+            for i in range(200):
+                kind = ("testcaserun.finished", "testsuiterun.started", "pipelinerun.started")[i % 3]
+                self.c.execute("INSERT INTO pipeline_events (event_id, source, type, at, received_at, body) "
+                               "VALUES (?, 'github', ?, ?, ?, ?)", (f"e{i}", f"dev.cdevents.{kind}.0.2.0", new, new,
+                                                                     "t" * 2000))
+        core.config_set(self.c, "db_max_size", "16KB")
+        res = space.run(self.c)
+        self.assertEqual(res["db"]["removed"][0]["what"], "copies of test results")
+        self.assertEqual(res["db"]["removed"][0]["rows"], 134)
+        self.assertIsNone(res["db"]["removed"][0]["older_than"])
+        left = {r[0] for r in self.c.execute("SELECT type FROM pipeline_events")}
+        self.assertEqual(left, {"dev.cdevents.pipelinerun.started.0.2.0"})
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0], 66)
+
     def test_read_notices_go_unread_ones_stay(self):
         core.project_add(self.c, "p")
         with core.tx(self.c):

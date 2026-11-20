@@ -8,7 +8,8 @@ maxpm cleanup --space removes the oldest removable data first, in a fixed order,
 limit (LOW_WATER: so the data of the next day does not start it again at once). Each kind of data has its own
 minimum age (a space_*_after setting): nothing younger goes, even over the limit.
 
-The database, in this order:
+The database, in this order (first, at any age, the copies of test results: the test events that pipeline_events
+kept before #6520, which test_suites and test_results hold too):
   0. the run log: one row for each maxpm command (#5969);
   1. ops records: the runs of the operations checks (not the newest run of a check, not a run that a detection
      names), their state history, and detections of closed or no fault items;
@@ -305,8 +306,18 @@ def _runs(conn, cutoff, n):
     return _gone(conn, "runs", rows)
 
 
-# The order of the database part, each with the setting of its minimum age.
-STAGES = (("command runs", "space_runs_after", _runs),
+def _test_events(conn, cutoff, n):
+    """The test events that pipeline_events kept before #6520: copies of test_suites and test_results rows, which
+    nothing reads. Any age."""
+    rows = conn.execute("SELECT id, length(body)+length(event_id)+length(type) FROM pipeline_events "
+                        "WHERE type LIKE 'dev.cdevents.testsuiterun.%' OR type LIKE 'dev.cdevents.testcaserun.%' "
+                        "ORDER BY id LIMIT ?", (n,)).fetchall()
+    return _gone(conn, "pipeline_events", rows)
+
+
+# The order of the database part, each with the setting of its minimum age (None: any age).
+STAGES = (("copies of test results", None, _test_events),
+          ("command runs", "space_runs_after", _runs),
           ("ops records", "space_ops_after", _ops),
           ("read notices", "space_notices_after", _notices),
           ("events of closed items", "space_events_after", _events),
@@ -349,7 +360,7 @@ def _db_part(conn, dry_run, t, s="main"):
         conn.execute("BEGIN IMMEDIATE")
     try:
         for what, key, fn in (STAGES if s == "main" else ARCHIVE_STAGES):
-            cutoff = iso(t - parse_duration(setting(conn, key)))
+            cutoff = iso(t - parse_duration(setting(conn, key))) if key else iso(t)
             rows = freed = 0
             while est > target:
                 if dry_run:
@@ -362,7 +373,7 @@ def _db_part(conn, dry_run, t, s="main"):
                 rows, freed, est = rows + k, freed + b, est - b
             if rows:
                 out["removed"].append({"what": what, "rows": rows, "bytes": freed,
-                                       "older_than": setting(conn, key)})
+                                       "older_than": setting(conn, key) if key else None})
             if est <= target:
                 break
     finally:

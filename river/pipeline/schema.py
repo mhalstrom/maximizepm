@@ -360,8 +360,9 @@ CREATE TABLE IF NOT EXISTS pipeline_deploys (
 );
 CREATE INDEX IF NOT EXISTS pipeline_deploys_env ON pipeline_deploys(env_id, id);
 
--- Every event as it came, in the CDEvents form. The records above follow from them. Readers: the view (a run's
--- history), the MaximizePM connection (new events since the last one it read).
+-- Every event as it came, in the CDEvents form, except the test events (testsuiterun, testcaserun: test_suites and
+-- test_results are their record; store.NOT_KEPT, #6520). The records above follow from them. Readers: the view (a
+-- run's history), the MaximizePM connection (new events since the last one it read).
 CREATE TABLE IF NOT EXISTS pipeline_events (
   id           INTEGER PRIMARY KEY,
   event_id     TEXT NOT NULL,            -- context.id

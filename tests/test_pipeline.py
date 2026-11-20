@@ -390,6 +390,22 @@ class JUnit(Base):
         s = run["suites"][0]
         self.assertEqual((s["name"], s["state"], s["tests"], s["failed"], s["seconds"]), ("pytest", "failed", 54, 3, 12.5))
 
+    def test_test_events_are_applied_and_not_kept(self):
+        """#6520: test_suites and test_results are the record of a test event; pipeline_events keeps no copy."""
+        before = self.c.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0]
+        junit.ingest_junit(self.c, self.run, xml=report())
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM pipeline_events").fetchone()[0], before)
+        self.assertEqual(len(store.tests(self.c, self.run)), 54)
+        # The same test event twice (a sender that sends again) writes the same row once.
+        suite = self.c.execute("SELECT key FROM test_suites WHERE run_id=?", (self.run,)).fetchone()[0]
+        ev = cdevents.make("testcaserun", "finished", "again", {"testCase": {"id": "x", "name": "test_again"},
+                                                                  "testSuiteRun": {"id": suite}, "outcome": "fail"},
+                           {"pipeline": "toolscaled", "run": self.run, "suite": "s"}, "ci")
+        a, b = store.ingest(self.c, ev), store.ingest(self.c, ev)
+        self.assertEqual((a["event"], b["event"], a["run"], b["run"]), (None, None, self.run, self.run))
+        self.assertEqual(len(store.tests(self.c, self.run)), 55)
+        self.assertEqual(store.run_show(self.c, self.run)["tests"], {"passed": 51, "failed": 3, "error": 1})
+
     def test_a_file_nested_suites_and_skipped(self):
         xml = ('<testsuite name="outer"><testsuite name="inner"><testcase name="a"/>'
                '<testcase name="b"><skipped/></testcase></testsuite><testcase name="c" time="1,234.5"/></testsuite>')
