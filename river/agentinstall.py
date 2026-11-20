@@ -65,9 +65,6 @@ METHODS = {
     "grok": {"install": "curl -fsSL https://x.ai/cli/install.sh | bash", "needs": None,
              "signin": "grok login --device-auth", "status": None, "dirs": ["~/.local/bin", "~/.grok/bin"]},
 }
-# The three the guide shows first (mark 2026-11-19: Claude Code, Codex and Antigravity CLI are the main agents); the
-# others are under More agents.
-MAIN = ("claude-code", "codex", "antigravity")
 # Where installers put programs, besides each method's dirs: Homebrew, the system, npm's and bun's global bins.
 COMMON_DIRS = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin", "~/.bun/bin",
                "~/.volta/bin"]

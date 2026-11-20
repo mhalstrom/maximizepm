@@ -332,6 +332,66 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   folders of `sessions.transcript`. The setup guide offers every agent that MaximizePM can start, from the adapters
   (`server.known_agents`, #5225).
 
+## Tier 1 agents
+
+mark 2026-11-19: 'we should add it and have a definitive feature set'. The tier 1 agents are Claude Code, Codex and
+Antigravity CLI: `agents.TIER1 = ("claude", "codex", "antigravity")` in `river/agents/__init__.py`, and
+`agents.is_tier1(name)` for an id, an alias or a platform name. Each one has every feature below. The setup guide
+shows the tier 1 agents first (Choose an agent); the other agents are under More agents and have the features their
+adapter gives.
+
+`tests/test_agent_tier1.py` checks each feature that code can check, for each tier 1 agent, and fails with the agent's
+and the feature's name. A feature that a tier 1 agent lacks is an exception below, with its fix item or the reason
+it cannot have it; the test fails when an exception no longer holds, and when this section does not name a feature
+or an exception. The end-to-end table under it proves what only a real run proves (#6253).
+
+| Feature | What a tier 1 agent has | Proof |
+|---|---|---|
+| `parts` | All the adapter parts: describe, settings, effort, launch, identity, chat log, state, screen rules, input, resume, commands, setup | unit |
+| `launch` | `build_command` starts its program with the name, folder, model, effort, settings and first prompt; every start path uses it (launch, Dispatch, serve's fresh, operational, review and deployer starts, manager, expert) | unit; e2e Start |
+| `resume` | `resume_command` resumes a session by its id: the Settings dialog's restart, expert resume and crash resume (`adopt_sessions`, `revive_sessions`, `session_restart`, `move_into_tmux`) | unit; e2e Resume |
+| `identity` | MaximizePM learns the session's id, and a maxpm command knows that it runs inside the agent (`inside_env`) | unit |
+| `chat` | The Sessions tab finds and reads its chat log: prompts, replies, tool calls and results | unit; e2e Chat |
+| `states` | Working, idle and blocked, from its hooks or its screen; blocked includes the folder trust question and each approval menu | unit (the rules exist, one reads trust); e2e States |
+| `ask_card` | Its own question dialog shows as a card on the page and is answered there (`DETECT['ask']`, a form of `river/ask_forms`) | unit; e2e Question card |
+| `interrupt` | Stop on the page ends the running turn and keeps the session (`INPUT['interrupt']`) | unit; e2e Stop |
+| `native_message` | A maxpm message reaches the session during a turn (`INPUT['native']`); the message box reaches its prompt | unit; e2e Message box |
+| `commands` | The "/" list in the message box with Tab, its custom commands for the folder, and `/model` opens the Settings dialog | unit; e2e / list |
+| `effort` | Its effort levels, the flag that sets one, and the Settings dialog row | unit |
+| `usage` | The context meter and the Usage panel (`context_window`), and `maxpm usage` (its token counts) | unit |
+| `setup_files` | `maxpm init` writes its instruction file, and MaximizePM's MCP server goes into its config | unit |
+| `setup_main` | Setup installs it, checks it (its status command) and signs it in (`agentinstall.METHODS`) | unit; e2e Setup |
+| `host_signin` | `maxpm agent-login` and `maxpm host signin` sign it in on a computer with no browser (`agentlogin.AGENTS`) | unit |
+| `roles` | `agent_for.<role>` (worker, manager, reviewer, deployer, expert), `default_agent`, `agent_rules` and `--agent` take it | unit; e2e Roles |
+| `jobs` | `maxpm runner add/set` and `maxpm runner github/gitlab/pulumi` take `--cli <its program>` (`runners.CLIS`, `agent_job.SECRET`) | unit |
+| `shell_guard` | A hook before each shell command, so MaximizePM refuses a `tmux kill-server` of its server (`core.tmux_guard`) and a push while an alert is unread (`core.push_guard`) | unit; e2e Shell guard |
+| `secrets` | `maxpm secret` confirms the session from its process (`vault.AGENT_PROGRAMS`) | unit |
+
+Exceptions (each also in `EXCEPTIONS` of the test):
+
+- Codex, `shell_guard`: #6254. MaximizePM installs no hook in Codex sessions yet; its state comes from the screen.
+- Antigravity CLI, `jobs`: #6249 adds agy to the runner and CI jobs.
+- Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
+  session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
+  pane, which works at its prompt.
+- Antigravity CLI, `shell_guard`: #6251. agy has a PreToolUse hook, but it loads hooks only from `hooks.json` in its
+  home or in the project, and an adapter installs nothing in a CLI's home (p140); no flag adds a hook for one start.
+  #6251 tries a rule of one session's permissions for the tmux guard; `push_guard` reads the queue's state and
+  cannot be a fixed rule.
+
+Lists that stay as they are, as they are not a tier: `agents.ASK_FORMS` (the question forms that `river/ask_forms`
+draws, also Copilot's and OpenCode's), `vault.AGENT_PROGRAMS` (the programs of every agent), and
+`core._PROFILE_MIGRATION` (the agents of a one-time change, fixed history).
+
+End-to-end runs of the tier 1 agents (#6253): a test serve on a queue of its own (`MAXPM_DB`) with its own tmux
+server, driven through the page's API and the page itself, with its desktop and 390 px screenshots.
+
+| Agent | Setup (install, check, sign-in) | Start, with its settings | Chat | Message box | States (working, idle, blocked, trust, approval) | Question card | / list | Stop | Resume after a stop | Roles (manager, reviewer) | Shell guard |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Claude Code | not run yet (#6253) | | | | | | | | | | |
+| Codex | not run yet (#6253) | | | | | | | | | | exception (#6254) |
+| Antigravity CLI | not run yet (#6253) | | | | | | | | | | exception (#6251) |
+
 ## Tests in maxpm (step 5)
 
 One row for each agent: its end-to-end test on this Mac, from a test serve on a queue of its own (`MAXPM_DB`) with

@@ -142,6 +142,8 @@ def add(conn, name, ssh, cli=None, slots=None, max_minutes=None, max_cost=None, 
     name = (name or "").strip().lower()
     if not NAME.match(name) or name == "this":
         raise RiverError("a runner's name is lower-case letters, digits and '-' (up to 32), such as ci-1")
+    if cli is not None and cli not in CLIS:
+        raise RiverError(f"the agent CLI of a runner is one of: {', '.join(CLIS)}")
     from .pipeline import agent_job
     if name in agent_job.FORGES:
         raise RiverError(f"{name} names the agent job in {agent_job.label(name)} (maxpm runner {name} <pipeline>); "

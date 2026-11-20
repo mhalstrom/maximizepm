@@ -1081,9 +1081,25 @@ def page_list():
     return {"agents": out, "errors": errors()}
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Tier 1 (#6252, mark 2026-11-19: 'we should add it and have a definitive feature set')
+# ---------------------------------------------------------------------------------------------------------------
+
+# The tier 1 agents, by adapter id. Each one has every feature of the Tier 1 section of docs/agent-adapters.md;
+# tests/test_agent_tier1.py fails when one lacks a feature that the section does not name as an exception. The setup
+# guide shows them first (Choose an agent).
+TIER1 = ("claude", "codex", "antigravity")
+
+
+def is_tier1(name):
+    """Whether `name` (an id, an alias or a platform name: claude-code) names a registered tier 1 agent."""
+    a = find(name)
+    return bool(a) and a.id in TIER1
+
+
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files", "import_files",
-           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
+           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "TIER1", "is_tier1"]
 
 
 # Last, after every name above: core imports the built-in adapters while it loads (their setting defaults), and they import

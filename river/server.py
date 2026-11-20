@@ -5480,7 +5480,7 @@ def _agent_cli(conn, label, exe, cmd, term, have, jobs):
     needs = m.get("needs")
     return {"label": label, "platform": platform, "found": bool(path), "path": path,
             "added": label in have or exe in have, "command": _shown_cmd(conn, cmd),
-            "main": platform in agentinstall.MAIN,
+            "main": core._adapters().is_tier1(platform),  # the tier 1 agents come first; others under More agents
             "install": {"command": agentinstall.install_command(platform),
                         "missing": needs if needs and not term.get(needs) else None}
             if m.get("install") else None,
