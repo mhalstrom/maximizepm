@@ -9,6 +9,8 @@ import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
 import { labelOf, programOf } from "./settingLabels.js";
 import { loadAgents } from "../components/agents.js";
+import { modelChoices } from "../components/modelPick.js";
+import { effortsFor } from "../components/launchDialog.js";
 
 const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -114,14 +116,43 @@ export function renderSettings() {
 // have an entry for each model group. Each has its model and effort (empty: the agent's own setting, shown greyed),
 // its limit of active sessions (empty: no limit), the sessions it runs now, ↑ ↓ ✕, and Add. A change writes
 // agent_order for every project.
+// The Model and Effort of a row are lists (mark 2026-11-20: 'also the models and effort need to be dropdowns'): the
+// models the agent runs and the effort levels of the chosen model (else of the model the launch runs), from the
+// launch dialog's options of the agent. The first option is the agent's own setting (no value), with the model or
+// effort it gives now. A value the lists lack (typed into agent_order by hand) stays as an option. An agent with
+// no launch option keeps a text field.
+const optOf = (p) => (S.launch_options || []).find(o => o.platform === p.platform)
+  || (S.launch_options || []).find(o => o.agent_type === p.platform);
 function provField(i, k, p) {
-  const ph = (k === "model" ? p.run_model : p.run_effort) || "its default";
-  return `<input data-prov-field="${k}" data-prov-i="${i}" value="${esc(p[k] || "")}" placeholder="${esc(ph)}" aria-label="${esc(p.label)} ${k}">`;
+  const now = (k === "model" ? p.run_model : p.run_effort);
+  const label = `${esc(p.label)} ${k}`, opt = optOf(p);
+  if (!opt) return `<input data-prov-field="${k}" data-prov-i="${i}" value="${esc(p[k] || "")}" placeholder="${esc(now || "its default")}" aria-label="${label}">`;
+  const cur = p[k] || "";
+  let vals = k === "model" ? modelChoices(opt.models, cur).shown.map(m => m.name) : effortsFor(opt, p.model || p.run_model);
+  if (cur && !vals.includes(cur)) vals = [cur, ...vals];
+  const first = `its default${now && !p[k] ? ` (${now})` : ""}`;
+  return `<select data-prov-field="${k}" data-prov-i="${i}" aria-label="${label}">
+    <option value=""${cur ? "" : " selected"}>${esc(first)}</option>
+    ${vals.map(v => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
 }
-function renderProviders() {
-  const host = $("#setProviders");
-  if (host.contains(document.activeElement)) return;  // a field the person types in keeps its text
-  loadAgents().then((agents) => drawProviders(host, agents));
+// A text field the person types in keeps its text, and an open list stays open: the timed refresh does not draw the
+// rows again while a field or a list has focus. A button with focus does not stop it (#6393: after a click on Add
+// provider, an arrow or ✕ the focus stays on that button, and the list kept its old rows until a reload). After a
+// save, saveOrder draws the rows at once (force) and puts the focus back on the same control.
+function renderProviders(force) {
+  const host = $("#setProviders"), a = document.activeElement;
+  if (!force && host.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT")) return;
+  return loadAgents().then((agents) => drawProviders(host, agents));
+}
+// The data attribute that names a control of the list, so that the same control gets the focus after a redraw.
+const PROV_KEYS = ["provField", "provUp", "provDown", "provDel", "provAdd"];
+function focusKey(el) {
+  if (el.id === "provAdd") return "#provAdd";
+  const k = PROV_KEYS.find(x => el.dataset[x] !== undefined);
+  if (!k) return null;
+  const attr = k.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+  return k === "provField" ? `[data-prov-field="${el.dataset.provField}"][data-prov-i="${el.dataset.provI}"]`
+    : `[data-${attr}="${el.dataset[k]}"]`;
 }
 function drawProviders(host, agents) {
   const P = S.providers || [], set = P.length && P[0].set;
@@ -143,9 +174,22 @@ function drawProviders(host, agents) {
       : "No order is set: these are the Start button's agents. A change here saves the order."}</div>
     ${rows || `<div class="muted">No provider yet.</div>`}
     ${free.length ? `<div class="prov-add"><select id="provAdd" aria-label="Agent to add">${free.map(a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join("")}</select>${button("Add provider", { data: { "prov-add": "1" } })}</div>` : ""}`;
-  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+  if (host.dataset.sig === html) return;
+  // The control with focus gets it back after the redraw, with the text and the agent chosen in it.
+  const a = document.activeElement, key = host.contains(a) ? focusKey(a) : null;
+  const typed = key && a.tagName === "INPUT" ? { value: a.value, start: a.selectionStart, end: a.selectionEnd } : null;
+  const pick = $("#provAdd") && $("#provAdd").value;
+  host.innerHTML = html; host.dataset.sig = html;
+  const sel = $("#provAdd");
+  if (sel && pick && [...sel.options].some(o => o.value === pick)) sel.value = pick;
+  const back = key && host.querySelector(key);
+  if (!back) return;
+  back.focus();
+  if (typed) { back.value = typed.value; try { back.setSelectionRange(typed.start, typed.end); } catch (e) { /* no selection */ } }
 }
-async function saveOrder(list) {
+// focus: the control that gets the focus after the redraw (an arrow follows its provider), or none to keep the one
+// that has it.
+async function saveOrder(list, focus) {
   const value = list.map(p => [p.agent, ...["model", "effort", "max"].filter(k => p[k] != null && p[k] !== "")
     .map(k => `${k} ${p[k]}`)].join(" ")).join(", ");
   try {
@@ -153,6 +197,9 @@ async function saveOrder(list) {
     else await act("config_unset", { key: "agent_order" });
     toast(value ? `Agent providers: ${value}` : "Agent providers: back to the Start button's agents");
   } catch (e) { /* act showed the error */ }
+  await renderProviders(true);
+  const el = focus && $("#setProviders").querySelector(focus);
+  if (el) el.focus();
 }
 const provList = () => (S.providers || []).map(p => ({ agent: p.platform || p.agent, model: p.model, effort: p.effort, max: p.max }));
 $("#setProviders").addEventListener("change", (e) => {
@@ -173,13 +220,11 @@ $("#setProviders").addEventListener("click", (e) => {
   const L = provList();
   if (t.dataset.provAdd) return saveOrder([...L, { agent: $("#provAdd").value }]);
   const i = +(t.dataset.provUp ?? t.dataset.provDown ?? t.dataset.provDel);
-  if (t.dataset.provDel !== undefined) L.splice(i, 1);
-  else {
-    const j = t.dataset.provUp !== undefined ? i - 1 : i + 1;
-    if (j < 0 || j >= L.length) return;
-    [L[i], L[j]] = [L[j], L[i]];
-  }
-  saveOrder(L);
+  if (t.dataset.provDel !== undefined) return saveOrder(L.filter((_, x) => x !== i), "#provAdd");
+  const up = t.dataset.provUp !== undefined, j = up ? i - 1 : i + 1;
+  if (j < 0 || j >= L.length) return;
+  [L[i], L[j]] = [L[j], L[i]];
+  saveOrder(L, `[data-prov-${up ? "up" : "down"}="${j}"]`);  // the arrow follows its provider
 });
 
 // A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
