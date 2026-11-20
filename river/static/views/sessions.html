@@ -57,6 +57,7 @@
       <div class="sess-head">
         <button class="btn" type="button" id="sessBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
         <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id"></span></h2>
+        <span id="sessBadge" class="sess-badge"></span>
         <span id="sessState" class="sess-st"></span>
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>
@@ -77,6 +78,13 @@
       </div>
       <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div><div id="sessPend" class="chat-col sess-pend" aria-label="Messages waiting their turn"></div></div>
       <div class="chat-col chat-foot">
+        <!-- What waits for the person in this session (#6438): its questions and prompts show here, in its own view,
+             never over the page (components/waitDialog.js openWaiting with dock). -->
+        <section id="sessAsk" class="sess-ask hidden" aria-labelledby="sessAskTitle">
+          <div class="sess-ask-h"><h3 id="sessAskTitle" class="sess-ask-t">Waits for you</h3>
+            <button class="iconbtn" type="button" id="sessAskClose" title="Hide" aria-label="Hide the questions">✕</button></div>
+          <div id="sessAskList"></div>
+        </section>
         <div id="sessWait" class="sess-wait hidden"></div>
         <div id="sessBarWhy" class="muted sess-why hidden"></div>
         <div id="sessFiles" class="sess-files hidden" aria-label="Attached files"></div>

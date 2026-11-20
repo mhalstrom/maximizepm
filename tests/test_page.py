@@ -1425,39 +1425,107 @@ try {
                          (1200, ["start", "compacted", "compacted"], True, [False, False], "Start of the session", False))
         self.assertTrue(got["jumps"] and all(abs(j) <= 1 for j in got["jumps"]), got["jumps"])
 
-    def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
-        """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
-        keeps it closed until something new waits."""
-        core.config_set(self.c, "setup_done", "on")
-
+    def _question_step(self):
         def question():
             c = core.connect()
             try:
                 core.send(c, "question", "Push the header?", to="mark", item=self.it, actor="ag")
+                with core.tx(c):  # as the CLI does after each command: the page's poll reads the rows as they are
+                    core.sync_needs_you(c)
             finally:
                 c.close()
+        return question
+
+    def test_a_new_prompt_or_question_of_the_open_session_shows_in_its_panel_once(self):
+        """#4663, #6438: what the open session waits on (a prompt, a question) shows by itself in the session's panel
+        above its message box, never as a dialog over the page; a hide keeps it hidden until something new waits."""
+        core.config_set(self.c, "setup_done", "on")
         driver = r'''
-const open = () => !q("#waitDlg").classList.contains("hidden");
+const open = () => !q("#sessAsk").classList.contains("hidden");
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
 try {
-  await until(() => window.__appReady && open(), "the dialog opens by itself for the prompt");
-  check(q("#waitList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
-  q("#waitDismiss").click();
-  await until(() => q("#sessWait [data-wait-open]"), "the wait line links to the dialog");
+  await until(() => window.__appReady && open(), "the panel shows by itself for the prompt");
+  check(q("#sessAskList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
+  check(!dlg(), "no dialog over the page");
+  check(document.activeElement === document.body || !q("#sessAsk").contains(document.activeElement), "it takes no focus by itself");
+  q("#sessAskClose").click();
+  await until(() => q("#sessWait [data-wait-open]"), "the wait line links to the panel");
   await sleep(600);  // several refreshes of the Sessions tab (150 ms in tests)
-  check(!open(), "Dismiss keeps the same prompt closed");
+  check(!open(), "the hide keeps the same prompt hidden");
   check(!q("#sessWait").textContent.includes("type the answer below"), "no text about typing the answer below");
   await fetch("/__step/question");
-  await until(open, "a new question opens it again");
-  check(q("#waitList").textContent.includes("Push the header?"), "it shows the question");
-  q("#waitDismiss").click();
+  await until(open, "a new question shows it again");
+  check(q("#sessAskList").textContent.includes("Push the header?"), "it shows the question");
+  check(!dlg(), "still no dialog over the page");
+  q("#sessAskClose").click();
   await sleep(600);
-  check(!open(), "and Dismiss keeps it closed");
+  check(!open(), "and the hide keeps it hidden");
   q("#sessWait [data-wait-open]").click();
-  check(open(), "Answer it opens it");
+  check(open(), "Answer it shows it");
   post({ ok: true });
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''
-        self.assertEqual(self.drive(driver, "/sessions/ag", {"question": question}), {"ok": True})
+        self.assertEqual(self.drive(driver, "/sessions/ag", {"question": self._question_step()}), {"ok": True})
+
+    def test_a_question_opens_nothing_over_the_page_and_shows_in_the_session_that_asked(self):
+        """#6438 (mark 2026-11-20: 'it also should not take over the screen'): a question that comes while the person
+        is on another view opens no dialog, and the count goes up. A click on it in Your action items opens the session
+        that asked, with the question in that session's panel; at desktop and at phone width."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"  # no prompt in the pane: only the question waits
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#needsYou"), "the You view");
+  await fetch("/__step/question");
+  await until(() => q("#needsYou [data-nyt]"), "the question in Your action items");
+  await sleep(600);
+  check(!dlg(), "no dialog over the page: " + (dlg() && dlg().id));
+  check(/^\(\d+\)/.test(document.title), "the count in the title");
+  check(q("#sessAsk").classList.contains("hidden"), "no panel outside the session");
+  const n = document.querySelectorAll("#needsYou [data-nyt]").length;
+  await until(() => q('#sessions [data-session="ag"] .wbadge'), "the asking session's badge");
+  check(q('#sessions [data-session="ag"] .wbadge').textContent.trim() === (n > 1 ? "! " + n : "!"), "its badge counts them");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "the asking session with its panel");
+  check(q("#sessAskList").textContent.includes("Push the header?"), "the panel holds the question");
+  check(!dlg(), "still no dialog over the page");
+  const r = q("#sessAsk").getBoundingClientRect();
+  check(r.width > 0 && r.left >= -0.5 && r.right <= innerWidth + 0.5, "the panel fits the width: " + JSON.stringify(r));
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1280,900", "390,844"):
+            self.assertEqual(self.drive(driver, "/you", {"question": self._question_step()}, size=size),
+                             {"ok": True})
+
+    def test_a_decision_a_session_put_as_the_person_shows_in_that_session(self):
+        """#6438 with #6436: the needs-you session puts a person item's decision as the person (decision.by). Its
+        card shows in that session's panel, and a click on the item in Your action items opens that session."""
+        core.config_set(self.c, "setup_done", "on")
+        self.pane["screen"] = "❯ \n"
+        it = core.item_add(self.c, "site", "Decide the header color", doer="human")["id"]
+        decision = core.decision_parse(["A: blue", "B: green"], "A", "Which color?")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET decision=? WHERE id=?", (json.dumps(dict(decision, by="ag")), it))
+            core.sync_needs_you(self.c)
+        driver = r'''
+const dlg = () => document.querySelector(".dlg:not(.hidden)");
+try {
+  await until(() => window.__appReady && q("#needsYou [data-nyt]"), "the item in Your action items");
+  check(!dlg(), "no dialog over the page");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => location.pathname === "/sessions/ag" && !q("#sessAsk").classList.contains("hidden"), "the session that put it, with its panel");
+  check(q("#sessAskList").textContent.includes("Which color?"), "the panel holds the decision");
+  check(q('#sessAskList form[data-kind="item"]').dataset.nopane === "1", "its answer is not typed into the chat");
+  check(q("#sessWait").textContent.includes("It waits for your decision."), "the wait line says so");
+  check(q('#sessions [data-session="ag"] .wbadge').textContent.trim() === "!", "the session's row has the badge");
+  check(q("#sessBadge .wbadge").textContent.trim() === "!", "and its head");
+  check(!dlg(), "still no dialog over the page");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        self.assertEqual(self.drive(driver, "/you"), {"ok": True})
 
     def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
         """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
@@ -2299,9 +2367,10 @@ try {
   const FULL = innerHeight, vv = Object.assign(new EventTarget(), { height: Math.round(innerHeight * 0.55), offsetTop: 230, width: innerWidth });
   Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
   if (IOS) Object.defineProperty(window, "innerHeight", { get: () => vv.height, configurable: true });
-  // The session waits on the person: the page opens its dialog once by itself, which takes the focus. Close it first.
-  await until(() => q("#waitDlg") && !q("#waitDlg").classList.contains("hidden"), "the wait dialog").catch(() => {});
-  if (q("#waitDlg")) q("#waitDlg").classList.add("hidden");
+  // The session waits on the person: its panel shows by itself (#6438) and takes no focus. Hide it, as the test
+  // measures the message box alone.
+  await until(() => !q("#sessAsk").classList.contains("hidden"), "the session's panel").catch(() => {});
+  q("#sessAsk").classList.add("hidden");
   box.focus();
   await sleep(450);
   const r = lay.getBoundingClientRect(), bar = q("#sessBar").getBoundingClientRect();

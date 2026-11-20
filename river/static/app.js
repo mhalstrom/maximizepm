@@ -49,6 +49,9 @@ Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (
   // One project in Plan (#5879: a project's own browser in the Browsers view has no session to open).
   openProject: (name) => { setScope(name, ""); return showPlan("overview"); },
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },
+  // A line of Your action items that a session asks (#6438; ev: the Needs you event): that session, with the line in
+  // its panel; false when that session does not hold it.
+  openSessionAsk: async (name, ev) => { await setTab("sessions"); return sessionsTab.openAsk(name, ev); },
   // The You view of Sessions (#5102): what waits on the person; takeovers opens the list of items an agent took over.
   openYou: async (takeovers) => { await setTab("sessions"); sessionsTab.showYou(true); if (takeovers) youView.openTakeovers(); } });
 let openItem = null, drawerItem = null;  // drawerItem: the open item as /api/item gave it

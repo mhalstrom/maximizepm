@@ -6,19 +6,35 @@
 // Server: the op prompt_answer (with the page's token: typeAction) and the op answer.
 // #6002: it is also the one card dialog. A question block is the card (askCard.js); a person item gets the same card;
 // a line of Needs you or a person task in Plan > Items opens the dialog with that one card (openCard).
+// #6438 (mark 2026-11-20: 'it also should not take over the screen. when these open for a session they should display
+// when we go to that specific session'): what waits in a session shows in that session's view, in the panel #sessAsk
+// above its message box (openWaiting with dock), not over the page. Nothing opens by itself over another tab. The one
+// list (#waitList) moves between that panel and the dialog's box, so the same handlers answer in both.
 import { $, esc, act, toast, typeAction, actor, getJson, hooks } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
 import { openTerminal } from "./terminalDialog.js";
-import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, fromEvent, typeChip, discussText, loadDiffs, loadTryFrames } from "./askCard.js";
+import { cardHtml, sideHtml, loadSide, fromWaiting, fromItem, typeChip, discussText, loadDiffs, loadTryFrames } from "./askCard.js";
 import { openFullScreen } from "./sidePanel.js";
 import { S, nav } from "../page.js";
 import { openOnRqs } from "./rqsPublish.js";
 import { button } from "./button.js";
 
-let queue = [], qAt = 0;  // the new cards that open by themselves, and the one shown (#6017)
-const dlg = makeDialog($("#waitDlg"), { onClose: () => { queue = []; } });  // a close ends the queue of new cards (#6017)
+const dlg = makeDialog($("#waitDlg"));
 let agent = null, pane = false, onSent = null, onAsk = null;
+let docked = false;  // the list is in the session view's panel (#6438), not in the dialog
+const dockEl = () => document.getElementById("sessAsk");
+// The list goes into the session's panel, or back into the dialog's box under its head.
+function place(inPanel) {
+  docked = inPanel && !!dockEl();
+  if (docked) $("#sessAskList").append($("#waitList"));
+  else $("#waitTitle").parentElement.after($("#waitList"));
+}
+function setTitle(text) { $(docked ? "#sessAskTitle" : "#waitTitle").textContent = text; }
+// Hide the session's panel; the session view's line 'Answer it' shows it again.
+export function hideDocked() { const d = dockEl(); if (d) d.classList.add("hidden"); }
+export function dockedShows() { const d = dockEl(); return !!d && docked && !d.classList.contains("hidden"); }
+function closeAll() { if (docked) hideDocked(); else dlg.close(); }
 const cards = new Map();  // "kind:id" -> the card, for its side column and Discuss
 
 // The CLI's own question dialog (Claude Code's AskUserQuestion, #6234), read from its pane: one block for the
@@ -120,30 +136,40 @@ function fillSides() {
 
 // opts.onSent(text): the chat shows the person's turn at once.
 // Close it: the page left the session (the You view of the first page, #5102), and it opens again only for something new.
-export function closeWaiting() { dlg.close(); }
+export function closeWaiting() { hideDocked(); dlg.close(); }
 
+// opts.dock: in the session view's panel (#6438), not as a dialog; opts.focus: false when it shows without a click,
+// so it takes no keys from the message box.
 export function openWaiting(s, opts = {}) {
-  queue = [];
+  if (opts.dock) dlg.close();
+  place(!!opts.dock);
   agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null; onAsk = opts.onAsk || null;
-  $("#waitTitle").textContent = `Waits for you: ${s.name}`;
+  setTitle(docked ? "Waits for you" : `Waits for you: ${s.name}`);
   // With no pane, one note under the heading for every question, not the same note under each one (#5359).
   const note = !pane && s.waiting.some(w => w.kind === "question")
     ? `<div class="muted t-s wnote">This session runs in no tmux pane here, so an answer goes to the queue only; the session reads it with maxpm inbox.</div>`
     : "";
   cards.clear();
-  $("#waitList").innerHTML = note + s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("");
+  // opts.extra: the cards of the decisions the session put to the person as the person (#6436, decision.by). Their
+  // answer goes to the queue only, which tells the session; nothing is typed into its chat (data-nopane).
+  const extra = (opts.extra || []).map(c => { cards.set(`${c.kind}:${c.id}`, c); return cardHtml(c); }).join("");
+  $("#waitList").innerHTML = note + s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("") + extra;
+  for (const c of opts.extra || []) {
+    const f = $("#waitList").querySelector(`form[data-kind="${c.kind}"][data-id="${c.id}"]`);
+    if (f) f.dataset.nopane = "1";
+  }
   // Files and local pages in the question, the command and the terminal's text open in the side panel (#4689).
   $("#waitList").dataset.agent = s.name;
   $("#waitList").querySelectorAll(".wq, .wcmd, .wlines pre").forEach(x => linkArtifacts(x, s.name, { inPre: true }));
-  shown();
+  shown(opts.focus !== false);
 }
 
 // One card, from a line of Needs you or a person task in Plan > Items (askCard.js fromEvent, fromItem). A question's
-// answer goes to the queue; the session reads it as it does today.
-export function openCard(c) { queue = []; drawCard(c); }  // a card the person opened: no queue of new cards
-function drawCard(c) {
+// answer goes to the queue; the session reads it as it does today. Only a click opens it.
+export function openCard(c) {
+  hideDocked(); place(false);
   agent = c.kind === "question" ? c.from : null; pane = false; onSent = null; onAsk = null;
-  $("#waitTitle").textContent = c.kind === "item" ? "Waits for you" : `Waits for you: ${c.from === "maxpm" ? "MaximizePM" : c.from}`;
+  setTitle(c.kind === "item" ? "Waits for you" : `Waits for you: ${c.from === "maxpm" ? "MaximizePM" : c.from}`);
   cards.clear();
   cards.set(`${c.kind}:${c.id}`, c);
   $("#waitList").innerHTML = cardHtml(c);
@@ -158,49 +184,21 @@ export async function openItemCard(id) {
   catch (e) { toast(e.message, true); }
 }
 
-// New cards that open by themselves (#6017, you-needs.js autoCards): one card at a time, with "1 of N" and Next;
-// after an answer or a Done the next one shows. Each entry: a Needs you event. Close ends the queue; the cards stay in
-// Needs you.
-export function isOpen() { return !$("#waitDlg").classList.contains("hidden"); }
-export async function openCardQueue(events) {
-  queue = events.slice(); qAt = 0;
-  return showQueued();
-}
-async function showQueued() {
-  while (qAt < queue.length) {
-    const e = queue[qAt];
-    try {
-      const c = e.kind === "item" ? fromItem(await getJson(`api/item/${e.item_id}`)) : fromEvent(e);
-      drawCard(c);
-      if (queue.length > 1) {
-        const line = document.createElement("div");
-        line.className = "wqueue muted t-s";
-        line.innerHTML = `New for you: ${qAt + 1} of ${queue.length}` + (qAt + 1 < queue.length
-          ? button("Next", { data: { wnext: 1 }, title: "The next new card" }) : "");
-        $("#waitList").prepend(line);
-      }
-      return true;
-    } catch (err) { qAt++; }  // gone meanwhile: the next one
-  }
-  queue = []; return false;
-}
-
-function shown() {
+function shown(focus = true) {
   $("#waitDlg").classList.toggle("has-cards", cards.size > 0);
   fillSides();
   loadDiffs($("#waitList"));  // a commit's diff on a card (#5956)
   loadTryFrames($("#waitList"));  // the canvas of each try (#6040)
-  dlg.open();
-  const first = $("#waitList").querySelector(".acard-choice input, input:checked, textarea");  // the first option (#6413)
-  if (first) first.focus();
+  if (docked) dockEl().classList.remove("hidden");
+  else dlg.open();
+  const first = focus && $("#waitList").querySelector(".acard-choice input, input:checked, textarea");  // the first option (#6413)
+  if (first) first.focus({ preventScroll: docked });
 }
 
 function done(form) {
   form.remove();
   if ($("#waitList").querySelector(".wblock")) return;
-  if (queue.length && qAt + 1 < queue.length) { qAt++; return showQueued(); }  // the next new card (#6017)
-  queue = [];
-  dlg.close();
+  closeAll();
 }
 
 $("#waitList").addEventListener("input", (e) => {  // a word in Other picks Other
@@ -222,7 +220,7 @@ $("#waitList").addEventListener("submit", async (e) => {
       if (!body && !choice) { toast(form.querySelector(".acard-choice") ? "Pick an option or write your answer" : "Write the answer first", true); return; }
       const said = choice ? (body ? `${choice}: ${body}` : choice) : body;
       let typed = false;
-      if (pane) {
+      if (pane && !form.dataset.nopane) {
         try { const r = await typeAction("session_send", { agent, text: said }); typed = true; if (onSent) onSent(r.text, true); }
         catch (err) { toast(`Not typed into the session (${err.message}); the queue still gets the answer`, true); }
       }
@@ -281,8 +279,7 @@ $("#waitList").addEventListener("keydown", (e) => {
   form.requestSubmit(go);
 });
 $("#waitList").addEventListener("click", async (e) => {
-  if (e.target.closest("[data-wnext]")) { qAt++; return showQueued(); }
-  if (e.target.closest("[data-wcancel]")) { dlg.close(); return; }
+  if (e.target.closest("[data-wcancel]")) { closeAll(); return; }
   const move = e.target.closest("[data-wtab], [data-wchat]");  // another question of the dialog, or Chat about this
   if (move) {
     const form = move.closest("form"), d = move.dataset;
@@ -306,7 +303,7 @@ $("#waitList").addEventListener("click", async (e) => {
     } catch (err) { /* act showed it */ }
     return;
   }
-  if (e.target.closest("[data-open]")) dlg.close();
+  if (e.target.closest("[data-open]") && !docked) dlg.close();  // the session's panel stays under the drawer
   const tryOpen = e.target.closest("[data-try-open]");  // a try's canvas in a tab of its own: the card stays (#6040)
   if (tryOpen) {
     const d = tryOpen.dataset;
@@ -335,13 +332,14 @@ $("#waitList").addEventListener("click", async (e) => {
     if (!c || !mgr) { toast("No manager runs now", true); return; }
     try {
       await act("send", { kind: "note", body: discussText(c), to: mgr.name, item: c.item_id || undefined });
-      dlg.close();
+      closeAll();
       nav.openSession(mgr.name);
     } catch (err) { /* act showed the error */ }
     return;
   }
   const t = e.target.closest("[data-term]");  // a prompt with no choices the page can read (#5220)
-  if (t) { dlg.close(); openTerminal(t.dataset.term); }
+  if (t) { if (!docked) dlg.close(); openTerminal(t.dataset.term); }
 });
 $("#waitClose").onclick = () => dlg.close();
 $("#waitDismiss").onclick = () => dlg.close();
+if (dockEl()) $("#sessAskClose").onclick = hideDocked;  // the session's panel (#6438, views/sessions.html)

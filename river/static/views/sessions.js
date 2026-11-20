@@ -10,7 +10,7 @@ import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle, ge
 import { chip } from "../components/chip.js";
 import { appendEntries, prependEntries, agePending, wireCopy, plainText, drawWaiting, placeReports } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
-import { openWaiting, closeWaiting } from "../components/waitDialog.js";
+import { openWaiting, closeWaiting, hideDocked, dockedShows } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
@@ -27,6 +27,8 @@ import { composerHtml, composerState } from "../components/composer.js";
 import { makeMenu } from "../components/menu.js";
 import { makeSlashList } from "../components/slashList.js";
 import { markYou } from "./you.js";
+import { waitsOf } from "./you-needs.js";
+import { fromEvent } from "../components/askCard.js";
 import { S } from "../page.js";
 import { renderGive, showAll, showingAll } from "./sessions-work.js";
 import { queueAnywhere } from "../components/agentStart.js";
@@ -174,10 +176,13 @@ export function shellLines(s) {
   return (s.shells || []).map(x => `${ago(x.started).replace(" ago", "")}: ${x.label}`);
 }
 
-// The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
-function waitBadge(s) {
-  const n = (s.waiting || []).length;
-  return n ? `<span class="wbadge" title="${n} wait for you">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
+// The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions, the
+// decisions it put to the person; waitsOf). One shows "!", more show their count (#6438, mark 2026-11-20: 'an alert
+// indicator on the session icon when questions wait to be answered'). It goes when they are answered or dropped.
+export function waitBadge(s, slot = true) {
+  const n = waitsOf(s).length;
+  return n ? `<span class="wbadge" title="${n} wait for you" aria-label="${n} wait for you">!${n > 1 ? " " + n : ""}</span>`
+    : slot ? `<span class="wbadge-slot" aria-hidden="true"></span>` : "";
 }
 
 // The pin of a worker row (#5007): a pinned session stays at the top of the worker sessions. The pin is the
@@ -238,7 +243,7 @@ export function sessionRow(s) {
   const head = s.role === "expert" ? s.name : s.role === "assistant" || (s.role === "manager" && s.title === "Manager") ? "" : s.title || s.name;
   const line2 = s.role === "expert" && s.topic ? s.topic : s.doing || s.state_label;
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
-  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
+  return `<div class="srow${["prompt", "answer"].includes(s.state) || waitsOf(s).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
       <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${dotOf(s)}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
@@ -262,7 +267,8 @@ function renderList(el, list, picked, empty) {
     return;
   }
   delete el.dataset.empty;
-  const sigs = list.map(s => JSON.stringify(s) + "|" + changesOf(s.name));  // the count of #5855 too
+  // The count of #5855 too, and the decisions the session put (waitsOf, #6438): they come from Needs you.
+  const sigs = list.map(s => JSON.stringify(s) + "|" + changesOf(s.name) + "|" + waitsOf(s).length);
   if (rows.length !== list.length || rows.some((r, i) => r.dataset.session !== list[i].name)) {
     el.innerHTML = list.map(sessionRow).join("");
     [...el.children].forEach((r, i) => { r.dataset.sig = sigs[i]; });
@@ -465,6 +471,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     drawStatus();
     drawLimits();
     drawState();
+    // The ! badge of the opened session in its head too (#6438): on a phone the head is all that shows of it.
+    const open = agent && list.find(x => x.name === agent);
+    putHtml($("#sessBadge"), open ? waitBadge(open, false) : "");
     fit();
     autoWait();
   }
@@ -650,6 +659,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (remember && name) { store(PICKED, name); setTab("agents"); }
     if (remember || !name) phoneChat(!!name);  // a session the person picks shows its chat (on a phone, #4885)
     if (name === agent) return;
+    hideDocked();  // what waits in the session it leaves (#6438)
     if (!agent && name) phoneChat(true);  // the first one at load
     if (name !== agent) dict.stop();
     saveDraft();  // the session it leaves keeps its text, cursor and files (#5112)
@@ -660,7 +670,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
-    for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
+    for (const id of ["#sessBadge", "#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
     $("#sessBar").classList.remove("can-now");  // the next read of the session says whether it can stop
     drawPend([]);
     renderGive(name);
@@ -678,7 +688,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it. A
   // prompt that runs nothing (no tool, no command) is a menu: a slash command's (#5220), not a permission prompt.
   function waitLine(j) {
-    const w = $("#sessWait"), all = (list.find(x => x.name === agent) || {}).waiting || [], waits = all.map(x => x.kind);
+    const s = list.find(x => x.name === agent), all = s ? waitsOf(s) : [], w = $("#sessWait"), waits = all.map(x => x.kind);
     // A question that takes only one of its options (Claude Code's folder trust question, #5904) is no menu (#6242).
     const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command && !p.ask && !p.fixed;
     // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253; Claude
@@ -686,7 +696,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const what = p && (p.ask || p.fixed) ? "It asks you a question in its terminal."
       : menu ? "It shows a menu in its terminal."
       : waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
-      : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
+      : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question."
+      : waits.includes("card") ? "It waits for your decision." : "";
     // The link opens something (#6234): the ! dialog when the page could read what waits, else the terminal.
     const link = all.length ? `<span class="link" data-wait-open="1" tabindex="0" role="button">${menu ? "Choose" : "Answer it"}</span>`
       : j.terminal ? `<span class="link" data-term="${esc(agent)}" tabindex="0" role="button">Open its terminal</span>` : "";
@@ -695,32 +706,61 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   }
   // What may open the dialog without a click on 'Answer it': a prompt, or a question younger than question_popup_max
   // (#5001: an old question stays on the card and behind 'Answer it', but does not pop up).
-  const popsUp = (s) => (s.waiting || []).filter(w => !w.old);
+  const popsUp = (s) => waitsOf(s).filter(w => !w.old);
   // A question dialog in the terminal (#6234): after each answer the page reads it again and opens its next question.
   const askNext = (name) => () => {
     for (const k of [...seenWait]) if (k.startsWith(name + "\x1f" + "p")) seenWait.delete(k);
     refresh();
   };
-  const showWaiting = (s) => { for (const w of s.waiting || []) seenWait.add(s.name + "\x1f" + waitKey(w)); openWaiting(s, { onSent: sentTurn, onAsk: askNext(s.name) }); };
+  // In the session's own panel above its message box (#6438), not over the page. focus: false when it shows without a
+  // click, so the message box keeps the keys.
+  const showWaiting = (s, focus = true) => {
+    const all = waitsOf(s);
+    for (const w of all) seenWait.add(s.name + "\x1f" + waitKey(w));
+    openWaiting(s, { onSent: sentTurn, onAsk: askNext(s.name), dock: true, focus,
+                     extra: all.filter(w => w.kind === "card").map(w => fromEvent(w.e)) });
+  };
   $("#sessWait").addEventListener("click", (e) => {
     const t = e.target.closest("[data-term]");
     if (t) { openTerminal(t.dataset.term); return; }
     if (!e.target.closest("[data-wait-open]")) return;
     const s = list.find(x => x.name === agent);
-    if (s && (s.waiting || []).length) showWaiting(s);
+    if (s && waitsOf(s).length) showWaiting(s);
   });
+  // A line of Your action items (#6438), ev a Needs you event: the session that asked or put it opens, with it in its
+  // panel. False when that session does not hold it (it ended): the caller opens the card.
+  async function openAsk(name, ev) {
+    const has = (s) => s && waitsOf(s).some(w => w.kind === "card" ? w.id === ev.id
+      : w.kind === "question" && ev.message_id != null && w.id === ev.message_id);
+    let s = list.find(x => x.name === name);
+    if (!has(s)) {
+      try { list = (await getJson("api/sessions")).sessions; listRead = true; } catch (e) { return false; }
+      s = list.find(x => x.name === name);
+      if (!has(s)) return false;
+    }
+    pick(name);
+    draw();
+    showWaiting(s);
+    return true;
+  }
   $("#sessWait").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.closest("[data-wait-open], [data-term]")) e.target.click(); });
-  // The open session comes to a prompt or asks a question: the ! dialog opens by itself (#4663), once for each
-  // prompt (its sig) and question (its id), so Dismiss does not bring the same one back; a new one opens it again.
-  // Not while the tab is hidden or another dialog is open: the next refresh after that opens it.
+  // The open session comes to a prompt or asks a question: it shows in the session's panel by itself (#4663, #6438),
+  // once for each prompt (its sig) and question (its id), so a hide does not bring the same one back; a new one shows
+  // it again. Not while the tab is hidden or a dialog is open: the next refresh after that shows it. The panel hides
+  // when nothing waits any more (answered in the terminal or elsewhere).
   const seenWait = new Set();
-  function waitKey(w) { return w.kind === "question" ? "q" + w.id : "p" + (w.sig || w.question || ""); }
+  // A card's key holds its decision: the next decision that the session puts on the same line shows again.
+  function waitKey(w) {
+    return w.kind === "question" ? "q" + w.id : w.kind === "card" ? `c${w.id}:${JSON.stringify(w.e.decision)}`
+      : "p" + (w.sig || w.question || "");
+  }
   function autoWait() {
     if (!agent || document.hidden || !isShown()) return;
     const s = list.find(x => x.name === agent);
+    if (s && !waitsOf(s).length && dockedShows()) { hideDocked(); return; }
     if (!s || !popsUp(s).some(w => !seenWait.has(s.name + "\x1f" + waitKey(w)))) return;
     if (document.querySelector('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')) return;
-    showWaiting(s);
+    showWaiting(s, false);
   }
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
   $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message to the session",
@@ -1149,7 +1189,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     refresh();
     if (!reading) poll();
   });
-  return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
+  return { refresh: () => { refresh(); fit(); }, pick, openAsk, showYou: (byPerson = true) => showPane("you", byPerson),
            showArts: (byPerson = true) => showPane("arts", byPerson),
            showCost: (byPerson = true) => showPane("cost", byPerson),
            showBrowsers: (byPerson = true) => showPane("browsers", byPerson), pane: () => pane };

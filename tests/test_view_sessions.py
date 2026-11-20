@@ -288,7 +288,7 @@ class Sessions(Base):
         core.config_set(self.c, "question_popup_max", "0s")
         self.assertFalse(self.cards()[0]["waiting"][0]["old"])
         js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
-        self.assertIn("const popsUp = (s) => (s.waiting || []).filter(w => !w.old);", js)
+        self.assertIn("const popsUp = (s) => waitsOf(s).filter(w => !w.old);", js)  # #6438: with the decisions it put
         self.assertIn("if (!s || !popsUp(s).some(", js)
 
     def test_a_person_pins_a_session_to_the_top_until_it_ends(self):
@@ -2778,9 +2778,9 @@ try {
   files()[0].click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("board.png") && q("#spBody img.sp-img"), "board.png in a panel tab");
   q('#sessions [data-session="ag"] .srow-main').click();
-  await until(() => !q("#waitDlg").classList.contains("hidden") && q("#waitList .wq [data-file][data-checked]"), "the ! dialog's link");
-  q("#waitList .wq [data-file]").click();
-  await until(() => q("#waitDlg").classList.contains("hidden") && q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the dialog's link in the panel");
+  await until(() => !q("#sessAsk").classList.contains("hidden") && q("#sessAsk .wq [data-file][data-checked]"), "the link of the session's panel (#6438)");
+  q("#sessAsk .wq [data-file]").click();
+  await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the question's link in the side panel");
   q('#sessCol a[href^="http://localhost:5173"], #sessCol [data-url^="http://localhost:5173"]').click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title === "http://localhost:5173/app", "the local page in the panel");
   await until(() => q("#sessItem [data-open]"), "the session's item");  // drawn after the session's data comes (#4766)
