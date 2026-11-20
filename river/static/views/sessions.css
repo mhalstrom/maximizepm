@@ -758,6 +758,9 @@ button.srow-it { cursor: pointer; }
 .au-lines { margin-top: var(--sp-2); }
 .au-lines .usage-row > span:last-child { text-align: right; }
 .au-details { overflow-wrap: anywhere; }
+/* #6427: the facts for a diagnosis, closed by default. */
+.au-more { margin-top: var(--sp-6); }
+.au-more > summary { padding-left: 0; font-size: var(--fs-m); }
 .au-old { opacity: .55; }
 .usage-limit .usage-row > span:last-child { text-align: right; }
 .usage-limit.full .bar > div { background: var(--warn); }  /* a window at its limit: not the green of a good bar */

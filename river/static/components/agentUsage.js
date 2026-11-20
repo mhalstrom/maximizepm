@@ -1,9 +1,9 @@
 // The usage of one agent type (#6387, mark 2026-11-20: 'when we click on a specific agent type we should be able to
 // get the detailed usage information'). limitRowHtml(r) is a row of the usage list at the foot of the Sessions list;
-// a click on it opens openAgentUsage(agent_type): one status line per model group (#6414: at limit until when, and the
-// session stop that limits it), every usage window of the last reading (a window read before a newer stop dimmed), where
-// and when each reading came from, the sessions of the agent that run now with their models, and Read now (op
-// usage_read), which reads the agent's usage at once.
+// a click on it opens openAgentUsage(agent_type): one status line per model group (#6414: at limit until when), every
+// usage window of the last reading (a window read before a newer stop dimmed), the sessions of the agent that run now
+// with their models (only when one runs), Details (#6427, closed: where and when each reading and limit stop came
+// from, with the agent's own words), and Read now (op usage_read), which reads the agent's usage at once.
 // Server: GET api/agent-usage?agent=<id> (server.agent_usage, core.agent_usage).
 import { esc, getJson, act, ago } from "../lib.js";
 import { makeDialog } from "./dialog.js";
@@ -58,7 +58,8 @@ export function limitRowHtml(r, base) {
     note ? `<span class="muted t-s">${esc(note)}</span>` : ""}</span>${OPEN_MARK}</div>`;
 }
 
-let dlg = null, el = null, agent = null, timer = null, tried = false;
+// detailsOpen: the Details toggle stays as the person left it while the dialog shows a new reading.
+let dlg = null, el = null, agent = null, timer = null, tried = false, detailsOpen = false;
 function build() {
   el = document.createElement("div");
   el.id = "agentUsageDlg"; el.className = "hidden";
@@ -78,9 +79,11 @@ function build() {
 
 function windowRow(w) {
   const old = w.older ? ` au-old` : "";
-  const before = w.older && w.read_at ? `<div class="muted t-s">read ${esc(at(w.read_at))}, before the limit stop</div>` : "";
+  // #6427 (mark 2026-11-20: 'too much unneeded text'): the dimming says it was read before the limit stop; the
+  // reading time is in the tooltip.
+  const tip = w.older && w.read_at ? ` title="Read ${esc(at(w.read_at))}"` : "";
   if (w.used_percent == null && w.remaining_percent == null) {
-    return `<div class="usage-row${old}"><span class="muted">${esc(w.name)}</span><span>${esc(w.text || "")}</span></div>`;
+    return `<div class="usage-row${old}"${tip}><span class="muted">${esc(w.name)}</span><span>${esc(w.text || "")}</span></div>`;
   }
   // As the agent's own usage screen shows it (mark 2026-11-20: 'it should show the actual usage'): the part used, a bar
   // of it, and the reset in this computer's time. A window read before a newer limit stop of its group is dimmed: the
@@ -88,9 +91,9 @@ function windowRow(w) {
   const used = Math.max(0, Math.min(100, w.used_percent != null ? w.used_percent : 100 - w.remaining_percent));
   const when = w.reset_since ? "started again since the reading" : resets(w);
   const warn = used >= 100 && !w.older;
-  return `<div class="usage-limit${warn ? " full" : ""}${old}"><div class="usage-row"><span class="muted">${esc(w.name)}</span>
+  return `<div class="usage-limit${warn ? " full" : ""}${old}"${tip}><div class="usage-row"><span class="muted">${esc(w.name)}</span>
     <span${warn ? ` class="sl-lim-warn"` : ""}>${Math.round(used)}% used${used >= 100 ? " (at limit)" : ""}${
-    when ? `, ${esc(when)}` : ""}</span></div>${before}${bar(used)}</div>`;
+    when ? `, ${esc(when)}` : ""}</span></div>${bar(used)}</div>`;
 }
 
 // Who saw the limit, and when: 'a session (maximizepm-6564) stopped at its limit at Fri 10:46 AM'.
@@ -98,25 +101,23 @@ const stopWho = (s) => s.source === "limit_stop" || !s.source
   ? `a session${s.session ? ` (${s.session})` : ""} stopped at its limit${s.at ? ` at ${at(s.at)}` : ""}`
   : `seen in ${s.source === "screen" ? "the screen of a session" : "a session's chat log"}${s.at ? ` at ${at(s.at)}` : ""}`;
 
-// One line per model group (one for an agent whose windows count every model): its state and until when, then the
-// session stop that limits it, and the agent's own words of that stop as a small details line (#6414).
-function statusLine(l) {
-  const until = l.resets_at ? `until ${at(l.resets_at)}` : (l.resets_text ? `until ${l.resets_text}` : "");
-  const state = l.limited
-    ? `<span class="sl-lim-warn">at limit${until ? ` ${esc(until)}` : ""}</span>`
-    : `<span>can launch${l.remaining_pct != null ? ` · ${pct(l.remaining_pct)}` : ""}</span>`;
-  const s = l.stop;
-  return `<div class="usage-row"><span>${esc(l.name)}</span>${state}</div>${s
-    ? `<div class="muted t-s">${esc(stopWho(s))}</div>${s.message ? `<div class="muted t-s au-details">details: ${esc(s.message)}</div>` : ""}`
-    : ""}`;
+// One line per model group (one for an agent whose windows count every model): its state and until when (#6414). The
+// session stop that limits it and the agent's own words are in Details (#6427).
+function lineState(l, cap = false) {
+  const until = l.resets_at ? ` until ${at(l.resets_at)}` : (l.resets_text ? ` until ${l.resets_text}` : "");
+  const text = l.limited ? `at limit${until}` : `can launch${l.remaining_pct != null ? ` · ${pct(l.remaining_pct)}` : ""}`;
+  const shown = cap ? text[0].toUpperCase() + text.slice(1) : text;
+  return `<span${l.limited ? ` class="sl-lim-warn"` : ""}>${esc(shown)}</span>`;
 }
+const statusLine = (l) => `<div class="usage-row"><span>${esc(l.name)}</span>${lineState(l)}</div>`;
 
-// The header sums the lines up, and says nothing that they do not.
+// The header sums the lines up, and says nothing that they do not. With one line (an agent whose windows count every
+// model) the header is that line: the same state twice is text the person does not need (#6427).
 function header(lines) {
   if (!lines.length) return `<span class="muted">usage not known</span>`;
+  if (lines.length === 1) return lineState(lines[0], true);
   const lim = lines.filter(l => l.limited);
   if (!lim.length) return `<span>Can launch</span>`;
-  if (lines.length === 1) return `<span class="sl-lim-warn">At limit</span>`;
   if (lim.length === lines.length) return `<span class="sl-lim-warn">Every model group at limit</span>`;
   return `<span class="sl-lim-warn">${esc(lim.map(l => l.name).join(", "))} at limit</span>`;
 }
@@ -125,30 +126,33 @@ export function agentUsageHtml(u) {
   const parts = [];
   const lines = u.lines || [];
   parts.push(`<div class="au-sum">${header(lines)}</div>`);
-  if (lines.length) parts.push(`<div class="au-lines">${lines.map(statusLine).join("")}</div>`);
+  if (lines.length > 1) parts.push(`<div class="au-lines">${lines.map(statusLine).join("")}</div>`);
   const wins = u.usage_windows || [];
   const rd = u.read;
   parts.push(`<h3>Usage windows${rd ? ` <span class="muted t-s">read ${esc(at(rd.at))}</span>` : ""}</h3>` + (wins.length
     ? wins.map(windowRow).join("")
     : `<p class="muted t-m">${u.limited ? "This limit came with no windows: Read now shows them." : "No reading of its windows yet."}</p>`));
+  // A reading that runs or failed is a state the person acts on (Read now): it stays in view.
+  const probe = u.reading ? `<div class="t-m">Reading now…</div>`
+    : u.probe_error ? `<div class="sl-lim-warn t-m">The last reading failed: ${esc(u.probe_error)}</div>` : "";
+  if (probe) parts.push(probe);
+  const sess = u.sessions || [];
+  if (sess.length) parts.push(`<h3>Sessions now</h3>` + sess.map(x => `<div class="usage-row"><span class="link" data-au-session="${esc(x.name)}"
+      title="Open its chat">${esc(x.name)}</span><span class="muted">${esc(x.model || "model not known")}${x.items.length
+      ? ` · ${x.items.map(i => `#${i.id}`).join(", ")}` : ""}</span></div>`).join(""));
+  // Details (#6427): where each fact came from, for a diagnosis: the reading of the windows, each limit stop with the
+  // agent's own words. Closed by default.
   const reads = [];
-  if (rd) reads.push(`Usage windows: ${esc(rd.source_text || rd.source || "")}, ${esc(at(rd.at))} (${esc(ago(rd.at))})`);
+  if (rd) reads.push(`<div class="t-m">Usage windows: ${esc(rd.source_text || rd.source || "")}, ${esc(at(rd.at))} (${esc(ago(rd.at))})</div>`);
   const seen = new Set();  // a stop of the whole agent is on each group's line: name it once
   for (const l of lines) {
     const key = l.stop && `${l.stop.group}|${l.stop.at}`;
     if (!key || !l.stop.at || seen.has(key)) continue;
     seen.add(key);
-    reads.push(`Limit stop${l.stop.group ? ` of ${esc(l.stop.group)}` : ""}: ${esc(stopWho(l.stop))} (${esc(ago(l.stop.at))})`);
+    reads.push(`<div class="t-m">Limit stop${l.stop.group ? ` of ${esc(l.stop.group)}` : ""}: ${esc(stopWho(l.stop))} (${esc(ago(l.stop.at))})</div>${
+      l.stop.message ? `<div class="muted t-s au-details">${esc(l.stop.message)}</div>` : ""}`);
   }
-  const probe = u.reading ? `<div class="t-m">Reading now…</div>`
-    : u.probe_error ? `<div class="sl-lim-warn t-m">The last reading failed: ${esc(u.probe_error)}</div>` : "";
-  parts.push(`<h3>Reading</h3>${reads.length ? reads.map(x => `<div class="t-m">${x}</div>`).join("")
-    : `<div class="t-m">No reading yet.</div>`}${probe}`);
-  const sess = u.sessions || [];
-  parts.push(`<h3>Sessions now</h3>` + (sess.length ? sess.map(x => `<div class="usage-row"><span class="link" data-au-session="${esc(x.name)}"
-      title="Open its chat">${esc(x.name)}</span><span class="muted">${esc(x.model || "model not known")}${x.items.length
-      ? ` · ${x.items.map(i => `#${i.id}`).join(", ")}` : ""}</span></div>`).join("")
-    : `<p class="muted t-m">No session of it runs now.</p>`));
+  if (reads.length) parts.push(`<details class="au-more"${detailsOpen ? " open" : ""}><summary>Details</summary>${reads.join("")}</details>`);
   return parts.join("");
 }
 
@@ -166,6 +170,8 @@ async function load() {
   }
   if (agent !== mine) return;
   el.querySelector("#agentUsageTitle").textContent = `Usage: ${u.label}`;
+  const more = body.querySelector(".au-more");
+  if (more) detailsOpen = more.open;
   body.innerHTML = agentUsageHtml(u);
   const b = el.querySelector("[data-au-read]");
   b.classList.toggle("hidden", !u.can_read);
@@ -187,7 +193,7 @@ async function readNow() {
 
 export function openAgentUsage(agentType) {
   if (!dlg) build();
-  agent = agentType; tried = false;
+  agent = agentType; tried = false; detailsOpen = false;
   el.querySelector("#agentUsageTitle").textContent = "Usage";
   el.querySelector(".au-body").innerHTML = `<p class="muted">Reading…</p>`;
   dlg.open();
