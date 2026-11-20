@@ -15,10 +15,12 @@ while [ $# -gt 0 ]; do
 done
 
 # No Python 3.10 here (a new Mac has 3.9): name the installer that brings its own Python (#5).
+# The printed command is one to copy and paste: the checkout's path goes in single quotes (a space in it, #10).
+quoted() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 no_python() {
   echo "$1" >&2
   echo "or install MaximizePM with its own Python, with no Python on this computer:" >&2
-  echo "  sh $ROOT/install-standalone.sh --from $ROOT" >&2
+  echo "  sh $(quoted "$ROOT/install-standalone.sh") --from $(quoted "$ROOT")" >&2
   exit 1
 }
 command -v python3 >/dev/null || no_python "python3 is required (3.10 or later)"
