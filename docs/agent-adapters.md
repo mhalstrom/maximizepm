@@ -510,6 +510,7 @@ launch dialog, so the run reached the later steps.
 | Agent | Settings | Start with no question | go, claim, done (with a commit) | wait | A message | Stop | AGENTS.md (root, subfolder) |
 |---|---|---|---|---|---|---|---|
 | Codex (gpt-6-luna, low) | default | fail: 'Trust this folder?' although the start passes `-c projects.<worktree>` and `-c projects.<repository root>.trust_level="trusted"`; 0.171.0 ignores that override, also in a plain new git folder, and has `--trust` only on `codex exec` (#6437) | not reached | not reached | not reached | pass: serve ended it at the card | pass (run 1) |
+| Codex (gpt-6-luna, low), 19:56 UTC, after #6437 (0567040: one inline `-c projects={...}` table) | default | trust: pass; then 'Allow the maxpm MCP server to run tool "go"?': the person's `[mcp_servers.maxpm]` of `setup-agent --chatgpt-desktop` (main queue, chat mode) reaches the session, and its model calls that tool instead of the shell `maxpm` (#6443) | not reached | not reached | not reached | pass: serve ended it | as above |
 | Cursor CLI (auto) | default | trust: pass (`--trust`, #6416); then 'Run this command?' for `maxpm go`: nothing in its start allows `Shell(maxpm)` (#6439) | not reached | not reached | not reached | pass: serve ended it | pass with `--trust` in print mode |
 | Cursor CLI (auto) | Run Everything (`--force`) | pass | pass: 15 s from the claim to done | pass | pass: 'pong' in 10 s, through its `maxpm wait` | pass: it ended its turn at once; its row left when serve ended the idle session (4.4 min) | as above |
 | GitHub Copilot CLI (auto, low) | default | pass: no trust question in the worktree, and `maxpm go` ran with no question (#6417) | claim: pass; then 'Do you want to create ok.txt?': with no Permissions setting Copilot asks before each change, as the setting says | not reached | not reached | pass: serve ended it | pass (run 1) |
@@ -517,8 +518,8 @@ launch dialog, so the run reached the later steps.
 | Antigravity CLI (default, Gemini 4 Neon high) | default | pass: no trust question in the worktree, and its Gemini quota had reset (19:40 UTC) | pass: 4.5 min from the claim to done; two `maxpm done` with no proof were refused, the third had `--commit` and `--test` | pass | pass: read through its `maxpm wait` in 45 s, 'pong' in 112 s | pass: it ended its turn at the STOP of its wait; its row left when serve ended the idle session (4.9 min) | pass: both codewords in print mode |
 
 With the defaults, only Antigravity CLI ran the whole session with no question. Copilot's question about a file
-write is its Permissions setting at work, not a defect. Open: #6437 (Codex trust on 0.171.0; #6432 decides trust in a
-project's own folder and needs the same flag) and #6439 (Cursor's allow of maxpm). A stopped session that sits at its
+write is its Permissions setting at work, not a defect. Codex's trust question went away with #6437; open: #6443
+(Codex sessions get the chat app's maxpm MCP server) and #6439 (Cursor's allow of maxpm). A stopped session that sits at its
 prompt leaves the queue only after serve's idle end, about 4.5 minutes, also when it ended its turn at once.
 
 ## Slash commands on the page (#5224)
