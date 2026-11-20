@@ -4205,7 +4205,11 @@ def init_folder(args):
     here = Path.cwd()
     plan = None
     if args.plan:  # read and check the plan first: a plan with an error leaves the folder as it was
-        plan = sys.stdin.read() if args.plan == "-" else Path(args.plan).expanduser().read_text(encoding="utf-8")
+        try:
+            plan = sys.stdin.read() if args.plan == "-" else Path(args.plan).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:  # no such file, a folder, no permission, not text
+            why = e.strerror if isinstance(e, OSError) and e.strerror else "it is not UTF-8 text"
+            raise RiverError(f"cannot read the plan file {args.plan}: {why}") from None
         core.parse_plan(plan)
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
     # AGENTS.md for every agent (Claude Code, Codex, OpenCode, ...); an old CLAUDE.md gives its rules to it (#6024).

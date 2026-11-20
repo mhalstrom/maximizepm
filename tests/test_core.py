@@ -1951,6 +1951,26 @@ class PlanFile(Base):
             self.assertEqual(os.listdir(folder), [])
             self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
 
+    def test_init_with_a_plan_file_it_cannot_read_says_so_in_one_line(self):
+        # A missing plan file, or a folder: one error line with the path, and nothing changes.
+        from river import cli
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            old = os.getcwd()
+            os.chdir(folder)
+            try:
+                for plan in (os.path.join(d, "no-such-plan.md"), d):
+                    # maxpm prints a RiverError as one line; an OSError would reach the person as a traceback
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RiverError) as e:
+                        cli.run(["init", "--plan", plan])
+                    self.assertIn(f"cannot read the plan file {plan}: ", str(e.exception))
+                    self.assertEqual(len(str(e.exception).splitlines()), 1)
+            finally:
+                os.chdir(old)
+            self.assertEqual(os.listdir(folder), [])
+            self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
+
     def test_init_without_a_plan_names_the_plan_file_form(self):
         with tempfile.TemporaryDirectory() as d:
             folder = os.path.join(d, "shop")
