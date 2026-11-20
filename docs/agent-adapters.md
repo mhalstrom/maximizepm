@@ -289,8 +289,10 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   agent's config file, or takes it out, and returns what changed: `claude` writes the Claude desktop app's config,
   `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`).
 - `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`, the one instruction file of a project folder. `agents.replaced_files()`
-  gives each old file an agent read before (`SETUP["replaces"]`: CLAUDE.md), whose rules `maxpm init`, the setup guide
-  and the Projects folder form move into AGENTS.md before they delete it.
+  lists the legacy files declared in `SETUP["replaces"]` (CLAUDE.md and GEMINI.md). When you choose to move the
+  rules, `maxpm init`, the setup guide and the Projects folder form copy them into AGENTS.md and remove the
+  legacy files. Setup lists any GEMINI.md files Antigravity CLI still reads in the project folder, its parents,
+  and ~/.gemini.
 - `GET /api/agents` (`agents.page_list()`) gives each agent's describe part, the parts it supports, its launch
   capabilities and its setup texts; `main` marks the first registered agent. The page reads it once
   (`static/components/agents.js`), and `views/sessions.js` tests no agent name. A session's `provider` has `agent`,
@@ -522,6 +524,16 @@ With the defaults, only Antigravity CLI ran the whole session with no question. 
 write is its Permissions setting at work, not a defect. Codex's trust question went away with #6437; open: #6443
 (Codex sessions get the chat app's maxpm MCP server) and #6439 (Cursor's allow of maxpm). A stopped session that sits at its
 prompt leaves the queue only after serve's idle end, about 4.5 minutes, also when it ended its turn at once.
+
+### Antigravity CLI shared instructions (#6446)
+
+`maxpm init --move` moved a demo project's GEMINI.md rules into AGENTS.md and removed GEMINI.md. The root and
+subfolder each had a distinct codeword in AGENTS.md.
+
+| Antigravity CLI 1.5.13 model | Project root | Subfolder |
+|---|---|---|
+| Gemini 4 Neon high | Pass | Pass |
+| Claude Opus 5.5 medium | Quota limit | Pending |
 
 ## Slash commands on the page (#5224)
 
