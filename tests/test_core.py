@@ -3763,7 +3763,7 @@ class Prompts(Base):
         allp = core.prompt_for_all(self.c, "mark")
         self.assertIn("1. Item #", allp)
         # The agent that goes through the list (#5103): one at a time, read first, record each answer.
-        for part in ("Never two in one message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
+        for part in ("Never two in one dialog or message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
             self.assertIn(part, allp)
         self.assertIn(f"maxpm --as mark answer {q['id']}", allp)
         core.done(self.c, h, "approved", "mark")
@@ -7137,6 +7137,84 @@ class EscalationOptions(Base):
         with self.assertRaisesRegex(RiverError, "it has no options"):
             core.done(self.c, j, None, actor="mark", choice="A")
         self.assertEqual(core.done(self.c, j, "fine", actor="mark")["output"], "fine")
+
+
+class NeedsYouDialog(Base):
+    """#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to use the question
+    asking modal'. The needs-you session puts each decision with maxpm --as <person> forward (the page's dialog), and
+    the person's answer there comes back to it as a notice, so it goes on to the next one."""
+
+    OPTS = ["Blue: calm, the color of the logo", "Red: loud, for the sale week"]
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        core.assistant_make(self.c, "you-1", "mark")
+
+    def as_session(self, name):
+        tok = core.TOKEN_AGENT.set(name)
+        self.addCleanup(core.TOKEN_AGENT.reset, tok)
+
+    def notices(self, to="you-1"):
+        return [r["body"] for r in self.c.execute("SELECT body FROM messages WHERE kind='notice' AND to_agent=? "
+                                                  "ORDER BY id", (to,))]
+
+    def test_the_steps_put_each_decision_in_the_dialog(self):
+        core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")
+        x = self.add("a", "x")
+        core.message(self.c, "question", "Which font?", to="mark", item=x, actor="w1")
+        for p in (core.prompt_for_all(self.c, "mark"),
+                  core.prompt_for(self.c, core.item_list(self.c, project="a")[0]["id"], "mark")):
+            for part in ("maxpm --as mark forward --item <id> --question", "--recommend <label>",
+                         "maxpm inbox --wait", "record nothing", "Decision <n> of <total>"):
+                self.assertIn(part, p)
+
+    def test_an_item_answered_in_the_dialog_tells_the_session_that_put_it(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        j = core.item_add(self.c, "a", "Sign in to the shop", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=i, actor="mark", options=self.OPTS, recommend="Blue", question="Banner color?")
+        core.forward(self.c, item=j, actor="mark", question="Sign in to the shop in the Browser tab")
+        self.assertEqual(core.item_show(self.c, i)["decision"]["by"], "you-1")
+        core.TOKEN_AGENT.set(None)  # the page: the person picks in the dialog
+        core.done(self.c, i, "a dark one", actor="mark", choice="red")
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn(f"#{i} Decide the banner color (done): Red: a dark one [choice: Red]", self.notices()[0])
+        self.assertIn("Go on to the next one", self.notices()[0])
+        # The session records an answer from its chat itself: no notice to itself.
+        self.as_session("you-1")
+        core.done(self.c, j, "signed in", actor="mark")
+        self.assertEqual(len(self.notices()), 1)
+
+    def test_a_question_answered_in_the_dialog_tells_the_session_and_the_asker(self):
+        x = self.add("a", "x")
+        core.claim(self.c, x, "w1")
+        q = core.message(self.c, "question", "Which color for the banner?", to="mark", item=x, actor="w1")[0]
+        self.as_session("you-1")
+        core.forward(self.c, q["id"], actor="mark", options=self.OPTS, recommend="Red")
+        core.TOKEN_AGENT.set(None)
+        core.answer(self.c, q["id"], None, actor="mark", choice="Blue")
+        self.assertIn(f"question #{q['id']} from w1: Blue", self.notices()[0])
+        self.assertEqual(self.c.execute("SELECT choice FROM messages WHERE kind='answer' AND to_agent='w1'")
+                         .fetchone()["choice"], "Blue")
+
+    def test_the_manager_s_decision_and_an_ended_session_get_no_notice(self):
+        core.manage(self.c, self.dir.name, "boss")
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        self.as_session("boss")
+        core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Blue")
+        self.assertNotIn("by", core.item_show(self.c, i)["decision"])
+        core.TOKEN_AGENT.set(None)
+        core.done(self.c, i, None, actor="mark", choice="Blue")
+        j = core.item_add(self.c, "a", "Decide the font", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=j, actor="mark", options=self.OPTS, recommend="Blue")
+        core.unregister(self.c, "you-1")
+        core.TOKEN_AGENT.set(None)
+        core.done(self.c, j, None, actor="mark", choice="Blue")
+        self.assertEqual(self.notices("boss") + self.notices(), [])
 
 
 class QuestionHold(Base):

@@ -17405,6 +17405,11 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
         res["shared_handoffs"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "
             "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],))]
+    if it["doer"] == "human" and status in CLOSED_STATES:
+        said = output or note  # with a choice, the output starts with its label (decision_choice)
+        _tell_asker(conn, it, f"{actor or 'The person'} answered #{it['id']} {it['title']} ({status})"
+                    + (f": {said}" if said else "") + (f" [choice: {choice}]" if choice else "")
+                    + ". It is closed; record nothing. Go on to the next one.", it["id"])
     return res
 
 
@@ -19884,6 +19889,26 @@ def decision_choice(decision, choice, text=None):
     return got, f"{got}: {text}" if text else got
 
 
+def _tell_asker(conn, row, text, item_id=None):
+    """After the commit (#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to
+    use the question asking modal'): the person answered, in the page's dialog, a decision that a session put for
+    them (decision_of(row)["by"], maxpm --as <person> forward): that session gets a notice, into its chat when its
+    platform has native_message, so it goes on to the next one. Not when that session recorded the answer itself."""
+    by = (decision_of(row) or {}).get("by")
+    if not by or by == TOKEN_AGENT.get():
+        return
+    a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (by,)).fetchone()
+    if not a or _agent_state(conn, a) in ("stopped", "gone"):
+        return
+    with tx(conn):
+        mid = _send(conn, "notice", "maxpm", text, to=by, item_id=item_id)
+    st = deliver_native(conn, by, _native_text("notice", "maxpm", text))
+    with tx(conn):
+        conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+        if st == "sent":
+            _mark_delivered(conn, [mid], "native")
+
+
 def _set_decision(conn, table, row_id, decision, actor):
     """Inside a tx: store the manager's decision on a question or an item, and say so in the item's history."""
     conn.execute(f"UPDATE {table} SET decision=? WHERE id=?", (json.dumps(decision), row_id))
@@ -19913,6 +19938,11 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, opt
         raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
     note = note.strip() if note and note.strip() else None
     decision = decision_parse(options, recommend, question)
+    own = TOKEN_AGENT.get()
+    if decision and own and own != actor and _is_person(conn, actor):
+        # A session that goes through the list with the person (#6436: the needs-you session, or the one-item helper)
+        # puts each decision as the person; the person's answer in the dialog then comes back to it (_tell_asker).
+        decision["by"] = own
     if decision and drop:
         raise RiverError("--drop closes the alert; options are for what the person decides")
     with tx(conn):
@@ -20073,6 +20103,9 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False, cho
                         f"[answer from {actor}] {body.strip()}" + (f"\n[choice] {choice}" if choice else ""))
     if waits:
         _deliver_answer(conn, q, mid, actor, body.strip(), for_person, choice)
+    if q["from_agent"] != (decision_of(q) or {}).get("by"):  # an asker that put it gets the answer itself
+        _tell_asker(conn, q, f"{actor} answered question #{q['id']} from {q['from_agent']}: {body.strip()}. It is "
+                    f"closed and the asker has the answer; record nothing. Go on to the next one.", q["item_id"])
     return message_show(conn, mid)
 
 
@@ -22570,14 +22603,30 @@ DECISION_FORMAT = """Put each decision to the person in this form, one decision 
 Then stop and wait for the answer before you show the next decision. Do not squeeze several decisions
 into one table. If they ask what something means, explain it, then ask the same decision again."""
 
+# The decision goes into the page's dialog (#6436, mark 2026-11-20: 'the needs you agent that helps go through action
+# items also needs to use the question asking modal'): maxpm forward puts the options on the item or question, the
+# page opens its card with them, and the person's answer there closes it and comes back to the session (_tell_asker).
+DIALOG_STEPS = """Put the decision itself in the dialog on {person}'s MaximizePM page, not in the chat:
+     maxpm --as {person} forward --item <id> --question "<one short sentence>" \\
+       --option "<label>: <one line: what happens>" --option "<label>: ..." --recommend <label>
+   2 to 4 options, your recommendation among them. A question (not an item): maxpm --as {person} forward
+   <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
+   --question "<what to do>"; the dialog then shows a text box. The dialog opens on the page by itself.
+   Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
+   background command). The answer in the dialog closes the item or question, and MaximizePM sends you a
+   notice with the choice and the person's words; record nothing for it. When the page is not open (they
+   talk with you in a terminal only), ask in the chat in the form below instead, and record the answer
+   yourself with the "record the result" command (add --choice <label> when they picked an option):
+"""
+
 PROMPT_STEPS = """How to help:
 1. Run the "read it first" command. Read the files or links it names.
-2. Explain to {person} in plain words what is needed and why.
-""" + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
-3. Answer their questions. Help them do it: draft the text, check the setting, walk through the steps.
+2. Explain to {person} in the chat, in plain words, what is needed and why, and what each choice changes.
+3. """ + DIALOG_STEPS + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
+4. Answer their questions. Help them do it: draft the text, check the setting, walk through the steps.
    Ask before anything that uses their accounts, money, or sends something in their name.
-4. When it is decided or done, record it with the "record the result" command, in their words.
-   If you can do the step yourself without them, say so; with their yes, take it over instead:
+5. When the answer asks for a change, add the work: maxpm add "<title>" --found-during <id> --context "<what they
+   said>". If you can do the step yourself without them, say so; with their yes, take it over instead:
    maxpm register <your-agent-name>, then maxpm --as <your-agent-name> takeover <id> --note "<how>".
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""
 
@@ -22587,18 +22636,18 @@ If the maxpm command is not found, ask {person} where MaximizePM is installed.""
 LIST_STEPS = """How to go through the list with {person}:
 1. Take the first one. Before you write to {person}, run its "read it first" command and read the files, links and
    pictures it names.
-2. Write one short message about this one only: what it is, in a few plain lines; the options, each with what it
-   changes; your recommendation and why. A decision takes the form below. Show a picture or a page in the chat (in
-   Claude Code: SendUserFile). Use plain words, not the queue's own words (lease, claim, reserved, annotate), and
-   say what a thing is, not only its number.
-""" + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
-3. Wait for the answer. Then record it at once, in their words: the "record the result" command (done with the
-   answer as its note), or drop it with the reason. When the answer asks for a change, add the work
-   (maxpm add "<title>" --found-during <id> --context "<what they said>") and close this one.
+2. Write one short message in the chat about this one only: what it is, in a few plain lines; what each choice
+   changes; your recommendation and why. Show a picture or a page in the chat (in Claude Code: SendUserFile). Use
+   plain words, not the queue's own words (lease, claim, reserved, annotate), and say what a thing is, not only its
+   number.
+3. """ + DIALOG_STEPS + "\n".join(
+    "   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
+4. When the answer asks for a change, add the work (maxpm add "<title>" --found-during <id> --context "<what they
+   said>"); a dialog answer closed this one already. When they want it dropped, drop it with the reason.
    If you can do the step yourself without them, say so; with their yes, take it over:
    maxpm --as <your-agent-name> takeover <id> --note "<how>".
-4. Then the next one. Never two in one message. When they want to skip one, leave it open and go on; when they
-   want to stop, say in one line what is left.
+5. Then the next one, as soon as the answer comes. Never two in one dialog or message. When they want to skip one,
+   leave it open and go on; when they want to stop, say in one line what is left.
 Ask before anything that uses their accounts, money, or sends something in their name.
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""
 
