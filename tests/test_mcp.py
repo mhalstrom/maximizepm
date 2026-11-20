@@ -4,8 +4,9 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from river import core, mcp
+from river import core, mcp, peer, server
 
 
 class Mcp(unittest.TestCase):
@@ -26,6 +27,31 @@ class Mcp(unittest.TestCase):
         out = io.StringIO()
         mcp.serve(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out)
         return [json.loads(x) for x in out.getvalue().splitlines()]
+
+    def test_managed_stdio_cannot_use_the_queue_pinned_in_its_config(self):
+        msgs = ({"id": 1, "method": "initialize"},
+                {"id": 2, "method": "tools/list"},
+                {"id": 3, "method": "tools/call", "params": {"name": "go", "arguments": {"cwd": self.dir.name}}},
+                {"id": 4, "method": "tools/call", "params": {"name": "maxpm", "arguments": {"args": ["go"]}}})
+        chain = [(101, 102, "python", 1), (102, 103, "sh", 1), (103, 1, "tmux", 1)]
+        for env, tagged_panes in (({core.TOKEN_ENV: "session-token"}, ""), ({}, "102\n999")):
+            with self.subTest(token=bool(env)), mock.patch.dict(os.environ, env), \
+                    mock.patch.object(peer, "chain", return_value=chain), \
+                    mock.patch.object(server, "_tmux_cmd", return_value=["tmux"]), \
+                    mock.patch.object(server, "_tmux", return_value=tagged_panes), \
+                    mock.patch.object(core, "connect", side_effect=AssertionError("MCP opened the configured queue")):
+                results = [reply["result"] for reply in self.talk(*msgs)]
+                self.assertIn("Run maxpm from the shell", results[0]["instructions"])
+                self.assertEqual(results[1]["tools"], [])
+                for refusal in results[2:]:
+                    self.assertTrue(refusal["isError"])
+                    self.assertIn("Run maxpm from the shell", refusal["content"][0]["text"])
+
+        with mock.patch.object(peer, "chain", return_value=chain), \
+                mock.patch.object(server, "_tmux_cmd", return_value=["tmux"]), \
+                mock.patch.object(server, "_tmux", return_value="999"):
+            tools = self.talk(msgs[1])[0]["result"]["tools"]
+        self.assertIn("go", [tool["name"] for tool in tools])
 
     def test_initialize_list_and_work_loop(self):
         call = lambda i, name, args: {"jsonrpc": "2.0", "id": i, "method": "tools/call",

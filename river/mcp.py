@@ -653,16 +653,40 @@ def canvas_argv(a):
 _CALL_LOCK = threading.Lock()
 
 
+def _in_managed_session():
+    """A managed CLI must use the shell's queue and identity, even if its MCP client filters the environment."""
+    if os.environ.get(core.TOKEN_ENV):
+        return True
+    from . import peer, server
+    chain = peer.chain(os.getpid()) or []
+    if not any(comm == "tmux" or comm.startswith("tmux:") for _, _, comm, _ in chain):
+        return False
+    if not server._tmux_cmd():
+        return False
+    # Match the pane process, not a workspace path or the database pinned in this MCP server's config.
+    parents = {str(pid) for pid, _, _, _ in chain}
+    try:
+        panes = server._tmux("list-panes", "-a", "-F", "#{?@maxpm_agent,#{pane_pid},}", check=False)
+    except RiverError:
+        # A sandbox can deny access to the socket. This process still belongs to a tmux pane.
+        return True
+    return not parents.isdisjoint((panes or "").splitlines())
+
+
+_SHELL_INSTRUCTIONS = "Run maxpm from the shell to use this session's queue and identity."
+
+
 class Server:
     """chat: a session with no folder (default: MAXPM_CHAT=1); go, plan, and manage get --chat. folders: whether a
     tool call may name a cwd (not over HTTP: a web chat has no folder on this computer)."""
 
-    def __init__(self, chat=None, folders=True, plan=False):
+    def __init__(self, chat=None, folders=True, plan=False, shell_only=False):
         # Over HTTP the session is a new chat: not the agent whose environment started maxpm serve.
         self.agent = os.environ.get("MAXPM_AGENT") if folders and not plan else None
         self.chat = os.environ.get("MAXPM_CHAT") == "1" if chat is None else chat
         self.folders = folders
         self.plan = plan  # the planner tools only (#6190): it acts as the person, as <person>@<client>
+        self.shell_only = shell_only
         self.client = "mcp"
 
     def argv(self, name, a):
@@ -740,6 +764,8 @@ class Server:
 
     def call(self, name, a):
         """Run one river command in-process; return (text, is_error)."""
+        if self.shell_only:
+            raise RiverError(_SHELL_INSTRUCTIONS)
         if self.plan:
             return self.plan_call(name, a)
         words = self.argv(name, a)
@@ -795,9 +821,10 @@ class Server:
             result = {"protocolVersion": params.get("protocolVersion") or PROTOCOL,
                       "capabilities": {"tools": {}},
                       "serverInfo": {"name": "maximizepm-planner" if self.plan else "maximizepm", "version": __version__},
-                      "instructions": PLAN_INSTRUCTIONS if self.plan else CHAT_INSTRUCTIONS if self.chat else INSTRUCTIONS}
+                      "instructions": (_SHELL_INSTRUCTIONS if self.shell_only else PLAN_INSTRUCTIONS if self.plan
+                                       else CHAT_INSTRUCTIONS if self.chat else INSTRUCTIONS)}
         elif method == "tools/list":
-            result = {"tools": PLAN_TOOLS if self.plan else TOOLS}
+            result = {"tools": [] if self.shell_only else PLAN_TOOLS if self.plan else TOOLS}
         elif method == "tools/call":
             p = msg.get("params") or {}
             try:
@@ -815,7 +842,7 @@ class Server:
 def serve(stdin=None, stdout=None, plan=False):
     """plan: the planner tools only (maxpm mcp --plan, #6190)."""
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
-    srv = Server(plan=plan)
+    srv = Server(plan=plan, shell_only=_in_managed_session())
     for line in stdin:
         if not line.strip():
             continue
