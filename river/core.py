@@ -3669,6 +3669,22 @@ def _limit_group(conn, aid, model):
     return ad.model_group(model) if ad is not None else None
 
 
+def _prev_windows(conn, aid):
+    """The windows recorded before for agent `aid`, each with the time and source of its own reading (#6414): a limit
+    stop keeps them but writes its own time and source on the row, and the panel then shows the windows as read
+    before the stop, not as read at the stop."""
+    r = conn.execute("SELECT windows_json, source, updated_at FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    try:
+        prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
+    except ValueError:
+        return []
+    for w in prev:
+        if not w.get("at"):  # a limit stop has its own time
+            w.setdefault("read_at", r["updated_at"])
+            w.setdefault("source", r["source"])
+    return prev
+
+
 def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
                        reason=None, source="screen", model=None, session=None):
     """Record an agent type's remaining usage or limit-stop state (#6348).
@@ -3684,17 +3700,14 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
     if not aid:
         return None
     t = now()
+    message = reason  # the agent's own words, before the session's name: the panel shows them as details (#6414)
     if session and reason:
         reason = f"{reason} (session {session})"
     group_stop = None
     if limited and model and not windows:
         group_stop = _limit_group(conn, aid, model)
     if group_stop:
-        r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
-        try:
-            prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
-        except ValueError:
-            prev = []
+        prev = _prev_windows(conn, aid)
         for w in prev:
             try:
                 gone = bool(w.get("resets_at")) and parse_iso(w["resets_at"]) <= t
@@ -3708,6 +3721,8 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
                   "resets_text": resets_text or (None if resets_at else "in 30m"), "at": iso(t)}
         if session:
             stop_w["session"] = session
+        if message:
+            stop_w["message"] = message
         windows = [w for w in prev if w.get("name") != stop_w["name"]] + [stop_w]
         reason = f"{group_stop}: {reason}" if reason else None
         resets_at = resets_text = None  # the reset of the group's window; the row's comes from the windows
@@ -3748,9 +3763,9 @@ def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=
     wjson = json.dumps(win_list) if win_list is not None else None
     with tx(conn):
         if win_list is None:
-            prev = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
-            if prev and prev["windows_json"]:
-                wjson = prev["windows_json"]
+            prev = _prev_windows(conn, aid)
+            if prev:
+                wjson = json.dumps(prev)
         conn.execute(
             "INSERT INTO agent_limits (agent_type, limited, remaining_pct, used_pct, resets_at, resets_text, reason, "
             "windows_json, source, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
@@ -3870,7 +3885,82 @@ def agent_usage(conn, agent_type):
             "SELECT id, title, short FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
             (a["name"],))]
         sessions.append({"name": a["name"], "model": a["model"], "role": a["role"], "state": state, "items": held})
-    return {**row, "source_text": LIMIT_SOURCES.get(row["source"] or "", row["source"]), "sessions": sessions}
+    return {**row, **_usage_view(row), "source_text": LIMIT_SOURCES.get(row["source"] or "", row["source"]),
+            "sessions": sessions}
+
+
+_STOP_SUFFIX = ": limit stop"
+_SESSION_TAIL = re.compile(r"^(.*?)\s*\(session ([^)\s]+)\)\s*$", re.S)
+
+
+def _stop_message(reason, group=None):
+    """(message, session) of a limit's reason: the agent's own words without the group and the session that
+    record_agent_limit put around them."""
+    m = _SESSION_TAIL.match(reason or "")
+    text, session = (m.group(1), m.group(2)) if m else (reason, None)
+    if text and group and text.startswith(f"{group}: "):
+        text = text[len(group) + 2:]
+    return text or None, session
+
+
+def _usage_view(row):
+    """What the usage panel shows (#6414, mark 2026-11-20: 'this is a confusing look'): the header, the reason, the
+    windows and the reading must agree.
+    - lines: one status per model group (one for an agent whose windows count every model): {"name", "limited",
+      "resets_at", "resets_text", "remaining_pct", "stop"}. stop: the session stop that limits it, else None.
+    - usage_windows: the windows of the readings, without the stops (a stop is no usage window), each with its
+      read_at and source, and older=True when a stop of its group came after its reading: then the stop, not the
+      window, says what holds now.
+    - read: {"at", "source", "source_text"} of the newest reading of the windows, else None.
+    A stop: {"group", "at", "session", "resets_at", "resets_text", "message" (the agent's own words), "source"}."""
+    if not row.get("known"):
+        return {"lines": [], "usage_windows": [], "read": None}
+    wins = row.get("windows") or []
+    stops = {}
+    for w in wins:
+        name = w.get("name") or ""
+        if name.endswith(_STOP_SUFFIX) and not w.get("reset_since") and (w.get("used_percent") or 0) >= 100:
+            group = name[:-len(_STOP_SUFFIX)].strip()
+            msg, sess = (w.get("message"), None) if w.get("message") else _stop_message(row.get("reason"), group)
+            stops[group] = {"group": group, "at": w.get("at"), "session": w.get("session") or sess,
+                            "resets_at": w.get("resets_at"), "resets_text": w.get("resets_text"), "message": msg,
+                            "source": "limit_stop"}
+    real = [w for w in wins if not (w.get("name") or "").endswith(_STOP_SUFFIX)]
+    whole = None
+    if (row["limited"] and not stops and (row.get("source") or "") not in ("probe", "log")
+            and not any((w.get("used_percent") or 0) >= 100 for w in real)):
+        # The limit came from a session (its stop or its screen), not from the windows.
+        msg, sess = _stop_message(row.get("reason"))
+        whole = {"group": None, "at": row["updated_at"], "session": sess, "resets_at": row["resets_at"],
+                 "resets_text": row["resets_text"], "message": msg, "source": row.get("source")}
+    out_w = []
+    for w in real:
+        w = dict(w)
+        w.setdefault("read_at", row["updated_at"])
+        w.setdefault("source", row.get("source"))
+        stop = (stops.get((w.get("name") or "").split(":", 1)[0].strip()) if _window_group(w.get("name")) else None) \
+            or whole
+        w["older"] = bool(stop and stop["at"] and w["read_at"] and stop["at"] > w["read_at"])
+        out_w.append(w)
+    read = None
+    dated = [w for w in out_w if w.get("read_at")]
+    if dated:
+        last = max(dated, key=lambda w: w["read_at"])
+        read = {"at": last["read_at"], "source": last["source"],
+                "source_text": LIMIT_SOURCES.get(last["source"] or "", last["source"])}
+    if row.get("groups"):
+        lines = []
+        for g in row["groups"]:
+            stop = stops.get(g["name"]) or whole
+            full = g["full"] or bool(whole)
+            src = g if g["full"] else (whole or g)
+            lines.append({"name": g["name"], "limited": full, "resets_at": src.get("resets_at"),
+                          "resets_text": src.get("resets_text"), "remaining_pct": 0.0 if full else g["remaining_pct"],
+                          "stop": stop if full else None})
+    else:
+        lines = [{"name": row["label"], "limited": row["limited"], "resets_at": row["resets_at"],
+                  "resets_text": row["resets_text"], "remaining_pct": row["remaining_pct"], "stop": whole}]
+    return {"lines": lines, "usage_windows": out_w, "read": read}
 
 
 def agent_limit_status(conn, agent_type):

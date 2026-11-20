@@ -729,6 +729,57 @@ class AgentUsagePanel(unittest.TestCase):
                                 source="log")
         self.assertEqual(core.agent_usage(self.conn, "codex")["groups"], [])
 
+    def test_one_status_per_group_and_a_stop_is_no_window(self):
+        # #6414, the agy panel of 2026-11-20: /usage at 10:22 read the Claude group at 2%, a session stopped at 10:46
+        # with 'Individual quota reached', and the panel showed both as windows, the 2% as the truth.
+        read_at = self.t0 + timedelta(minutes=12)
+        self.t0 = read_at
+        core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._usage(gemini=0.0, claude=97.9),
+                                source="probe")
+        self.t0 = read_at + timedelta(minutes=24)
+        stop_reset = core.iso(self.t0 + timedelta(hours=3, minutes=19))
+        core.record_agent_limit(self.conn, "antigravity", limited=True, resets_at=stop_reset,
+                                reason="Individual quota reached. Resets in 3h19m.", source="limit_stop",
+                                session="agy-7", model="claude-opus-5-5-high")
+        u = core.agent_usage(self.conn, "antigravity")
+        gem, cl = u["lines"]
+        self.assertEqual((gem["name"], gem["limited"], gem["resets_at"], gem["stop"]),
+                         ("Gemini models", True, core.iso(read_at + timedelta(hours=1, minutes=30)), None))
+        self.assertEqual((cl["name"], cl["limited"], cl["resets_at"]), ("Claude and GPT models", True, stop_reset))
+        self.assertEqual((cl["stop"]["session"], cl["stop"]["at"], cl["stop"]["message"]),
+                         ("agy-7", core.iso(self.t0), "Individual quota reached. Resets in 3h19m."))
+        # The windows are the reading's, with its time; the Claude window is older than the stop; no stop window.
+        self.assertEqual([(w["name"], w["older"], w["read_at"]) for w in u["usage_windows"]],
+                         [("Gemini models: 5-hour", False, core.iso(read_at)),
+                          ("Claude and GPT models: 5-hour", True, core.iso(read_at))])
+        self.assertEqual(u["read"]["at"], core.iso(read_at))
+        self.assertEqual(u["read"]["source"], "probe")
+        # A new reading takes the stop's place: its windows say what holds.
+        self.t0 += timedelta(minutes=12)
+        core.record_agent_limit(self.conn, "antigravity", limited=True, windows=self._usage(gemini=0.0, claude=0.0),
+                                source="probe")
+        u = core.agent_usage(self.conn, "antigravity")
+        self.assertEqual([(l["limited"], l["stop"]) for l in u["lines"]], [(True, None), (True, None)])
+        self.assertFalse(any(w["older"] for w in u["usage_windows"]))
+
+    def test_a_stop_of_an_agent_without_groups_dims_the_windows_read_before_it(self):
+        core.record_agent_limit(self.conn, "claude", windows=[{"name": "Current week (all models)", "used_percent": 29.0,
+                                "remaining_percent": 71.0}], source="probe")
+        read_at = core.iso(self.t0)
+        self.t0 += timedelta(minutes=30)
+        core.record_agent_limit(self.conn, "claude", limited=True, reason="You've hit your limit",
+                                resets_at=core.iso(self.t0 + timedelta(hours=2)), source="limit_stop", session="cc-3")
+        u = core.agent_usage(self.conn, "claude")
+        (line,) = u["lines"]
+        self.assertEqual((line["name"], line["limited"], line["stop"]["session"], line["stop"]["message"]),
+                         ("Claude Code", True, "cc-3", "You've hit your limit"))
+        self.assertEqual([(w["older"], w["read_at"]) for w in u["usage_windows"]], [(True, read_at)])
+        # No limit: one line that can launch, and no stop.
+        core.record_agent_limit(self.conn, "codex", windows=[{"name": "5-hour window", "used_percent": 4.0}],
+                                source="log")
+        (line,) = core.agent_usage(self.conn, "codex")["lines"]
+        self.assertEqual((line["limited"], line["remaining_pct"], line["stop"]), (False, 96.0, None))
+
     def test_the_sessions_of_the_agent_now_with_their_models_and_items(self):
         for name, at, model in (("agy-1", "antigravity", "claude-opus-5-5-high"), ("agy-2", "antigravity", None),
                                 ("cc-1", "claude-code", "opus")):

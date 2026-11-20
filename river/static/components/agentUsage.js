@@ -1,8 +1,9 @@
 // The usage of one agent type (#6387, mark 2026-11-20: 'when we click on a specific agent type we should be able to
 // get the detailed usage information'). limitRowHtml(r) is a row of the usage list at the foot of the Sessions list;
-// a click on it opens openAgentUsage(agent_type): what can still launch (each model group of agy), every usage window
-// with its percent left and reset time, the reason of a limit, where and when the reading came from, the sessions of
-// the agent that run now with their models, and Read now (op usage_read), which reads the agent's usage at once.
+// a click on it opens openAgentUsage(agent_type): one status line per model group (#6414: at limit until when, and the
+// session stop that limits it), every usage window of the last reading (a window read before a newer stop dimmed), where
+// and when each reading came from, the sessions of the agent that run now with their models, and Read now (op
+// usage_read), which reads the agent's usage at once.
 // Server: GET api/agent-usage?agent=<id> (server.agent_usage, core.agent_usage).
 import { esc, getJson, act, ago } from "../lib.js";
 import { makeDialog } from "./dialog.js";
@@ -24,16 +25,17 @@ const pct = (n) => `${Math.round(n)}% left`;
 const groupShort = (name) => name.replace(/\s+models$/i, "");
 
 // What the row says: not known; the whole agent at its limit; each model group (agy); or the least percent left.
+// With model groups (agy), each group says its own state and reset, also when every group is at its limit: one reset
+// for the whole agent would be the reset of one group only (#6414).
 function summary(r) {
   if (!r.known) return { html: `<span class="muted">usage not known</span>`, note: "" };
-  if (r.limited) return { html: `<span class="sl-lim-warn">At limit</span>`, note: resets(r) };
   const groups = r.groups || [];
+  if (r.limited && !groups.length) return { html: `<span class="sl-lim-warn">At limit</span>`, note: resets(r) };
   if (groups.length) {
     const html = groups.map(g => g.full
-      ? `<span class="sl-lim-warn">${esc(groupShort(g.name))} at limit</span>`
+      ? `<span class="sl-lim-warn">${esc(groupShort(g.name))} at limit${g.resets_at ? ` until ${esc(at(g.resets_at))}` : ""}</span>`
       : `<span>${esc(groupShort(g.name))} ${g.remaining_pct != null ? pct(g.remaining_pct) : "no limit reached"}</span>`).join("");
-    const full = groups.find(g => g.full);
-    return { html, note: full ? resets(full) : "" };
+    return { html, note: "" };
   }
   return { html: r.remaining_pct != null ? `<span>${pct(r.remaining_pct)}</span>` : `<span>no limit reached</span>`,
            note: resets(r) };
@@ -75,38 +77,73 @@ function build() {
 }
 
 function windowRow(w) {
+  const old = w.older ? ` au-old` : "";
+  const before = w.older && w.read_at ? `<div class="muted t-s">read ${esc(at(w.read_at))}, before the limit stop</div>` : "";
   if (w.used_percent == null && w.remaining_percent == null) {
-    return `<div class="usage-row"><span class="muted">${esc(w.name)}</span><span>${esc(w.text || "")}</span></div>`;
+    return `<div class="usage-row${old}"><span class="muted">${esc(w.name)}</span><span>${esc(w.text || "")}</span></div>`;
   }
   // As the agent's own usage screen shows it (mark 2026-11-20: 'it should show the actual usage'): the part used, a bar
-  // of it, and the reset in this computer's time.
+  // of it, and the reset in this computer's time. A window read before a newer limit stop of its group is dimmed: the
+  // stop says what holds now (#6414).
   const used = Math.max(0, Math.min(100, w.used_percent != null ? w.used_percent : 100 - w.remaining_percent));
   const when = w.reset_since ? "started again since the reading" : resets(w);
-  const stop = w.session ? `limit stop of session ${w.session}${w.at ? ` at ${at(w.at)}` : ""}` : "";
-  return `<div class="usage-limit${used >= 100 ? " full" : ""}"><div class="usage-row"><span class="muted">${esc(w.name)}</span>
-    <span${used >= 100 ? ` class="sl-lim-warn"` : ""}>${Math.round(used)}% used${used >= 100 ? " (at limit)" : ""}${
-    when ? `, ${esc(when)}` : ""}</span></div>${bar(used)}${stop ? `<div class="muted t-s">${esc(stop)}</div>` : ""}</div>`;
+  const warn = used >= 100 && !w.older;
+  return `<div class="usage-limit${warn ? " full" : ""}${old}"><div class="usage-row"><span class="muted">${esc(w.name)}</span>
+    <span${warn ? ` class="sl-lim-warn"` : ""}>${Math.round(used)}% used${used >= 100 ? " (at limit)" : ""}${
+    when ? `, ${esc(when)}` : ""}</span></div>${before}${bar(used)}</div>`;
+}
+
+// Who saw the limit, and when: 'a session (maximizepm-6564) stopped at its limit at Fri 10:46 AM'.
+const stopWho = (s) => s.source === "limit_stop" || !s.source
+  ? `a session${s.session ? ` (${s.session})` : ""} stopped at its limit${s.at ? ` at ${at(s.at)}` : ""}`
+  : `seen in ${s.source === "screen" ? "the screen of a session" : "a session's chat log"}${s.at ? ` at ${at(s.at)}` : ""}`;
+
+// One line per model group (one for an agent whose windows count every model): its state and until when, then the
+// session stop that limits it, and the agent's own words of that stop as a small details line (#6414).
+function statusLine(l) {
+  const until = l.resets_at ? `until ${at(l.resets_at)}` : (l.resets_text ? `until ${l.resets_text}` : "");
+  const state = l.limited
+    ? `<span class="sl-lim-warn">at limit${until ? ` ${esc(until)}` : ""}</span>`
+    : `<span>can launch${l.remaining_pct != null ? ` · ${pct(l.remaining_pct)}` : ""}</span>`;
+  const s = l.stop;
+  return `<div class="usage-row"><span>${esc(l.name)}</span>${state}</div>${s
+    ? `<div class="muted t-s">${esc(stopWho(s))}</div>${s.message ? `<div class="muted t-s au-details">details: ${esc(s.message)}</div>` : ""}`
+    : ""}`;
+}
+
+// The header sums the lines up, and says nothing that they do not.
+function header(lines) {
+  if (!lines.length) return `<span class="muted">usage not known</span>`;
+  const lim = lines.filter(l => l.limited);
+  if (!lim.length) return `<span>Can launch</span>`;
+  if (lines.length === 1) return `<span class="sl-lim-warn">At limit</span>`;
+  if (lim.length === lines.length) return `<span class="sl-lim-warn">Every model group at limit</span>`;
+  return `<span class="sl-lim-warn">${esc(lim.map(l => l.name).join(", "))} at limit</span>`;
 }
 
 export function agentUsageHtml(u) {
   const parts = [];
-  const s = summary(u);
-  parts.push(`<div class="au-sum">${s.html}${s.note ? `<span class="muted t-s">${esc(s.note)}</span>` : ""}</div>`);
-  if (u.reason) parts.push(`<div class="t-m">Why: ${esc(u.reason)}</div>`);
-  const groups = u.groups || [];
-  if (groups.length) {
-    parts.push(`<h3>What can launch</h3>` + groups.map(g => `<div class="usage-row"><span class="muted">${esc(g.name)}</span>${g.full
-      ? `<span class="sl-lim-warn">no launch${resets(g) ? ` · ${esc(resets(g))}` : ""}</span>`
-      : `<span>launches${g.remaining_pct != null ? ` · ${Math.round(100 - g.remaining_pct)}% used` : ""}</span>`}</div>`).join(""));
-  }
-  const wins = u.windows || [];
-  parts.push(`<h3>Usage windows</h3>` + (wins.length ? wins.map(windowRow).join("")
+  const lines = u.lines || [];
+  parts.push(`<div class="au-sum">${header(lines)}</div>`);
+  if (lines.length) parts.push(`<div class="au-lines">${lines.map(statusLine).join("")}</div>`);
+  const wins = u.usage_windows || [];
+  const rd = u.read;
+  parts.push(`<h3>Usage windows${rd ? ` <span class="muted t-s">read ${esc(at(rd.at))}</span>` : ""}</h3>` + (wins.length
+    ? wins.map(windowRow).join("")
     : `<p class="muted t-m">${u.limited ? "This limit came with no windows: Read now shows them." : "No reading of its windows yet."}</p>`));
-  const read = u.updated_at ? `${esc(u.source_text || u.source || "")}, ${esc(at(u.updated_at))} (${esc(ago(u.updated_at))})`
-    : "No reading yet.";
+  const reads = [];
+  if (rd) reads.push(`Usage windows: ${esc(rd.source_text || rd.source || "")}, ${esc(at(rd.at))} (${esc(ago(rd.at))})`);
+  const seen = new Set();  // a stop of the whole agent is on each group's line: name it once
+  for (const l of lines) {
+    const key = l.stop && `${l.stop.group}|${l.stop.at}`;
+    if (!key || !l.stop.at || seen.has(key)) continue;
+    seen.add(key);
+    reads.push(`Limit stop${l.stop.group ? ` of ${esc(l.stop.group)}` : ""}: ${esc(stopWho(l.stop))} (${esc(ago(l.stop.at))})`);
+  }
   const probe = u.reading ? `<div class="t-m">Reading now…</div>`
     : u.probe_error ? `<div class="sl-lim-warn t-m">The last reading failed: ${esc(u.probe_error)}</div>` : "";
-  parts.push(`<h3>Reading</h3><div class="t-m">${read}</div>${probe}`);
+  parts.push(`<h3>Reading</h3>${reads.length ? reads.map(x => `<div class="t-m">${x}</div>`).join("")
+    : `<div class="t-m">No reading yet.</div>`}${probe}`);
   const sess = u.sessions || [];
   parts.push(`<h3>Sessions now</h3>` + (sess.length ? sess.map(x => `<div class="usage-row"><span class="link" data-au-session="${esc(x.name)}"
       title="Open its chat">${esc(x.name)}</span><span class="muted">${esc(x.model || "model not known")}${x.items.length
