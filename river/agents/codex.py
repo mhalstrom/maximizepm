@@ -143,6 +143,30 @@ def resume_command(session_ref, model, effort, settings, name=None):
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
 
 
+def trust_workspace(folder, command, env=None):
+    """Pass -c projects."<folder>".trust_level="trusted" for a worktree that MaximizePM made (#6339), so Codex starts
+    there without its folder trust prompt and without writing to ~/.codex/config.toml."""
+    import json
+    import shlex
+    if not folder or not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if not words:
+        return command
+    raw = str(folder)
+    real = os.path.realpath(raw)
+    paths = [real] if real == raw else [raw, real]
+    extra = []
+    for p in paths:
+        val = f'projects.{json.dumps(p)}.trust_level="trusted"'
+        if val not in words:
+            extra += ["-c", val]
+    return shlex.join(words[:1] + extra + words[1:]) if extra else command
+
+
 def parse_command(words):
     """A hand-written codex command that a profile builds exactly: -m {model}, -c model_reasoning_effort={effort},
     --sandbox and --ask-for-approval with a known value, --add-dir of the queue folder, and one prompt."""

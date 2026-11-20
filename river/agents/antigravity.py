@@ -28,6 +28,7 @@ queue's state (an unread alert, a blocked item) when the command runs, and a fix
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 from . import CliList, Raw, model_tier
@@ -258,6 +259,50 @@ def resume_command(session_ref, model, effort, settings, name=None):
     if not session_ref:
         return None
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
+
+
+def trust_workspace(folder, command, env=None):
+    """Add `folder` to trustedWorkspaces in agy's session-only --settings JSON (#6339), so a worktree that MaximizePM
+    made starts without agy's folder trust prompt and without writing to ~/.gemini/antigravity-cli/settings.json."""
+    if not folder or not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if not words:
+        return command
+    raw = str(folder)
+    real = os.path.realpath(raw)
+    paths = [real] if real == raw else [raw, real]
+
+    def _add(text):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        trusted = list(data.get("trustedWorkspaces") or ()) if isinstance(data.get("trustedWorkspaces"), list) else []
+        for p in paths:
+            if p not in trusted:
+                trusted.append(p)
+        data["trustedWorkspaces"] = trusted
+        return json.dumps(data, separators=(",", ":"))
+
+    for i, w in enumerate(words):
+        if w == "--settings" and i + 1 < len(words):
+            updated = _add(words[i + 1])
+            if updated is not None:
+                words[i + 1] = updated
+            return shlex.join(words)
+        if w.startswith("--settings="):
+            updated = _add(w.split("=", 1)[1])
+            if updated is not None:
+                words[i] = "--settings=" + updated
+            return shlex.join(words)
+    payload = json.dumps({"trustedWorkspaces": paths}, separators=(",", ":"))
+    return shlex.join(words[:1] + ["--settings", payload] + words[1:])
 
 
 def parse_command(words):

@@ -352,9 +352,104 @@ def _s():
     return sessions
 
 
-def home():
+def home(env=None):
     """Copilot's own folder: $COPILOT_HOME, else ~/.copilot."""
-    return Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+    base = (env or {}).get("COPILOT_HOME") or os.environ.get("COPILOT_HOME")
+    return Path(base or Path.home() / ".copilot").expanduser()
+
+
+def _strip_jsonc(text):
+    """Strip // and /* */ comments outside JSON strings (Copilot's config.json starts with // comments)."""
+    out, i, n, in_str, esc = [], 0, len(text), False, False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _read_config_json(path):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return None
+    try:
+        data = json.loads(_strip_jsonc(text))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_config_json(path, data):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def trust_workspace(folder, command, env=None):
+    """Add a worktree that MaximizePM made to trustedFolders in $COPILOT_HOME/config.json (#6339), so interactive
+    Copilot starts there without its folder trust prompt (--trust-folder applies to -p prompt mode only)."""
+    if not folder:
+        return command
+    path = home(env) / "config.json"
+    data = _read_config_json(path)
+    if data is None:
+        return command
+    real = os.path.realpath(str(folder))
+    trusted = data.get("trustedFolders")
+    if not isinstance(trusted, list):
+        trusted = []
+    if real not in trusted:
+        trusted.append(real)
+        data["trustedFolders"] = trusted
+        _write_config_json(path, data)
+    return command
+
+
+def untrust_workspace(folder, env=None):
+    """Remove a deleted MaximizePM worktree from trustedFolders in $COPILOT_HOME/config.json (#6339)."""
+    if not folder:
+        return
+    path = home(env) / "config.json"
+    if not path.is_file():
+        return
+    data = _read_config_json(path)
+    if data is None or not isinstance(data.get("trustedFolders"), list):
+        return
+    drop = {str(folder), os.path.realpath(str(folder))}
+    kept = [p for p in data["trustedFolders"] if p not in drop]
+    if len(kept) != len(data["trustedFolders"]):
+        data["trustedFolders"] = kept
+        _write_config_json(path, data)
 
 
 def chat_path(session_ref, folder=None, root=None):

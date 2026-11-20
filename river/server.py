@@ -410,6 +410,25 @@ def workspace_sweep(conn):
 WORKSPACE_LOOK = core.timedelta(minutes=10)
 
 
+def _untrust_workspace(path):
+    """Remove a deleted MaximizePM worktree from any CLI's trusted-folders file (#6339)."""
+    for ad in core._adapters().load().values():
+        ad.untrust_workspace(path)
+
+
+def _workspace_for(conn, name, folder):
+    """The worktree path when `folder` is inside the worktree MaximizePM made for `name`, else None."""
+    have = core.workspace_of(conn, name)
+    if not have or not folder:
+        return None
+    try:
+        if Path(folder).resolve().is_relative_to(Path(have["path"]).resolve()):
+            return have["path"]
+    except OSError:
+        pass
+    return None
+
+
 def _workspace_remove(w, force=False):
     """Remove one worktree and its branch; None when done (or its folder is gone). Else the reason it stays,
     because something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks.
@@ -419,10 +438,12 @@ def _workspace_remove(w, force=False):
         _git(repo, "worktree", "prune", check=False)
         if force:
             _git(repo, "branch", "-D", w["branch"], check=False)
+        _untrust_workspace(w["path"])
         return None
     if force:
         _git(repo, "worktree", "remove", "--force", str(wt))
         _git(repo, "branch", "-D", w["branch"], check=False)
+        _untrust_workspace(w["path"])
         return None
     dirty = _git(wt, "status", "--porcelain", check=False)
     if dirty:
@@ -433,6 +454,7 @@ def _workspace_remove(w, force=False):
         return f"{ahead} commit{'s' if ahead != '1' else ''} on {w['branch']} not in {repo.name}'s HEAD"
     _git(repo, "worktree", "remove", str(wt))
     _git(repo, "branch", "-d", w["branch"], check=False)
+    _untrust_workspace(w["path"])
     return None
 
 
@@ -785,6 +807,13 @@ def _open_terminal(t, env, runner=None, conn=None):
     # The agent uses the same queue as this page: a page on a MAXPM_DB queue starts agents on it too.
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
+    # A worktree that MaximizePM made for this session is trusted before the agent starts (#6339); a folder that
+    # MaximizePM did not make has no t["workspace"] and keeps its trust prompt.
+    platform = t.get("platform") or core._exe_platform(t.get("command") or "")
+    if t.get("workspace") and platform:
+        ad = core._adapters().find(platform)
+        if ad is not None:
+            t["command"] = ad.trust_workspace(t["path"], t["command"], env)
     assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
     if t.get("setup"):
         # The project's own setup of a new worktree (workspace setup, #5856), with the session's variables, before the
@@ -798,8 +827,7 @@ def _open_terminal(t, env, runner=None, conn=None):
         line = f"cd {shlex.quote(t['path'])} && export {assign} && {t['command']}"
     else:
         line = f"cd {shlex.quote(t['path'])} && " + (f"{assign} " if assign else "") + t["command"]
-    if (t.get("platform") or core._exe_platform(t.get("command") or "")) == "claude-code" \
-            and claude_untrusted(t["path"], env):
+    if platform == "claude-code" and claude_untrusted(t["path"], env):
         t["trust"] = str(t["path"])  # the reply says that Claude Code asks first (#5892); MaximizePM answers nothing
     if runner:
         runner(line)
@@ -2066,8 +2094,10 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
         core._touch_agent(conn, name)
         core._event(conn, None, "maxpm", f"{name} {why}: its process {pid} ended, and the same chat resumes "
                                          f"({t['agent']})")
+    wt = _workspace_for(conn, name, cwd)
     spec = {"command": t["command"], "path": cwd, "project": name, "session_title": a.get("session") or name,
-            "platform": t.get("platform"), "first_prompt": t.get("first_prompt")}
+            "platform": t.get("platform"), "first_prompt": t.get("first_prompt"),
+            **({"workspace": wt} if wt else {})}
     _open_terminal(spec, t["env"], runner, conn)
     return spec.get("tmux_pane")
 
@@ -3389,9 +3419,11 @@ def _resume_for_answer(conn, item_id, why, runner=None):
                  f"gives you #{item_id} again.")
         t = core.resume_command(conn, name, platform, c["sid"], r["project_id"], {"prompt": first, "model": c.get("model")},
                                 transcript=c["path"])
-        spec = {"command": t["command"], "path": c.get("cwd") or core._project(conn, r["project_id"])["path"],
+        folder = c.get("cwd") or core._project(conn, r["project_id"])["path"]
+        wt = _workspace_for(conn, name, folder)
+        spec = {"command": t["command"], "path": folder,
                 "project": name, "session_title": c.get("session") or name, "platform": t.get("platform"),
-                "first_prompt": t.get("first_prompt")}
+                "first_prompt": t.get("first_prompt"), **({"workspace": wt} if wt else {})}
         _open_terminal(spec, {**t["env"], "MAXPM_FOCUS": f"item:{item_id}"}, runner, conn)
     except Exception as e:  # noqa: BLE001 - the start is taken back; a fresh session starts instead
         try:

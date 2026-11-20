@@ -1155,6 +1155,107 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "shared"):
             core.config_set(self.c, "workspace", "own")
 
+    def test_a_worktree_made_by_maxpm_is_trusted_before_antigravity_codex_copilot_and_grok_start(self):
+        """#6339: a worktree maxpm makes is trusted before the agent starts (agy --settings trustedWorkspaces,
+        codex -c projects.<wt>.trust_level, copilot config.json trustedFolders, grok trusted_folders.toml); a folder
+        maxpm did not make keeps its prompt; removing the worktree cleans up the trusted-folders files."""
+        import json
+        import shlex
+        import subprocess
+        from unittest import mock
+        from river.agents import antigravity, codex, copilot, grok
+
+        root = os.path.join(os.path.realpath(self.dir.name), "web")
+        os.makedirs(root)
+
+        def git(*a, cwd=root):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        core.project_add(self.c, "web", path=root)
+        core.config_set(self.c, "launch_agents",
+                        "Antigravity=@antigravity; Codex=@codex; Copilot=@copilot; Grok=@grok")
+        add = lambda title: core.item_add(self.c, "web", title)["id"]
+
+        chome = Path(self.dir.name) / "copilot_home"
+        ghome = Path(self.dir.name) / "grok_home"
+        chome.mkdir()
+        (chome / "config.json").write_text(
+            '// comment with https://example.com\n{"firstLaunchAt": "2026-08-10", "trustedFolders": ["/keep"]}\n',
+            encoding="utf-8",
+        )
+        ghome.mkdir()
+        (ghome / "trusted_folders.toml").write_text(
+            '[folders."/keep"]\ntrusted = true\ndecided_at = 100\n', encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(chome), "GROK_HOME": str(ghome)}):
+            # Shared folder (not made by maxpm): none of the four CLIs gets trusted.
+            for label in ("Antigravity", "Codex", "Copilot", "Grok"):
+                sent = []
+                t = server.dispatch_item(self.c, add(f"shared {label}"), agent=label, runner=sent.append)
+                self.assertNotIn("trustedWorkspaces", t["command"])
+                self.assertNotIn("trust_level", t["command"])
+                core.unregister(self.c, t["session_name"])
+            self.assertEqual(json.loads((chome / "config.json").read_text().split("\n", 1)[1])["trustedFolders"],
+                             ["/keep"])
+            self.assertNotIn(root, (ghome / "trusted_folders.toml").read_text())
+
+            # Worktree mode: each CLI trusts the new worktree before launch.
+            core.config_set(self.c, "workspace", "worktree", project="web")
+            wts = {}
+            for label in ("Antigravity", "Codex", "Copilot", "Grok"):
+                sent = []
+                t = server.dispatch_item(self.c, add(f"wt {label}"), agent=label, runner=sent.append)
+                wt = t["workspace"]
+                wts[label] = wt
+                self.assertTrue(sent[-1].endswith(t["command"]))
+                core.unregister(self.c, t["session_name"])
+                if label == "Antigravity":
+                    words = shlex.split(t["command"])
+                    cfg = json.loads(words[words.index("--settings") + 1])
+                    self.assertIn(wt, cfg["trustedWorkspaces"])
+                    self.assertIn("command(maxpm)", cfg["permissions"]["allow"])
+                elif label == "Codex":
+                    words = shlex.split(t["command"])
+                    self.assertIn(f'projects.{json.dumps(wt)}.trust_level="trusted"', words)
+                elif label == "Copilot":
+                    data = json.loads((chome / "config.json").read_text())
+                    self.assertIn(wt, data["trustedFolders"])
+                    self.assertIn("/keep", data["trustedFolders"])
+                elif label == "Grok":
+                    txt = (ghome / "trusted_folders.toml").read_text()
+                    self.assertIn(f"[folders.{json.dumps(wt)}]", txt)
+                    self.assertIn('[folders."/keep"]', txt)
+
+            # Removing the worktrees cleans up Copilot's and Grok's trusted-folders files, keeping /keep.
+            out = server.workspace_sweep(self.c)
+            for label, wt in wts.items():
+                self.assertEqual(out[wt], "removed")
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"], ["/keep"])
+            txt = (ghome / "trusted_folders.toml").read_text()
+            self.assertNotIn(wts["Grok"], txt)
+            self.assertIn('[folders."/keep"]', txt)
+
+            # Edge cases on adapter helpers directly: idempotency, custom commands, false->true update.
+            self.assertEqual(antigravity.trust_workspace(root, "agy -i hi"),
+                             shlex.join(["agy", "--settings", json.dumps({"trustedWorkspaces": [root]},
+                                                                         separators=(",", ":")), "-i", "hi"]))
+            cmd1 = codex.trust_workspace(root, "codex resume tid hi")
+            self.assertEqual(codex.trust_workspace(root, cmd1), cmd1)
+            (ghome / "trusted_folders.toml").write_text(f"[folders.{json.dumps(root)}]\ntrusted = false\n",
+                                                        encoding="utf-8")
+            grok.trust_workspace(root, "grok hi")
+            self.assertIn("trusted = true", (ghome / "trusted_folders.toml").read_text())
+            grok.untrust_workspace(root)
+            self.assertEqual((ghome / "trusted_folders.toml").read_text(), "")
+            copilot.trust_workspace(root, "copilot -i hi")
+            copilot.trust_workspace(root, "copilot -i hi")
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"].count(root), 1)
+            copilot.untrust_workspace(root)
+            self.assertEqual(json.loads((chome / "config.json").read_text())["trustedFolders"], ["/keep"])
+
     def test_go_where_the_queue_is_off_gives_a_session_with_no_item(self):
         """#5851: queue off for a project: its maxpm go gives no item, goal or wait, and says how to turn it on."""
         from river import cli

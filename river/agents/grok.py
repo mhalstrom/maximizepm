@@ -194,6 +194,82 @@ def resume_command(session_ref, model, effort, settings, name=None):
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
 
 
+def trust_workspace(folder, command, env=None):
+    """Add a worktree that MaximizePM made to $GROK_HOME/trusted_folders.toml (#6339), so Grok starts there without
+    its folder trust prompt."""
+    if not folder:
+        return command
+    path = grok_home({**os.environ, **(env or {})}) / "trusted_folders.toml"
+    real = os.path.realpath(str(folder))
+    header = f"[folders.{json.dumps(real)}]"
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return command
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip() == header:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("["):
+                if re.match(r"^\s*trusted\s*=\s*true\b", lines[j]):
+                    return command
+                if re.match(r"^\s*trusted\s*=\s*false\b", lines[j]):
+                    lines[j] = "trusted = true"
+                    try:
+                        _write(path, "\n".join(lines) + "\n")
+                    except OSError:
+                        pass
+                    return command
+                j += 1
+            lines.insert(i + 1, "trusted = true")
+            try:
+                _write(path, "\n".join(lines) + "\n")
+            except OSError:
+                pass
+            return command
+    block = f"{header}\ntrusted = true\ndecided_at = {int(time.time())}\n"
+    sep = "\n\n" if text.strip() else ""
+    new_text = (text.rstrip() + sep + block) if text.strip() else block
+    try:
+        _write(path, new_text)
+    except OSError:
+        pass
+    return command
+
+
+def untrust_workspace(folder, env=None):
+    """Remove a deleted MaximizePM worktree from $GROK_HOME/trusted_folders.toml (#6339)."""
+    if not folder:
+        return
+    path = grok_home({**os.environ, **(env or {})}) / "trusted_folders.toml"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    headers = {f"[folders.{json.dumps(p)}]" for p in (str(folder), os.path.realpath(str(folder)))}
+    out, skip, changed = [], False, False
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("["):
+            skip = s in headers
+            if skip:
+                changed = True
+                while out and not out[-1].strip():
+                    out.pop()
+                continue
+        if not skip:
+            out.append(ln)
+    if not changed:
+        return
+    new_text = "\n".join(out).strip()
+    try:
+        _write(path, (new_text + "\n") if new_text else "")
+    except OSError:
+        pass
+
+
 def parse_command(words):
     """A hand-written grok command that a profile builds exactly: -m/--model {model}, --reasoning-effort/--effort
     {effort}, --permission-mode <a known mode> (--always-approve and --yolo are bypassPermissions), --sandbox <a

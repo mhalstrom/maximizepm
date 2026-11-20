@@ -587,7 +587,8 @@ PARTS = {
     "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models", "context_window"), "required": True},
     "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ("config_settings",)},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
-    "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
+    "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command", "trust_workspace",
+                                                       "untrust_workspace"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
@@ -978,6 +979,21 @@ class Adapter:
     def parse_command(self, argv):
         f = self._fn("parse_command")
         return f(list(argv)) if f else None
+
+    def trust_workspace(self, folder, command, env=None):
+        """Trust a worktree that MaximizePM made before the agent starts there (#6339), via a start flag on `command`
+        or the CLI's own trusted-folders file. Returns the command (with any added flags)."""
+        f = self._fn("trust_workspace")
+        if f is None or not folder:
+            return command
+        got = f(folder, command, env)
+        return command if got is None else got
+
+    def untrust_workspace(self, folder, env=None):
+        """Remove a deleted MaximizePM worktree from the CLI's trusted-folders file (#6339), if the adapter added it."""
+        f = self._fn("untrust_workspace")
+        if f is not None and folder:
+            f(folder, env)
 
     def start_session(self, name, settings=None):
         """The session id that a start with this name and these settings chooses (start_session), or None."""
