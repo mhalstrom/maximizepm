@@ -1056,6 +1056,25 @@ def desktop_config_path():
     return Path("~/.config/Claude/claude_desktop_config.json").expanduser()
 
 
+DESKTOP_APPS = ("/Applications/Claude.app", "~/Applications/Claude.app")  # tests replace it
+
+
+def desktop_app():
+    """The Claude desktop app on this computer, for the setup guide (#6477): its app or its config folder is there.
+    added: its config has MaximizePM's server. None without the app."""
+    import json
+    from pathlib import Path
+    f = desktop_config_path()
+    if not (f.parent.is_dir() or any(Path(p).expanduser().exists() for p in DESKTOP_APPS)):
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        added = isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and "maxpm" in data["mcpServers"]
+    except (OSError, ValueError):
+        added = False
+    return {"name": "Claude desktop app", "added": added, "path": str(f)}
+
+
 def write_mcp_config(path=None, remove=False):
     """Add (or remove) the MaximizePM entry in the Claude desktop app's config (maxpm setup-agent --claude-desktop);
     other servers and settings stay. The old file is kept as <name>.bak when it changes."""

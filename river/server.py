@@ -6125,6 +6125,9 @@ def setup_status(conn):
         "people": [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")],
         "claude_home": Path("~/.claude").expanduser().is_dir(),
         "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-manager")},
+        # Desktop chat apps on this computer (#6477): the Claude and ChatGPT desktop apps reach MaximizePM through
+        # maxpm mcp once their config has it (maxpm setup-agent --claude-desktop|--chatgpt-desktop).
+        "desktop_apps": [{"agent": a.id, **d} for a in adapters.load().values() if (d := a.desktop_app())],
         "launch_agents": [label for label, _ in agents],
         "tmux": core.can_start_agents(),  # every agent starts in tmux
         "tmux_install": core.tmux_install(),
@@ -6351,6 +6354,16 @@ def setup_skills():
     return install_skills(Path("~/.claude/skills").expanduser())
 
 
+def setup_desktop(agent):
+    """Add MaximizePM to the config of an agent's desktop chat app that is on this computer (#6477); what
+    maxpm setup-agent --claude-desktop or --chatgpt-desktop does. Returns its text: what changed, and the restart."""
+    from . import agents
+    a = agents.get(agent)
+    if not a.desktop_app():
+        raise RiverError(f"no desktop app of {a.id} on this computer")
+    return a.write_mcp_config()
+
+
 def setup_agent_add(conn, label, actor=None):
     """Add one of known_agents to launch_agents (the Start button's list), as its launch profile (@<platform>). An
     entry that starts the same program (one added before #5225 as 'pi=pi "run maxpm go ..."') stays, and no second
@@ -6524,6 +6537,8 @@ OPS = {
     "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who,
                                                    bool(a.get("create"))),
     "setup_skills": lambda c, a, who: setup_skills(),
+    # Add MaximizePM to a desktop chat app's config (#6477): the person's click is the yes.
+    "setup_desktop": lambda c, a, who: setup_desktop(a["agent"]),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
     "setup_agent_install": setup_agent_install,  # #6239: a window of the Terminal tab runs the vendor's install
     "setup_agent_signin": setup_agent_signin,

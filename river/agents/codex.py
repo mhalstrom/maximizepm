@@ -834,6 +834,19 @@ def _toml_load(text, f):
         raise RiverError(f"{f} is not valid TOML ({e}); fix it first, MaximizePM does not overwrite it")
 
 
+DESKTOP_APPS = ("/Applications/ChatGPT.app", "~/Applications/ChatGPT.app")  # tests replace it
+
+
+def desktop_app():
+    """The ChatGPT desktop app on this computer, for the setup guide (#6477). Its Work and Codex modes read
+    ~/.codex/config.toml, which the Codex CLI also reads, so only the app itself counts, not that file. added: the
+    file has MaximizePM's server. None without the app."""
+    if not any(Path(p).expanduser().exists() for p in DESKTOP_APPS):
+        return None
+    return {"name": "ChatGPT desktop app", "added": _has_maxpm_mcp(),
+            "path": str(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml")}
+
+
 def write_mcp_config(path=None, remove=False):
     """Add (or remove) MaximizePM in ~/.codex/config.toml (or $CODEX_HOME), which the ChatGPT desktop app shares with
     the Codex CLI (maxpm setup-agent --chatgpt-desktop). Only the [mcp_servers.maxpm] tables change; the old file is

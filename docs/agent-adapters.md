@@ -287,7 +287,9 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   session's web link), `open_title` (its tooltip) and `no_link` (why a session that runs in no tmux pane here cannot
   open). `write_mcp_config(path=None, remove=False)` adds MaximizePM's MCP server (`agents.setup_entry()`) to the
   agent's config file, or takes it out, and returns what changed: `claude` writes the Claude desktop app's config,
-  `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`).
+  `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`). `desktop_app()`
+  returns `{name, added, path}` when the agent's desktop chat app is on this computer, else None: the setup guide
+  then offers the config writer as an optional step.
 - `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`, the one instruction file of a project folder. `agents.replaced_files()`
   lists the legacy files declared in `SETUP["replaces"]` (CLAUDE.md and GEMINI.md). When you choose to move the
   rules, `maxpm init`, the setup guide and the Projects folder form copy them into AGENTS.md and remove the

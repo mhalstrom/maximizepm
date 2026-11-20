@@ -131,7 +131,8 @@ OPS.update({op: ONLY_PERSON for op in (
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",
     "relay_disconnect", "release_changes", "release_download", "release_now", "release_agent", "release_update", "rqs_connect", "session_interrupt",
     "session_pin", "session_restart", "session_send", "session_setting", "session_upload",
-    "session_upload_drop", "setup_agent_add", "setup_block", "setup_maxpm_cmd", "setup_ntfy", "setup_skills",
+    "session_upload_drop", "setup_agent_add", "setup_block", "setup_desktop", "setup_maxpm_cmd", "setup_ntfy",
+    "setup_skills",
     "setup_tmux", "setup_agent_install", "setup_agent_signin",
     "shell_close", "shell_keys", "shell_open", "start_manager", "tailnet_serve", "takeover_seen", "takeovers_seen",
     "terminal_keys", "undo_takeover", "update")})

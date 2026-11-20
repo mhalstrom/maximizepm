@@ -4652,6 +4652,33 @@ class SetupGuide(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
+    def test_desktop_apps_show_only_when_present_and_the_click_adds_maxpm(self):
+        # #6477 (GitHub #8): an optional step for each desktop chat app on this computer; the click writes its config.
+        from pathlib import Path
+        from river.agents import claude, codex
+        home = Path(self.dir.name)
+        cfg = home / "Claude" / "claude_desktop_config.json"
+        codex_home = home / "codex"
+        self.addCleanup(setattr, claude, "DESKTOP_APPS", claude.DESKTOP_APPS)
+        self.addCleanup(setattr, codex, "DESKTOP_APPS", codex.DESKTOP_APPS)
+        claude.DESKTOP_APPS = codex.DESKTOP_APPS = ()
+        apps = lambda: {d["agent"]: d for d in server.setup_status(self.c)["desktop_apps"]}
+        with mock.patch.object(claude, "desktop_config_path", return_value=cfg), \
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            self.assertEqual(apps(), {})
+            with self.assertRaises(RiverError):
+                server.OPS["setup_desktop"](self.c, {"agent": "claude"}, None)
+            cfg.parent.mkdir()  # the Claude app made its folder
+            codex.DESKTOP_APPS = (str(home / "ChatGPT.app"),)
+            (home / "ChatGPT.app").mkdir()
+            got = apps()
+            self.assertEqual({k: (v["name"], v["added"]) for k, v in got.items()},
+                             {"claude": ("Claude desktop app", False), "codex": ("ChatGPT desktop app", False)})
+            self.assertIn("added MaximizePM", server.OPS["setup_desktop"](self.c, {"agent": "claude"}, None))
+            self.assertIn("added MaximizePM", server.OPS["setup_desktop"](self.c, {"agent": "codex"}, None))
+            self.assertTrue(all(d["added"] for d in apps().values()))
+            self.assertIn("maxpm", json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"])
+
     def test_block_fix_writes_agents_md_and_status_follows(self):
         before = server.setup_status(self.c)
         self.assertFalse(before["done"])

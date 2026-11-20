@@ -857,6 +857,12 @@ function renderSetup(st) {
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
     missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",
     `<button class="btn" data-su="skills">Install skills</button>`));
+  // A desktop chat app on this computer (#6477, GitHub #8): it reaches MaximizePM through maxpm mcp once its config
+  // has it. Shown only when the app is here; the click writes the config (maxpm setup-agent does the same).
+  for (const d of st.desktop_apps || []) more.push(extra(d.added, `MaximizePM in the ${esc(d.name)}`,
+    `Plan work, see what waits on you, and answer it in a chat in the ${esc(d.name)}`
+      + (d.agent === "codex" ? " (Work and Codex modes)" : "") + ". Quit and reopen the app after you add it.",
+    button("Add to the app", { data: { su: "desktop", agent: d.agent } })));
   more.push(extra(st.ntfy_ready && st.notify_channels.includes("ntfy"), "Phone notifications",
     st.ntfy_ready ? "Channels: " + (st.notify_channels.map(esc).join(", ") || "none") : "Get a push on your phone when something needs you (ntfy).",
     `<button class="btn" data-su="ntfy">Turn on ntfy</button><span id="suNtfy" class="sub"></span>`));
@@ -880,6 +886,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
     } else if (k === "block") await act("setup_block", { path: b.dataset.path,
       move: b.dataset.move === undefined ? null : b.dataset.move === "1" });
     else if (k === "skills") await act("setup_skills", {});
+    else if (k === "desktop") toast(await act("setup_desktop", { agent: b.dataset.agent }));
     else if (k === "mode") await act("config_set", { key: "queue", value: b.dataset.mode });
     else if (k === "task") {
       const title = $("#suTaskTitle").value.trim(); if (!title) return toast("Write the item first", true);

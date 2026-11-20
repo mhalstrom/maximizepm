@@ -18,7 +18,7 @@ Each part is optional unless it is marked required; the page shows only what an 
  8. Input: INPUT.
  9. Resume: resume_command().
 10. Commands: COMMANDS, and optionally read_commands(folder).
-11. Setup: SETUP, and optionally write_mcp_config().
+11. Setup: SETUP, and optionally write_mcp_config() and desktop_app().
 12. Update: UPDATE (how to read its version, update it and test it; river/agentupdate.py).
 
 The loader refuses a module without a valid DESCRIBE. A module without build_command loads (the built-in claude and
@@ -596,6 +596,9 @@ COMMAND_PAGES = ("usage",)
 #    }
 # write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
 # mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
+# desktop_app() -> None when the agent's desktop chat app is not on this computer, else {"name": the app's name,
+# "added": True when its config has MaximizePM's server, "path": that config file}: the setup guide offers
+# write_mcp_config() for it (#6477).
 # write_guard(path=None, remove=False) -> one text that says what changed: adds the queue guard (#6412: no write to
 # the queue file and its -wal and -shm files) to the agent's own settings, for sessions that a person starts by hand
 # (maxpm setup-agent --guard), or takes it out again.
@@ -644,7 +647,7 @@ PARTS = {
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
-    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard")},
+    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard", "desktop_app")},
     "update": {"data": ("UPDATE", UPDATE_KEYS), "functions": ()},
 }
 
@@ -1288,6 +1291,11 @@ class Adapter:
         if f is None:
             raise RiverError(f"agent {self.id} has no MCP config writer (write_mcp_config); add it to {self._file()}")
         return f(path, remove)
+
+    def desktop_app(self):
+        """Its desktop chat app on this computer ({name, added, path}), or None."""
+        f = self._fn("desktop_app")
+        return f() if f else None
 
     def write_guard(self, path=None, remove=False):
         f = self._fn("write_guard")
