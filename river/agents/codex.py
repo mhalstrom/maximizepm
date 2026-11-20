@@ -49,13 +49,56 @@ EFFORT = {
     "read": r"model_reasoning_effort=([a-z][a-z0-9_-]{0,31})\b",
 }
 
-# read_dirs (#6281): Codex's sandbox (read-only and workspace-write) reads the whole disk with no question and writes
-# only in its workspace, so a read folder needs no word on its command line. Its sandbox has no rule that refuses
-# one file: it can read a secret file of a read folder (a stated Tier 1 exception, docs/agent-adapters.md).
-# Measured 2026-11-20 with codex-cli 0.159.1 (workspace-write, on-request): cat of a read folder's files ran with no
-# question, and touch in a folder of ~/Projects was refused ('operation not permitted'). It writes in /tmp, so a
-# read folder there is writable.
+# read_dirs (#6281, #6304): Codex's sandbox (read-only and workspace-write) reads the whole disk with no question and
+# writes only in its workspace, so a read folder needs no allow rule. To refuse secret files (.env, .env.*, .envrc,
+# *.secret, *.secrets, a secrets folder), each start and resume adds a permission profile from -c that extends the
+# active profile (config.toml's default_permissions, read and not changed: p140, else :workspace) and denies those
+# globs. Measured 2026-11-20 with codex-cli 0.159.1 in a read folder outside /tmp: cat Cargo.toml ran with no question,
+# cat .env (including gitignored files) was refused ('Operation not permitted'), touch in the read folder was refused,
+# and the PreToolUse hook ran with no trust prompt. A legacy --sandbox flag overrides default_permissions, so
+# workspace-write and read-only go into the profile's extends instead when read_dirs is set.
 LAUNCH = {"extra_dirs": True, "resume": True, "read_dirs": True}
+READ_DIR_DENY = ("{d}/**/.env", "{d}/**/.env.*", "{d}/**/.envrc",
+                 "{d}/**/*.secret", "{d}/**/*.secrets", "{d}/**/secrets/**")
+_READ_DIR_PROFILE = "maxpm_read_dirs"
+_SANDBOX_PROFILES = {"workspace-write": ":workspace", "read-only": ":read-only"}
+
+
+def _config_top():
+    """Top-level 'key = "value"' lines of ~/.codex/config.toml (or $CODEX_HOME): the standard library of Python 3.10
+    has no TOML reader."""
+    import re
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    got = {}
+    for ln in lines:
+        if ln.strip().startswith("["):
+            break  # a table: the keys after it are not the top-level ones
+        m = re.match(r"""^\s*(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""", ln)
+        if m:
+            got[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+    return got
+
+
+def read_dir_words(dirs, sandbox=None):
+    """-c words for the project's read_dirs (#6304): a permission profile extending the active profile and denying
+    secret files in each read folder. Codex's -c splits keys on '.' even when quoted, so filesystem entries go as one
+    inline table."""
+    if not dirs:
+        return []
+    import json
+    base = _SANDBOX_PROFILES.get(sandbox or "")
+    if not base:
+        top = _config_top()
+        base = top.get("default_permissions") or _SANDBOX_PROFILES.get(top.get("sandbox_mode") or "") or ":workspace"
+        if base == _READ_DIR_PROFILE:
+            base = ":workspace"
+    fs = ",".join(f'{json.dumps(p.format(d=d))}="deny"' for d in dirs for p in READ_DIR_DENY)
+    return ["-c", f"default_permissions={json.dumps(_READ_DIR_PROFILE)}",
+            "-c", f"permissions.{_READ_DIR_PROFILE}={{extends={json.dumps(base)},filesystem={{{fs}}}}}"]
 
 # A Codex session records no task link: its web link is Codex's web app (core.CODEX_WEB).
 IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "pane": None, "url": "https://chatgpt.com/codex",
@@ -76,11 +119,17 @@ def build_command(name, folder, model, effort, settings, prompt):
     it out (settings['noflags'])."""
     from ..core import river_dir
     s = settings
+    rd = s.get("read_dirs") or ()
+    sandbox = s.get("sandbox")
     words = ["codex"] + (["resume", s["resume"]] if s.get("resume") else [])
     words += (["-m", model] if model else []) + ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
-    words += ["--sandbox", s["sandbox"]] if s.get("sandbox") else []
+    # A legacy --sandbox flag overrides default_permissions in Codex 0.159.1, dropping the read_dirs deny profile;
+    # workspace-write and read-only go into the profile's extends instead.
+    if sandbox and not (rd and sandbox in _SANDBOX_PROFILES):
+        words += ["--sandbox", sandbox]
     words += ["--ask-for-approval", s["approval"]] if s.get("approval") else []
     words += ["--add-dir", river_dir()]
+    words += read_dir_words(rd, sandbox)
     if ("--no-daemon" in codex_flags() and "--no-daemon" not in s.get("args", "")
             and "--no-daemon" not in (s.get("noflags") or ())):
         words.append("--no-daemon")
@@ -281,21 +330,8 @@ def parse_chat(lines):
 
 def config_settings():
     """What a Codex session takes from config.toml when its command line names nothing (#6280): the top-level model,
-    model_reasoning_effort, sandbox_mode and approval_policy (gpt-6.1-terra and medium on 2026-11-20). A small reader
-    of top-level 'key = "value"' lines: the standard library of Python 3.10 has no TOML reader."""
-    import re
-    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    got = {}
-    for ln in lines:
-        if ln.strip().startswith("["):
-            break  # a table: the keys after it are not the top-level ones
-        m = re.match(r'^\s*(\w+)\s*=\s*"([^"]*)"', ln)
-        if m:
-            got[m.group(1)] = m.group(2)
+    model_reasoning_effort, sandbox_mode and approval_policy (gpt-6.1-terra and medium on 2026-11-20)."""
+    got = _config_top()
     return {"model": got.get("model"), "effort": got.get("model_reasoning_effort"),
             "sandbox": got.get("sandbox_mode"), "approval": got.get("approval_policy")}
 

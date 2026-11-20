@@ -217,7 +217,6 @@ FEATURES = {
 EXCEPTIONS = {
     ("antigravity", "native_message"): "no command, socket or flag",
     ("antigravity", "shell_guard"): "push_guard reads the queue's state",
-    ("codex", "read_dirs"): "its sandbox has no rule that refuses one file",
 }
 
 

@@ -1263,9 +1263,38 @@ class ReadDirs(Env):
         self.assertIn(f"read_file({rd}/deep/.env)", agy)
         self.assertNotIn("--add-dir", agy)  # it would move where agy runs its commands (#6278)
         codex = core._launch_agent_cmd(self.c, pid, "Codex")["command"]
-        self.assertNotIn(str(rd), codex)  # its sandbox reads the whole disk already
+        self.assertIn('default_permissions="maxpm_read_dirs"', codex)
+        self.assertIn(f'"{rd}/**/.env"="deny"', codex)
+        self.assertIn(f'"{rd}/**/secrets/**"="deny"', codex)
+        # Active profile comes from CODEX_HOME/config.toml (default_permissions), or :workspace; --sandbox
+        # read-only/workspace-write moves into extends so Codex does not drop the profile (#6304).
+        ch = Path(self.tmp.name, "codex-home")
+        ch.mkdir()
+        (ch / "config.toml").write_text('default_permissions = "custom-local"\n', encoding="utf-8")
+        old_ch = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(ch)
+        try:
+            ad = agents.get("codex")
+            w_start = ad.build_command("n", str(proj), None, None, {"read_dirs": [str(rd)]}, "go")
+            self.assertIn(f'permissions.maxpm_read_dirs={{extends="custom-local",filesystem={{', " ".join(w_start))
+            w_res = ad.resume_command("tid-1", None, None, {"read_dirs": [str(rd)], "prompt": "go"})
+            self.assertIn('default_permissions="maxpm_read_dirs"', w_res)
+            self.assertIn(f'"{rd}/**/.env"="deny"', " ".join(w_res))
+            w_ro = ad.build_command("n", str(proj), None, None,
+                                    {"read_dirs": [str(rd)], "sandbox": "read-only"}, "go")
+            self.assertNotIn("--sandbox", w_ro)
+            self.assertIn('extends=":read-only"', " ".join(w_ro))
+            (ch / "config.toml").unlink()
+            w_def = ad.build_command("n", str(proj), None, None, {"read_dirs": [str(rd)]}, "go")
+            self.assertIn('extends=":workspace"', " ".join(w_def))
+        finally:
+            if old_ch is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old_ch
         core.config_unset(self.c, "read_dirs", project="p")
         self.assertNotIn("--disallowedTools", core._launch_agent_cmd(self.c, pid, "Claude Code")["command"])
+        self.assertNotIn("maxpm_read_dirs", core._launch_agent_cmd(self.c, pid, "Codex")["command"])
 
 
 class Setup(Env):
