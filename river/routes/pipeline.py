@@ -1,7 +1,7 @@
 """The pipeline view of Plan (#6116): the reads that river/static/views/pipeline.js draws. The actions (hold, approve,
 roll back, run again) come with #6117.
 
-GET /api/pipelines            the pipelines, and each deploy target that no pipeline covers (its default pipeline)
+GET /api/pipelines            standalone pipelines and the release flow of each deploy target
 GET /api/pipeline/<name>      one pipeline: its stages with their last run, its environments, and its versions
 GET /api/pipeline-run/<id>    one stage run: its steps, its tests (failed first), its last lines, and the prompt that
                               analyzes its failed tests"""
@@ -31,7 +31,10 @@ def _with(fn, query=False):
 
 def pipelines(conn, path):
     out = []
+    sources = targets.check_source_ids(conn)
     for p in store.pipelines(conn):
+        if p["id"] in sources:
+            continue
         envs = [r["target"] for r in conn.execute("SELECT target FROM pipeline_envs WHERE pipeline_id=? AND target IS "
                                                   "NOT NULL AND removed_at IS NULL", (p["id"],))]
         out.append({"name": p["name"], "project": p["project"], "default": False, "targets": envs})
@@ -45,14 +48,18 @@ def pipelines(conn, path):
 
 def pipeline(conn, path):
     name = unquote(path.split("/api/pipeline/", 1)[1])
-    if conn.execute("SELECT 1 FROM pipelines WHERE name=? AND target IS NULL", (name,)).fetchone():  # #6176
+    source = conn.execute("SELECT id, forge FROM pipelines WHERE name=? AND target IS NULL", (name,)).fetchone()
+    names = targets.check_targets(conn, source["id"]) if source and source["forge"] == "github" else []
+    if len(names) > 1:
+        raise RiverError(f"GitHub checks for {name} appear on {' and '.join(names)} in Deploy")
+    if source and not names:
         p = store.show(conn, name)
         p["versions"] = store.versions(conn, name)
         p["account"] = _accounts().for_pipeline(conn, conn.execute("SELECT * FROM pipelines WHERE name=?",
                                                                    (name,)).fetchone())  # #6147
         work = _links().stage_work(conn, name).get(name) or {}
-        p["release"] = _targets_release(conn, [e["target"] for e in p["envs"] if e.get("target")])  # #6488
     else:
+        name = names[0] if names else name
         p = targets.default_pipeline(conn, name)
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
         p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
@@ -80,7 +87,9 @@ def _with_holding(conn, name, stages):
 def holding(conn, path):
     """GET /api/pipeline-holding/<name>: the commits that wait in holding, with their tasks, sessions, changes and
     review, and the release after it (#6140)."""
-    return targets.holding(conn, unquote(path.split("/api/pipeline-holding/", 1)[1]))
+    name = unquote(path.split("/api/pipeline-holding/", 1)[1])
+    h = targets.holding(conn, name)
+    return {**h, "checks": targets.release_checks(conn, name)} if h["default"] else h
 
 
 def run(conn, path):
@@ -393,26 +402,6 @@ def _release_now(conn, name):
             "running": plan["running"], "text": plan["text"]}
 
 
-def _targets_release(conn, names):
-    """Release now for a pipeline of its own whose environments name deploy targets (#6488, mark 2026-11-20: 'why
-    can I not put the maxpm release out?'): the first of those targets whose release waits for the person's yes
-    ({"target", "approve": the approval item, "deploy"}), else whose collected tasks wait, as _release_now gives it
-    (with its target's name), else None. Such a target has no default pipeline, so these are its only buttons."""
-    for name in dict.fromkeys(names):
-        yes = conn.execute("SELECT i.id, d.item_id dep FROM items i LEFT JOIN deps d ON d.blocked_by=i.id WHERE "
-                           "i.doer='human' AND i.target=? AND i.status IN " + str(core.OPEN_STATES) + " AND i.title "
-                           "LIKE ? ORDER BY i.id DESC LIMIT 1", (name, core.APPROVE_TITLE + " %")).fetchone()
-        if yes:
-            return {"target": name, "approve": yes["id"], "deploy": yes["dep"]}
-        try:
-            r = _release_now(conn, name)
-        except RiverError:  # an environment that names a target that is gone
-            continue
-        if r:
-            return r
-    return None
-
-
 def _person_waits(conn, pipeline_id):
     """The versions that wait at a transition for a person's yes: not approved, and the transition not disabled or
     blocked (#6139)."""
@@ -437,7 +426,10 @@ def deploy(conn, path):
     defaults = {t["name"]: targets.default_pipeline(conn, t["name"]) for t in targets.default_list(conn)}
     work = _links().stage_work(conn, defaults=defaults)
     out = []
+    sources = targets.check_source_ids(conn)
     for p in store.pipelines(conn):
+        if p["id"] in sources:
+            continue
         d = store.show(conn, p["name"])
         waits = [] if p.get("held_reason") else _person_waits(conn, p["id"])
         src = _with_account(_source(p, saved), accts.get(_accounts().key_of(p)))
@@ -450,8 +442,7 @@ def deploy(conn, path):
                               "history": e.get("history") or []} for e in d["envs"]],
                     "targets": [e["target"] for e in d["envs"] if e.get("target")], "waits": waits,
                     "definition": _versions().current(conn, p["id"]),  # #6143: the head's 'definition vN'
-                    "followed": bool(p.get("followed")),  # #6167: an outside system runs its flow
-                    "release": _targets_release(conn, [e["target"] for e in d["envs"] if e.get("target")])})  # #6488
+                    "followed": bool(p.get("followed"))})  # #6167: an outside system runs its flow
     for t in targets.default_list(conn):
         d = defaults[t["name"]]
         approval = next((s for s in d["stages"] if s["name"] == "approval"), None)
@@ -464,10 +455,11 @@ def deploy(conn, path):
                     "held_by": d.get("held_by"), "controls": True,  # #6176
                     "stages": _strip(_with_holding(conn, t["name"], d["stages"]), work=work.get(t["name"])), "envs": [{"name": e["name"], "target": e.get("target"),
                     "rev": e.get("rev"), "since": e.get("since"), "history": e.get("history") or []} for e in d["envs"]],
-                    "targets": [t["name"]], "waits": waits,
+                    "targets": [t["name"]], "waits": waits, "checks": d["checks"],
                     "release": None if waits else _release_now(conn, t["name"])})  # #6189: a yes first, not a way round
     bad = {(x["source"]["forge"], x["source"].get("secret")) for x in out if x["source"]["state"] in ("bad", "missing")}
-    return {"pipelines": out, "accounts": account_list, "runners": _runners().listing(conn),  # #6151
+    return {"pipelines": out, "aliases": targets.check_aliases(conn), "accounts": account_list,
+            "runners": _runners().listing(conn),  # #6151
             "count": sum(len(x["waits"]) for x in out) + len(bad)}
 
 

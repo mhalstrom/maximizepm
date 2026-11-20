@@ -1834,7 +1834,7 @@ class DefaultPipelines(Base):
                         if s["name"] == "approval")
         self.assertEqual(approval["transition"]["mode"], "yes")
 
-    def test_list_and_show_and_a_target_that_a_pipeline_covers(self):
+    def test_list_and_show_and_a_target_refuses_a_replacement_pipeline(self):
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
@@ -1844,10 +1844,28 @@ class DefaultPipelines(Base):
         self.assertIn("web-prod  (a deploy target: its default pipeline)", out.getvalue())
         self.assertIn("(the default pipeline of deploy target web-prod, from its releases)", out.getvalue())
         define.pipeline_add(self.c, "web", project="web")
-        define.env_set(self.c, "web", "prod", target="web-prod")
-        self.assertEqual(self.targets.default_list(self.c), [])
+        with self.assertRaisesRegex(RiverError, "owns its release flow"):
+            define.env_set(self.c, "web", "prod", target="web-prod")
+        self.assertEqual([t["name"] for t in self.targets.default_list(self.c)], ["web-prod"])
         with self.assertRaises(RiverError):
             self.targets.default_pipeline(self.c, "nowhere")
+
+    def test_the_hook_supplies_the_draft_build_and_approval_without_a_github_deploy_stage(self):
+        from river.routes import pipeline
+        core.target_hook(self.c, "web-prod", "deploy", "build the draft", actor="mark")
+        dep = self.release("aaaaaaa", "A change")
+        at = core.iso(core.now())
+        self.hook(dep, "deploy", core.HOOK_YES, "aaaaaaa", at)
+        run = self.c.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=?", (dep,)).fetchone()[0]
+        self.c.execute("INSERT INTO hook_steps(hook_run, name, kind, state, started_at, ended_at) "
+                       "VALUES (?, 'build-mac', 'build', 'passed', ?, ?)", (run, at, at))
+        approval = core._draft_yes(self.c, dep, "The draft is ready")
+        d = pipeline.pipeline(self.c, "/api/pipeline/web-prod")
+        self.assertEqual([s["name"] for s in d["stages"]], ["holding", "deploy", "approval", "publish", "watch"])
+        self.assertEqual(d["stages"][1]["run"], "build the draft")
+        self.assertEqual(d["stages"][1]["last_run"]["step_list"][0]["name"], "build-mac")
+        self.assertEqual(d["stages"][2]["last_run"]["item"], approval)
+        self.assertIsNone(d["envs"][0]["rev"])
 
     def test_ten_releases_read_under_100_ms(self):
         for n in range(12):
@@ -2007,6 +2025,57 @@ class GitHub(Base):
     def stage_runs(self):
         return {r["stage"]: r for r in self.c.execute(
             "SELECT r.*, s.name stage FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id ORDER BY r.id")}
+
+    def test_linked_github_checks_keep_one_target_flow_and_its_release_record(self):
+        from river.pipeline import target_flow
+        from river.routes import pipeline
+        core.target_add(self.c, "site", "", None)
+        core.project_add(self.c, "web", target="site")
+        core.target_cadence(self.c, "site", "1w", "mark")
+        i = core.item_add(self.c, "web", "First", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        core.target_cut(self.c, "site", rev="1234567", actor="mark")
+        old = core.iso(core.now() - core.timedelta(days=2))
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE kind='deploy' AND target='site'", (old,))
+        i = core.item_add(self.c, "web", "Second", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+
+        store.deployed(self.c, "mpm", "beta", "f" * 40, source="github")
+        with self.assertRaisesRegex(RiverError, "only GitHub test workflows"):
+            define.env_set(self.c, "mpm", "beta", target="site", actor="mark")
+        # A legacy link can already have a deploy stage. It contributes test runs only.
+        self.c.execute("UPDATE pipeline_envs SET target='site' WHERE name='beta'")
+        self.assertTrue(target_flow.ensure(self.c, "site"))
+        with self.assertRaisesRegex(RiverError, "supplies GitHub checks"):
+            self.runner.start(self.c, "mpm", rev="a" * 40, actor="mark")
+
+        # A newer branch run was collected under the old model. It stays in history but never becomes the check.
+        store.run_start(self.c, "mpm", "tests", "b" * 40, key="gh-run-999", source="github")
+        self.runs["tests.yml"] = [
+            dict(gh_run(104, "d" * 40), event="push", head_repository={"full_name": "fork/r"}),
+            dict(gh_run(103, "c" * 40, conclusion="action_required"), event="pull_request"),
+            dict(gh_run(102, "b" * 40, conclusion="failure"), event="push", head_branch="feature"),
+            dict(gh_run(101, "a" * 40), event="push"),
+        ]
+        self.jobs(101, ("test", "success"))
+        self.api.routes[("GET", "/repos/o/r/actions/runs/101/artifacts")] = (200, {"artifacts": []})
+        self.assertEqual(self.gh.poll(self.c, self.p())["runs"], 1)
+        self.assertTrue(any("branch=main&event=push" in call[1] for call in self.api.calls))
+        self.assertFalse(any("desktop-release.yml/runs" in call[1] for call in self.api.calls))
+        self.assertFalse(any("/deployments" in call[1] for call in self.api.calls))
+        self.assertNotIn("beta", self.stage_runs())  # test success never schedules the desktop workflow
+        payload = pipeline.deploy(self.c, "/api/deploy")
+        self.assertEqual(payload["aliases"], {"mpm": "site"})
+        self.assertEqual(pipeline.pipeline(self.c, "/api/pipeline/mpm")["name"], "site")
+        d = payload["pipelines"]
+        self.assertEqual([p["name"] for p in d], ["site"])
+        self.assertEqual((d[0]["envs"][0]["rev"], d[0]["envs"][0]["since"]), ("1234567", old))
+        self.assertEqual(d[0]["release"]["tasks"], 1)
+        check, = d[0]["checks"]
+        self.assertEqual((check["branch"], check["last_run"]["key"]), ("main", "gh-run-101"))
+        define.stage_set(self.c, "mpm", "beta", remove=True, actor="mark")
+        result = define.env_set(self.c, "mpm", "beta", target="site", actor="mark")
+        self.assertIn("GitHub tests join the release flow of site", result["message"])
 
     def test_a_push_run_its_jobs_and_tests_then_the_gate_then_github_runs_the_next_stage(self):
         self.runs["tests.yml"] = [gh_run(101, "a" * 40)]
@@ -2673,6 +2742,9 @@ class Holding(RunnerBase):
         sha = self.commit(f"A change (#{t})")
         h = self.targets.holding(self.c, "site", fresh=True)
         self.assertEqual(([c["sha"] for c in h["commits"]][-1], h["default"]), (sha, True))
+        self.assertFalse(h["review_enabled"])
+        self.assertEqual(h["counts"], {})
+        self.assertTrue(all(c["review"] is None for c in h["commits"]))
         self.assertFalse(h["release"]["can"])  # nothing is collected yet
         core.claim(self.c, t, "w1")
         core.done(self.c, t, output="done", actor="w1", ship_it=True, force="test")

@@ -501,7 +501,7 @@ def _reports(conn, p, m, reports):
     return n
 
 
-def _take(conn, p, m, answer):
+def _take(conn, p, m, answer, release_checks=False):
     """Keep what an answer brings: its events (in one transaction, all or none), its JUnit reports and its state. A
     run that the events end as passed hands its version on (runner.hand_on), after its tests are read. Returns
     (new events, reports read)."""
@@ -530,7 +530,8 @@ def _take(conn, p, m, answer):
             raise core.RiverError(f"plugin {m['name']}: its state is more than {STATE_MAX // 1024} KB")
         with core.tx(conn):
             conn.execute("UPDATE pipelines SET plugin_state=? WHERE id=?", (state, p["id"]))
-    runner.hand_on_passed(conn, res)
+    if not release_checks:
+        runner.hand_on_passed(conn, res)
     if answer.get("agents"):  # #6152: the state and proof of the agent jobs in the forge's own CI
         from . import agent_job
         agent_job.take(conn, p, answer["agents"], m["name"])
@@ -543,13 +544,21 @@ def poll(conn, p):
     m = of(p)
     _trusted(conn, m, p)  # #6166: a person's item asks once when its files have no yes
     req = _request(conn, p, m, "poll")
-    req["runs"] = _known_runs(conn, p)
-    from . import agent_job
-    agents = agent_job.open_runs(conn, p)
-    if agents:  # #6152: the agent jobs in the forge's own CI that wait or run; only then, so no read when none
-        req["agents"] = agents
+    from . import agent_job, targets
+    release_checks = p["forge"] == "github" and bool(targets.check_targets(conn, p["id"]))
+    if release_checks:
+        info = req["pipeline"]
+        info["release_check_branch"] = req["settings"].get("ref") or "main"
+        info["stages"] = [s for s in info["stages"] if s["kind"] == "test"]
+        info["envs"] = []
+        req["runs"] = []
+    else:
+        req["runs"] = _known_runs(conn, p)
+        agents = agent_job.open_runs(conn, p)
+        if agents:  # #6152: the agent jobs in the forge's own CI that wait or run; only then, so no read when none
+            req["agents"] = agents
     answer = call(m, req)
-    events, tests = _take(conn, p, m, answer)
+    events, tests = _take(conn, p, m, answer, release_checks=release_checks)
     counts = answer.get("counts") if isinstance(answer.get("counts"), dict) else {}
     return {**{k: v for k, v in counts.items() if isinstance(v, int)}, "events": events, "tests": tests,
             "seconds": answer["_seconds"]}

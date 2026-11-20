@@ -5584,6 +5584,8 @@ def target_add(conn, name, description="", actor=None):
     with tx(conn):
         if conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
             raise RiverError(f"target {name!r} exists")
+        if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
+            raise RiverError(f"a pipeline named {name} exists already; choose another name for the deploy target")
         conn.execute("INSERT INTO targets(name,description,created_at) VALUES (?,?,?)", (name, description, iso(now())))
         _event(conn, None, actor, f"target {name} added")
     return target_show(conn, name)

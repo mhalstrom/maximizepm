@@ -195,19 +195,24 @@ def norm(run):
             "workflow": run.get("workflow_id") if isinstance(run.get("workflow_id"), str) else path.rsplit("/", 1)[-1]}
 
 
-def runs_of(api, workflow):
+def runs_of(api, workflow, check_branch=None):
     """The newest runs of a workflow, oldest first (so a newer version is handed on last). Pull-request runs are
     skipped: a pipeline tracks the repository's own commits (push, tag, workflow_dispatch), not unmerged or fork PRs
     whose runs may also be held for approval (conclusion 'action_required', #6473). Gitea and Forgejo list the runs
     of the whole repository: keep those of this workflow."""
     if api.forge == "github":
+        filters = "&" + urllib.parse.urlencode({"branch": check_branch, "event": "push"}) if check_branch else ""
         runs = api.call(
             "GET", f"/repos/{api.repo}/actions/workflows/{workflow}/runs?per_page={RUNS}&exclude_pull_requests=true"
+            + filters
         ).get("workflow_runs", [])
     else:
         got = api.call("GET", f"/repos/{api.repo}/actions/runs?limit=50")
         listed = got.get("workflow_runs") or got.get("runs") or [] if isinstance(got, dict) else got
         runs = [r for r in (norm(r) for r in listed) if r["workflow"] == workflow]
+    if check_branch:
+        runs = [r for r in runs if r.get("event") == "push" and r.get("head_branch") == check_branch
+                and ((r.get("head_repository") or {}).get("full_name") or api.repo).lower() == api.repo.lower()]
     runs = [r for r in runs if not str(r.get("event") or "").startswith("pull_request")][:RUNS]
     return list(reversed(runs))
 
@@ -226,10 +231,10 @@ def waiting_for(stage, run, open_runs):
     return None
 
 
-def run_events(api, stage, run, waiting):
+def run_events(api, stage, run, waiting, release_check=False):
     """The pipelinerun events of one workflow run: queued, started, finished."""
     key = f"gh-run-{run['id']}"
-    m = LINK.search(run.get("display_title") or run.get("name") or "")
+    m = None if release_check else LINK.search(run.get("display_title") or run.get("name") or "")
     maxpm = {"stage": stage, "version": run.get("head_sha"), "ref": run.get("head_branch"),
              "title": (run.get("display_title") or "")[:200] or None, "run": int(m.group(1)) if m else waiting}
     base = {"pipelineName": stage, "url": run.get("html_url")}
@@ -335,15 +340,21 @@ def poll(req, api):
     done, deps = list(state.get("done") or []), set(state.get("deployments") or [])
     events, reports, runs = [], [], 0
     open_runs = req.get("runs") or []
+    check_branch = (req.get("pipeline") or {}).get("release_check_branch")
+    checks = {}
     for stage in (req.get("pipeline") or {}).get("stages") or []:
         if not stage.get("work"):
             continue  # this stage runs its own command on MaximizePM's computer
-        for run in runs_of(api, stage["work"]):
+        latest = runs_of(api, stage["work"], check_branch)
+        if check_branch:
+            checks[stage["name"]] = [f"gh-run-{r['id']}" for r in latest]
+        for run in latest:
             runs += 1
             mark = f"{run['id']}-{run.get('run_attempt') or 1}"
             if mark in done:
                 continue  # read to its end before
-            events += run_events(api, stage["name"], run, waiting_for(stage["name"], run, open_runs))
+            events += run_events(api, stage["name"], run, waiting_for(stage["name"], run, open_runs),
+                                 release_check=bool(check_branch))
             events += job_events(api, run)
             if run.get("status") == "completed":
                 reports += junit_reports(api, stage, run)
@@ -351,6 +362,8 @@ def poll(req, api):
     events += deploy_events(api, (req.get("pipeline") or {}).get("envs") or [], deps)
     out_state = {"done": done[-DONE_KEEP:], "deployments": sorted(deps)[-DONE_KEEP:],
                  "secrets_at": state.get("secrets_at") or 0}
+    if check_branch:
+        out_state["release_checks"] = checks
     names = secret_names(api, (req.get("pipeline") or {}).get("stages") or [], out_state)
     answer = {"events": events, "reports": reports, "counts": {"runs": runs}, "state": out_state}
     if names is not None:

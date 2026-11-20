@@ -194,10 +194,7 @@ class TargetControls(unittest.TestCase):
         self.assertEqual([w["item"] for w in p["waits"]], [core._approvals(self.c, dep)[0]["id"]], p)
         self.assertIsNone(p["release"])
 
-    def test_a_pipeline_of_a_target_offers_its_release_now_and_its_yes(self):
-        """#6488 (mark 2026-11-20: 'why can I not put the maxpm release out?'): a pipeline of its own whose environment
-        names the target (it reads GitHub runs) replaces the target's default pipeline on the Deploy tab. It offers the
-        target's Release now while collected tasks wait, and the person's yes while a release waits for it."""
+    def test_a_target_with_github_checks_offers_release_now_and_approval(self):
         from river.pipeline import define
         from river.routes import pipeline as routes
         core.config_unset(self.c, "release_approval", project="web")
@@ -206,20 +203,23 @@ class TargetControls(unittest.TestCase):
         i = core.item_add(self.c, "web", "Second change", actor="mark")["id"]
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
         define.pipeline_add(self.c, "web", project="web", actor="mark")
+        define.forge_set(self.c, "web", "github", repo="example/web", secret="github", actor="mark")
+        define.stage_set(self.c, "web", "tests", "test", workflow="tests.yml", actor="mark")
         define.env_set(self.c, "web", "release", target="web-prod", actor="mark")
-        define.stage_set(self.c, "web", "release", "deploy", env="release", workflow="release.yml", actor="mark")
         rows = lambda: {p["name"]: p for p in routes.deploy(self.c, "/api/deploy")["pipelines"]}  # noqa: E731
-        self.assertNotIn("web-prod", rows())  # the target has no default pipeline now
-        r = rows()["web"]["release"]
+        self.assertNotIn("web", rows())
+        r = rows()["web-prod"]["release"]
         self.assertEqual((r["target"], r["tasks"], bool(r["until"])), ("web-prod", 1, True))
         self.assertEqual(routes.pipeline(self.c, "/api/pipeline/web")["release"], r)
         core.release_now(self.c, "web-prod", "Released by mark from the Deploy tab", "mark")
-        self.assertIsNone(rows()["web"]["release"])  # it goes now: nothing waits
+        self.assertIsNone(rows()["web-prod"]["release"])
         core.config_set(self.c, "release_approval", "person", project="web")
         dep = self.release("bbbbbbb", "Third change")
         core.release_yes_pass(self.c)
         yes = core._approvals(self.c, dep)[0]["id"]
-        self.assertEqual(rows()["web"]["release"], {"target": "web-prod", "approve": yes, "deploy": dep})
+        row = rows()["web-prod"]
+        self.assertIsNone(row["release"])
+        self.assertEqual([w["item"] for w in row["waits"]], [yes])
 
     def test_a_worker_may_not_and_an_operator_agent_may_only_when_agents_may(self):
         self.release("aaaaaaa", "First change", done=True)

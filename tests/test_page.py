@@ -439,6 +439,11 @@ try {
         person's approval item as them. Deploy now does not show while the yes waits. At 1920 and 390 px."""
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
         core.project_add(self.c, "web", target="toolscaled-prod")
+        from river.pipeline import define
+        define.pipeline_add(self.c, "web-checks", project="web")
+        define.stage_set(self.c, "web-checks", "tests", "test", workflow="tests.yml")
+        define.forge_set(self.c, "web-checks", "github", repo="example/web", secret="gh-token")
+        define.env_set(self.c, "web-checks", "prod", target="toolscaled-prod")
         core.config_set(self.c, "release_approval", "person", project="web")
         i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
@@ -453,11 +458,18 @@ try {
   q("#actor").value = "mark";
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
-  q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  const separate = !!q('#dpList [data-dp-open="web-checks"]');
+  history.replaceState(null, "", "/deploy/pipeline/web-checks");
+  dispatchEvent(new PopStateEvent("popstate"));
   await until(() => q('.pl-next [data-pl-yes]'), "the next step");
   const b = q('.pl-next [data-pl-yes]').getBoundingClientRect();
   const out = { next: q(".pl-next").textContent.replace(/\s+/g, " "), waits: [...document.querySelectorAll(".pl-waits")].map(e => e.dataset.plStage || e.dataset.plArrow),
-    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]') };
+    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]'),
+    separate, address: location.pathname };
+  q('#plRow [data-pl-stage="holding"]').click();
+  await until(() => q('.hd')?.textContent.includes('GitHub tests.yml on main'), "the GitHub check in holding");
+  out.checkInView = [...document.querySelectorAll('.hd .pl-bar > *')].every(e =>
+    e.getBoundingClientRect().right <= innerWidth + 0.5);
   q('.pl-next [data-pl-yes]').click();
   await until(() => q('#plAskDlg:not(.hidden) [data-pl-askgo]'), "the confirm");
   out.confirm = q("#plAskDlg").textContent.replace(/\s+/g, " ");
@@ -472,17 +484,17 @@ try {
             self.assertEqual(r["waits"], ["approval"], r)
             self.assertTrue(r["inView"], r)  # no scroll
             self.assertFalse(r["deploy"], r)  # never around the yes
+            self.assertFalse(r["separate"], r)
+            self.assertTrue(r["checkInView"], r)
+            self.assertEqual(r["address"], "/deploy/pipeline/toolscaled-prod", r)
             self.assertIn(f"Approve release #{dep}?", r["confirm"], r)
             st = self.c.execute("SELECT status, assignee FROM items WHERE id=?", (appr,)).fetchone()
             self.assertEqual(st["status"], "done", r)
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
 
-    def test_a_github_pipeline_of_a_target_offers_release_now(self):
-        """#6488 (mark 2026-11-20: 'why can I not put the maxpm release out?'): a pipeline that reads GitHub runs and
-        whose environment names the deploy target hides the target's default pipeline. Its page's Next bar and the
-        Deploy list's banner offer the target's Release now while collected tasks wait; its dialog names the target.
-        At 1500 and 390 px."""
+    def test_a_target_with_github_checks_offers_release_now(self):
+        """At 1500 and 390 px, Release now appears in the list and on the target's page."""
         from river.pipeline import define
         core.register(self.c, "mark", human=True)
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
@@ -497,8 +509,8 @@ try {
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
         define.pipeline_add(self.c, "app", project="web", actor="mark")
         define.forge_set(self.c, "app", "github", repo="o/app", secret="gh-app", actor="mark")
+        define.stage_set(self.c, "app", "tests", "test", workflow="tests.yml", actor="mark")
         define.env_set(self.c, "app", "release", target="toolscaled-prod", actor="mark")
-        define.stage_set(self.c, "app", "release", "deploy", env="release", workflow="release.yml", actor="mark")
         self.c.commit()
         driver = r'''
 try {
@@ -507,8 +519,8 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('.dp-banner [data-relnow]'), "the banner's Release now");
   const out = { banner: q('.dp-banner [data-relnow]').closest(".dp-banner").textContent.replace(/\s+/g, " "),
-    target: !!q('#dpList [data-dp-open="toolscaled-prod"]') };
-  q('#dpList [data-dp-open="app"]').click();
+    separate: !!q('#dpList [data-dp-open="app"]') };
+  q('#dpList [data-dp-open="toolscaled-prod"]').click();
   await until(() => q('.pl-next [data-relnow]'), "the Next bar's Release now");
   const b = q('.pl-next [data-relnow]').getBoundingClientRect();
   out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
@@ -517,22 +529,17 @@ try {
   await until(() => q('#relNowDlg:not(.hidden) [data-relgo]'), "the dialog");
   out.dlg = q("#relNowDlg").textContent.replace(/\s+/g, " ");
   q('#relNowDlg [data-relclose]').click();
-  q('.pl-next [data-dp-open="toolscaled-prod"]').click();  // Release steps: the target's own page
-  await until(() => q('#dpStages [data-pl-stage="watch"]') && !q('#dpStages [data-pl-stage="release"]'), "the target's page");
   out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
-  out.stepsNext = q(".pl-next").textContent.replace(/\s+/g, " ");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
             r = self.drive(driver, "/", size=size)
             self.assertIn("toolscaled-prod: 1 task wait for the next release", r["banner"], r)
-            self.assertFalse(r["target"], r)  # the pipeline app stands for the target
-            self.assertIn("Next: 1 task of toolscaled-prod wait for the next release", r["next"], r)
-            self.assertIn("Release steps", r["next"], r)
+            self.assertFalse(r["separate"], r)
+            self.assertIn("Next: release 1 task", r["next"], r)
             self.assertTrue(r["inView"], r)
             self.assertIn("Release toolscaled-prod now?", r["dlg"], r)
             self.assertEqual(r["steps"], ["holding", "deploy", "watch"], r)
-            self.assertIn("Release now", r["stepsNext"], r)  # the target's own page offers it too
 
     def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
         """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'): the Next bar names

@@ -1939,7 +1939,7 @@ def build_parser(only=None):
     x = pls.add_parser("env", help="add or change an environment: a place that runs the code (dev, beta, prod, a "
                        "server)")
     x.add_argument("name"); x.add_argument("env")
-    x.add_argument("--target", help="the deploy target of today that it is"); x.add_argument("--url")
+    x.add_argument("--target", help="attach GitHub test checks to a deploy target"); x.add_argument("--url")
     x.add_argument("--notes"); x.add_argument("--remove", action="store_true")
     x = pls.add_parser("stage", help="add or change a stage: its kind, the command or forge workflow that does its "
                        "work, its environment, its gate, its place")
@@ -8056,11 +8056,18 @@ def _pipeline_cmd(conn, a, actor):
     sub = a.plcmd  # who may run each one: river/rights.py
     from .pipeline import targets
     if sub == "list":
-        return store.pipelines(conn) + targets.default_list(conn)
+        sources = targets.check_source_ids(conn)
+        return [p for p in store.pipelines(conn) if p["id"] not in sources] + targets.default_list(conn)
     if sub == "add":
         return define.pipeline_add(conn, a.name, a.project, a.notes, actor)
     if sub == "show":  # a target with no pipeline of its own shows as its default pipeline (#6115)
-        if conn.execute("SELECT 1 FROM pipelines WHERE name=? AND target IS NULL", (a.name,)).fetchone():  # #6176
+        p = conn.execute("SELECT id, forge FROM pipelines WHERE name=? AND target IS NULL", (a.name,)).fetchone()
+        if p:
+            names = targets.check_targets(conn, p["id"]) if p["forge"] == "github" else []
+            if len(names) == 1:
+                return targets.default_pipeline(conn, names[0])
+            if names:
+                raise RiverError(f"GitHub checks for {a.name} appear on these deploy targets: {', '.join(names)}")
             return store.show(conn, a.name)
         return targets.default_pipeline(conn, a.name)
     if sub == "env":
@@ -8658,6 +8665,8 @@ def render_pipeline(a, res):
         d = res.get("detail") or {}
         extra = ", ".join(f"{k} {v}" for k, v in d.items() if v and k != "name")
         print(f"pipeline {res['pipeline']}: {what} {res['changed']}" + (f" ({extra})" if extra else ""))
+        if res.get("message"):
+            print(res["message"])
         return
     # show
     print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else "")
@@ -8670,6 +8679,11 @@ def render_pipeline(a, res):
                                                    else f": {src.get('error')}"))
     if res.get("poll_error"):
         print(f"  the last read failed: {res['poll_error']}")
+    for check in res.get("checks", []):
+        run = check["last_run"] or {}
+        state = run.get("state") or "no run yet"
+        at = f" at {run['version'][:12]}" if run.get("version") else ""
+        print(f"  {check['source']} {check['workflow']} on {check['branch']}: {state}{at}")
     if not res["stages"]:
         print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
     for s in res["stages"]:

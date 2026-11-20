@@ -47,6 +47,7 @@ Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (
   openPlan: (view) => showPlan(view),
   // The Deploy tab (#6136) on what deploy.D names now: a new entry in the history, so Back returns.
   deployGo: async () => { if (tab !== "deploy") return setTab("deploy"); syncUrl(true); return deploy.renderDeploy(true); },
+  deployReplaceUrl: () => syncUrl(false),
   // One project in Plan (#5879: a project's own browser in the Browsers view has no session to open).
   openProject: (name) => { setScope(name, ""); return showPlan("overview"); },
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },

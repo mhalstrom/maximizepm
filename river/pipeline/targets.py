@@ -1,9 +1,9 @@
 """Each deploy target of today as a default pipeline (#6115), computed from the records MaximizePM keeps now.
 
-Nothing is stored and nothing that works today changes: a read builds the pipeline of a target from its deploy items
-(one release each), their review items, the person's approval items (release_approval person), the hook runs
-(release-cut, deploy) and the runs of the target's checks after each release (the watch). So toolscaled-prod and
-maximizepm-github show in the pipeline view before they move to a pipeline of their own.
+A target owns its release flow. A read builds it from its deploy items (one release each), review and approval items,
+hook runs, and the checks after each release. MaximizePM starts the hook on schedule or through Release now.
+An attached GitHub source reports tests of the release branch as checks. Test results leave release controls and the
+live version to the target. When the deploy hook starts an external build, its reported jobs belong to that release.
 
 The stages, left to right, as a target has them:
     holding  (holding) the commits that wait for the next release; the release fixes the release's list (cut_at)
@@ -28,10 +28,12 @@ of the project's folder since the last version that left it: for a pipeline, the
 stage; for a deploy target, the pin of its last done release (or the last version tag). Each commit has its tasks
 (#<id> in its message), the session that wrote it (its Claude-Session link), its changes, and its review: passed in or
 in the review of a release that covers it (a cut release of the target), approved or sent back in the Changes view of
-its task, else not reviewed. The transition after holding is the release: release() sends the commits on, a pipeline's
+its task, else not reviewed. Review counts apply to flows that have review. The transition after holding is the
+release: release() sends the commits on, a pipeline's
 with maxpm pipeline start, a target's with its release cut (core.target_cut), pinned at the last commit it takes.
 """
 
+import json
 import re
 import threading
 import time
@@ -295,6 +297,18 @@ def _has_build(conn, name, deps):
                                       f"({','.join('?' * len(ids))}) LIMIT 1", ids).fetchone() is not None
 
 
+def _approval_mode(conn, name, deps):
+    mode = core.release_approval(conn, name)["approval"]
+    if mode or not deps:
+        return mode
+    ids = [d["id"] for d in deps]
+    prepared = conn.execute(
+        f"SELECT 1 FROM hook_runs WHERE deploy_id IN ({','.join('?' * len(ids))}) AND event='deploy' "
+        "AND ended_at IS NOT NULL AND exit_code=? AND NOT COALESCE(timed_out, 0) LIMIT 1",
+        (*ids, core.HOOK_YES)).fetchone()
+    return "draft" if prepared else ""
+
+
 def shape(conn, name, deps=None):
     """The stages of target name, left to right, holding first: the names that its default pipeline shows (#6176:
     the stored pipeline of its controls has the same ones, less holding)."""
@@ -304,7 +318,7 @@ def shape(conn, name, deps=None):
         out.append("build")
     if _has_reviews(conn, name, deps):
         out.append("review")
-    gate = core.release_approval(conn, name)["approval"]
+    gate = _approval_mode(conn, name, deps)
     if gate == "person":
         out.append("approval")
     if gate == "draft":  # #6213: the deploy hook prepares the release, the person approves it, the hook publishes it
@@ -317,7 +331,7 @@ def release_runs(conn, name, deps=None):
     t = _target(conn, name)
     deps = _deploys(conn, name) if deps is None else deps
     reviews = _has_reviews(conn, name, deps)
-    approval = core.release_approval(conn, name)["approval"]
+    approval = _approval_mode(conn, name, deps)
     checks = _checks(conn, name)
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
     out = []
@@ -372,6 +386,7 @@ def default_pipeline(conn, name):
     project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id "
                            "LIMIT 1", (name, f"deploy-{name}")).fetchone()  # not the deploy project of the target
     return {"name": name, "project": project["name"] if project else None, "default": True, "stages": stages,
+            "checks": release_checks(conn, name),
             "controls": True,  # #6176: its arrows, operators, emergency actions, triggers and audit log act
             "held_reason": own["held_reason"] if own else None, "held_by": own["held_by"] if own else None,
             "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
@@ -381,10 +396,51 @@ def default_pipeline(conn, name):
 
 
 def default_list(conn):
-    """The targets that no pipeline covers yet (no pipeline environment names them), as default pipelines."""
-    covered = {r["target"] for r in conn.execute("SELECT DISTINCT target FROM pipeline_envs WHERE target IS NOT NULL "
-                                                 "AND removed_at IS NULL")}
-    return [{"name": t["name"], "project": None, "default": True} for t in _targets(conn) if t["name"] not in covered]
+    """Every deploy target owns its release flow."""
+    return [{"name": t["name"], "project": None, "default": True} for t in _targets(conn)]
+
+
+_CHECK_LINKS = ("FROM pipelines p JOIN pipeline_envs e ON e.pipeline_id=p.id "
+                "JOIN targets t ON t.name=e.target "
+                "WHERE p.target IS NULL AND p.forge='github' AND e.removed_at IS NULL")
+
+
+def check_targets(conn, pipeline_id):
+    """The release flows that read this pipeline's GitHub tests."""
+    return [r[0] for r in conn.execute("SELECT DISTINCT t.name " + _CHECK_LINKS + " AND p.id=? ORDER BY t.name",
+                                      (pipeline_id,))]
+
+
+def check_source_ids(conn):
+    return {r[0] for r in conn.execute("SELECT DISTINCT p.id " + _CHECK_LINKS)}
+
+
+def check_aliases(conn):
+    """Old pipeline links open the target when the source serves just one release flow."""
+    return dict(conn.execute("SELECT p.name, MIN(t.name) " + _CHECK_LINKS
+                             + " GROUP BY p.id HAVING COUNT(DISTINCT t.name)=1"))
+
+
+def release_checks(conn, target):
+    """Read the latest eligible GitHub runs. The source retains all its original run history."""
+    from . import plugin, store
+    out = []
+    sources = conn.execute("SELECT DISTINCT p.* " + _CHECK_LINKS + " AND t.name=? ORDER BY p.name", (target,))
+    for p in sources:
+        branch = plugin._config(p)["settings"].get("ref") or "main"
+        observed = (json.loads(p["plugin_state"] or "null") or {}).get("release_checks") or {}
+        for stage in conn.execute("SELECT id, name, workflow FROM pipeline_stages WHERE pipeline_id=? "
+                                  "AND removed_at IS NULL AND kind='test' AND workflow IS NOT NULL ORDER BY pos, id",
+                                  (p["id"],)):
+            keys = observed.get(stage["name"]) or []
+            run = None
+            if keys:
+                marks = ",".join("?" * len(keys))
+                run = conn.execute(f"SELECT * FROM stage_runs WHERE stage_id=? AND key IN ({marks}) "
+                                   "ORDER BY queued_at DESC, id DESC LIMIT 1", (stage["id"], *keys)).fetchone()
+            out.append({"name": stage["name"], "source": "GitHub", "workflow": stage["workflow"],
+                        "branch": branch, "last_run": store._run_dict(conn, run), "error": p["poll_error"]})
+    return out
 
 
 # ---------------------------------------------------------------- the holding stage (#6140)
@@ -545,15 +601,18 @@ def holding(conn, name, fresh=False):
     from .. import review
     p, target, project = _where(conn, name)
     root = _root_of(conn, project)
+    review_enabled = p is not None or _has_reviews(conn, target, _deploys(conn, target))
     out = {"pipeline": name, "target": target, "project": project, "folder": root, "default": p is None,
            "base": None, "base_label": None, "head": None, "head_label": None, "commits": [], "added": 0,
-           "removed": 0, "counts": {"reviewed": 0, "in_review": 0, "not_reviewed": 0}, "upto": None, "report": None}
+           "removed": 0, "review_enabled": review_enabled,
+           "counts": {"reviewed": 0, "in_review": 0, "not_reviewed": 0} if review_enabled else {},
+           "upto": None, "report": None}
     head, head_label = review._branch_head(root) if root else (None, None)
     if root and head:
         head_sha = (_git(root, "rev-parse", head + "^{commit}") or "").strip()
         base, base_label = _base(conn, root, p, target, head)
         rows = _commits(conn, root, base, head)
-        found = _reviews(conn, root, target, base)
+        found = _reviews(conn, root, target, base) if review_enabled else {}
         ids = sorted({t for c in rows for t in c["tasks"]})
         items = {r["id"]: r for r in conn.execute(
             f"SELECT id, title, short, status FROM items WHERE id IN ({','.join('?' * len(ids)) or 'NULL'})", ids)}
@@ -565,25 +624,27 @@ def holding(conn, name, fresh=False):
         for c in rows:
             tasks = [{"id": i, "title": items[i]["short"] or items[i]["title"], "status": items[i]["status"]}
                      for i in c["tasks"] if i in items]
-            rv = found.get(c["sha"])
-            if rv is None:
-                marks = {review.state_of(conn, f"item:{t['id']}", "-") for t in tasks}
-                rv = ("bad", "changes requested in Changes", None) if "changes" in marks else \
-                    ("ok", "approved in Changes", None) if tasks and marks == {"approved"} else \
-                    ("wait", "not reviewed", None)
-            state, text, dep = rv
-            key = "reviewed" if state == "ok" else "in_review" if state == "run" else "not_reviewed"
-            out["counts"][key] += 1
-            if state == "ok" and open_run:
-                upto = c["sha"]
-            else:
-                open_run = False
+            status = None
+            if review_enabled:
+                rv = found.get(c["sha"])
+                if rv is None:
+                    marks = {review.state_of(conn, f"item:{t['id']}", "-") for t in tasks}
+                    rv = ("bad", "changes requested in Changes", None) if "changes" in marks else \
+                        ("ok", "approved in Changes", None) if tasks and marks == {"approved"} else \
+                        ("wait", "not reviewed", None)
+                state, text, dep = rv
+                key = "reviewed" if state == "ok" else "in_review" if state == "run" else "not_reviewed"
+                out["counts"][key] += 1
+                open_run = open_run and state == "ok"
+                if open_run:
+                    upto = c["sha"]
+                status = {"state": state, "text": text, "release": dep}
+                out["report"] = out["report"] or dep
             session = next((who[x] for x in c["links"] if x in who), None)
             out["commits"].append({"sha": c["sha"], "subject": c["subject"], "tasks": tasks,
                                    "session": session or c["author"], "by_session": bool(session),
                                    "added": c["added"], "removed": c["removed"],
-                                   "review": {"state": state, "text": text, "release": dep}})
-            out["report"] = out["report"] or dep
+                                   "review": status})
         out.update(base=base, base_label=base_label, head=head_sha or head, head_label=head_label, upto=upto,
                    added=sum(c["added"] for c in rows), removed=sum(c["removed"] for c in rows))
     out["release"] = _release_rule(conn, p, target)
@@ -636,6 +697,8 @@ def release(conn, name, upto=None, everything=False, actor=None):
         rev = next((s for s in shas if s.startswith(upto)), None)
         if not rev:
             raise core.RiverError(f"{upto} is not a commit in holding of {name}: maxpm pipeline holding {name}")
+    elif not h["review_enabled"]:
+        rev = shas[-1]
     else:
         rev = h["upto"]
         if not rev:
@@ -689,6 +752,7 @@ def holding_stage(h):
     k = next((i + 1 for i, x in enumerate(h["commits"]) if x["sha"] == h.get("upto")), 0) if h.get("upto") else 0
     return {"name": "holding", "pos": 0, "kind": "holding", "run": None, "workflow": None, "env": None,
             "transition": None, "holding": {"commits": n, **c, "added": h["added"], "removed": h["removed"],
+                                            "review_enabled": h.get("review_enabled", True),
                                             "base_label": h["base_label"], "folder": bool(h["folder"]),
                                             "reading": bool(h.get("reading")),
                                             "release": {"can": bool(rel.get("can")), "reviewed": k,

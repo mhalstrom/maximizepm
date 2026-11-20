@@ -582,6 +582,9 @@ def _waves(conn, r, folder, limit, limit_text, env):
 
 def _hand_on(conn, r):
     """A stage passed: its environment runs the version now (a deploy stage), and the next stage gets it."""
+    from . import targets
+    if r["forge"] == "github" and targets.check_targets(conn, r["pipeline_id"]):
+        return
     if r["kind"] == "deploy" and r["env_id"]:
         e = conn.execute("SELECT name FROM pipeline_envs WHERE id=?", (r["env_id"],)).fetchone()
         if e:
@@ -899,13 +902,16 @@ def serve_pass(conn):
     Returns {"started": [run ids], "waiting": {run id: note}}."""
     _lost(conn)
     transitions.expire(conn)  # blocks, delays and freezes whose end came (#6139)
-    from . import plugin
+    from . import plugin, targets
     plugin.poll_due(conn)  # and the pipelines whose source is a plugin: GitHub, Gitea, Forgejo too (#6159, #6160)
+    check_sources = targets.check_source_ids(conn)
     started, waiting = [], {}
     rows = conn.execute("SELECT r.id FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id WHERE "
                         "r.state='queued' AND s.removed_at IS NULL ORDER BY r.id").fetchall()
     for row in rows:
         r = _row(conn, row["id"])
+        if r["pipeline_id"] in check_sources:
+            continue
         forge = r["workflow"] and not r["cmd"]
         if forge and not r["outside"] and (r["runner"] or not plugin.is_plugin(r["forge"])):
             continue  # started in its system already (its plugin reads the run), or no plugin serves its source

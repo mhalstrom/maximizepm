@@ -56,10 +56,9 @@ export function urlPath() {
 }
 function go(r) { setDeploy(r); nav.deployGo(); }
 
-// The page of the pipeline that releases a target: the pipeline whose environment names it, else its default.
+// A target's release page.
 export function openTarget(name) {
-  const p = data && data.pipelines.find(x => (x.targets || []).includes(name) && !x.default);
-  go({ part: null, pipeline: p ? p.name : name, tab: "stages" });
+  go({ part: null, pipeline: name, tab: "stages" });
 }
 
 // ---- reading and drawing
@@ -71,6 +70,11 @@ export async function renderDeploy(force) {
   catch (e) { if (on) $("#dpList").innerHTML = empty(esc(e.message)); return; }
   drawBadge();
   if (tab !== "deploy") return;
+  const alias = data.aliases?.[D.pipeline];
+  if (typeof alias === "string") {
+    D.pipeline = alias;
+    nav.deployReplaceUrl();
+  }
   drawParts();
   for (const id of ["list", "pipeline", "part"]) $("#deploy-" + id).classList.toggle("hidden", id !== view());
   if (D.pipeline) return drawPage(force);
@@ -178,12 +182,7 @@ function bannersHtml() {
   // #6189: a deploy target whose collected tasks wait (for its cadence, or for the release that runs): Release now.
   for (const p of data.pipelines) if (p.release) {
     const r = p.release, n = `${r.tasks} task${r.tasks === 1 ? "" : "s"}`;
-    if (r.approve) {  // #6488: the release of a target that a pipeline of its own releases waits for the person's yes
-      out.push(`<div class="dp-banner dp-human"><span>✋ ${esc(r.target)}: release${r.deploy ? " #" + r.deploy : ""} waits for your yes</span>
-        <span class="spacer"></span>${releaseButton(p)}${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
-      continue;
-    }
-    out.push(`<div class="dp-banner"><span>📦 ${esc(r.target || p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
+    out.push(`<div class="dp-banner"><span>📦 ${esc(p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
       : r.running ? ` after release #${r.running}` : ""}</span><span class="spacer"></span>${releaseButton(p)}
       ${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
   }
