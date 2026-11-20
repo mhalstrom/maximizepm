@@ -344,8 +344,11 @@ try {
             self.assertIn("2 failed check run(s): web-prod/backend-errors (passes now)", r["text"], r)
             self.assertIn("3 errors in the backend log", r["text"], r)
             self.assertIn("240 runs", r["text"], r)
-            self.assertIn("ends in 19h", r["text"], r)  # the watch failed before its 24 hours ended
-            self.assertIn("failed, ends in 19h", r["card"], r)
+            # #6505 (mark 2026-11-20): a failed check is a note and never ends or fails the watch; it runs its 24 hours.
+            self.assertIn("A note, not a failure of the release", r["text"], r)
+            self.assertIn("running for 5h 00m", r["text"], r)
+            self.assertIn("running for 5h 00m", r["card"], r)
+            self.assertNotIn("failed", r["card"], r)
             self.assertNotIn("s ago", r["text"].split("2 failed")[0], r)
             self.assertEqual(r["dots"], 3, r)  # one dot for each check on the stage card
             self.assertLess(r["height"], 1200, r)
