@@ -956,7 +956,7 @@ def paste_answers(conn):
     prompt (a person answers that first), or a running turn. An answer the asker read (maxpm inbox) goes no more; one
     whose asker has no pane waits, and fresh_sessions gives it to a fresh session as other news.
     Returns {message id: pane} of what it typed."""
-    rows = conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.body, m.reply_to FROM messages m JOIN agents a ON "
+    rows = conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.body, m.reply_to, m.choice FROM messages m JOIN agents a ON "
                         "a.name=m.to_agent WHERE m.kind='answer' AND m.native_status=? AND m.read_at IS NULL ORDER BY m.id",
                         (core.ANSWER_TO_PANE,)).fetchall()
     if not rows or not core.tmux_path() and TMUX_RUNNER is None:
@@ -969,7 +969,7 @@ def paste_answers(conn):
         if not _idle_prompt(conn, agent, pane):
             continue
         q = core._message(conn, r["reply_to"])
-        text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]))
+        text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]), r["choice"])
         with core.tx(conn):  # first, so an answer is never typed twice
             if not conn.execute("UPDATE messages SET native_status=?, read_at=?, state='read' WHERE id=? AND "
                                 "native_status=? AND read_at IS NULL",
@@ -6429,7 +6429,7 @@ OPS = {
     "claim": lambda c, a, who: core.claim(c, a["id"], who),
     "accept": lambda c, a, who: core.accept(c, a["id"], who),
     "decline": lambda c, a, who: core.decline(c, a["id"], a.get("note"), who),
-    "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who),
+    "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who, choice=a.get("choice")),
     "release": lambda c, a, who: core.release(c, a["id"], a.get("note"), who),
     "drop": lambda c, a, who: core.drop(c, a["id"], who),
     "reopen": lambda c, a, who: core.reopen(c, a["id"], who),

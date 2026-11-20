@@ -7024,6 +7024,89 @@ class PersonHold(Base):
         self.assertTrue(self.sees(item_id=k))
 
 
+class EscalationOptions(Base):
+    """#6413: the manager forwards a question or a person item with its short question and 2 to 4 options; the page
+    opens them as a dialog, and the person's choice reaches the asker as a field."""
+
+    OPTS = ["Blue: calm, the color of the logo", "Red: loud, for the sale week"]
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        self.x = self.add("a", "x")
+        core.claim(self.c, self.x, "w1")
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def test_the_options_are_checked(self):
+        q = core.message(self.c, "question", "Which color for the banner?", to="mark", item=self.x, actor="w1")[0]
+        for opts, rec, err in ((self.OPTS[:1], "Blue", "2 to 4 options"), (self.OPTS, None, "--recommend"),
+                               (self.OPTS, "Green", "no option"), (["Blue", "Red: loud"], "Red", "one line"),
+                               (self.OPTS + ["blue: again"], "Red", "two options")):
+            with self.assertRaisesRegex(RiverError, err):
+                core.forward(self.c, q["id"], actor="boss", options=opts, recommend=rec)
+        self.assertEqual(core.message_show(self.c, q["id"])["held_for"], "boss")  # nothing changed
+
+    def test_a_question_with_options_and_the_answer_as_a_field(self):
+        q = core.message(self.c, "question", "Which color for the banner? Long reasons follow ...", to="mark",
+                         item=self.x, actor="w1")[0]
+        core.forward(self.c, q["id"], actor="boss", options=self.OPTS, recommend="2", question="Banner color?")
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        ev = next(n for n in core.needs_you(self.c, "mark") if n.get("message_id") == q["id"])
+        d = ev["decision"]
+        self.assertEqual(d["question"], "Banner color?")
+        self.assertEqual([(o["label"], o["recommended"]) for o in d["options"]], [("Red", True), ("Blue", False)])
+        self.assertEqual(d["options"][1]["detail"], "calm, the color of the logo")
+        from river import sessions
+        self.assertEqual(sessions._open_questions(self.c, "w1")[0]["id"], q["id"])
+        with self.assertRaisesRegex(RiverError, "no option"):
+            core.answer(self.c, q["id"], None, actor="mark", choice="Green")
+        a = core.answer(self.c, q["id"], "a dark blue", actor="mark", choice="blue")
+        self.assertEqual((a["choice"], a["body"]), ("Blue", "Blue: a dark blue"))
+        self.assertIn("choice: Blue\n", core.answer_text(core.message_show(self.c, q["id"]), "mark", a["body"],
+                                                         choice=a["choice"]))
+        self.assertTrue(any("decision for the person on question" in r["change"] and "recommended Red" in r["change"]
+                            for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (self.x,))))
+
+    def test_a_person_item_with_options_closes_with_the_choice(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="w1", blocks=self.x,
+                          mode="keep")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Blue")
+        card = core.item_show(self.c, i)
+        self.assertEqual(card["decision"]["options"][0]["label"], "Blue")
+        self.assertIsNone(card["decision"]["question"])
+        # With no option and no words, nothing closes; an option alone is enough.
+        with self.assertRaisesRegex(RiverError, "pick an option"):
+            core.done(self.c, i, "", actor="mark", choice="")
+        res = core.done(self.c, i, None, actor="mark", choice="Red")
+        self.assertEqual((res["choice"], res["output"]), ("Red", "Red"))
+        note = self.c.execute("SELECT body FROM messages WHERE kind='notice' AND to_agent='w1' AND item_id=?",
+                              (self.x,)).fetchone()["body"]
+        self.assertIn("(choice: Red)", note)
+
+    def test_options_on_what_is_with_the_person_already(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="boss")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        self.assertEqual(core.item_show(self.c, i)["held_for"], "")  # the manager's own item: the person has it
+        with self.assertRaisesRegex(RiverError, "with the person already"):
+            core.forward(self.c, item=i, actor="boss")
+        got = core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Red", question="Color?")
+        self.assertEqual(got["decision"]["question"], "Color?")
+        with self.assertRaisesRegex(RiverError, "no open person item"):
+            core.forward(self.c, item=self.x, actor="boss", options=self.OPTS, recommend="Red")
+        # An item with no options closes with words only, as before; a choice there is refused.
+        j = core.item_add(self.c, "a", "Look at the page", doer="human", actor="boss")["id"]
+        with self.assertRaisesRegex(RiverError, "it has no options"):
+            core.done(self.c, j, None, actor="mark", choice="A")
+        self.assertEqual(core.done(self.c, j, "fine", actor="mark")["output"], "fine")
+
+
 class QuestionHold(Base):
     """#5307: mark, 2026-11-11: worker questions that he had settled opened 'Waits for you' on his page; 'these sorts
     of questions should not come to me or block waiting for me'. A question from a session to a person goes to the

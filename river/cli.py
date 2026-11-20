@@ -2511,6 +2511,8 @@ def build_parser(only=None):
     x.add_argument("--shot", action="append", metavar="FILE", help="a screenshot or short video of a visible change, "
                    "or canvas:<name> (repeatable; the file is kept beside the queue)")
     x.add_argument("--no-proof", metavar="WHY", help="the result has no commit or test: why (setting done_proof)")
+    x.add_argument("--choice", metavar="LABEL", help="a person's item with options (maxpm forward --option): the "
+                   "option chosen; --output adds words to it")
     x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
                        "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
     x.add_argument("--project", help="project name(s) to wait on (default: this folder's)")
@@ -2655,7 +2657,9 @@ def build_parser(only=None):
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does with it "
                    "(default: from its first word; a question: decide)")
-    x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
+    x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int)
+    x.add_argument("text", nargs="?", help="the answer (with --choice: words added to the chosen option)")
+    x.add_argument("--choice", metavar="LABEL", help="a question with options (maxpm forward --option): the option chosen")
     x.add_argument("--in-chat", action="store_true", help="you asked it, and the person answered in your own chat: "
                    "record their words as the answer and close the question")
     x.add_argument("--self", dest="self_answer", action="store_true", help="you asked it, and you have the answer "
@@ -2665,6 +2669,11 @@ def build_parser(only=None):
     x.add_argument("--item", type=int, help="a held person item (item id) instead of a message")
     x.add_argument("--drop", action="store_true", help="a held alert you dealt with yourself: close it, the person never sees it")
     x.add_argument("--note", help="what you add for the person (what you checked, your recommendation)")
+    x.add_argument("--option", action="append", default=[], metavar="LABEL: LINE",
+                   help="a choice for the person, a short label and one line on what it does (2 to 4 times); the page "
+                        "opens them as a dialog. Also on a question or item that is with the person already")
+    x.add_argument("--recommend", metavar="LABEL", help="the option you recommend (shown first); needed with --option")
+    x.add_argument("--question", help="your short question for the person (the asker's words stay on the card)")
     x = sub.add_parser("release-changes", help="a person says no to a release on its sign-off: the review runs again "
                                                "after a fix with these words (#6039)")
     x.add_argument("id", type=int, help="the 'Approve release' item")
@@ -5151,7 +5160,8 @@ def dispatch(conn, a, actor):
         shots = [s if s.startswith("canvas:") or os.path.isabs(os.path.expanduser(s)) else os.path.abspath(s)
                  for s in a.shot or ()]
         return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.force, a.changed,
-                         proof=dict(commits=a.commit, tests=a.test, result=a.result, shots=shots, none=a.no_proof))
+                         proof=dict(commits=a.commit, tests=a.test, result=a.result, shots=shots, none=a.no_proof),
+                         choice=a.choice)
     if c == "cleanup":
         if a.space or a.dry_run:  # the size limits (#5711)
             from . import space
@@ -5276,13 +5286,14 @@ def dispatch(conn, a, actor):
         return core.send(conn, a.kind, core.typed_body(a.text, a.atype, a.kind), a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
                          a.item, a.reply, actor, a.level, a.blocked, _artifact_args(a))
     if c == "answer":
-        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
+        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer, choice=a.choice)
     if c == "withdraw":
         return core.withdraw(conn, a.id, a.note, actor)
     if c == "release-changes":
         return core.release_changes(conn, a.id, a.note, actor)
     if c == "forward":
-        return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop)
+        return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop, options=a.option,
+                            recommend=a.recommend, question=a.question)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -9439,6 +9450,11 @@ def render(a, res):
               else "") + f"; sign-off #{res['dropped']} is dropped, and a new one comes after the review")
         return
     if c == "forward":
+        d = res.get("decision") or {}
+        if d.get("options"):
+            print("the person picks in a dialog: " + "; ".join(
+                o["label"] + (" (recommended)" if o["recommended"] else "") for o in d["options"])
+                + ", or writes an answer")
         if a.item is not None:
             print(f"#{res['id']} {res['title']} went on to the person: their Waits for you, needs-you and phone show it now")
         elif a.drop:

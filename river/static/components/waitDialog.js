@@ -191,7 +191,7 @@ function shown() {
   loadDiffs($("#waitList"));  // a commit's diff on a card (#5956)
   loadTryFrames($("#waitList"));  // the canvas of each try (#6040)
   dlg.open();
-  const first = $("#waitList").querySelector("input:checked, textarea");
+  const first = $("#waitList").querySelector(".acard-choice input, input:checked, textarea");  // the first option (#6413)
   if (first) first.focus();
 }
 
@@ -214,21 +214,26 @@ $("#waitList").addEventListener("submit", async (e) => {
   if (btn.disabled) return;
   btn.disabled = true;
   try {
+    // The option picked from the manager's escalation (#6413): it goes as a field, the box's words with it.
+    const picked = form.querySelector(".acard-choice input:checked");
+    const choice = picked ? picked.value : undefined;
     if (form.dataset.kind === "question") {
       const body = form.querySelector(".wanswer").value.trim();
-      if (!body) { toast("Write the answer first", true); return; }
+      if (!body && !choice) { toast(form.querySelector(".acard-choice") ? "Pick an option or write your answer" : "Write the answer first", true); return; }
+      const said = choice ? (body ? `${choice}: ${body}` : choice) : body;
       let typed = false;
       if (pane) {
-        try { const r = await typeAction("session_send", { agent, text: body }); typed = true; if (onSent) onSent(r.text, true); }
+        try { const r = await typeAction("session_send", { agent, text: said }); typed = true; if (onSent) onSent(r.text, true); }
         catch (err) { toast(`Not typed into the session (${err.message}); the queue still gets the answer`, true); }
       }
-      await act("answer", { msg: +form.dataset.id, body });
+      await act("answer", { msg: +form.dataset.id, body, choice });
       toast(typed ? "Sent to the chat, and the question is answered" : "Answered in the queue");
     } else if (form.dataset.kind === "item") {  // a person item: done, with what the person decided or did
       if (!actor()) { toast("Choose your name in 'You are' first", true); return; }
       const out = form.querySelector(".wanswer").value.trim();
-      await act("done", { id: +form.dataset.id, output: out || undefined });
-      toast(`#${form.dataset.id} is done`);
+      if (!out && !choice && form.querySelector(".acard-choice")) { toast("Pick an option or write your answer", true); return; }
+      await act("done", { id: +form.dataset.id, output: out || undefined, choice });
+      toast(`#${form.dataset.id} is done` + (choice ? `: ${choice}` : ""));
     } else if (form.dataset.kind === "ask") {  // the CLI's question dialog (#6234)
       const text = (form.querySelector(".wother") || {}).value || "";
       const own = form.querySelector('input[value="text"]');
@@ -263,8 +268,21 @@ $("#waitList").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
   finally { btn.disabled = false; }
 });
+// The keys of a card (#6413): the arrows move between its options (the browser's own radio group), Enter on an
+// option sends, and Cmd or Ctrl+Enter sends from the box. Esc closes the dialog (dialog.js).
+$("#waitList").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing) return;
+  const onPick = e.target.matches(".acard-choice input");
+  if (!onPick && !(e.target.matches(".wanswer") && (e.metaKey || e.ctrlKey))) return;
+  const form = e.target.closest("form"), go = form && form.querySelector(".wgo");
+  if (!go) return;
+  e.preventDefault();
+  if (onPick) e.target.checked = true;
+  form.requestSubmit(go);
+});
 $("#waitList").addEventListener("click", async (e) => {
   if (e.target.closest("[data-wnext]")) { qAt++; return showQueued(); }
+  if (e.target.closest("[data-wcancel]")) { dlg.close(); return; }
   const move = e.target.closest("[data-wtab], [data-wchat]");  // another question of the dialog, or Chat about this
   if (move) {
     const form = move.closest("form"), d = move.dataset;

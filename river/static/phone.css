@@ -101,6 +101,7 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   .wblock.acard { grid-template-columns: 1fr; }
   .acard-s { border-left: 0; padding-left: 0; border-top: var(--hair) solid var(--line); padding-top: var(--sp-3); }
   .acard-opts .acard-opt { min-height: 44px; }
+  .acard-choice { min-height: var(--tap); }
   /* The sheet of the tabs: each tab is a row of 48 px; the one on shows a mark at its left. */
   header nav { display: none; }
   header.tabs-open nav { display: flex; flex-direction: column; position: absolute; top: 100%; left: 0; right: 0; gap: 0; overflow-y: auto;

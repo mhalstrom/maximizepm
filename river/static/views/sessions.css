@@ -268,6 +268,12 @@ button.srow-it { cursor: pointer; }
 .acard-diff { max-height: 50vh; overflow: auto; font-size: var(--fs-xs); white-space: pre; margin: 0; }
 .acard-opts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .acard-opts .acard-opt { border: var(--hair) solid var(--line); }
+/* The options of the manager's escalation (#6413): one row each, the picked one outlined in the accent color. */
+.acard-choices { display: flex; flex-direction: column; gap: var(--sp-2); }
+.acard-choice { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); background: var(--panel); }
+.acard-choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 var(--hair) var(--accent); }
+.acard-choice:has(input:focus-visible) { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
+.acard-cd { display: block; margin-top: var(--sp-0); }
 .acard-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
 .acard-s { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); min-width: 0; font-size: var(--fs-s); }
 .acard-s h4 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--muted); margin: var(--sp-3) 0 var(--sp-2); }

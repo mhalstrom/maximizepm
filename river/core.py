@@ -821,6 +821,8 @@ CREATE TABLE IF NOT EXISTS items (
   held_at           TEXT,
   held_for          TEXT,  -- a person item (doer human) held for the active manager (#5311); NULL: not looked at yet; '': the person has it
   held_until        TEXT,  -- then it goes to the person by itself (question_hold)
+  decision          TEXT,  -- JSON: the manager's question and options when it forwarded the item (#6413)
+  choice            TEXT,  -- the label of the option that the person chose when it closed the item (#6413)
   replan            INTEGER NOT NULL DEFAULT 0,
   late_prereqs      INTEGER NOT NULL DEFAULT 0,
   due               TEXT,
@@ -1064,7 +1066,9 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered_via TEXT,  -- how: watch, wait, native, read (it was read before any delivery)
   shown_at      TEXT,  -- a blocked message to a manager: the last time a watch showed it (manage_rewake)
   answered_at   TEXT,  -- a blocked message: when the receiver answered it or acted on its item
-  session       TEXT   -- the agent CLI session of the command that sent it (RUN_SESSION, #5969)
+  session       TEXT,  -- the agent CLI session of the command that sent it (RUN_SESSION, #5969)
+  decision      TEXT,  -- a question: JSON, the manager's question and options when it forwarded it (#6413)
+  choice        TEXT   -- an answer: the label of the option that the person chose (#6413)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -2637,6 +2641,10 @@ def _migrate(conn):
         conn.execute("UPDATE items SET held_for='' WHERE doer='human'")
     if "held_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN held_at TEXT")
+    for t in ("items", "messages"):  # the options of an escalation, and the person's choice (#6413)
+        if "decision" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}:
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN decision TEXT")
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN choice TEXT")
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='aliases'").fetchone():
         conn.execute("DROP TABLE aliases")  # the old names of renamed projects and targets are gone (#810)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_steps'").fetchone():
@@ -16139,7 +16147,8 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     if sync:
         sync_needs_you_now(conn)
     sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body, "
-           "m.level message_level, m.blocked message_blocked "  # the card's level (#6002)
+           "m.level message_level, m.blocked message_blocked, "  # the card's level (#6002)
+           "CASE WHEN n.kind='item' THEN i.decision ELSE m.decision END decision "  # its options (#6413)
            "FROM needs_you n LEFT JOIN items i ON i.id=n.item_id LEFT JOIN projects p ON p.id=i.project_id "
            "LEFT JOIN messages m ON m.id=n.message_id WHERE 1=1")
     args = []
@@ -16148,7 +16157,7 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     if human is not None:
         sql += " AND (n.human IS NULL OR n.human=?)"
         args.append(human)
-    rows = [dict(r) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
+    rows = [dict(r, decision=decision_of(r)) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
     sets = _action_types(conn)
     for r in rows:  # its type (#5998); atype keeps one type
         r["type"] = (item_action_type(conn, r["item_id"], r["item_title"], r["project"], sets) if r["kind"] == "item"
@@ -17140,7 +17149,8 @@ def _already_closed(conn, it):
     return f"#{it['id']} is {st} already: {detail}" if (who or when) else f"#{it['id']} is {st} already"
 
 
-def _close(conn, item_id, status, actor, output=None, note=None, force=None):
+def _close(conn, item_id, status, actor, output=None, note=None, force=None, choice=None):
+    # choice: the option of the item's decision that the person chose (#6413); the notices say it as a field.
     # The close check (_close_check) weighs words by the queue's word table. It is read here, before the write lock:
     # after an edit of a title it counts the words of every work item again, 0.27 s on 5,600 items (#5419).
     _df(conn)
@@ -17171,6 +17181,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
                      "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
                      "WHERE id=?", (status, iso(now()), output, it["id"]))
+        if choice is not None:
+            conn.execute("UPDATE items SET choice=? WHERE id=?", (choice, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
         unneeded = _close_check(conn, it, status, output, note) if it["kind"] == "work" else []
         if it["kind"] == "deploy":
@@ -17211,10 +17223,12 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
                 if it["doer"] == "human":
                     for d in newly:
                         _want_fresh(conn, d, f"[#{it['id']} {it['title']}: {status} by {actor or 'a person'}]"
-                                    + (f" {output}" if output else "") + (f" ({note})" if note else ""))
+                                    + (f" {output}" if output else "") + (f" ({note})" if note else "")
+                                    + (f"\n[choice] {choice}" if choice else ""))
                 for d in held:
                     left_ = ann[d]["open_blockers"]
                     _send(conn, "notice", "maxpm", f"#{it['id']} {it['title']} is {status}"
+                          + (f" (choice: {choice})" if choice else "")
                           + (f" (output: {output})" if output else "") + f"; your #{d} waits on it. "
                           + (f"Still open before #{d}: " + ", ".join(f"#{x}" for x in left_) if left_
                              else (f"Nothing is left before #{d}; it is in progress again" if d in resumed
@@ -17520,14 +17534,20 @@ def done_proof(conn, item_id, actor, commits=None, tests=None, result=None, shot
     return (keep or None), (missing if mode != "off" else [])
 
 
-def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None, proof=None):
+def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None, proof=None,
+         choice=None):
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
     checked before the close. proof: the arguments of done_proof (#5988; the CLI passes them, a person's page
-    close does not)."""
+    close does not). choice (#6413): a person's item with a decision (maxpm forward --item --option): the label
+    the person picked; output is then the person's added words, or empty."""
     it = _item(conn, item_id)
     if it["status"] in CLOSED_STATES:
         raise RiverError(_already_closed(conn, it))
+    if choice is not None:
+        if it["doer"] != "human":
+            raise RiverError(f"#{item_id} is no person's item; --choice is a person's pick of its options")
+        choice, output = decision_choice(decision_of(it), choice, output)
     changed = check_changed(changed) if changed else None
     proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
@@ -17539,7 +17559,7 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
     if why:
         raise RiverError(why)
     pick = _tries_choice(conn, it, output)  # a Look card of tries names the one to keep (#5996)
-    res = _close(conn, item_id, "done", actor, output, note, force)
+    res = _close(conn, item_id, "done", actor, output, note, force, choice)
     if pick:
         res["merge_task"] = _tries_picked(conn, res, *pick, actor)
     if changed:
@@ -19203,6 +19223,8 @@ def item_show(conn, item_id, ann=None):
     if a["doer"] == "human":
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
         a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
+        row = conn.execute("SELECT decision, choice FROM items WHERE id=?", (iid,)).fetchone()
+        a["decision"], a["choice"] = decision_of(row), row["choice"]  # the manager's options (#6413)
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
             a["tries"] = [{"k": k, **t, "canvases": try_canvases(conn, t)}
                           for k, t in sorted(tries_of(conn, iid).items())]
@@ -19292,6 +19314,8 @@ def _msg_dict(r):
     m["level_set"] = bool(m.get("level"))  # the sender gave it
     m["level"] = m.get("level") or DEFAULT_LEVEL
     m["delivery"] = delivery_text(m)  # for the sender: delivered, read, answered (#5685); the page shows it
+    if "decision" in m:
+        m["decision"] = decision_of(r)  # the manager's options for the person (#6413)
     return m
 
 
@@ -19523,7 +19547,9 @@ def _hold_question(conn, mid):
     else:
         body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
-                f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
+                f"maxpm answer {mid} \"...\". Else send it on to {person} with 2 to 4 options, your pick first: "
+                f"maxpm forward {mid} --question \"<one short sentence>\" --option \"<label>: <one line>\" --option ... "
+                f"--recommend <label> [--note \"<what you add>\"]. "
                 f"With neither within {hold} (question_hold), {person} gets it.")
     body += _earlier_note(conn, "message", mid)
     alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
@@ -19601,11 +19627,108 @@ def _release_held(conn):
             _unhold_item(conn, it, why)
 
 
-def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
+# The options of an escalation (#6413, mark 2026-11-20: 'a dialog modal with selectable options with a final text
+# area option ... the dialog is when the manager escalates the question to me'). The manager forwards a question or a
+# person item with its own short question and 2 to 4 options; the page opens them as a dialog, and the person's
+# choice comes back as a field (messages.choice of the answer, items.choice), not as text to parse.
+DECISION_OPTIONS = (2, 4)
+DECISION_LABEL_MAX, DECISION_DETAIL_MAX, DECISION_QUESTION_MAX = 60, 200, 300
+DECISION_HELP = ("--option \"<label>: <one line: what happens>\" (2 to 4 times) --recommend <label> "
+                 "[--question \"<your short question>\"]")
+
+
+def decision_parse(options=(), recommend=None, question=None):
+    """The decision of an escalation from the manager's words -> {"question", "options": [{label, detail,
+    recommended}]} with the recommended option first, or None when there are no options and no question. options:
+    "<label>: <one line>" strings (the CLI) or {label, detail} dicts (MCP, the page). recommend: a label or its
+    number (1-based)."""
+    question = " ".join((question or "").split()) or None
+    if question and len(question) > DECISION_QUESTION_MAX:
+        raise RiverError(f"the question is at most {DECISION_QUESTION_MAX} characters: one short sentence; the asker's "
+                         f"own words stay on the card")
+    opts = []
+    for o in options or ():
+        if isinstance(o, dict):
+            label, detail = str(o.get("label") or "").strip(), " ".join(str(o.get("detail") or "").split())
+        else:
+            label, _, detail = str(o).partition(":")
+            label, detail = label.strip(), " ".join(detail.split())
+        if not label or not detail:
+            raise RiverError(f"each option is a short label and one line on what it does: {DECISION_HELP}")
+        if len(label) > DECISION_LABEL_MAX or len(detail) > DECISION_DETAIL_MAX:
+            raise RiverError(f"an option's label is at most {DECISION_LABEL_MAX} characters and its line at most "
+                             f"{DECISION_DETAIL_MAX}: {label[:40]!r}")
+        if any(x["label"].lower() == label.lower() for x in opts):
+            raise RiverError(f"two options have the label {label!r}; give each its own")
+        opts.append({"label": label, "detail": detail, "recommended": False})
+    if not opts:
+        if recommend is not None:
+            raise RiverError(f"--recommend names one of the options: {DECISION_HELP}")
+        return {"question": question, "options": []} if question else None
+    lo, hi = DECISION_OPTIONS
+    if not lo <= len(opts) <= hi:
+        raise RiverError(f"give {lo} to {hi} options, not {len(opts)}; with none, the person writes the answer: "
+                         f"{DECISION_HELP}")
+    if recommend is None or not str(recommend).strip():
+        raise RiverError(f"name the option you recommend: --recommend <label> ({DECISION_HELP})")
+    r = str(recommend).strip()
+    pick = opts[int(r) - 1] if r.isdigit() and 1 <= int(r) <= len(opts) else next(
+        (x for x in opts if x["label"].lower() == r.lower()), None)
+    if pick is None:
+        raise RiverError(f"--recommend {r!r} is no option; the labels: {', '.join(x['label'] for x in opts)}")
+    pick["recommended"] = True
+    opts.remove(pick)
+    return {"question": question, "options": [pick] + opts}
+
+
+def decision_of(row):
+    """The decision stored on a message or an item row (decision_parse's form), or None."""
+    raw = row["decision"] if row is not None and "decision" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def decision_choice(decision, choice, text=None):
+    """The person's answer to a decision: (the chosen label as stored, the answer text). choice: a label of its
+    options (any case) or None; text: the person's own words. The text says the choice first, so a reader of the
+    plain text has it too; the label is the field (#6413)."""
+    text = (text or "").strip()
+    if choice is None or not str(choice).strip():
+        if not text:
+            raise RiverError("pick an option or write your answer")
+        return None, text
+    labels = [o["label"] for o in (decision or {}).get("options") or []]
+    got = next((x for x in labels if x.lower() == str(choice).strip().lower()), None)
+    if got is None:
+        raise RiverError(f"{choice!r} is no option of this decision" + (f"; the options: {', '.join(labels)}"
+                                                                         if labels else "; it has no options"))
+    return got, f"{got}: {text}" if text else got
+
+
+def _set_decision(conn, table, row_id, decision, actor):
+    """Inside a tx: store the manager's decision on a question or an item, and say so in the item's history."""
+    conn.execute(f"UPDATE {table} SET decision=? WHERE id=?", (json.dumps(decision), row_id))
+    item = row_id if table == "items" else conn.execute("SELECT item_id FROM messages WHERE id=?",
+                                                        (row_id,)).fetchone()[0]
+    if item is not None:
+        opts = decision["options"]
+        _event(conn, item, actor, f"decision for the person{f' on question #{row_id}' if table == 'messages' else ''}"
+               + (f": {decision['question']}" if decision.get("question") else "")
+               + (f" (options: {', '.join(o['label'] for o in opts)}; recommended {opts[0]['label']})" if opts else ""))
+
+
+def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, options=(), recommend=None,
+            question=None):
     """maxpm forward <id> [--note] | forward --item <id>: the manager sends a question or alert that it held (#5307,
     #5311), or a person item that it held, on to the person, who then sees it (Waits for you, needs-you, phone).
     note: what the manager adds for the person, a note in the thread. drop: an alert that the manager dealt with
-    itself is closed, and the person never sees it."""
+    itself is closed, and the person never sees it. options, recommend, question (#6413): the decision the person
+    makes, which the page opens as a dialog (decision_parse); on a question or item that is with the person
+    already, they only set the decision."""
     if not actor:
         raise RiverError("forward needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if (msg_id is None) == (item is None):
@@ -19614,10 +19737,21 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
     if not (_is_manager(conn, actor) or _is_person(conn, actor)):
         raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
     note = note.strip() if note and note.strip() else None
+    decision = decision_parse(options, recommend, question)
+    if decision and drop:
+        raise RiverError("--drop closes the alert; options are for what the person decides")
     with tx(conn):
         if item is not None:
             it = _item(conn, item)
+            if decision:
+                if it["doer"] != "human" or it["status"] not in OPEN_STATES:
+                    raise RiverError(f"#{item} is no open person item; options are for a person's decision")
+                _set_decision(conn, "items", it["id"], decision, actor)
             if not it["held_for"]:
+                if decision:
+                    if note:
+                        _event(conn, item, actor, f"note for the person: {note}")
+                    return item_show(conn, item)
                 raise RiverError(f"#{item} is with the person already; nothing to forward")
             if drop:
                 raise RiverError(f"close #{item} with: maxpm done {item} --note \"<what you did>\" (or drop)")
@@ -19628,7 +19762,15 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
         q = _message(conn, msg_id)
         if q["kind"] not in ("question", "alert") or (q["kind"] == "question" and q["state"] != "open"):
             raise RiverError(f"message {msg_id} is no open question or alert; see: maxpm thread {msg_id}")
+        if decision:
+            if q["kind"] != "question":
+                raise RiverError(f"message {msg_id} is an alert; options are for a question to a person")
+            _set_decision(conn, "messages", q["id"], decision, actor)
         if not q["held_for"]:
+            if decision:
+                if note:
+                    _send(conn, "note", actor, note, to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+                return message_show(conn, msg_id)
             raise RiverError(f"{q['kind']} {msg_id} is with {q['to_agent'] or 'its holder'} already; nothing to forward")
         if drop:
             if q["kind"] != "alert":
@@ -19688,16 +19830,21 @@ def _hold_items(conn, ann):
         body = (f"Person item #{a['id']} [{a['project']}] {a['title']} is ready; it waits on a person. It comes to you "
                 f"first; the person does not see it yet. Do it when the person is not needed: maxpm done {a['id']} "
                 f"--note \"<what you did>\" (or drop). Else send it on: maxpm forward --item {a['id']} "
-                f"[--note \"<what you add>\"]. With neither within {hold} (question_hold), the person gets it.")
+                f"[--note \"<what you add>\"]; a decision with 2 to 4 options, your pick first: --question \"<one "
+                f"short sentence>\" --option \"<label>: <one line>\" --option ... --recommend <label>. With neither "
+                f"within {hold} (question_hold), the person gets it.")
         body += _earlier_note(conn, "item", a["id"])
         _send(conn, "alert", "maxpm", body, to=boss, item_id=a["id"], blocked="sender")
         _event(conn, a["id"], "maxpm", f"held for the manager {boss} ({hold}): it does the item or forwards it")
 
 
-def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
+def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False, choice=None):
     """Answer a question: the answer goes to the asker and the question closes. in_chat (#4995) or self_answer
     (#5001): the asker records the answer that it has from its own chat or from any other channel; the answer is in
-    the name of the person asked, and is not delivered again (the asker has it)."""
+    the name of the person asked, and is not delivered again (the asker has it). choice (#6413): the label of an
+    option of the question's decision (maxpm forward --option); body is then the person's added words, or empty."""
+    if choice is not None and (in_chat or self_answer):
+        raise RiverError("--choice is the person's pick in the dialog; with --self or --in-chat write their words")
     if in_chat or self_answer:
         if not actor:
             raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
@@ -19714,10 +19861,11 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         return message_show(conn, mid)
     if not actor:
         raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
-    if not body or not body.strip():
+    if choice is None and (not body or not body.strip()):
         raise RiverError("an answer needs text")
     with tx(conn):
         q = _message(conn, msg_id)
+        choice, body = decision_choice(decision_of(q), choice, body) if choice is not None else (None, body)
         if q["kind"] != "question":
             raise RiverError(f"message {msg_id} is {'an' if q['kind'][0] in 'aeiou' else 'a'} {q['kind']}, not a question; "
                              f"reply with: maxpm send note --reply {msg_id} \"...\"")
@@ -19733,6 +19881,8 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         for_person = answered_for(conn, q, actor)
         _unhold_question(conn, q)
         mid = _send(conn, "answer", actor, body.strip(), to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
+        if choice is not None:
+            conn.execute("UPDATE messages SET choice=? WHERE id=?", (choice, mid))
         conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?), "
                      "to_agent=COALESCE(to_agent, ?) WHERE id=?", (t, t, actor, q["id"]))
         if q["item_id"] is not None:
@@ -19745,9 +19895,9 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
             # leaves a held item alone.
             _answer_unblocks(conn, q)
             _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
-                        f"[answer from {actor}] {body.strip()}")
+                        f"[answer from {actor}] {body.strip()}" + (f"\n[choice] {choice}" if choice else ""))
     if waits:
-        _deliver_answer(conn, q, mid, actor, body.strip(), for_person)
+        _deliver_answer(conn, q, mid, actor, body.strip(), for_person, choice)
     return message_show(conn, mid)
 
 
@@ -19762,24 +19912,25 @@ def answered_for(conn, q, sender):
     return to if to and to != sender and _is_person(conn, to) and not _is_person(conn, sender) else None
 
 
-def answer_text(q, sender, body, for_person=None):
+def answer_text(q, sender, body, for_person=None, choice=None):
     """The answer as the asker reads it in its session (#5303): it starts with '[maxpm ', so the asker's prompt hook
     (_talk) does not take it for a person's answer to its other open questions. for_person: the manager answered a
-    question to that person (#5307)."""
+    question to that person (#5307). choice: the option the person picked in the dialog (#6413), as its own line."""
     item = f" (#{q['item_id']})" if q["item_id"] is not None else ""
     by = f"{sender} for {for_person}" if for_person else sender
     return (f"[maxpm answer from {by} to your question #{q['id']}{item}] {body}\n"
-            f"Your question was: {' '.join(q['body'].split())[:300]}")
+            + (f"choice: {choice}\n" if choice else "")
+            + f"Your question was: {' '.join(q['body'].split())[:300]}")
 
 
-def _deliver_answer(conn, q, mid, sender, body, for_person=None):
+def _deliver_answer(conn, q, mid, sender, body, for_person=None, choice=None):
     """An answer to a question whose asker waits at its prompt (waits_on_person) goes into its session, as an alert
     does (#5303): the asker ran maxpm ask and ended its turn, so no maxpm command of its own reads the answer. The
     manager answered markhalstrom-site-3a49's question with maxpm answer, and the session sat at its prompt for an
     hour until the manager typed the answer into its tmux pane by hand. Through the platform's native_message when
     the asker has one; else maxpm serve types it into the asker's tmux pane when its idle prompt shows
     (server.paste_answers). An asker in no pane gets it in a fresh session (fresh_sessions), as other news."""
-    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person))
+    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person, choice))
     how = "sent into its session" if st == "sent" else (
         ("" if st.startswith("no native channel") else f"native {st}; ") + "maxpm serve types it into its pane")
     sent = st == "sent"

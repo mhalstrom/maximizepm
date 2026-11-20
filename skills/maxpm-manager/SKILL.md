@@ -266,8 +266,12 @@ ends the session, and tell the user.
   thread shows your answer for the user, who can read it later. Send it on
   when only the user can decide (a release to production, a deletion of data,
   money, public text, a choice the user did not make yet):
-  `maxpm forward <id> --note "<what you checked, your recommendation>"`. The
-  user then sees it in 'Waits for you', needs-you, and on the phone. With
+  `maxpm forward <id> --question "<one short sentence>" --option "<label>:
+  <one line: what happens>" --option ... --recommend <label> --note "<what you
+  checked>"`. Give 2 to 4 options for every decision; your pick shows first.
+  The page opens it for the user as a dialog: the options to pick and a box
+  for other words. The pick reaches the asker as a field (`choice`). The
+  user also sees it in 'Waits for you', needs-you, and on the phone. With
   neither within `question_hold` (10m), the user gets it.
 - **An alert held for you** (a session sent the user `maxpm alert`; it comes
   to you first, like a question): do what it asks when you can, and close it:
@@ -279,9 +283,11 @@ ends the session, and tell the user.
   with the reason: `maxpm done <id> --note "<what you did>"` (or `drop`).
   Before you relay a "Look at" item, check what the session made
   (`maxpm artifacts --item <found-during>`). Send it on when only the user can
-  do it: `maxpm forward --item <id> --note "<what you checked>"`. With
+  do it: `maxpm forward --item <id> --note "<what you checked>"`; a decision
+  takes the same `--question`, `--option` and `--recommend`. With
   nothing within `question_hold` (10m), the user gets it. Items that the user,
-  you, or MaximizePM added go to the user at once.
+  you, or MaximizePM added go to the user at once; give such a decision its
+  options with the same `maxpm forward --item <id> --option ...`.
 - **QUESTION** to the user (one you forwarded, or one that `question_hold`
   sent on) or **WAITS ON THE USER**: tell the user in chat, one decision at a
   time (`maxpm guide decisions`). Do not answer for them.
