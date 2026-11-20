@@ -325,6 +325,26 @@ def open_tab(url, window=None):
     return _cm()
 
 
+_REAL_SLEEP = __import__("time").sleep
+
+
+def own_sleep(record):
+    """A fake time.sleep for mock.patch.object(server.time, "sleep", ...): record(seconds) for the sleeps of the
+    test's own thread, a real sleep for every other thread. The patch replaces time.sleep for the whole process: a
+    fake that only recorded put the sleeps of a background thread of an earlier test in the test's list, and that
+    thread no longer slept, so it filled the list (#6495: ['sleep', 'sleep', 'sleep'] in the full run of release
+    v1.5.0)."""
+    import threading
+    me = threading.get_ident()
+
+    def sleep(seconds):
+        if threading.get_ident() == me:
+            record(seconds)
+        else:
+            _REAL_SLEEP(seconds)
+    return sleep
+
+
 def proc_after_exec(pid, want, wait=5.0):
     """core.proc_info(pid) once the new child's command line shows `want` (the program it starts) and stays the same
     for 0.2 s, at most wait seconds (#5295). ps right after Popen can find the child before its exec (the test

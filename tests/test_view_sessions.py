@@ -921,7 +921,8 @@ class Waiting(TmuxBase):
         self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
         self.pane["keys"].clear()
         from unittest import mock
-        with mock.patch.object(server.time, "sleep", lambda s: self.tmux.calls.append(["sleep"])):
+        from tests import own_sleep
+        with mock.patch.object(server.time, "sleep", own_sleep(lambda s: self.tmux.calls.append(["sleep"]))):
             r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"},
                                             "mark")
         self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])

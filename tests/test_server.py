@@ -17,7 +17,7 @@ from unittest import mock
 
 from river import core, server
 from river.core import RiverError
-from tests import timing
+from tests import own_sleep, timing
 
 
 def _codex():
@@ -323,7 +323,7 @@ class LaunchAgent(unittest.TestCase):
         said, naps = io.StringIO(), []
         busy = ["the deploy hook of target web (since 01:00)", None]
         with mock.patch.object(server, "restart_blocked", lambda c: busy.pop(0)), \
-                mock.patch.object(server.time, "sleep", naps.append), contextlib.redirect_stdout(said):
+                mock.patch.object(server.time, "sleep", own_sleep(naps.append)), contextlib.redirect_stdout(said):
             server._restart_wait("restart asked")
         self.assertEqual(naps, [5])
         self.assertIn("restart asked: the restart waits until this ends: the deploy hook of target web", said.getvalue())
