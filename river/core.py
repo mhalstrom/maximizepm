@@ -21542,11 +21542,34 @@ def model_name_of(models, value):
 PLATFORM = sys.platform
 
 
+# The tmux server of the app's own tmux (tmux -L): its sessions stay apart from the person's own tmux, and a tmux of
+# another version (Homebrew's) never talks to its server (#6237).
+TMUX_SOCKET = "maximizepm"
+
+
+def bundled_tmux():
+    """The tmux that the desktop app carries (river-app/tmux/bin/tmux, desktop/scripts/build-tmux.js), or None (#6237).
+    The app names its folder (MAXPM_APP_BUNDLE); the maxpm launcher runs the app's Python (river-app/python/bin), also
+    for a newer version of the code in the app's folder; a copy of the code in the bundle has it beside river/."""
+    roots = [Path(os.environ["MAXPM_APP_BUNDLE"])] if os.environ.get("MAXPM_APP_BUNDLE") else []
+    exe = Path(sys.executable)
+    if exe.parent.name == "bin" and exe.parent.parent.name == "python":
+        roots.append(exe.parent.parent.parent)
+    roots.append(Path(__file__).resolve().parent.parent)
+    return next((str(p) for p in (r / "tmux" / "bin" / "tmux" for r in roots) if os.access(p, os.X_OK)), None)
+
+
 def tmux_path():
-    """The tmux program, or None when it is not installed: on PATH, else where Homebrew or MacPorts put it
-    (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
-    return shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux",
-                                                     "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+    """The tmux program, or None when it is not installed: the app's own tmux first, then on PATH, else where
+    Homebrew or MacPorts put it (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
+    return bundled_tmux() or shutil.which("tmux") or next(
+        (p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+
+
+def brew_path():
+    """Homebrew's brew, or None: where its installer puts it (the app's PATH is short)."""
+    return shutil.which("brew") or next((p for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+                                         if os.access(p, os.X_OK)), None)
 
 
 def is_wsl():

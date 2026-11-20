@@ -58,6 +58,7 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
     if _name:
         os.environ.pop(_name, None)
 
+REAL_TMUX_PATH = core.tmux_path  # for the test of the lookup itself, with a fake app folder (#6237)
 core.tmux_path = lambda: None
 # The tests never probe the network (#6099): this computer is online for every test, offline or in a sandbox. A test
 # of an outage sets core.NET_PROBE itself.

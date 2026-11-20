@@ -4471,6 +4471,62 @@ class SetupGuide(unittest.TestCase):
         self.assertIn("No tabs.", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
+    def test_the_apps_own_tmux_comes_first_and_runs_its_own_server(self):
+        """#6237: the app carries tmux in river-app/tmux/bin; MaximizePM uses it before any other, and every tmux
+        command for it names the server maximizepm (-L), so the person's own tmux stays apart. With no app tmux, the
+        command line is the tmux found, as before."""
+        from tests import REAL_TMUX_PATH
+        bundle = os.path.join(self.dir.name, "river-app")
+        exe = os.path.join(bundle, "tmux", "bin", "tmux")
+        os.makedirs(os.path.dirname(exe))
+        Path(exe).write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(exe, 0o755)
+        old = core.tmux_path
+        self.addCleanup(setattr, core, "tmux_path", old)
+        os.environ["MAXPM_APP_BUNDLE"] = bundle
+        self.addCleanup(os.environ.pop, "MAXPM_APP_BUNDLE", None)
+        self.assertEqual(core.bundled_tmux(), exe)
+        core.tmux_path = REAL_TMUX_PATH
+        self.assertEqual(core.tmux_path(), exe)
+        self.assertEqual(server._tmux_cmd(), [exe, "-L", "maximizepm"])
+        self.assertEqual(server.tmux_line(), f"{exe} -L maximizepm")
+        os.environ.pop("MAXPM_APP_BUNDLE")
+        core.tmux_path = lambda: "/opt/homebrew/bin/tmux"
+        self.assertIsNone(core.bundled_tmux())
+        self.assertEqual(server._tmux_cmd(), ["/opt/homebrew/bin/tmux"])
+
+    def test_install_tmux_is_one_click_on_a_mac_and_a_command_on_linux(self):
+        """#6237: without the app's tmux and with no tmux, the setup guide has the step Install tmux. On a Mac a
+        Terminal window runs brew install tmux, after Homebrew's own installer when brew is missing; Linux gets the
+        command, which needs sudo. With tmux there is no step."""
+        scripts = []
+        old = (server.INSTALL_RUNNER, core.PLATFORM, core.brew_path)
+        self.addCleanup(lambda: (setattr(server, "INSTALL_RUNNER", old[0]), setattr(core, "PLATFORM", old[1]),
+                                 setattr(core, "brew_path", old[2])))
+        server.INSTALL_RUNNER = scripts.append
+        core.PLATFORM = "darwin"
+        core.brew_path = lambda: "/opt/homebrew/bin/brew"
+        st = server.setup_status(self.c)
+        self.assertEqual((st["tmux"], st["tmux_click"], st["brew"]), (False, True, True))
+        r = server.OPS["setup_tmux"](self.c, {}, "mark")
+        self.assertEqual((r["opened"], r["homebrew_first"]), (True, False))
+        self.assertIn('"$BREW" install tmux', scripts[-1])
+        self.assertNotIn(server.HOMEBREW_INSTALLER, scripts[-1])
+        core.brew_path = lambda: None
+        r = server.install_tmux()
+        self.assertTrue(r["homebrew_first"])
+        self.assertIn(server.HOMEBREW_INSTALLER, scripts[-1])
+        self.assertLess(scripts[-1].index(server.HOMEBREW_INSTALLER), scripts[-1].index("install tmux ||"))
+        core.PLATFORM = "linux"
+        self.assertFalse(server.setup_status(self.c)["tmux_click"])
+        self.assertIn("apt install tmux", server.install_tmux()["command"])
+        self.assertEqual(len(scripts), 2)
+        old_path = core.tmux_path
+        self.addCleanup(setattr, core, "tmux_path", old_path)
+        core.tmux_path = lambda: "/usr/bin/tmux"
+        self.assertTrue(server.setup_status(self.c)["tmux"])
+        self.assertEqual(server.install_tmux(), {"note": "tmux is installed already"})
+
     def test_a_new_folder_is_made_after_the_person_says_create(self):
         """#6236: a folder that does not exist is a question, not an error; Create (create=True) makes it with its
         missing parents and adds it as any folder. A folder of the system or one under a parent this user cannot

@@ -98,7 +98,7 @@ def start(agent):
         last = " ".join(text.split())[-300:]
         raise RiverError(f"{a['name']} showed no sign-in link in {int(WAIT)} seconds"
                          + (f" (its screen: {last})" if last else "")
-                         + f"; look at it: tmux attach -t {server.TMUX_SESSION}, window signin-{agent}")
+                         + f"; look at it: {server.tmux_line()} attach -t {server.TMUX_SESSION}, window signin-{agent}")
     res = {"agent": agent, "signed_in": False, "url": url, "paste": a["paste"]}
     if a["paste"]:
         res["next"] = f"open the link, sign in, and give the code it shows: maxpm agent-login {agent} --code <code>"

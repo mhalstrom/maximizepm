@@ -949,12 +949,21 @@ EXIT_MARK = "@maxpm_exit"
 
 
 def _tmux_cmd():
-    """The tmux command line, or None when tmux is not installed."""
+    """The tmux command line, or None when tmux is not installed. The app's own tmux runs its own server
+    (-L maximizepm, #6237): every command (start, capture, keys, view, the Terminal tab) goes through here."""
     import shutil
     if TMUX_CMD:
         return TMUX_CMD if shutil.which(TMUX_CMD[0]) else None
     exe = core.tmux_path()
-    return [exe] if exe else None
+    if not exe:
+        return None
+    return [exe, "-L", core.TMUX_SOCKET] if exe == core.bundled_tmux() else [exe]
+
+
+def tmux_line():
+    """The tmux command as a person types it in a terminal (the app's own tmux: its path and server)."""
+    import shlex
+    return " ".join(shlex.quote(w) for w in (_tmux_cmd() or ["tmux"]))
 
 
 def _tmux(*args, check=True):
@@ -5478,6 +5487,9 @@ def setup_status(conn):
         "launch_agents": [label for label, _ in agents],
         "tmux": core.can_start_agents(),  # every agent starts in tmux
         "tmux_install": core.tmux_install(),
+        # Install tmux (#6237): one click on a Mac (Homebrew, or its installer first); on Linux the command to run.
+        "tmux_click": core.PLATFORM == "darwin",
+        "brew": bool(core.brew_path()),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
         "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have or exe in have,
@@ -5544,6 +5556,49 @@ def folder_add(conn, path, name=None, description="", move=None, actor=None, cre
     lines += setup_instructions(folder, move)
     return {"project": name or linked_here[0], "path": str(folder), "lines": lines,
             "layout": instructions_layout(folder), "default_name": folder_project_name(folder)}
+
+
+# Install tmux from the setup guide (#6237): tests set it to a function that gets the script instead of a Terminal window.
+INSTALL_RUNNER = None
+HOMEBREW_INSTALLER = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
+
+def install_tmux():
+    """Install tmux with one click, for an install without the app (the app carries its own tmux). On a Mac a Terminal
+    window runs brew install tmux; with no Homebrew it runs Homebrew's own installer first, and the person types their
+    password there. Linux: the command to run, since it needs sudo."""
+    import shlex
+    import subprocess
+    import tempfile
+    if core.tmux_path():
+        return {"note": "tmux is installed already"}
+    if core.PLATFORM != "darwin":
+        return {"command": core.tmux_install(), "note": f"Run in a terminal: {core.tmux_install()}"}
+    brew = core.brew_path()
+    lines = ["#!/bin/bash", 'rm -f "$0"', "echo 'MaximizePM installs tmux: every agent session runs in it.'"]
+    if brew:
+        lines.append(f"BREW={shlex.quote(brew)}")
+    else:
+        lines += ["echo 'First Homebrew, the installer of command line programs (brew.sh). It asks for your Mac password.'",
+                  f'/bin/bash -c "$(curl -fsSL {HOMEBREW_INSTALLER})" || exit 1',
+                  'for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$b" ] && BREW=$b; done']
+    lines += ['"$BREW" install tmux || exit 1',
+              "echo; echo 'tmux is installed. Go back to MaximizePM: the setup guide shows it.'"]
+    text = "\n".join(lines) + "\n"
+    if INSTALL_RUNNER:
+        INSTALL_RUNNER(text)
+    else:
+        fd, path = tempfile.mkstemp(prefix="maxpm-install-tmux-", suffix=".command")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(path, 0o700)
+        try:
+            subprocess.run(["open", "-a", "Terminal", path], check=True, capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as e:
+            os.unlink(path)
+            raise RiverError(f"MaximizePM could not open Terminal ({e}); run in a terminal: {core.tmux_install()}")
+    return {"opened": True, "homebrew_first": not brew,
+            "note": "A Terminal window installs tmux" + ("" if brew else ", after Homebrew (type your Mac password there)")}
 
 
 # The maxpm command for agents: a small launcher in ~/.local/bin that runs this MaximizePM with this Python, so an
@@ -5820,6 +5875,7 @@ OPS = {
     "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
     "setup_block": lambda c, a, who: setup_block(c, a["path"], a.get("move")),
     "setup_maxpm_cmd": lambda c, a, who: install_command(),
+    "setup_tmux": lambda c, a, who: install_tmux(),
     "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who,
                                                    bool(a.get("create"))),
     "setup_skills": lambda c, a, who: setup_skills(),

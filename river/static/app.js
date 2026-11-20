@@ -695,6 +695,14 @@ function renderSetup(st) {
       : rc.launcher === "old" ? "The maxpm command still points at an older copy of MaximizePM. Update it to this one."
       : "The agents you start talk to MaximizePM with a small command, maxpm. One click adds it to this Mac.",
     rc.in_app_image ? "" : `<button class="btn primary" data-su="maxpmcmd">${rc.launcher === "old" ? "Update" : "Add"} the maxpm command</button>`));
+  // Every agent session runs in tmux (#6237). The app carries its own, so this step shows only for an install
+  // without the app and no tmux: one click on a Mac (Homebrew, or its installer first), the command on Linux.
+  if (!st.tmux) out.push(step(false, "Install tmux",
+    !st.tmux_click ? `Every agent session runs in tmux. Run this in a terminal, then check again: <code>${esc(st.tmux_install)}</code>`
+      : st.brew ? "Every agent session runs in tmux, a program for terminals. One click installs it with Homebrew, in a Terminal window."
+      : "Every agent session runs in tmux, a program for terminals. One click opens a Terminal window that installs Homebrew first (type your Mac password there), then tmux.",
+    (st.tmux_click ? `<button class="btn primary" data-su="tmux">Install tmux</button>` : "")
+      + `<button class="btn" data-su="recheck">Check again</button>`));
   // One instructions file for every agent: AGENTS.md holds the rules; an old CLAUDE.md gives its rules to it (#6024).
   const blocks = st.folders.filter(f => f.exists && (f.agents_md !== "current" || (f.empty_old || []).length));
   const layouts = { claude_only: "its CLAUDE.md has rules that Codex and other agents don't read",
@@ -857,6 +865,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
     }
     else if (k === "relay") await connectRelay();
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
+    else if (k === "tmux") { const r = await act("setup_tmux", {}); toast(r.note || "A Terminal window installs tmux"); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
     else if (k === "ntfy") {
       const r = await act("setup_ntfy", {});
