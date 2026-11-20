@@ -110,13 +110,15 @@ item), so a link, a reload, and Back show the same view.
 
 ![The Sessions tab: an agent's chat, with a file it wrote open in the side panel](site/img/sessions-light.png)
 
-When the open session comes to a permission prompt or asks you a question, the
-! dialog opens by itself. You pick an answer, or tell the agent what to do
-instead. For a session that runs in a tmux pane (every session MaximizePM
+When a session comes to a permission prompt or asks you a question, its row
+gets a ! badge, and the question shows in a panel above that session's message
+box. Nothing opens by itself over the page: open the session, or click the
+question in Your action items, which opens the session that asks. You pick an
+answer, or tell the agent what to do instead. For a session that runs in a tmux pane (every session MaximizePM
 starts), the answer goes into its terminal, and so does what you type in the message box, with
 files and pictures.
 
-![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
+![A permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
 
 The message box keeps what you typed for each session: switch to another
 session, or reload the page, and the draft (with the files you attached) is
@@ -643,8 +645,9 @@ blocker trees, the agent registry, capacity, settings, and the web page.
 
 - Sessions tab: each running agent session (Claude Code or Codex) as a chat,
   read from its transcript on this computer, with its item, its state, and
-  what waits for you in it. The ! dialog answers a permission prompt or a
-  question, and opens by itself when a new one comes. For a session in a tmux
+  what waits for you in it. A permission prompt or a question shows in a
+  panel above the session's message box, and its row gets a ! badge; nothing
+  opens by itself over the page. For a session in a tmux
   pane, the message box types into its terminal, with files and pictures.
   Items and Artifacts show what the session took and wrote. The message box
   keeps a draft for each session through a switch and a reload. After a
@@ -697,8 +700,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   When a prompt (a permission prompt, a folder trust question;
   `prompt_pattern`) stays on the screen for `prompt_wait` (20s), each person
   gets an alert with the question, each option and the keys that choose it,
-  the item the agent holds, and a link to the session. Answer it in the ! dialog
-  on the Sessions tab, or with Open in terminal. A Claude Code session that MaximizePM starts
+  the item the agent holds, and a link to the session. Answer it in the panel
+  above the session's message box on the Sessions tab, or with Open in terminal. A Claude Code session that MaximizePM starts
   also reports each tool call, permission prompt, and turn end through hooks
   (`claude_activity_hooks`). When the agent holds an item, a permission
   prompt alerts the manager at once, and so does a turn end, but not while
