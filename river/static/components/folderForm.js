@@ -2,6 +2,7 @@
 // in the setup guide and on the Projects tab. In the desktop app, "Choose folder…" opens the system folder
 // picker (window.riverDesktop, from the app's preload script); in a browser, people type or paste the path.
 import { esc, act, toast } from "../lib.js";
+import { button } from "./button.js";
 
 export function folderForm() {
   const pick = window.riverDesktop && window.riverDesktop.pickFolder;
@@ -31,7 +32,12 @@ export function wireFolderForms(onAdded) {
   const setPath = (form, p) => { form.querySelector('[data-ff="path"]').value = p; hint(form, p); };
   // Typing only updates the name hint; it never rewrites what the person types.
   document.addEventListener("input", (e) => {
-    if (e.target.dataset && e.target.dataset.ff === "path") hint(e.target.closest(".folderForm"), e.target.value.trim());
+    if (!e.target.dataset || e.target.dataset.ff !== "path") return;
+    const form = e.target.closest(".folderForm");
+    hint(form, e.target.value.trim());
+    // A new path: the question whether to create the old one no longer applies.
+    const out = form.querySelector(".ff-out");
+    if (out.querySelector("[data-ff-create]")) out.innerHTML = "";
   });
   // Enter in a field of the form does what Add folder does.
   document.addEventListener("keydown", (e) => {
@@ -46,26 +52,34 @@ export function wireFolderForms(onAdded) {
       if (p) setPath(form, p);
       return;
     }
-    const go = e.target.closest("[data-ff-go], [data-ff-move]"); if (!go || go.disabled) return;
+    const out = form.querySelector(".ff-out");
+    if (e.target.closest("[data-ff-cancel]")) { out.innerHTML = ""; return; }
+    const go = e.target.closest("[data-ff-go], [data-ff-move], [data-ff-create]"); if (!go || go.disabled) return;
     const v = (k) => form.querySelector(`[data-ff="${k}"]`).value.trim();
     const move = go.dataset.ffMove === undefined ? undefined : go.dataset.ffMove === "1";
+    const create = go.dataset.ffCreate !== undefined || undefined;
     go.disabled = true;
     try {
-      const r = await act("folder_add", { path: v("path"), name: v("name") || undefined, description: v("description"), move });
-      const out = form.querySelector(".ff-out");
-      // An old CLAUDE.md holds rules of this folder: ask once whether to move them to AGENTS.md, which every agent reads.
-      const old = r.layout === "claude_only" || r.layout === "both";
-      out.innerHTML = old
-        ? `Added <b>${esc(r.project)}</b>. This folder's CLAUDE.md has rules that Codex and other agents do not read.
-           <button class="btn" data-ff-move="1">Share them with every agent</button><button class="btn" data-ff-move="0">Keep CLAUDE.md as it is</button>`
+      const r = await act("folder_add", { path: v("path"), name: v("name") || undefined, description: v("description"), move, create });
+      // A folder that does not exist (#6236): ask before MaximizePM makes it; Create sends the same fields again.
+      if (r.missing) {
+        out.innerHTML = `<span class="ff-ask">${esc(r.path)} does not exist. Create it?</span>
+          ${button("Create", { kind: "primary", data: { "ff-create": "1" } })}${button("Cancel", { data: { "ff-cancel": "1" } })}`;
+        const yes = out.querySelector("[data-ff-create]"); if (yes) yes.focus();
+        return;
+      }
+      const old = (r.old_with_rules || []).join(" and ");
+      const choosing = old && move === undefined;
+      out.innerHTML = choosing
+        ? `Added <b>${esc(r.project)}</b>. Move the rules from ${esc(old)} to AGENTS.md and delete the old files?
+           ${button("Move rules", { data: { "ff-move": "1" } })}${button("Keep files", { data: { "ff-move": "0" } })}`
         : `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
-      // Keep the fields while the CLAUDE.md choice is open: its buttons send the same folder again.
-      if (!(old && move === undefined)) {
+      out.innerHTML += (r.agy_instruction_warnings || []).map(w => `<div>${esc(w).replaceAll("/", "/<wbr>")}</div>`).join("");
+      if (!choosing) {
         for (const k of ["path", "name", "description"]) form.querySelector(`[data-ff="${k}"]`).value = "";
-        if (move !== undefined) out.innerHTML = `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
+        if (onAdded) onAdded(r);
       }
       toast(`Added the folder for ${r.project}`);
-      if (onAdded) onAdded(r);
     } catch (err) { /* act shows the error */ } finally { go.disabled = false; }
   });
 }

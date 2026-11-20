@@ -62,7 +62,7 @@ class FakeRqs:
                          "people": r.get("people", []), "comments": threads, "polls": polls}
         if tool == "list_pages":
             return 200, {"pages": [{"subdomain": s, "url": p["url"], "access": p["access"], "version": p["version"],
-                                    "expires_at": "2026-12-01T00:00:00.000Z"} for s, p in self.pages.items()]}
+                                    "expires_at": "2099-12-01T00:00:00.000Z"} for s, p in self.pages.items()]}
         if tool == "publish":
             sub = body.get("subdomain")
             if sub:
@@ -76,7 +76,7 @@ class FakeRqs:
                 p = self.pages[sub] = {"access": body.get("access", "link"), "version": 1,
                                        "url": f"https://{sub}.realquicksite.app/"}
             p["files"] = body["files"]
-            return 200, {"subdomain": sub, "url": p["url"], "expires_at": "2026-11-20T12:00:00.000Z",
+            return 200, {"subdomain": sub, "url": p["url"], "expires_at": "2099-11-20T12:00:00.000Z",
                          "version": p["version"], "problems": self.problems, "access": p["access"],
                          "screenshots": {}, "settings_url": f"https://my.realquicksite.com/pages/{sub}",
                          "next_step": "...", "total_bytes": 10, "preview": {}}
@@ -246,7 +246,7 @@ class Publish(Base):
         self.assertIn("*This part is not written yet.*", body["files"][0]["content"])
         self.assertNotIn("writing:", body["files"][0]["content"])
         self.assertEqual((got["state"], got["access"], got["version"], got["expires_at"]),
-                         ("done", "private", 1, "2026-11-20T12:00:00Z"))
+                         ("done", "private", 1, "2099-11-20T12:00:00Z"))
         self.assertEqual(core.canvas_show(self.c, "plan")["page"]["url"], got["url"])
         # The same version again: no new publish.
         again = core.canvas_publish(self.c, "plan", "ag")
@@ -320,6 +320,7 @@ class Publish(Base):
         self.assertIn('<body><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg></body>', f["content"])
         self.assertNotIn("<?xml", f["content"])
 
+    @timing.local_only("wall-clock latency and background thread timing")
     def test_the_page_op_answers_at_once_and_the_publish_runs_in_a_thread(self):
         self.connect()
         t0 = time.perf_counter()
@@ -535,7 +536,7 @@ class PanelButton(unittest.TestCase):
                     c.execute("INSERT INTO canvas_pages (canvas_id, subdomain, url, access, expires_at, version, state, "
                               "problems) VALUES (?, 'relay-plan-with-a-long-name-k3x9', "
                               "'https://relay-plan-with-a-long-name-k3x9.realquicksite.app/', 'link', "
-                              "'2026-12-01T00:00:00Z', 1, 'done', ?)",
+                              "'2099-12-01T00:00:00Z', 1, 'done', ?)",
                               (cid, json.dumps([{"viewport": "phone", "kind": "small_text",
                                                  "message": "A text under 12 px: " + "x" * 120}])))
                 return cid

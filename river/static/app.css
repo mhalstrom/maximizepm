@@ -121,6 +121,7 @@ a.btn { display: inline-block; text-decoration: none; }
 /* The QR code of Your phone (#5863): white with its own quiet zone, so it scans in dark mode too; never wider than the box. */
 .su-qr { margin-top: var(--sp-3); }
 .su-qr svg { display: block; max-width: 100%; height: auto; }
+.su-pair { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 /* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
 button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
 button.primary, a.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }
@@ -346,11 +347,24 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .folderForm input { flex: 1 1 200px; min-width: 0; }
 .folderForm .ff-out:empty { display: none; }
 .folderForm .ff-out .btn { margin-left: 4px; }
+.folderForm .ff-ask { overflow-wrap: anywhere; }
 /* Setup guide: the first step not done yet, numbered steps, and the optional extras. */
 /* The current step: its box reaches out into the margin, so its number and text stay in line with the other steps (#5318). */
 #setup .step.next { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--r-m);
   padding-left: var(--sp-2); padding-right: var(--sp-2); margin-left: calc(-1 * var(--sp-2)); margin-right: calc(-1 * var(--sp-2)); }
 #setup .mark.opt { color: var(--muted); }
+/* Choose an agent (#6239): one row for each agent, its state mark (installed: a green check; not: an empty circle),
+   its name and state, its buttons, and the last lines of its install or sign-in window. On a phone the buttons wrap. */
+#setup .su-agents { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+#setup .su-agent { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); }
+#setup .su-am { width: var(--sp-6); text-align: center; font-weight: 600; }
+#setup .su-am.ok { color: var(--ready); }
+#setup .su-am.no { color: var(--muted); }
+#setup .su-ab { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); margin-left: auto; }
+#setup .su-tail { flex: 1 0 100%; margin-left: calc(var(--sp-6) + var(--sp-3)); font-family: var(--mono, monospace);
+  font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+#setup .su-agents > .btn { align-self: flex-start; }
+#setup .su-more summary { cursor: pointer; color: var(--muted); font-size: var(--fs-m); margin: var(--sp-1) 0; }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .link.ref { cursor: pointer; }
@@ -388,6 +402,23 @@ body:has(#relDlg:not(.hidden)) .relbar { visibility: hidden; }  /* the dialog sa
 #relDlg { --dlg-w: var(--w-dlg-m); }
 .rel-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
 .rel-box > p { margin: var(--sp-2) 0; }
+/* An agent CLI that is out of date (#6430, components/agentUpdate.js): its dialog, and the list of Settings > Agents.
+   A row: the name and versions, its state, its buttons; on a narrow box the state and buttons go under the name. */
+#auDlg { --dlg-w: var(--w-dlg-m); }
+.au-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
+.au-rows { display: flex; flex-direction: column; gap: var(--sp-2); margin: var(--sp-3) 0; }
+.au-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-4); padding: var(--sp-3);
+  border: var(--hair) solid var(--line); border-radius: var(--r-m); }
+.au-name { flex: 1 1 var(--w-l); min-width: 0; overflow-wrap: anywhere; }
+.au-st { flex: 2 1 var(--w-l); min-width: 0; overflow-wrap: anywhere; }
+.au-st:empty { display: none; }
+.au-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-left: auto; }
+.au-fail { border-color: var(--warn); }
+.au-fail .au-st { color: var(--warn); }
+.au-done { border-color: var(--done); }
+/* A failed update's message (#6460): closed under the row, the whole row wide. */
+.au-why { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+.au-why > summary { cursor: pointer; color: var(--muted); }
 .rel-notes { max-height: var(--h-pre); overflow: auto; border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-3) var(--sp-5); margin: var(--sp-4) 0; font-size: var(--fs-m); }
 .rel-notes h2, .rel-notes h3 { font-size: var(--fs-base); margin: var(--sp-4) 0 var(--sp-2); }
 .rel-notes ul { padding-left: var(--sp-7); margin: var(--sp-2) 0; }
@@ -557,3 +588,7 @@ button.tc-unfold { display: none; }
 .wk-foot .spacer { flex: 1; }
 .wk-zl { display: flex; align-items: center; gap: var(--sp-2); }
 .wk-zone { width: var(--w-l); max-width: 100%; }  /* the time zone field (#6206) */
+/* The links between an artifact and its tasks (#6208, components/artifactTasks.js). */
+.art-tasks, .art-links { margin-top: var(--sp-1); color: var(--muted); overflow-wrap: anywhere; }
+.art-tasks .link, .art-links .link, .art-links a { color: var(--accent); }
+.sp-crqs .art-tasks { margin-top: 0; }

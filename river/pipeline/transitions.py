@@ -45,6 +45,8 @@ def parse_mode(text):
     """(mode, arg) from the words of a mode. The words of the gates before #6139 still work: auto after <time> is a
     delay, manager the manager's yes, person [<name>] a person's yes."""
     words = str(text or "").split()
+    if words == ["host"]:  # #6482: the page's word for forge (the Git host starts the stage)
+        return "forge", None
     if words in (["auto"], ["forge"], ["yes"], ["release"], ["person"]):
         return ("yes", None) if words == ["person"] else (words[0], None)
     if words == ["manager"]:
@@ -71,8 +73,22 @@ def mode_words(mode, arg):
     return f"{mode} {arg}" if arg else mode
 
 
-def mode_text(mode, arg):
-    """The mode in plain words, for the arrow and the briefing."""
+def host_name(forge):
+    """The name of the Git host whose own CI starts a stage (GitHub, GitLab), for the page and the briefing: mark
+    2026-11-20 does not use the word 'forge' (#6482)."""
+    return audit.FORGE_NAMES.get(forge, forge) if forge and forge != "none" else "the Git host"
+
+
+def _forge(pipeline):
+    """The pipeline's forge column, or None for a pipeline dict without it (a deploy target's default pipeline)."""
+    try:
+        return pipeline["forge"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def mode_text(mode, arg, host=None):
+    """The mode in plain words, for the arrow and the briefing. host: the Git host's name (host_name)."""
     if mode == "yes":
         return "the manager's yes" if arg == "manager" else f"{arg}'s yes" if arg else "a person's yes"
     if mode == "delay":
@@ -80,7 +96,7 @@ def mode_text(mode, arg):
     if mode == "release":
         return "the release" + (f", or every {arg}" if arg else "")
     if mode == "forge":
-        return "the forge starts it (a push or a tag)"
+        return f"{host or 'the Git host'} starts it by itself (a push or a tag)"
     return "automatic"
 
 
@@ -259,6 +275,7 @@ def describe(conn, stage, pipeline, cache=None, at=None):
     at = at or core.now()
     t = get(conn, stage["id"])
     c = closed(conn, t, pipeline, at, cache)
+    host = host_name(_forge(pipeline))
     window = None
     if t["time_window"]:
         try:
@@ -281,7 +298,7 @@ def describe(conn, stage, pipeline, cache=None, at=None):
                  "item": t["block_item"]}
     return {
         "mode": t["mode"], "arg": t["mode_arg"], "words": mode_words(t["mode"], t["mode_arg"]),
-        "text": mode_text(t["mode"], t["mode_arg"]), "mode_by": t["mode_by"], "mode_at": t["mode_at"],
+        "text": mode_text(t["mode"], t["mode_arg"], host), "host": host, "mode_by": t["mode_by"], "mode_at": t["mode_at"],
         "window": window, "freezes": freezes,
         "fault_rule": bool(t["fault_rule"]), "rule_by": t["rule_by"],
         "fault": _fault(conn, pipeline, cache) if t["fault_rule"] else None,
@@ -290,7 +307,7 @@ def describe(conn, stage, pipeline, cache=None, at=None):
         if t["delay_until"] and core.parse_iso(t["delay_until"]) > at else None,
         "disabled": {"reason": t["disabled_reason"], "by": t["disabled_by"], "at": t["disabled_at"]}
         if t["disabled_at"] else None,
-        "state": c["kind"] if c else "open", "state_text": c["text"] if c else mode_text(t["mode"], t["mode_arg"]),
+        "state": c["kind"] if c else "open", "state_text": c["text"] if c else mode_text(t["mode"], t["mode_arg"], host),
         "set_by": (c or {}).get("by") or t["mode_by"], "until": (c or {}).get("until"),
         "waiting": waiting,
         **_join(conn, stage, pipeline, cache),
@@ -595,7 +612,8 @@ def let_pass(conn, pipeline, stage, rev=None, reason=None, actor=None):
             conn.execute("UPDATE stage_runs SET approved_by=?, approved_at=? WHERE id=?",
                          (actor or "a person", store._now(), r["id"]))
         _line(conn, p["id"], actor, f"let version {r['rev']} pass the transition {_arrow(conn, p, s)} once (run "
-                                    f"#{r['id']})" + ("" if yes else f"; it still waits for {mode_text(t['mode'], t['mode_arg'])}"),
+                                    f"#{r['id']})" + ("" if yes else f"; it still waits for "
+                                                       f"{mode_text(t['mode'], t['mode_arg'], host_name(_forge(p)))}"),
               reason)
     if yes and r["gate_item"]:
         runner._drop_card(conn, r["gate_item"], f"let pass with maxpm pipeline pass (run #{r['id']})")

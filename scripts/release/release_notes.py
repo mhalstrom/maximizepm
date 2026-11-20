@@ -4,11 +4,13 @@
     release_notes.py <report.json> <version> <release-notes.md> [--project maximizepm ...]
 
 <report.json> is the output of `maxpm --json target report <deploy id>`. The notes are, in this order:
-a first line with the version and the number of tasks; the report's summary when a person or the manager
-wrote it (MaximizePM's own text only counts the tasks); one section for each group of the report (a goal,
-or 'Other changes'), with the 'changed' line of each done task, which its session wrote for a person; then
-desktop/release-notes.md from its '## Download' heading on, with {TAG} and {VERSION} filled in, as the
-desktop-release workflow does.
+a first line with the version and the number of tasks; then the report's summary when it is written (#6493:
+what changes for a user by area, the risks and what to check, under the hood; the same text as the report,
+so the two never differ), with no #<id> (a number of the private queue, which GitHub reads as one of its
+own issues). Before the summary is written (MaximizePM's own text only counts the tasks): one section for
+each group of the report (an area, or 'Other changes') with the 'changed' line of each done task, which its
+session wrote for a person. Last, desktop/release-notes.md from its '## Download' heading on, with {TAG} and
+{VERSION} filled in, as the desktop-release workflow does.
 
 The repository is public: only the done tasks of the named projects come in (default: maximizepm), and a
 line that names a home folder or the queue's local folders (data/, private/) is left out. Standard library
@@ -22,15 +24,34 @@ import sys
 # A line with one of these is left out of the public notes: a home folder, or the git-ignored local folders.
 PRIVATE = re.compile(r"(/Users/|/home/|~/|\bdata/|\bprivate/)")
 TASK_KINDS = ("work", "operational")
+# '(#12, #34)' after a point, and any other '#12': the ids of the private queue.
+REFS = re.compile(r"\s*\((?:#\d+[,\s]*)+\)")
+REF = re.compile(r"(?<![\w&])#\d+\b")
 
 
 def heading(group, projects):
-    """The section heading of a group of the report: the goal's name in words, or 'Other changes'."""
+    """The section heading of a group of the report: the area's (or an old report's goal's) name in words, or
+    'Other changes'."""
     key, name = group.get("key") or "", group.get("name") or ""
-    if not key.startswith("goal:") or not name or name in projects:
+    if not key.startswith(("area:", "goal:")) or not name or name in projects:
         return "Other changes"
     words = name.replace("-", " ").replace("_", " ").strip()
     return words[:1].upper() + words[1:]
+
+
+def written(summary):
+    """The report's summary as public Markdown, or '' when nobody wrote it: no #<id>, no line with a private path."""
+    if not summary.get("by") or summary.get("by") == "maxpm":
+        return ""
+    lines = []
+    for line in (summary.get("text") or "").splitlines():
+        if PRIVATE.search(line):
+            continue
+        line = REF.sub("", REFS.sub("", line)).rstrip()
+        line = re.sub(r"\s+([.,;:])", r"\1", re.sub(r"(?<=\S)  +", " ", line))
+        if line or (lines and lines[-1]):
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def build(report, version, tail, projects=("maximizepm",)):
@@ -60,13 +81,15 @@ def build(report, version, tail, projects=("maximizepm",)):
     if "Other changes" in sections:  # the tasks of no goal come last
         sections.remove("Other changes")
         sections.append("Other changes")
-    out = [f"MaximizePM {version} ships {count} task{'s' if count != 1 else ''}. The main changes:"]
+    head = f"MaximizePM {version} ships {count} task{'s' if count != 1 else ''}."
     summary = report.get("summary") or {}
-    text = " ".join((summary.get("text") or "").split())
-    if text and summary.get("by") and summary.get("by") != "maxpm" and not PRIVATE.search(text):
-        out += ["", text]
-    for h in sections:
-        out += ["", f"## {h}", ""] + by_heading[h]
+    text = written(summary)
+    if text:
+        out = [head, "", text]
+    else:
+        out = [head + " The main changes:"]
+        for h in sections:
+            out += ["", f"## {h}", ""] + by_heading[h]
     if tail:
         at = tail.find("## Download")
         rest = tail[at:] if at >= 0 else ""

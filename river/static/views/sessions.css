@@ -86,6 +86,28 @@ button.srow-it { cursor: pointer; }
   .sess-stw .dot { margin: 0; }
   .sess-h2 #sessTitle { display: none; }
 }
+.sess-badge { display: inline-flex; flex: none; }  /* the ! badge of the opened session (#6438) */
+.sess-badge:empty { display: none; }
+/* The background tasks of a session (#6454, components/bgTasks.js): on its row the count in the shape of the ! badge,
+   in the working color; in the head a clock button with the count, whose list opens in a card under it. */
+.tbadge { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: var(--sp-0); font-size: var(--fs-xs);
+  font-weight: 700; padding: var(--hair) calc(var(--sp-2) + var(--hair)); border-radius: var(--r-pill); background: var(--prog); color: var(--panel); }
+.srow-h .tbadge { box-sizing: border-box; }
+.tclock { width: var(--sp-4); height: var(--sp-4); flex: none; }
+.sess-tasks { position: relative; flex: none; display: inline-flex; }
+.sess-tbtn { color: var(--muted); }
+.sess-tcard { display: none; }
+.sess-tasks.open .sess-tcard { display: block; position: absolute; top: 100%; left: 0; z-index: 7; width: max-content;
+  min-width: var(--w-l); max-width: min(calc(var(--w-l) * 2), calc(100vw - var(--sp-7))); max-height: var(--h-pre); overflow: auto;
+  margin-top: var(--sp-1); padding: var(--sp-3) var(--sp-4); box-sizing: border-box; background: var(--panel);
+  border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-pop); }
+.bgt-h { font-size: var(--fs-s); font-weight: 600; margin-bottom: var(--sp-2); }
+.bgt-sub { color: var(--muted); margin-top: var(--sp-4); }
+.bgt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.bgt { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--sp-3); align-items: baseline; font-size: var(--fs-m); }
+.bgt-w { overflow-wrap: anywhere; }
+.bgt-t { grid-column: 2; font-size: var(--fs-s); color: var(--muted); }
+.bgt-end .bgt-w, .bgt-wait .bgt-w { color: var(--muted); }
 .sess-st { display: inline-flex; align-items: center; gap: var(--sp-2); flex: none; font-size: var(--fs-s); color: var(--muted); white-space: nowrap; }
 /* Stop beside the state (#5547): ends the running turn now, as Esc in its terminal. */
 .sess-stw { white-space: nowrap; }
@@ -224,6 +246,16 @@ button.srow-it { cursor: pointer; }
 .chat-summary > .md { text-align: left; margin-top: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-m); color: var(--ink); }
 .sess-wait { font-size: var(--fs-m); margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-m); background: var(--warn-bg); color: var(--warn); }
 .sess-wait.hidden { display: none; }
+/* What waits for the person in the open session (#6438): a panel above its message box, in the session's own view,
+   never over the page. It scrolls inside itself, so the chat keeps part of the view; a card's comments and history go
+   under it, as on a phone. */
+.sess-ask { margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-4); border: var(--hair) solid var(--warn);
+  border-radius: var(--r-l); background: var(--panel); max-height: 55vh; overflow-y: auto; overscroll-behavior: contain; }
+.sess-ask.hidden { display: none; }
+.sess-ask-h { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); }
+.sess-ask-t { margin: 0; font-size: var(--fs-m); }
+.sess-ask .wblock { margin-top: var(--sp-3); }
+.sess-ask .wblock.acard { grid-template-columns: minmax(0, 1fr); }
 .sess-head .btn { font-size: var(--fs-m); }
 /* The item in the head: a quiet link, cut with … (its full title is the tooltip). */
 .sess-item .sess-itembtn { display: block; min-width: 0; max-width: 100%; border: 0; background: none; padding: 0; color: var(--accent);
@@ -248,6 +280,12 @@ button.srow-it { cursor: pointer; }
 .wblock .wgo { align-self: flex-end; }
 /* A menu's own keys (#5244): one send button for each, at the right. */
 .wkeys { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
+/* A question dialog of the terminal (#6234): its tabs (the one it shows now pressed), the answers before Submit. */
+.wtabs { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.wtab.on:disabled { opacity: 1; border-color: var(--accent); color: var(--ink); }
+.wreview { margin: 0; padding-left: var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-1); }
+.wblock .wchat { align-self: flex-start; }
+.wcmd.wpreview { white-space: pre; overflow-wrap: normal; overflow-x: auto; margin: 0; }  /* a drawing: no wrap */
 /* The card (#6002): the question or the person item on the left, its comments, history and Discuss on the right; on
    a phone the right column goes under it (phone.css). The dialog is wide while it holds a card. */
 #waitDlg.has-cards { --dlg-w: var(--w-dlg-l); }
@@ -262,6 +300,12 @@ button.srow-it { cursor: pointer; }
 .acard-diff { max-height: 50vh; overflow: auto; font-size: var(--fs-xs); white-space: pre; margin: 0; }
 .acard-opts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .acard-opts .acard-opt { border: var(--hair) solid var(--line); }
+/* The options of the manager's escalation (#6413): one row each, the picked one outlined in the accent color. */
+.acard-choices { display: flex; flex-direction: column; gap: var(--sp-2); }
+.acard-choice { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); background: var(--panel); }
+.acard-choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 var(--hair) var(--accent); }
+.acard-choice:has(input:focus-visible) { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
+.acard-cd { display: block; margin-top: var(--sp-0); }
 .acard-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
 .acard-s { border-left: var(--hair) solid var(--line); padding-left: var(--sp-5); min-width: 0; font-size: var(--fs-s); }
 .acard-s h4 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--muted); margin: var(--sp-3) 0 var(--sp-2); }
@@ -584,16 +628,19 @@ button.srow-it { cursor: pointer; }
 #setDlg > .box { width: min(var(--w-dlg-m), calc(100vw - 2 * var(--sp-6))); }
 .set-head { margin: var(--sp-3) 0; }
 /* The third column has one width in every row (Change now, restart, now, fixed), so each field ends at the same x (#5322). */
-.set-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
-.set-row select, .set-row input { font: inherit; background-color: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
-.set-row > .btn, .set-row > span.muted { justify-self: start; white-space: nowrap; }
-.set-row [data-other] { grid-column: 2; }
+/* sdlg-row, not set-row (#6262): the Settings tab's .set-row (views/settings.css, a two-column grid loaded after this
+   sheet) took over these rows, and the select covered labels such as 'Show tool calls'. */
+.sdlg-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
+.sdlg-row > label { min-width: 0; overflow-wrap: anywhere; }
+.sdlg-row select, .sdlg-row input { font: inherit; background-color: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
+.sdlg-row > .btn, .sdlg-row > span.muted { justify-self: start; white-space: nowrap; }
+.sdlg-row [data-other] { grid-column: 2; }
 .set-sub { grid-column: 2 / 4; font-size: var(--fs-s); }
 .set-foot { display: flex; gap: var(--sp-4); align-items: center; margin-top: calc(var(--sp-5) + var(--sp-0)); flex-wrap: wrap; }
 /* The row that a slash command opened the dialog for (#5220: /model, /effort from the message box). */
-.set-row.on > label { color: var(--accent); font-weight: 600; }
+.sdlg-row.on > label { color: var(--accent); font-weight: 600; }
 /* A phone: the name on its own line; the field, then Change now (or the word) on the line under it, at the left. */
-@media (max-width: 560px) { .set-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .set-row > label, .set-sub { grid-column: 1 / -1; } .set-row [data-other] { grid-column: 1; } }
+@media (max-width: 560px) { .sdlg-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .sdlg-row > label, .set-sub { grid-column: 1 / -1; } .sdlg-row [data-other] { grid-column: 1; } }
 /* A phone (#5422): the list of settings is taller than the screen, so its foot (the default box and Restart) stays at
    the bottom of the screen while the list scrolls under it; at the end of the list it sits under the last row. */
 @media (max-width: 759px) {
@@ -727,3 +774,27 @@ button.srow-it { cursor: pointer; }
 /* A person's sign-off on a release (#6039, askCard.js releaseHtml): the review it follows and its report. */
 .acard-rel { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--accent);
   border-radius: var(--r-m); overflow-wrap: anywhere; }
+/* Agent usage & limits in the session list (#6348): compact rows above Cost; a row opens its usage (#6387). */
+.sess-limits { display: flex; flex-direction: column; padding: var(--sp-1) 0;
+  border-top: var(--hair) solid var(--line); flex: none; font-size: var(--fs-s); }
+.sess-limits.hidden { display: none; }
+.sl-lim-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3); }
+.sl-lim-text { display: flex; align-items: baseline; gap: 0 var(--sp-2); flex-wrap: wrap; min-width: 0; }
+/* The usage of one agent (#6387, components/agentUsage.js). */
+#agentUsageDlg { --dlg-w: var(--w-dlg-s); }
+#agentUsageDlg h3 { font-size: var(--fs-m); margin: var(--sp-6) 0 var(--sp-2); }
+.au-sum { display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-base); }
+/* #6414: a status line per model group, then its stop and the agent's own words; a window read before a newer stop is
+   dimmed: the stop says what holds now. */
+.au-lines { margin-top: var(--sp-2); }
+.au-lines .usage-row > span:last-child { text-align: right; }
+.au-details { overflow-wrap: anywhere; }
+/* #6427: the facts for a diagnosis, closed by default. */
+.au-more { margin-top: var(--sp-6); }
+.au-more > summary { padding-left: 0; font-size: var(--fs-m); }
+.au-old { opacity: .55; }
+.usage-limit .usage-row > span:last-child { text-align: right; }
+.usage-limit.full .bar > div { background: var(--warn); }  /* a window at its limit: not the green of a good bar */
+.sl-lim-name { font-weight: 600; }
+.sl-lim-warn { color: var(--warn); font-weight: 600; }

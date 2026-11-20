@@ -11,9 +11,11 @@ import { empty } from "../components/empty.js";
 import { askReason } from "./pipeline.js";
 
 const WHO = [["", "Every actor"], ["person", "People"], ["agent", "Agents"], ["trigger,hook", "Triggers and hooks"],
-  ["forge", "Forges"]];
+  ["forge", "Git hosts"]];
 const SINCE = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
 const KIND_MARK = { person: "👤", agent: "🤖", trigger: "⚡", hook: "⚙", forge: "⚙" };
+// The kind as the page says it (#6482: 'forge' is a word mark does not use).
+const KIND_WORD = { forge: "Git host" };
 const EXPORT_MAX = 10000;
 let timer = null;
 
@@ -88,7 +90,7 @@ function drawLines(box, A, name) {
     <th>Did</th>${one ? "" : "<th>Pipeline</th>"}${has.place ? "<th>On</th>" : ""}${has.rev ? "<th>Version</th>" : ""}${has.why ? "<th>Why</th>" : ""}${has.result ? "<th>Result</th>" : ""}<th></th></tr>
     ${L.map(l => `<tr class="${l.corrected_by ? "au-fixed" : ""}">
       <td class="mono" title="${esc(l.at)}">${esc(ago(l.at))}</td>
-      <td><span aria-hidden="true">${KIND_MARK[l.kind] || ""}</span> ${esc(l.actor || "")}<div class="muted t-s">${esc(l.kind || "")}</div></td>
+      <td><span aria-hidden="true">${KIND_MARK[l.kind] || ""}</span> ${esc(l.actor || "")}<div class="muted t-s">${esc(KIND_WORD[l.kind] || l.kind || "")}</div></td>
       <td><b>${esc(l.action || "")}</b><div class="t-s">${esc(l.change)}</div>
         ${l.corrected_by ? `<div class="au-corr t-s">corrected by line ${l.corrected_by.map(esc).join(", ")}</div>` : ""}</td>
       ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline.split(", ")[0] }, title: "Open the pipeline" })}</td>`}

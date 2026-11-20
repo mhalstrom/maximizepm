@@ -1,7 +1,7 @@
 {
   "name": "maximizepm",
   "productName": "MaximizePM",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MaximizePM dashboard in its own window: runs maxpm serve and shows the page.",
   "main": "main.js",
   "license": "MIT",
@@ -11,10 +11,10 @@
     "test": "node --test",
     "dist": "electron-builder --mac dmg --arm64 --x64 --publish never",
     "python": "node scripts/fetch-python.js",
-    "predist": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write",
+    "predist": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/build-tmux.js mac-arm64 mac-x64 && node scripts/shell-id.js --write",
     "icon": "electron scripts/make-icon.js",
     "dist:signed": "electron-builder --config signed.config.js --mac dmg --arm64 --x64 --publish never",
-    "predist:signed": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write"
+    "predist:signed": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/build-tmux.js mac-arm64 mac-x64 && node scripts/shell-id.js --write"
   },
   "devDependencies": {
     "electron": "^45.3.1",
@@ -54,6 +54,10 @@
       {
         "from": "build/python/${os}-${arch}/python",
         "to": "river-app/python"
+      },
+      {
+        "from": "build/tmux/${os}-${arch}/tmux",
+        "to": "river-app/tmux"
       },
       {
         "from": "build/shell-id.txt",

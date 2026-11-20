@@ -14,7 +14,7 @@ Multi-provider models (OpenCode, Pi, Goose and others): option A. The model of s
 - About 30 functions test a platform name: `build_command` (core.py:10674), `_launch_agent_cmd` (:11217), `profile_from_command` (:10739), `resume_command` (:11294), `agent_type_from_env` (:1809), `wait_background` (:11573), `start_expert` resume (server.py:352, :419), `move_into_tmux` (server.py:1164), the parsers `_claude`/`_codex` (sessions.py:297, :357), `transcript_chain`, `custom_title`, `_transcript_settings` (sessions.py:1237), `_cache_line`, `_line_hits`, usage measurement (core.py:8580-8760), the hook parser `activity_event` (core.py:8446), `background_work` (:8624), pane wording in `prompt_pattern` (core.py:183) and `_prompt_parts`/`_prompt_found` (server.py:1378-1470), the MCP config writers (cli.py:1382-1504), the instruction file names (cli.py:1944-2046), and the JS name checks in views/sessions.js:42-44, :82, :123.
 - Effort levels exist in four copies (the `effort_levels` default, `PLATFORM_EFFORTS`, sessions.py:45, Codex's models cache), and the flag forms, the resume regex (core.py:11336) and the live `/effort` command are Claude- or Codex-only.
 - `default_agent`, `agent_rules` and an item's `--agent` accept only `claude-code` or `codex` (`_agent_platform`, core.py:1503). No role has its own agent setting. `fresh_expert` takes the first entry; expert and crash resume work only for Claude Code and Codex.
-- Grok, OpenCode, Gemini and Pi exist only as plain custom commands in `server.KNOWN_AGENTS` (server.py:2822): no agent type, no settings, no chat on the page, no resume.
+- Grok, OpenCode and Pi exist only as plain custom commands in `server.KNOWN_AGENTS` (server.py:2822): no agent type, no settings, no chat on the page, no resume.
 
 ## The adapter
 
@@ -38,7 +38,7 @@ loader of the user's modules). The built-in adapters are `river/agents/claude.py
 - `DETECT` holds the process name, the idle prompt pattern, the working pattern (for example "esc to interrupt"), the patterns of each blocked screen, the text of the "tell it instead" option, and the image paste rule.
 - herdr's integrations (Apache-2.0) are a starting point for each agent's hook or plugin, changed to call `maxpm report`. maxpm never runs herdr's scripts behind a fake `HERDR_*` environment.
 
-What each agent gives for state (herdr's integration docs, 2026-11-11): Claude Code, hooks for many events (maxpm uses them now); OpenCode, a JS plugin with full state and session id; Pi, a TS extension with full state; Codex, Copilot CLI, Cursor CLI, Grok CLI, hooks that give the session id, state from the screen; Hermes, a plugin that gives the session id, state from the screen; Gemini CLI and Amp, screen only; Goose and Aider, not checked.
+What each agent gives for state (herdr's integration docs, 2026-11-11): Claude Code, hooks for many events (maxpm uses them now); OpenCode, a JS plugin with full state and session id; Pi, a TS extension with full state; Codex, Copilot CLI, Cursor CLI, Grok CLI, hooks that give the session id, state from the screen; Hermes, a plugin that gives the session id, state from the screen; Amp, screen only; Goose and Aider, not checked. Antigravity CLI (#6248): hooks only from files in its home or the project, so state from the screen and the session id from its environment; with the setting `agy_activity_hooks` on (#6351), MaximizePM's hooks in the project's `.agents/hooks.json` add the shell command guard, each turn's start and end, and messages at a turn's end.
 
 Each part below is optional unless marked required; the page shows only what an adapter supports.
 
@@ -49,10 +49,11 @@ Each part below is optional unless marked required; the page shows only what an 
 5. Session identity: how maxpm learns the session's id after the start (an env var, a new log file in a known folder, or text in the pane), its web link if any, and the env vars that tell maxpm a command runs inside this agent (replaces `agent_type_from_env`).
 6. Chat log: where the log of a session is (by session id or address, compressed or not), `parse(lines)` to the shared entries (assistant, user with images, tool, result, divider, summary, turn state), and optionally: the chain of files across resumes, the title, the cwd, usage and cache, the settings read back, the tool names that write files (for Artifacts).
 7. State: one declared source per signal, as above: a hook installer whose hooks call `maxpm report`, or the `DETECT` dict (replaces the wording in `prompt_pattern` and the Claude layout code in `_prompt_parts`). Claude Code's hooks move from `maxpm activity` to `maxpm report` in step 1, with no change of behaviour. Also: whether the agent waits for background commands in the foreground.
-8. Input: tmux paste is the same for every agent. The adapter gives the image paste convention (Claude: "[Image #N]"), the text of the "tell it instead" option of a permission menu, and an optional native message command (Codex: `codex queue --thread`; Claude Code, Pi, OpenCode and Copilot CLI: the built-in `wake`). `INPUT["interrupt"]` (#5547): the tmux keys that end a running turn and keep the session, for Stop and Send now on the Sessions tab and `maxpm interrupt`: Esc for Claude Code, Codex, Gemini CLI, Pi and Amp; Esc twice for OpenCode ("esc again to interrupt"); Ctrl+C for Copilot CLI, Cursor CLI, Grok CLI, Hermes, Goose and Aider. None: the page says that the agent has no such key. `INPUT["interrupt_again"]` (#5563): a slash command that a second Stop of the same turn types, and what it does in a few words, or None. Codex: `{"text": "/stop", "does": "end its background commands"}`, because its Esc leaves the turn's shell commands running. The first Stop says "Stop again to ...", and the page keeps Stop while the session waits at its prompt.
+8. Input: tmux paste is the same for every agent. The adapter gives the image paste convention (Claude: "[Image #N]"), the text of the "tell it instead" option of a permission menu, and an optional native message command (Codex: `codex queue --thread`; Claude Code, Pi, OpenCode and Copilot CLI: the built-in `wake`). `INPUT["interrupt"]` (#5547): the tmux keys that end a running turn and keep the session, for Stop and Send now on the Sessions tab and `maxpm interrupt`: Esc for Claude Code, Codex, Antigravity CLI, Pi and Amp; Esc twice for OpenCode ("esc again to interrupt"); Ctrl+C for Copilot CLI, Cursor CLI, Grok CLI, Hermes, Goose and Aider. None: the page says that the agent has no such key. `INPUT["interrupt_again"]` (#5563): a slash command that a second Stop of the same turn types, and what it does in a few words, or None. Codex: `{"text": "/stop", "does": "end its background commands"}`, because its Esc leaves the turn's shell commands running. The first Stop says "Stop again to ...", and the page keeps Stop while the session waits at its prompt.
 9. Resume: `resume_command(session_ref, model, effort, settings)` or none.
 10. Commands (slash command completion, mark 2026-11-11): the agent's built-in slash commands, and a reader for its custom ones for a session folder (Claude: ~/.claude/commands, .claude/commands, the skills in ~/.claude/skills and .claude/skills, plugin commands; Codex: ~/.codex/prompts). Each entry: name, description, argument hint. The page: when the message box starts with "/", a list of matching commands opens above it; Tab completes; Up and Down move in the list while it is open (otherwise they recall messages as now); Esc closes it; the text is sent as now.
-11. Setup: the instruction file name (CLAUDE.md, AGENTS.md, GEMINI.md, ...), the skills folder, the MCP config writer, the voice text, the open-link text.
+11. Setup: the instruction file name (CLAUDE.md, AGENTS.md, ...), the skills folder, the MCP config writer, the voice text, the open-link text.
+12. Update (#6430): the arguments that print its version, a smoke test (one short request that is not interactive and answers OK, such as `codex exec --skip-git-repo-check -m {model} "Reply OK"`), the CLI's own update command and version check for a program that no package manager installed (`claude install {version}`, `grok update --version {version}`), and the package where the vendor publishes its versions. `river/agentupdate.py` reads the install method from where the program is (npm, Homebrew, uv, pipx, else the CLI's own updater). maxpm serve checks when it starts and once a day; a newer version opens the page's dialog '<Agent> is out of date'. Update now runs only while no process of the CLI runs, holds new starts of the agent until it ends, runs the smoke test, and puts the old version back when the test fails. `agent_auto_update` names the agents that update with no click (none by default).
 
 ## Agent choice for each role
 
@@ -63,7 +64,7 @@ A new setting `agent_for.<role>` for the roles worker, manager, reviewer, deploy
 1. Claude Code and Codex become adapters with no change of behaviour; every name check above becomes an adapter call; all four tables and the copied maps go. The whole test suite stays green. This design file goes into the repo as docs/agent-adapters.md in this step.
 2. Agent choice is generic: `agent_for.<role>`, `default_agent`, `agent_rules`, `--agent`, expert and crash resume through the adapter.
 3. Settings, effort and slash commands come from the adapter: the Setup section, the launch dialog, the Settings dialog of a running session, and the "/" list with Tab in the message box (Claude Code and Codex lists first).
-4. One adapter per new agent, in parallel after step 3: Pi, OpenCode, Grok CLI, Hermes, Gemini CLI, Cursor CLI, GitHub Copilot CLI, Aider, Goose, Amp. Each worker installs the CLI, reads its real flags, log files and hook or plugin system on this Mac, and writes the adapter: describe, settings, effort, launch, identity, state first; then the chat log; then resume and commands. herdr's detection files (Apache-2.0, github.com/herdrdev/herdr) may serve as a start for prompt patterns.
+4. One adapter per new agent, in parallel after step 3: Pi, OpenCode, Grok CLI, Hermes, Cursor CLI, GitHub Copilot CLI, Aider, Goose, Amp. Each worker installs the CLI, reads its real flags, log files and hook or plugin system on this Mac, and writes the adapter: describe, settings, effort, launch, identity, state first; then the chat log; then resume and commands. herdr's detection files (Apache-2.0, github.com/herdrdev/herdr) may serve as a start for prompt patterns.
 5. Each agent's item ends with its test: it starts from the page with its settings; its chat shows on the Sessions page; the message box reaches it; the state moves between working and idle (and waiting, when it asks a permission); its slash commands complete; resume works if the adapter has it.
 
 ## Parallel plan
@@ -83,7 +84,7 @@ the items of one row run in parallel.
      checks of sessions.js).
    - #5186 C3: Tab completion of / commands in the Sessions message box, from the adapter's command list.
    - One adapter module for each new agent, with tests from recorded fixtures: #5170 Pi, #5171 OpenCode, #5172 Grok
-     CLI, #5173 Hermes, #5174 Gemini CLI, #5175 Cursor CLI, #5176 GitHub Copilot CLI, #5177 Aider, #5178 Goose,
+     CLI, #5173 Hermes, #5175 Cursor CLI, #5176 GitHub Copilot CLI, #5177 Aider, #5178 Goose,
      #5179 Amp. Each one adds only `river/agents/<id>.py`, its fixtures and its tests; it changes no shared file, so
      they do not conflict with the B items. Each worker installs the CLI and reads its real flags, log files and hook
      or plugin system on this Mac.
@@ -95,8 +96,8 @@ the items of one row run in parallel.
 5. The test of each new agent in maxpm, after #5168, #5169, #5185, #5186 and its adapter item: it starts from the page
    with its settings, its chat shows on the Sessions page, the message box reaches it, its state moves between working
    and idle (and blocked, when it asks a permission), its / commands complete, and resume works if the adapter has it.
-   #5187 Pi (after #5170), #5188 OpenCode (#5171), #5189 Grok CLI (#5172), #5190 Hermes (#5173), #5191 Gemini CLI
-   (#5174), #5192 Cursor CLI (#5175), #5193 GitHub Copilot CLI (#5176), #5194 Aider (#5177), #5195 Goose (#5178),
+   #5187 Pi (after #5170), #5188 OpenCode (#5171), #5189 Grok CLI (#5172), #5190 Hermes (#5173), #5192 Cursor CLI
+   (#5175), #5193 GitHub Copilot CLI (#5176), #5194 Aider (#5177), #5195 Goose (#5178),
    #5196 Amp (#5179).
 
 Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 above).
@@ -106,7 +107,7 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
 - An adapter is a module; its parts are module-level names: `DESCRIBE` (+ `read_models`), `SETTINGS`, `EFFORT`
   (+ `read_effort_levels`, `read_effort`), `build_command` with `LAUNCH` (+ `parse_command`), `IDENTITY`,
   `chat_path` with `parse_chat` and `CHAT` (+ `chat_chain`, `chat_title`, `chat_cwd`, `chat_usage`, `chat_settings`),
-  `STATE` with `DETECT` or `install_hooks`, `INPUT`, `resume_command`, `COMMANDS` (+ `read_commands`), `SETUP`
+  `STATE` with `DETECT` (+ `screen_settings`) or `install_hooks`, `INPUT`, `resume_command`, `COMMANDS` (+ `read_commands`), `SETUP`
   (+ `write_mcp_config`). The id is the file name (`claude`, `codex`); the old platform names are aliases
   (`claude-code`).
 - `agents.load()` reads the built-in modules, then each `<id>.py` in the `agents` folder beside the queue
@@ -286,11 +287,14 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   session's web link), `open_title` (its tooltip) and `no_link` (why a session that runs in no tmux pane here cannot
   open). `write_mcp_config(path=None, remove=False)` adds MaximizePM's MCP server (`agents.setup_entry()`) to the
   agent's config file, or takes it out, and returns what changed: `claude` writes the Claude desktop app's config,
-  `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`).
+  `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`). `desktop_app()`
+  returns `{name, added, path}` when the agent's desktop chat app is on this computer, else None: the setup guide
+  then offers the config writer as an optional step.
 - `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`, the one instruction file of a project folder. `agents.replaced_files()`
-  gives each old file an agent read before (`SETUP["replaces"]`: CLAUDE.md), whose rules `maxpm init`, the setup guide
-  and the Projects folder form move into AGENTS.md before they delete it. `agents.import_files()` gives each file
-  that imports AGENTS.md (`SETUP["import"]`: GEMINI.md is `@AGENTS.md`).
+  lists the legacy files declared in `SETUP["replaces"]` (CLAUDE.md and GEMINI.md). When you choose to move the
+  rules, `maxpm init`, the setup guide and the Projects folder form copy them into AGENTS.md and remove the
+  legacy files. Setup lists any GEMINI.md files Antigravity CLI still reads in the project folder, its parents,
+  and ~/.gemini.
 - `GET /api/agents` (`agents.page_list()`) gives each agent's describe part, the parts it supports, its launch
   capabilities and its setup texts; `main` marks the first registered agent. The page reads it once
   (`static/components/agents.js`), and `views/sessions.js` tests no agent name. A session's `provider` has `agent`,
@@ -332,6 +336,128 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   folders of `sessions.transcript`. The setup guide offers every agent that MaximizePM can start, from the adapters
   (`server.known_agents`, #5225).
 
+## Model and effort lists
+
+The Start an agent dialog and a session's Settings dialog list each agent's models from one function,
+`core.platform_models`, in one order (`agents.order_models`, #6256): the agent's own choice (auto) first, then each
+provider and maker in the order the agent names them, newest generation first, then the strongest. Each model with
+levels of its own carries them, and the Effort list shows only those; for "the agent's default" it shows the levels
+that any of the agent's models takes. A list longer than 30 shows its picks and finds the rest with Other model….
+What each agent's list came from on this Mac on 2026-11-20 (#6257):
+
+| Agent | Source of the list | Models | Effort levels |
+|---|---|---|---|
+| Claude Code | `model_ladder` (fable, opus, sonnet, haiku) | 4 | the agent's: low to max |
+| Codex | `model_ladder`, and Codex's model cache (`~/.codex/models_cache.json`, hidden models left out) with Codex's names | 10 | each model's, from the cache |
+| Antigravity CLI | `agy models`, read by a thread (`agents.CliList`); one row per model, the level out of the id | 11 | each model's, from its ids; none for the Orchestrators |
+| Pi | `pi --list-models` (the signed-in providers), Pi's `defaultProvider` first and offered as picks | 299 | Pi's levels for a model with thinking, none without |
+| GitHub Copilot CLI | `DESCRIBE['models']`: Copilot prints no list | 8 | the agent's |
+| Hermes | Hermes's model cache of its provider | 17 | the agent's |
+| Grok CLI | Grok's `models_cache.json` | 1 | each model's, from the cache |
+| OpenCode | `opencode models --standalone` | 778 (4 picks) | none: OpenCode takes no effort at the start |
+| Goose | goose's model cache (`sessions.db`), else each provider's model in its `config.yaml` | 1 | the agent's |
+| Aider | `DESCRIBE['models']`: Aider 0.86.2 prints its list only in a terminal, and knows no 2026 model | 7 | low, medium, high |
+| Amp | none: Amp picks its model by its mode (the effort list) | 0: no Model field | low, medium, high, max (ultra) |
+| Cursor CLI | `cursor-agent models` (284 ids), one row per model, the level out of the id | 79 (10 picks) | each model's, from its ids |
+
+## Tier 1 agents
+
+mark 2026-11-19: 'we should add it and have a definitive feature set'. The tier 1 agents are Claude Code, Codex and
+Antigravity CLI: `agents.TIER1 = ("claude", "codex", "antigravity")` in `river/agents/__init__.py`, and
+`agents.is_tier1(name)` for an id, an alias or a platform name. Each one has every feature below. The setup guide
+shows the tier 1 agents first (Choose an agent); the other agents are under More agents and have the features their
+adapter gives.
+
+`tests/test_agent_tier1.py` checks each feature that code can check, for each tier 1 agent, and fails with the agent's
+and the feature's name. A feature that a tier 1 agent lacks is an exception below, with its fix item or the reason
+it cannot have it; the test fails when an exception no longer holds, and when this section does not name a feature
+or an exception. The end-to-end table under it proves what only a real run proves (#6253).
+
+| Feature | What a tier 1 agent has | Proof |
+|---|---|---|
+| `parts` | All the adapter parts: describe, settings, effort, launch, identity, chat log, state, screen rules, input, resume, commands, setup | unit |
+| `launch` | `build_command` starts its program with the name, folder, model, effort, settings and first prompt; every start path uses it (launch, Dispatch, serve's fresh, operational, review and deployer starts, manager, expert) | unit; e2e Start |
+| `resume` | `resume_command` resumes a session by its id: the Settings dialog's restart, expert resume and crash resume (`adopt_sessions`, `revive_sessions`, `session_restart`, `move_into_tmux`) | unit; e2e Resume |
+| `identity` | MaximizePM learns the session's id, and a maxpm command knows that it runs inside the agent (`inside_env`) | unit |
+| `chat` | The Sessions tab finds and reads its chat log: prompts, replies, tool calls and results | unit; e2e Chat |
+| `states` | Working, idle and blocked, from its hooks or its screen; blocked includes the folder trust question and each approval menu | unit (the rules exist, one reads trust); e2e States |
+| `ask_card` | Its own question dialog shows as a card on the page and is answered there (`DETECT['ask']`, a form of `river/ask_forms`) | unit; e2e Question card |
+| `interrupt` | Stop on the page ends the running turn and keeps the session (`INPUT['interrupt']`) | unit; e2e Stop |
+| `native_message` | A maxpm message reaches the session during a turn (`INPUT['native']`); the message box reaches its prompt | unit; e2e Message box |
+| `commands` | The "/" list in the message box with Tab, its custom commands for the folder, and `/model` opens the Settings dialog | unit; e2e / list |
+| `effort` | Its effort levels, the flag that sets one, and the Settings dialog row | unit |
+| `model_order` | The model list of the launch dialog and the Settings dialog is newest generation first, then strongest first (`agents.order_models`), each model once with the name people read; the effort list shows only the levels that the agent and the chosen model take, low to high, and changes with the model (#6256) | unit; e2e Start |
+| `settings_read` | The Settings dialog of a running session shows each value that the session runs with (model, effort, mode and each other setting), also when it started with none named: from its chat log (`chat_settings`), its screen (`screen_settings`: agy's footer) or the agent's own config (`config_settings`), as `SETTINGS_READ` declares; `tests/test_model_order.py` refuses a setting with no source for every agent (#6260, #6280) | unit; e2e Settings |
+| `usage` | The context meter and the Usage panel (`context_window`), and `maxpm usage` (its token counts) | unit |
+| `setup_files` | `maxpm init` writes its instruction file, and MaximizePM's MCP server goes into its config | unit |
+| `setup_main` | Setup installs it, checks it (its status command) and signs it in (`agentinstall.METHODS`) | unit; e2e Setup |
+| `host_signin` | `maxpm agent-login` and `maxpm host signin` sign it in on a computer with no browser (`agentlogin.AGENTS`) | unit |
+| `roles` | `agent_for.<role>` (worker, manager, reviewer, deployer, expert), `default_agent`, `agent_rules` and `--agent` take it | unit; e2e Roles |
+| `jobs` | `maxpm runner add/set` and `maxpm runner github/gitlab/pulumi` take `--cli <its program>` (`runners.CLIS`, `agent_job.SECRET`) | unit |
+| `shell_guard` | A hook before each shell command, so MaximizePM refuses a `tmux kill-server` of its server (`core.tmux_guard`) and a push while an alert is unread (`core.push_guard`) | unit; e2e Shell guard |
+| `secrets` | `maxpm secret` confirms the session from its process (`vault.AGENT_PROGRAMS`) | unit |
+| `first_go` | Started by MaximizePM in any project folder, its first `maxpm go` and every later command run in that folder, and it claims its item with no typed help (mark 2026-11-19, #6278) | unit (agy: its start names no `--add-dir`, as agy runs a command in such a folder, not in its start folder); e2e First go, in a project folder that is not biggestriver |
+| Antigravity CLI start (#6445) | A new queue session starts with `go` and receives the packaged MaximizePM skill in its first message. | Antigravity CLI 1.5.13 started from `go` and claimed and finished an item in both a worktree and a linked folder. Both folders had no `AGENTS.md` and started without a trust prompt. |
+| `read_dirs` | The project's setting `read_dirs` (folders, comma-separated): the session reads them with no question for each file, writes nothing in them, and never reads their secret files (.env, .env.*, .envrc, *.secret, *.secrets, a secrets folder) (mark 2026-11-20, #6281). Claude Code: `--add-dir` and `--disallowedTools` rules; Antigravity CLI: `--settings` allow `read_file(<folder>)`, deny `write_file(<folder>)` and `read_file(<file>)` for each secret file found at the start (its rules take paths, not patterns; never `--add-dir`, #6278); Codex (#6304): its sandbox reads the whole disk and writes only in its workspace, and each start and resume adds `-c default_permissions="maxpm_read_dirs"` and `-c permissions.maxpm_read_dirs={extends=...,filesystem={...}}` (extending `config.toml`'s `default_permissions` or `:workspace`, denying those secret globs) | unit; e2e 2026-11-20 (#6281, #6304, a fake .env outside /tmp): Claude Code, Antigravity CLI and Codex read the folder's Cargo.toml with no question and were refused its .env, and writes in the read folder were refused (Codex also ran its PreToolUse hook with no trust prompt). Claude Code asks once per start to add a folder it was never started in |
+
+Exceptions (each also in `EXCEPTIONS` of the test):
+
+- Antigravity CLI, `native_message`: agy 1.5.13 has no command, socket or flag that adds a message to a running
+  session (its reference: only `-p`, `--conversation`, `acp` and `remote-control`). The message box types into its
+  pane, which works at its prompt. With the setting `agy_activity_hooks` on (#6351), a maxpm message that comes
+  during a turn reaches the session at the end of that turn: the Stop hook answers `{"decision": "continue",
+  "reason": <the messages>}`, and agy gives the model the text as a system message.
+
+Antigravity CLI's `shell_guard` is behind the setting `agy_activity_hooks` (off by default, mark 2026-11-20). agy
+loads hooks only from `hooks.json` in its home or in the project, and an adapter installs nothing in a CLI's home
+(p140); no flag adds a hook for one start. With the setting on, each start of an agy session (and `maxpm init`)
+writes MaximizePM's hooks under the name `maximizepm` into the start folder's `.agents/hooks.json` (and the line
+`/.agents/hooks.json` into the repository's `info/exclude`), and keeps the person's other hooks; off takes out only
+that name. The PreToolUse hook of `run_command` runs `core.tmux_guard` and `core.push_guard` and answers `{"decision":
+"deny", "reason": ...}`; PreInvocation reports working and Stop reports idle (blocked still comes from the screen: no
+event says it). A hook in an agy session that MaximizePM did not start (no `MAXPM_AGENT` or session token in its
+environment) does nothing. With the setting off, the tmux guard is deny rules of the session's `--settings` (#6251,
+`antigravity.DENY_TMUX`), and nothing refuses a push.
+
+Lists that stay as they are, as they are not a tier: `agents.ASK_FORMS` (the question forms that `river/ask_forms`
+draws, also Copilot's and OpenCode's), `vault.AGENT_PROGRAMS` (the programs of every agent), and
+`core._PROFILE_MIGRATION` (the agents of a one-time change, fixed history).
+
+End-to-end runs of the tier 1 agents (#6253): a test serve on a queue of its own (`MAXPM_DB`) with its own tmux
+server, driven through the page's API and the page itself, with its desktop and 390 px screenshots.
+
+| Agent | Setup (install, check, sign-in) | Start, with its settings | First go (another project folder, no typed help) | Chat | Message box | States (working, idle, blocked, trust, approval) | Question card | / list | Stop | Resume after a stop | Roles (manager, reviewer) | Shell guard |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Claude Code | pass | pass | pass (the Dispatch runs) | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| Codex | pass | pass | pass (the Dispatch runs) | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
+| Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | fail before #6278 (its maxpm go ran in the queue folder, which --add-dir named); pass after it (no --add-dir) | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | setting off: not reached, the model refused the command itself (#6251); `agy_activity_hooks` on (#6351, 2026-11-20, claude-sonnet-5-5 low in agy): a `git push` refused while an alert was unread, the alert brought in at the turn's end, working and idle from the hooks in the second of each |
+
+The runs of 2026-11-19, with Claude Code 2.1.329 (haiku, low), codex-cli 0.159.1 (gpt-6-luna, low) and agy 1.5.13
+(gemini-3.8-flash-medium). Each run: Dispatch of a worker item from the page (the agent asks the person a date format
+with its own question tool, writes a line, commits and runs `maxpm done`), the trust question and an approval menu
+answered on the page, a reply through the message box, `/mo` and Tab to `/model`, which opens the Settings dialog, a
+Stop during a long reply, a restart with a changed setting (its chat goes on), then Start manager and a Dispatch of
+the release's review item (the reviewer passes it). Shell guard: Claude Code and Codex (after #6254, in a second run)
+refused a bare `tmux kill-server` with the guard's reason. agy (after #6251, with the deny rules in its start
+command) did not call its tool: its model refused the command twice by itself, so the run did not reach the rule. Screenshots: Setup, the question card, the Settings dialog and the Sessions tab, at desktop width
+and 390 px. Also found: the Settings dialog's row labels overlap their selects (#6262).
+
+Open gaps, each with its fix item:
+
+- Codex, question card: #6258. codex-cli 0.159.1 asks a question during a running turn as one line, '? 1 question',
+  with 'shift+← to answer'; the page shows working and no card.
+- Codex, an approval answered with "No, and tell Codex what to do differently" and a text: #6259. The text stays in
+  Codex's input line until an Enter.
+- Antigravity CLI, start with an effort: #6260. `--effort` with `--model` makes agy 1.5.13 start on its default model;
+  its model ids carry the effort.
+- Antigravity CLI, state after a Stop: #6261. The transcript's last step reads as working and wins over the screen,
+  which shows idle; the Settings restart then refuses until another turn ends.
+
+- Antigravity CLI, first `maxpm go` (#6278): each run started in a scratch project, not in biggestriver. Claude Code
+  and Codex reached their item with only the trust card answered on the page. agy's first start ran `maxpm go` in
+  the `--add-dir` folder (the queue's folder) and found no project; a second start, with the queue folder beside the
+  project, reached its item.
+
 ## Tests in maxpm (step 5)
 
 One row for each agent: its end-to-end test on this Mac, from a test serve on a queue of its own (`MAXPM_DB`) with
@@ -348,7 +474,69 @@ its own tmux server, driven through the page's API (`/api/action`) and the page 
 | Aider 0.86.2 (#5194), `ollama_chat/qwen2.5:3b` on the local Ollama, no key | Works, with faults: Start an agent with Aider and Edit format `whole` gives `aider --edit-format whole --chat-history-file <queue>/aider/<start name>.chat.history.md --no-show-release-notes --set-env MAXPM_AIDER_SESSION=<start name>`. The dialog has no field for a model outside its list or for a text setting, so `--model ollama_chat/qwen2.5:3b` came from `aider_args` (project scope). Aider then stopped at two start questions, the `.gitignore` one and the model warning (OLLAMA_API_BASE not set) (#5270). After them maxpm pasted the first prompt (#5221), and Aider answered it. | Fails: no chat. The log has both turns (the adapter reads 8 entries), but no session id is recorded: Aider runs no maxpm command, and the start does not record the name it chose (#5280). The agent type was not recorded either; #5269 now records it at the start. | Works: `y` typed in the box answered the `.gitignore` question; `n`, a `/ask` prompt and `/exit` reached the pane through the same action (`session_send`). | Partly: the watcher finds the adapter by the pane's process (Python, #5223) and reports idle. Working was not seen: the spinner shows only until the first token, and each turn ended between two passes (#5277). Blocked: not found; in a 57-column pane the question's `:` goes to the next line (#5265). | Fails: `/api/session-commands` gave none without the agent type (#5269, done after this test). | From the page: refused, the Settings dialog knew no settings of the session's provider (#5269). The adapter's `resume_command` gives the same log with `--restore-chat-history` (checked in the CLI in #5177). End now was refused too: no recorded process (#5278); `/exit` from the box ended it. | #5265, #5270, #5277, #5278, #5280, #5269 (done), #5225 (no Add Aider in the setup guide) |
 | OpenCode 2.2.7 (#5188), opencode/big-pickle (free, no key) | Works: Start an agent lists OpenCode, its free models first and Other model… for the rest, and its two toggles (Own server on, Approve permissions off); with model big-pickle it runs `env OPENCODE_CLI_CONFIG_CONTENT=<plugin> env OPENCODE_CONFIG_CONTENT={"model":…} opencode --standalone --prompt …` in a tmux pane; OpenCode runs `maxpm go`, writes the file, commits and closes the item. With no model chosen the launch leaves the model out, so OpenCode uses the model it remembers, not the adapter's default (#5284). | Fails, fixed in the test: no chat ("No transcript"), as `CHAT` had no `ref` and `chat_path` and `chat_chain` the old arguments (#5267). After the fix the chat shows the prompt, the replies and the tool calls; a failed turn's error shows once. | Works: the text reaches the pane; during its foreground `maxpm wait` OpenCode holds it until the wait ends, and since #5256 that is at once (it answered `ping` 2 s after the send). | Works: the plugin reports working and idle with the session id and the resume command, and blocked at the permission of a `.env` read with the message 'permission: read .env'. The card has no options: OpenCode's menu is one line (`Allow once   Always allow   Reject`), and the watcher reads only menus with one option per line (#5281); Reject was sent in the terminal, and the state went back to idle. | Works: `/com` lists `/compact`, Tab gives `/compact `. The folder's `.opencode/commands` were missing, as the chat file named no `cwd` (#5275, fixed in the test). | Partly: the Settings dialog restart resumes the same session (`opencode --standalone --session <id> --prompt …`) with its chat and context, but the model change did not apply, as a session keeps its own model (#5285); the dialog offered only Model (#5286, fixed in the test). The old TUI stayed alive in its pane: maxpm records OpenCode's private server as the session's process, not the TUI (#5283). | #5267 (done), #5275 (done), #5281, #5283, #5284, #5285, #5286 (done), #5225 (no Add OpenCode in the setup guide) |
 | Cursor CLI 2026.11.11-043ef28 (#5192), model `auto` on a Free account | Works: the launch dialog offers Cursor with its models, five efforts (the suffix of the model id) and its settings (Run Everything, Auto-review, Sandbox, Mode, Trust the folder, Approve MCP servers); `launch_agent` with model `auto` gave `cursor-agent --model auto "<prompt>"` in a tmux pane. The first start in the folder stopped at Cursor's trust question and then at the menus of its shell commands (#5264, answered from the page); then it ran `maxpm go`, took its item, appended the date to a file and closed the item. A `launch` with no `--prompt` lets a waiting session take the item first. The Free plan runs only Auto, Grok 4.7 and Grok 4.6 with fixed settings: `grok-4.7` (Cursor's Low variant) is refused ('Model unavailable on Free'). | Works: the prompts, the replies and the shell commands with their command lines, from the agent-transcripts log; no times and no tool results, as the log has none. | Works: a message from the box reached its prompt, and `pong` came back within 2 s. | Works: idle at its input line, working while a turn runs, and blocked at 'Run this command?' (Not in allowlist: uname) with its four options; Run (once) from the page ran it, and the state went back to idle. The card's command field is empty: the command shows only in the screen lines. | Works: `/api/session-commands` gives its 40 built-in commands; on the page `/run-e` and Tab give `/run-everything `. The folder's own commands and skills are missing: the log names no folder (#5301). | Works, with faults: Restart with model `grok-4.7` from the Settings dialog ran `cursor-agent --resume <chat id> --model grok-4.7 …` in a new pane with the same chat (context 11.8%, as before). The dialog showed Model and Effort 'not known' and no Cursor setting (#5299). The new turn failed (the Free plan), so the session ran no maxpm command: a second restart was refused, 'the process … is not known' (#5300), and the message box typed into the old pane, where zsh ran the text as a command (#5298). | #5298, #5299, #5300, #5301, #5225 (no Add Cursor in the setup guide) |
-| Gemini CLI 0.68.0 (#5191), model `flash`, with no Google account: a scripted local stand-in for the Gemini API (`tests/fixtures/gemini/record_server.py`, `GOOGLE_GEMINI_BASE_URL`, a dummy `GEMINI_API_KEY`), so the model's own work is not tested | Works, with one fault: the launch dialog offers Gemini with its four models, no effort, and Approval mode, Sandbox and Trust the folder; `launch_agent` with model `flash`, Approval mode `default` and Trust the folder on gave `gemini --model flash --approval-mode default --skip-trust --include-directories <queue folder> --prompt-interactive '<prompt>'` in a tmux pane. Each start then stops at Gemini's question 'Do you trust the following folders being added to this workspace?' for the queue folder, which the page does not see (#5818); answered in the pane. Then Gemini ran `maxpm go` on the test queue and took its item. | Fails: nothing records the Gemini session id (IDENTITY source `log` has no reader), so the page says 'no Gemini CLI session id … is recorded yet' (#5819). With the id recorded by hand (`maxpm report --session-id`, run by Gemini) the chat shows the prompts, the shell calls with their commands, their output and the replies. Gemini's workspace update after the trust answer shows as a prompt with the whole folder tree (#5820). | Works: `session_send` typed the text into Gemini's input line, and Gemini answered it. | Works: idle at the input line, working while a turn runs, and blocked at 'Allow execution of [Shell]?' with its three options; Allow once from the page (`prompt_answer`) ran the command. The card has no tool and no command (#5817). The added-folder question reads as no state (#5818). | Works: `/api/session-commands` gives its 35 built-in commands; on the page `/mo` and Tab give `/model`. | Works: Restart with Approval mode `auto_edit` from the Settings dialog (it showed Model `flash`, Approval mode and Sandbox from the command line) ran `gemini --resume <id> --model flash --approval-mode auto_edit …` in a new pane; Gemini appended to the same log, and the chat went on. The folder question came again (#5818). | #5817, #5818, #5819, #5820 |
+| Antigravity CLI 1.5.13 (#6248), `gemini-3.8-flash-medium` on a Google AI Ultra account, a test queue with its own serve and tmux server | Works after one fix: Dispatch of the item with Antigravity CLI gave `agy --model … --add-dir <queue folder> --settings '{"permissions":{"allow":["command(maxpm)"]}}' -i '<prompt>'`. The first start had no `--settings`: agy's auto mode runs each command in its sandbox, which refused to run maxpm ('operation not permitted'); the allow rule with a BypassSandbox note in the first prompt fixed it. The first start in a folder asks 'Do you trust the contents of this project?', answered from the page. Then agy ran `maxpm go`, took the item and closed it with its commit. | Works: the prompts, the tool calls and their results, the replies, from `transcript_full.jsonl`; the session id from `ANTIGRAVITY_CONVERSATION_ID`. | Not tested in this run. | Works: blocked at its trust question and at its own question dialog (`ask_question`), answered from the page (the dialog's card took 'US (11/19/2026)'), working with its spinner, idle at its footer. A read outside the workspace ('Allow access to this file?') read as no state; added after the run. | Not tested in this run (its 47 built-in commands and the skills of its folders are in the adapter). | Works: a stop from the page reached its background `maxpm wait`, and the session woke and ended; Restart from the Settings dialog with another model ran `agy --conversation <id> …` in a new pane, with the whole chat and the new model. | none |
+
+## End-to-end run of every agent (#6399)
+
+mark 2026-11-20: 'we need to take up a larger test of the agents as antigravity turned out to be a lot of work to get
+functional'. One run of each agent on 2026-11-20, on a test queue with its own serve and tmux server, started with
+`env -i` (`scripts/agent_e2e/`): `maxpm launch --item` (Dispatch), then the queue shows each step. The run answers no
+card of an agent: the auto mode classifier refused an answer to a trust card from the test session, so an agent that
+asks a question before its first `maxpm go` stops there. Grok CLI is not tested: policy p19 forbids xAI models
+(manager 2026-11-20). `AGENTS.md`: print mode in a subfolder of a repository, with a codeword in the root's and in
+the subfolder's `AGENTS.md`.
+
+| Agent | Launch, model on its command line | go, claim, done (with a commit) | wait | A message | Stop | Usage limits | AGENTS.md (root, subfolder) |
+|---|---|---|---|---|---|---|---|
+| OpenCode (opencode/big-pickle) | pass | pass: 27 s from the claim to done | pass | pass: native, 'pong' in 11 s | pass: ended in 3 s | no reader | pass |
+| Pi (its default, gpt-6.1-sol, `--thinking low`) | pass | pass: committed 19 s after the claim, then asked 'Push?' (result_look ask_first) | ran wait, then ended its turn at the first 'No work yet' (#6422). Run again after #6422 (default wait_step): with no open question it ran wait three times in a row; after 'Push?' and a release it waited through a 'No work yet', got WORK 1 s after the answer, and closed the item in the same session | not reached | serve ended it as idle | no reader | pass |
+| Goose (its default) | pass | pass: committed 17 s after the claim, then asked 'Push?' | as Pi (#6422) | not reached | serve ended it as idle | no reader | pass |
+| Amp (`--mode low`) | pass | pass: committed 25 s after the claim, then asked 'Push?' | as Pi (#6422) | not reached | serve ended it as idle | no reader | pass |
+| Claude Code (haiku, low) | pass | stops at its trust question in a new folder and in a worktree of a new repository (the real projects' folders are trusted) | not reached | not reached | pass: serve finished the stop when the session stayed idle | the probe skips Claude Code while a session of it runs; the real page reads it | pass |
+| Codex (gpt-6-luna, low) | pass | stops at 'Trust this folder?', also in a MaximizePM worktree: Codex trusts the repository root (#6415) | not reached | not reached | pass, as Claude Code | pass: from its log | pass |
+| Antigravity CLI (default; then claude-sonnet-5-5-low) | pass | first run: trust question in a new folder; worktree run: no question, then 'Individual quota reached' at its first prompt | not reached | not reached | pass, as Claude Code | pass: the limit stop limits the group 'Claude and GPT models'; the item was not started again on another agent (#6418) | not run (quota) |
+| GitHub Copilot CLI (auto, low) | pass | new folder: trust question; worktree: no trust question, then 'Do you want to run this command?' for maxpm go (#6417) | not reached | not reached | pass, as Claude Code | no reader | pass |
+| Cursor CLI (auto) | pass; `--effort low` is dropped for model auto | trust question, also in a worktree (#6416) | not reached | not reached | pass, as Claude Code | no reader | print mode refuses an untrusted folder without `--trust` |
+| Hermes (gpt-6.1-terra via openai-codex, low) | pass: it has a model with the launch's provider | fail: its terminal tool gets no MaximizePM variable, so `maxpm go` reads the default queue (#5241; after this run, maxpm reads them from the session that Hermes stored, and a one-shot Hermes session's `maxpm go` registered on its test queue) | not reached | not delivered: the session never ran a maxpm command on its queue | not run | no reader | pass |
+| Aider (ollama_chat/qwen2.5:3b) | pass | fail: Aider runs no shell command by itself, so it never runs maxpm go | not reached | not reached | not run | no reader | fail: no `--read` (#6420) |
+
+Also found: after the person's answer, the fresh sessions for the Pi, Goose and Amp items ran Claude Code, not the
+agent of the Dispatch (#6419); `maxpm launch --agent` takes only a label, not an id (#6421); a session with a token
+gets briefing lines with `--as` and then a note on each such command (#6423). The rest of the run, after #6415 to
+#6418: #6424, below.
+
+### The second run, after the trust and permission fixes (#6424)
+
+2026-11-20, 19:36 to 19:55 UTC, the same scripts and rules, each project with `workspace worktree` (a MaximizePM
+worktree of a new git repository), `wait_step` 2m. Versions: codex-cli 0.171.0 (Homebrew updated it at 19:29 UTC,
+after the fixes), cursor-agent 2026.11.19-f005e9d, GitHub Copilot CLI 1.0.114, agy 1.5.13. Each agent ran first with
+its default settings; Copilot and Cursor ran a second time with the permission setting that a person picks in the
+launch dialog, so the run reached the later steps.
+
+| Agent | Settings | Start with no question | go, claim, done (with a commit) | wait | A message | Stop | AGENTS.md (root, subfolder) |
+|---|---|---|---|---|---|---|---|
+| Codex (gpt-6-luna, low) | default | fail: 'Trust this folder?' although the start passes `-c projects.<worktree>` and `-c projects.<repository root>.trust_level="trusted"`; 0.171.0 ignores that override, also in a plain new git folder, and has `--trust` only on `codex exec` (#6437) | not reached | not reached | not reached | pass: serve ended it at the card | pass (run 1) |
+| Codex (gpt-6-luna, low), 19:56 UTC, after #6437 (0567040: one inline `-c projects={...}` table) | default | trust: pass; then 'Allow the maxpm MCP server to run tool "go"?': the person's `[mcp_servers.maxpm]` of `setup-agent --chatgpt-desktop` (main queue, chat mode) reaches the session, and its model calls that tool instead of the shell `maxpm` (#6443) | not reached | not reached | not reached | pass: serve ended it | as above |
+| Cursor CLI (auto) | default | trust: pass (`--trust`, #6416); then 'Run this command?' for `maxpm go`: nothing in its start allows `Shell(maxpm)` (#6439) | not reached | not reached | not reached | pass: serve ended it | pass with `--trust` in print mode |
+| Cursor CLI (auto) | Run Everything (`--force`) | pass | pass: 15 s from the claim to done | pass | pass: 'pong' in 10 s, through its `maxpm wait` | pass: it ended its turn at once; its row left when serve ended the idle session (4.4 min) | as above |
+| GitHub Copilot CLI (auto, low) | default | pass: no trust question in the worktree, and `maxpm go` ran with no question (#6417) | claim: pass; then 'Do you want to create ok.txt?': with no Permissions setting Copilot asks before each change, as the setting says | not reached | not reached | pass: serve ended it | pass (run 1) |
+| GitHub Copilot CLI (auto, low) | Permissions `allow-all-tools` | pass | pass: 34 s from the claim to done | pass | pass: 'pong' in 15 s, through its `maxpm wait`; the native channel needs Copilot's experimental mode, which the person turns on | pass, slowly: its model ran `maxpm stop` on itself (refused: a person's command), then sat at its prompt until serve ended it (4.6 min) | as above |
+| Antigravity CLI (default, Gemini 4 Neon high) | default | pass: no trust question in the worktree, and its Gemini quota had reset (19:40 UTC) | pass: 4.5 min from the claim to done; two `maxpm done` with no proof were refused, the third had `--commit` and `--test` | pass | pass: read through its `maxpm wait` in 45 s, 'pong' in 112 s | pass: it ended its turn at the STOP of its wait; its row left when serve ended the idle session (4.9 min) | pass: both codewords in print mode |
+
+With the defaults, only Antigravity CLI ran the whole session with no question. Copilot's question about a file
+write is its Permissions setting at work, not a defect. Codex's trust question went away with #6437; open: #6443
+(Codex sessions get the chat app's maxpm MCP server) and #6439 (Cursor's allow of maxpm). A stopped session that sits at its
+prompt leaves the queue only after serve's idle end, about 4.5 minutes, also when it ended its turn at once.
+
+### Antigravity CLI shared instructions (#6446)
+
+`maxpm init --move` moved a demo project's GEMINI.md rules into AGENTS.md and removed GEMINI.md. The root and
+subfolder each had a distinct codeword in AGENTS.md.
+
+| Antigravity CLI 1.5.13 model | Project root | Subfolder |
+|---|---|---|
+| Gemini 4 Neon high | Pass | Pass |
+| Claude Opus 5.5 medium | Quota limit | Pending |
 
 ## Slash commands on the page (#5224)
 
@@ -366,8 +554,8 @@ with no argument, nothing goes to the terminal. A command with an argument goes 
   `model_prices` setting has no output price.
 - The page has no action for a worker session's new chat, clear, resume, fork or rename (a new chat would lose its
   item and its context): those commands stay as they run (`now`, or `terminal` for a picker).
-- The other agents follow in #5289 (Pi, OpenCode, Grok), #5290 (Hermes, Gemini CLI, Cursor CLI) and #5291 (GitHub
-  Copilot CLI, Aider, Goose, Amp).
+- The other agents follow in #5289 (Pi, OpenCode, Grok), #5290 (Hermes, Cursor CLI), #5291 (GitHub Copilot CLI,
+  Aider, Goose, Amp) and #6248 (Antigravity CLI).
 
 | Agent | Command | On the page |
 |---|---|---|
@@ -398,9 +586,9 @@ with no argument, nothing goes to the terminal. A command with an argument goes 
 | Hermes | `/status`, `/context`, `/usage` | the Usage panel (the session's totals from its log; its window from `~/.hermes/context_length_cache.yaml`); Hermes logs no single call, so no meter |
 | Hermes | `/history`, `/rollback`, `/agents`, `/queue`, `/sessions`, `/resume`, `/config`, `/approvals`, `/diff`, `/tools`, `/skills`, `/help`, `/version` | needs the terminal (it prints them into its scrollback, not its log) |
 | Hermes | `/new`, `/clear`, `/retry`, `/undo`, `/compress`, `/branch`, `/title`, `/stop`, `/bg`, `/btw`, `/steer`, `/goal`, `/plan`, `/review`, `/fast`, `/yolo`, `/verbose`, `/init`, `/image`, `/copy`, `/quit` | run at once |
-| Gemini CLI (#5290; not signed in here: from its descriptions) | `/model` | Settings: Model |
-| Gemini CLI | `/stats` | the Usage panel (its window: 1,048,576 for the Gemini 2.5 and 3 models) |
-| Gemini CLI | `/settings`, `/resume`, `/chat`, `/rewind`, `/restore`, `/permissions`, `/policies`, `/extensions`, `/mcp`, `/memory`, `/tools`, `/skills`, `/theme`, `/editor`, `/auth`, `/about`, `/directory`, `/commands`, `/docs`, `/help`, `/privacy` | needs the terminal |
+| Antigravity CLI 1.5.13 (#6248) | `/model`, `/effort` | Settings: Model, Effort (a restart: its `/model` also changes later sessions) |
+| Antigravity CLI | `/context`, `/usage` | the Usage panel (the session's tokens from its transcript; its docs name no window size, so no meter) |
+| Antigravity CLI | `/config`, `/resume`, `/rewind`, `/permissions`, `/hooks`, `/mcp`, `/plugin`, `/skills`, `/agents`, `/tasks`, `/diff`, `/help` and its other panels | needs the terminal |
 | Cursor CLI 2026.11.11 (#5290) | `/model`, `/sandbox` | Settings: Model, Sandbox |
 | Cursor CLI | `/config`, `/resume`, `/rewind`, `/about`, `/logs`, `/help`, `/mcp`, `/plugin`, `/team`, `/load-workspace` | needs the terminal; Cursor logs no token counts, so it has no Usage panel |
 | Cursor CLI | the toggles (`/ask`, `/max-mode`, `/fast`, `/auto-review`, `/run-everything`, ...), `/clear`, `/fork`, `/summarize`, `/rename`, `/goal`, `/plan` | run at once |

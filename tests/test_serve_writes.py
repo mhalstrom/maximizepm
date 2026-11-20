@@ -295,6 +295,107 @@ class ServeWritesPolls(unittest.TestCase):
         self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "WORK: #3 is ready.\n", ""))
         self.assertEqual(len(sent), 4)
 
+    def test_serve_writes_a_wait_reloads_serve_token_and_stamp_after_restart(self):
+        # #6475: a restarted serve writes a new RUN_TOKEN to serve.json and may have newer code. _poll_loop re-reads
+        # serve.json and refreshes stamp so the wait goes back to serve instead of getting 403/409 for POLL_LOST.
+        sfile = self.db + "-serve.json"
+        with open(sfile, "w", encoding="utf-8") as f:
+            json.dump({"port": 1, "token": "t1"}, f)
+        stamp = [100]
+        seen = []
+
+        def post(port, body, token, timeout):
+            req = json.loads(body)
+            seen.append((token, req.get("stamp")))
+            if len(seen) == 1:
+                return 200, b'{"code": 75, "out": "", "err": "", "poll": {"started": "t0"}}'
+            if len(seen) == 2:
+                # serve restarted with a new token and newer code
+                with open(sfile, "w", encoding="utf-8") as f:
+                    json.dump({"port": 1, "token": "t2"}, f)
+                stamp[0] = 200
+                return 403, b'{"error": "a maxpm command with the token of the serve file only"}'
+            if token == "t2" and req.get("stamp") == 200:
+                return 200, b'{"code": 0, "out": "WORK: #9 is ready.\\n", "err": ""}'
+            return 409, b'{"error": "stale"}'
+        out, err, naps = io.StringIO(), io.StringIO(), []
+        with mock.patch.object(client, "_post", post), mock.patch.object(client, "code_stamp", lambda: stamp[0]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = client._poll_loop(1, "t1", {"argv": ["wait"], "stamp": 100}, sleep=naps.append,
+                                     serve_path=sfile, can_local=False)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "WORK: #9 is ready.\n", ""))
+        self.assertEqual(seen, [("t1", 100), ("t1", 100), ("t2", 200)])
+        self.assertEqual(naps, [client.POLL_SLEEP])  # 403 with rotated token retried immediately
+
+    def test_serve_writes_a_wait_that_cannot_write_locally_keeps_polling_past_poll_lost(self):
+        # #6475: when this process cannot write the queue locally, falling back after POLL_LOST always fails with
+        # 'only maxpm serve writes the queue'. Keep polling until serve answers again.
+        answers = [(200, b'{"code": 75, "out": "", "err": "", "poll": {"started": "t0"}}'),
+                   (None, None), (None, None), (None, None),
+                   (200, b'{"code": 0, "out": "WORK: #5 is ready.\\n", "err": ""}')]
+        calls = [0]
+        clock = iter(range(0, 1000, 90))
+
+        def post(port, body, token, timeout):
+            calls[0] += 1
+            return answers[calls[0] - 1]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "_post", post), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = client._poll_loop(1, "t", {"argv": ["wait"]}, sleep=lambda s: None,
+                                     clock=lambda: next(clock), can_local=False)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "WORK: #5 is ready.\n", ""))
+        self.assertEqual(calls[0], 5)
+
+    def test_serve_writes_a_write_during_a_restart_is_retried_not_a_502(self):
+        # #6475: a non-poll command (e.g. send note) that hits 502/504 or 503 restarting retries across the restart,
+        # re-reading the new serve token, instead of failing with 'gave no answer (502)'.
+        sfile = self.db + "-serve.json"
+        with open(sfile, "w", encoding="utf-8") as f:
+            json.dump({"port": 1, "token": "t1"}, f)
+        env = {"MAXPM_DB": self.db, "PATH": os.environ.get("PATH", "")}
+        tokens = []
+
+        def post(port, body, token, timeout):
+            tokens.append(token)
+            if len(tokens) == 1:
+                return 502, b"<html>Bad Gateway</html>"
+            if len(tokens) == 2:
+                return 503, b'{"error": "restarting"}'
+            if len(tokens) == 3:
+                with open(sfile, "w", encoding="utf-8") as f:
+                    json.dump({"port": 1, "token": "t2"}, f)
+                return 403, b'{"error": "token"}'
+            return 200, b'{"code": 0, "out": "sent\\n"}'
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "_post", post), mock.patch.object(client, "RETRY_SLEEP", 0), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = client.run_remote(["send", "note", "hi", "--to", "m"], env)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "sent\n", ""))
+        self.assertEqual(tokens, ["t1", "t1", "t1", "t2"])
+
+    def test_serve_writes_a_write_on_a_readonly_db_retries_connection_refused(self):
+        # #6475: inside a sandbox (read-only queue), a brief connection refused during serve exec retries instead of
+        # falling back locally and failing with 'only maxpm serve writes the queue'.
+        sfile = self.db + "-serve.json"
+        with open(sfile, "w", encoding="utf-8") as f:
+            json.dump({"port": 1, "token": "t1"}, f)
+        os.chmod(self.db, stat.S_IRUSR)
+        self.addCleanup(os.chmod, self.db, stat.S_IRUSR | stat.S_IWUSR)
+        env = {"MAXPM_DB": self.db, "PATH": os.environ.get("PATH", "")}
+        answers = [(None, None), (200, b'{"code": 0, "out": "ok\\n"}')]
+        calls = [0]
+
+        def post(port, body, token, timeout):
+            calls[0] += 1
+            return answers[calls[0] - 1]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(client, "_post", post), mock.patch.object(client, "RETRY_SLEEP", 0), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = client.run_remote(["send", "note", "hi"], env)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "ok\n", ""))
+        self.assertEqual(calls[0], 2)
+
     def test_serve_writes_a_runner_answers_a_poll_with_its_state(self):
         proc = subprocess.Popen([sys.executable, "-m", "river.runner", self.db], cwd=ROOT, text=True,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)

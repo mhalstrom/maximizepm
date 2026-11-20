@@ -30,7 +30,7 @@ import os
 import re
 from pathlib import Path
 
-from . import Raw
+from . import CliList, Raw, split_levels
 
 DESCRIBE = {
     "id": "cursor",
@@ -39,7 +39,9 @@ DESCRIBE = {
     # Not "agent": the installer links ~/.local/bin/agent to cursor-agent, but that name is the Grok CLI's too.
     "aliases": ["cursor-agent", "cursor-cli"],
     "family": "multi",
-    "models": ["auto", "opus", "sonnet", "haiku", "fable", "sol", "terra", "luna", "composer-2.5", "grok-4.7"],
+    # The models offered first (picks) of the long list that read_models reads from `cursor-agent models` (#6257).
+    "models": ["auto", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "gpt-5.6-sol",
+               "gpt-5.6-terra", "gpt-5.6-luna", "composer-2.5", "grok-4.7"],
     "default_model": "",  # Cursor's own default (cursor-agent models marks it; Auto on a new account)
     # Cursor takes a base id and picks the effort it names as its default ("claude-opus-5-5" is Opus 5.5 at medium).
     "model_ids": {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5",
@@ -100,7 +102,6 @@ LAUNCH = {
 IDENTITY = {
     "source": "env",  # each shell command of the session has CURSOR_CONVERSATION_ID
     "env": "CURSOR_CONVERSATION_ID",
-    "log_glob": "~/.cursor/projects/*/agent-transcripts/*/*.jsonl",
     "pane": None,
     "url": None,
     "inside_env": ["CURSOR_AGENT"],  # Cursor sets CURSOR_AGENT=1 for the commands it runs
@@ -188,6 +189,9 @@ SETUP = {
     "open_link": None,
 }
 
+# 12. Update (#6430): cursor-agent -p answers one request and exits; cursor-agent update updates its own install.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["update"]}
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Folders
@@ -218,14 +222,110 @@ def _on(v):
     return v is True or str(v).strip().lower() in ("on", "true", "1", "yes")
 
 
+def parse_models(text):
+    """The models of `cursor-agent models` ('<id> - <name>' lines; 284 ids on 2026-11-20, cursor-agent 2026.11), one
+    row per model with the levels its ids carry (agents.split_levels: gpt-5.6-sol-high and gpt-5.6-sol-xhigh are one
+    model with high and xhigh)."""
+    rows = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^([a-z0-9][\w.-]*) - (.+)$", line.strip())
+        if m:
+            label = re.sub(r"\s*\((?:default|current)\)\s*$", "", m.group(2).replace("​", "")).strip()
+            rows.append((m.group(1), label))
+    return split_levels(rows)
+
+
+# `cursor-agent models` (about five seconds; it asks api2.cursor.sh), read by maxpm serve in a thread at most once in
+# ten minutes (agents.CliList); until serve's first read ends, and when it gives nothing, DESCRIBE['models'] stand.
+# MODELS.runner: a test hook.
+MODELS = CliList(["cursor-agent", "models"], parse_models)
+
+
+def read_models():
+    """The models of the installed Cursor CLI, one dict per model (parse_models); None before the first read."""
+    return [dict(m, efforts=list(m["efforts"])) for m in MODELS.get()] or None
+
+
+def read_effort_levels(model):
+    """The levels Cursor takes for a model (from its ids); [] for a model it lists with no level; None for one it
+    does not list (or before the first read)."""
+    row = next((r for r in MODELS.get() if r["name"] == model), None)
+    return list(row["efforts"]) if row else None
+
+
+_LEVEL_MAP = {"extra-high": "xhigh", "extra high": "xhigh"}
+_DISPLAY_LEVEL = re.compile(r"\b(extra[- ]high|xhigh|minimal|low|medium|high|max)\b", re.I)
+
+
+def _norm_level(value):
+    """Normalize a Cursor effort name ('Extra High' / 'extra-high' -> 'xhigh')."""
+    v = str(value or "").strip().lower()
+    return _LEVEL_MAP.get(v, v) or None
+
+
+def _param_effort(params):
+    """The effort or reasoning_effort parameter of a Cursor parameter list ([{'id', 'value'}]), or None."""
+    if not isinstance(params, list):
+        return None
+    for p in params:
+        if isinstance(p, dict) and p.get("id") in ("effort", "reasoning_effort") and isinstance(p.get("value"), str):
+            lv = _norm_level(p["value"])
+            if lv:
+                return lv
+    return None
+
+
+def config_settings():
+    """What a Cursor session takes from ~/.cursor/cli-config.json when its command line names nothing (#6280, #6319):
+    the selected model (model.modelId or selectedModel.modelId, else 'auto'), its effort (from a level suffix on the
+    id, else selectedModel.parameters or modelParameters[id] where Cursor stores effort/reasoning_effort for base ids
+    such as grok-4.7 and claude-fable-5-2, else model.displayName, else 'none' for auto or a model with no levels and
+    'default' otherwise), the sandbox (sandbox.mode: disabled) and the mode: agent, Cursor's own when no --mode names
+    plan or ask."""
+    try:
+        d = json.loads((Path.home() / ".cursor" / "cli-config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    d = d if isinstance(d, dict) else {}
+    mod = d.get("model") if isinstance(d.get("model"), dict) else {}
+    sel = d.get("selectedModel") if isinstance(d.get("selectedModel"), dict) else {}
+    mid = mod.get("modelId") or sel.get("modelId")
+    m = _SUFFIX.search(mid or "")
+    model, level = (mid[:m.start()] + (m.group(2) or ""), _norm_level(m.group(1))) if m else (mid, None)
+    if not model or model == "default":
+        model = "auto"
+    if not level:
+        if not sel.get("modelId") or sel.get("modelId") == mid:
+            level = _param_effort(sel.get("parameters"))
+        if not level and isinstance(d.get("modelParameters"), dict):
+            level = _param_effort(d["modelParameters"].get(mid)) or _param_effort(d["modelParameters"].get(model))
+        if not level:
+            dn = mod.get("displayName") or mod.get("displayNameShort") or ""
+            dm = _DISPLAY_LEVEL.search(dn) if isinstance(dn, str) else None
+            if dm and not (dm.group(1).lower() == "max" and mod.get("maxMode")):
+                level = _norm_level(dm.group(1))
+        if not level:
+            level = "none" if model == "auto" or read_effort_levels(model) == [] else "default"
+    sandbox = (d.get("sandbox") or {}).get("mode") if isinstance(d.get("sandbox"), dict) else None
+    return {"model": model, "effort": level, "sandbox": sandbox, "mode": "agent"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280, #6319).
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "sandbox": ("config",), "mode": ("config",)}
+
+
 def model_word(model, effort):
-    """The --model word: the model id, with the effort as its suffix when both are given, the model is no "auto",
-    and its id names no effort yet (claude-opus-5-5 + high -> claude-opus-5-5-high). None for no model."""
+    """The --model word: the model id, with the effort as its level when both are given, the model is no "auto", and
+    its id names no level yet (claude-opus-5-5 + high -> claude-opus-5-5-high; the level goes before a -fast end:
+    gpt-5.3-codex-fast + low -> gpt-5.3-codex-low-fast). A model that Cursor lists with no level gets none. None for no
+    model."""
     if not model:
         return None
     level = EFFORT["map"].get(effort, effort) if effort else None
-    if not level or model == "auto" or _SUFFIX.search(model):
+    if not level or model == "auto" or _SUFFIX.search(model) or read_effort_levels(model) == []:
         return model
+    if model.endswith("-fast"):
+        return f"{model[:-5]}-{level}-fast"
     return f"{model}-{level}"
 
 
@@ -253,6 +353,114 @@ def build_command(name, folder, model, effort, settings, prompt):
     if prompt:
         argv.append(prompt)
     return argv
+
+
+ALLOW_MAXPM = "Shell(maxpm)"
+PROJECT_PERMISSIONS = Path(".cursor") / "cli.json"
+
+
+def _global_permissions(env=None):
+    """The (allow, deny) string lists from ~/.cursor/cli-config.json (empty lists when missing or unreadable)."""
+    try:
+        d = json.loads((cursor_dir(env) / "cli-config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], []
+    perms = d.get("permissions") if isinstance(d, dict) and isinstance(d.get("permissions"), dict) else {}
+    allow = [x for x in perms.get("allow") or () if isinstance(x, str)] if isinstance(perms.get("allow"), list) else []
+    deny = [x for x in perms.get("deny") or () if isinstance(x, str)] if isinstance(perms.get("deny"), list) else []
+    return allow, deny
+
+
+def _has_maxpm(allow):
+    return ALLOW_MAXPM in allow or "Shell(maxpm:*)" in allow
+
+
+def _allow_maxpm(folder, env=None):
+    """Ensure <folder>/.cursor/cli.json allows Shell(maxpm) (#6439), and exclude the file in the repository's
+    info/exclude (core._git_exclude) so git status and worktree cleanup ignore it.
+
+    Cursor 2026.11.19 merges .cursor/cli.json onto ~/.cursor/cli-config.json with a strict schema (only 'permissions',
+    and both 'allow' and 'deny' arrays are required) and replaces arrays rather than joining them. So a new file carries
+    over the person's allow and deny rules from cli-config.json and adds Shell(maxpm); when cli-config.json already
+    allows maxpm and no .cursor/cli.json exists, no file is written. An existing non-JSON or malformed file is left
+    alone."""
+    root = Path(folder)
+    if not root.is_dir():
+        return
+    f = root / PROJECT_PERMISSIONS
+    try:
+        text = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except OSError:
+        return
+    if text is None:
+        allow, deny = _global_permissions(env)
+        if _has_maxpm(allow):
+            return
+        data = {"permissions": {"allow": [*allow, ALLOW_MAXPM], "deny": deny}}
+    else:
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            return
+        if not isinstance(data, dict):
+            return
+        perms = data.get("permissions")
+        if perms is None:
+            allow, deny = _global_permissions(env)
+            perms = {"allow": list(allow), "deny": list(deny)}
+        elif isinstance(perms, dict):
+            allow = perms.get("allow")
+            deny = perms.get("deny")
+            if allow is None:
+                allow, _ = _global_permissions(env)
+            elif not isinstance(allow, list):
+                return
+            if deny is None:
+                _, deny = _global_permissions(env)
+            elif not isinstance(deny, list):
+                return
+            perms = {**perms, "allow": list(allow), "deny": list(deny)}
+        else:
+            return
+        if _has_maxpm(perms["allow"]):
+            return
+        perms["allow"].append(ALLOW_MAXPM)
+        data = {**data, "permissions": perms}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f".cli.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        return
+    from .. import core
+    core._git_exclude(folder, f, note="MaximizePM's Cursor permissions (#6439)")
+
+
+def trust_workspace(folder, command, env=None):
+    """Add --trust to the start of a worktree that MaximizePM made (#6416, as #6339 for the other CLIs), so Cursor
+    starts there without 'Do you trust the contents of this directory?', and write .cursor/cli.json allowing
+    Shell(maxpm) (#6439) unless Run Everything (--force/--yolo/-f) is already on. In an interactive start, cursor-agent
+    2026.11.19 writes its own trust marker for each workspace folder that has none when --trust is on, and then skips
+    the question. A folder that MaximizePM did not make gets no call and keeps both questions."""
+    import shlex
+    if not folder or not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if not words:
+        return command
+    if "--force" not in words and "--yolo" not in words and "-f" not in words:
+        _allow_maxpm(folder, env)
+    if "--trust" in words:
+        return command
+    # The flag goes after the program word, also when variables (A=1 cursor-agent ...) come first.
+    at = next((i for i, w in enumerate(words) if Path(w).name in ("cursor-agent", "agent")), 0)
+    return shlex.join(words[:at + 1] + ["--trust"] + words[at + 1:])
 
 
 def parse_command(words):

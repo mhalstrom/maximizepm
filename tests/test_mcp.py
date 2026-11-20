@@ -4,8 +4,9 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from river import core, mcp
+from river import core, mcp, peer, server
 
 
 class Mcp(unittest.TestCase):
@@ -26,6 +27,31 @@ class Mcp(unittest.TestCase):
         out = io.StringIO()
         mcp.serve(io.StringIO("".join(json.dumps(m) + "\n" for m in msgs)), out)
         return [json.loads(x) for x in out.getvalue().splitlines()]
+
+    def test_managed_stdio_cannot_use_the_queue_pinned_in_its_config(self):
+        msgs = ({"id": 1, "method": "initialize"},
+                {"id": 2, "method": "tools/list"},
+                {"id": 3, "method": "tools/call", "params": {"name": "go", "arguments": {"cwd": self.dir.name}}},
+                {"id": 4, "method": "tools/call", "params": {"name": "maxpm", "arguments": {"args": ["go"]}}})
+        chain = [(101, 102, "python", 1), (102, 103, "sh", 1), (103, 1, "tmux", 1)]
+        for env, tagged_panes in (({core.TOKEN_ENV: "session-token"}, ""), ({}, "102\n999")):
+            with self.subTest(token=bool(env)), mock.patch.dict(os.environ, env), \
+                    mock.patch.object(peer, "chain", return_value=chain), \
+                    mock.patch.object(server, "_tmux_cmd", return_value=["tmux"]), \
+                    mock.patch.object(server, "_tmux", return_value=tagged_panes), \
+                    mock.patch.object(core, "connect", side_effect=AssertionError("MCP opened the configured queue")):
+                results = [reply["result"] for reply in self.talk(*msgs)]
+                self.assertIn("Run maxpm from the shell", results[0]["instructions"])
+                self.assertEqual(results[1]["tools"], [])
+                for refusal in results[2:]:
+                    self.assertTrue(refusal["isError"])
+                    self.assertIn("Run maxpm from the shell", refusal["content"][0]["text"])
+
+        with mock.patch.object(peer, "chain", return_value=chain), \
+                mock.patch.object(server, "_tmux_cmd", return_value=["tmux"]), \
+                mock.patch.object(server, "_tmux", return_value="999"):
+            tools = self.talk(msgs[1])[0]["result"]["tools"]
+        self.assertIn("go", [tool["name"] for tool in tools])
 
     def test_initialize_list_and_work_loop(self):
         call = lambda i, name, args: {"jsonrpc": "2.0", "id": i, "method": "tools/call",
@@ -449,6 +475,71 @@ class Planner(unittest.TestCase):
         self.assertIn("## Writing tasks", call("planning_guide")[0])
         c.close()
 
+    def test_design_doc_over_http(self):
+        """#6221: the planner keeps a design document as an expert does: it starts it for a goal or a task (it opens in
+        the page), writes its parts, reads it, its comments and answered decisions, and links its plan to tasks."""
+        from river import cli, server
+        opened = []
+        real_ask = cli.ask_server
+        cli.ask_server = lambda conn, op, args, actor=None, **k: opened.append((op, args, actor)) or {"opened": True}
+        self.addCleanup(setattr, cli, "ask_server", real_ask)
+        _, sid, call = self.session()
+        self.assertFalse(call("add_project", name="shop", description="The online shop")[1])
+        self.assertFalse(call("add_goal", project="shop", name="checkout", outcome="People pay in one step")[1])
+        self.assertFalse(call("add_task", project="shop", title="Build the payment form", goal=["checkout"])[1])
+        c = core.connect()
+        self.addCleanup(c.close)
+        task = c.execute("SELECT id FROM items WHERE title='Build the payment form'").fetchone()["id"]
+        core.goal_handoff(c, "checkout", "The provider is Stripe; the form is left", "mark")
+        self.assertIn("needs the task (task) or the goal", call("start_doc", title="x")[0])
+        text, bad = call("start_doc", goal="checkout", title="Checkout")
+        self.assertFalse(bad, text)
+        self.assertIn("goal-checkout", text)
+        self.assertIn("opened in the side panel", text)
+        doc = core.canvas_show(c, "goal-checkout")
+        self.assertEqual(doc["project"], "shop")
+        self.assertEqual([v["author"] for v in doc["versions"]], ["mark@claude-ai"])  # the app wrote it, as mark
+        self.assertEqual(opened, [("canvas_open", {"name": str(doc["id"])}, "mark")])
+        decision = ("Decision 1 of 1: Provider\nWhat you decide: which provider takes the payments (A or B).\n"
+                    "My recommendation: A.\nYour answer: \"A\"")
+        text, bad = call("write_section", doc="goal-checkout", heading="Decisions", text=decision)
+        self.assertFalse(bad, text)
+        text, bad = call("write_section", doc="goal-checkout", heading="Plan", text=f"### The form\n\n- #{task}")
+        self.assertFalse(bad, text)
+        # The person comments in the page; the planner reads it, answers, and records an answer from the chat.
+        com = core.canvas_comment(c, "goal-checkout", "Say why A", "mark", send_now=True)
+        text, bad = call("doc_comments", doc="goal-checkout", open=True)
+        self.assertFalse(bad, text)
+        self.assertIn("Say why A", text)
+        self.assertFalse(call("reply_comment", comment=f"c{com['id']}", text="A has the lower fee")[1])
+        self.assertFalse(call("reply_comment", comment=f"c{com['id']}", resolve=True, text="v4 says why")[1])
+        self.assertEqual(core._canvas_comment(c, com["id"])["state"], "resolved")
+        text, bad = call("answer_decision", doc="goal-checkout", decision=1, answer="A")
+        self.assertFalse(bad, text)
+        self.assertIn("Answer to decision 1 of 1 (Provider): A", call("doc_comments", doc="goal-checkout")[0])
+        text, bad = call("read_doc", doc="goal-checkout")
+        self.assertFalse(bad, text)
+        self.assertIn("Decision 1 of 1: Provider", text)
+        text, bad = call("read_doc", doc="goal-checkout", plan=True)
+        self.assertFalse(bad, text)
+        self.assertIn(f"#{task}", text)
+        self.assertEqual({v["author"] for v in core.canvas_show(c, "goal-checkout")["versions"]}, {"mark@claude-ai"})
+        self.assertIn("goal-checkout", call("show_task", id=task)[0])  # the task links to its part of the plan
+        text = call("show_goal", name="checkout")[0]
+        self.assertIn("canvas goal-checkout", text)  # the goal's doc
+        self.assertIn("The provider is Stripe", text)  # and its handoff
+        self.assertIn("goal-checkout", call("list_docs", project="shop")[0])
+        # A task's doc: it belongs to the task, and needs a name.
+        self.assertIn("needs the document's name", call("start_doc", task=task)[0])
+        self.assertFalse(call("start_doc", task=task, name="form-design")[1])
+        self.assertEqual(core.canvas_show(c, "form-design")["item_id"], task)
+        self.assertIn("form-design", call("show_task", id=task)[0])
+        self.assertFalse(call("read_notes")[1])
+        actors = {r["actor"] for r in c.execute("SELECT actor FROM events WHERE change LIKE 'canvas %'")}
+        self.assertEqual(actors, {"mark@claude-ai"})
+        # A person has no session of their own: the page opens the doc in the side panel it shows now.
+        self.assertEqual(server.canvas_open(c, {"name": "goal-checkout"}, "mark")["session"], "")
+
     def test_agent_tools_are_refused(self):
         _, sid, call = self.session()
         for name, args in (("go", {}), ("done", {"id": 1, "output": "x"}), ("maxpm", {"args": ["claim", "1"]}),
@@ -490,7 +581,7 @@ class Planner(unittest.TestCase):
         c.close()
 
     def test_stdio_and_its_refusals(self):
-        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Gemini CLI"}}},
+        msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Antigravity CLI"}}},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                  "params": {"name": "add_project", "arguments": {"name": "notes", "description": "My notes"}}},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -505,7 +596,7 @@ class Planner(unittest.TestCase):
         self.assertIn("needs a field to change", r[2]["content"][0]["text"])
         c = core.connect()
         self.assertEqual(c.execute("SELECT actor FROM events WHERE change LIKE 'project notes added%'").fetchone()[0],
-                         "mark@gemini-cli")
+                         "mark@antigravity-cli")
         c.close()
         # Inside an agent session of MaximizePM the planner does not act as the person.
         os.environ["MAXPM_AGENT"] = "worker-1"

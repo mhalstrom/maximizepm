@@ -33,6 +33,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -42,20 +43,40 @@ DONE_KEEP = 300  # finished runs that the state remembers as read
 NAMES = {"github": "GitHub", "gitea": "Gitea", "forgejo": "Forgejo"}
 LINK = re.compile(r"\bmaxpm run (\d+)\b")  # the run-name of a run that MaximizePM started
 OUTCOME = {"success": "success", "failure": "failure", "timed_out": "failure", "startup_failure": "failure",
-           "cancelled": "cancel", "skipped": "skip", "neutral": "success", "stale": "cancel"}
+           "cancelled": "cancel", "skipped": "skip", "neutral": "success", "stale": "cancel",
+           "action_required": "skip"}
 
 
 class Failed(Exception):
-    """A call that did not work: main() answers {"error": <its words>} and exits 1."""
+    """A call that did not work: main() answers {"error": <its words>} and exits 1. status: the HTTP status, if any."""
+
+    def __init__(self, words, status=None):
+        super().__init__(words)
+        self.status = status
 
 
 # ---------------------------------------------------------------- the API
+
+class _Redirect(urllib.request.HTTPRedirectHandler):
+    """urllib keeps every header on a redirect, the token too. An artifact download redirects to a storage host
+    (GitHub: an Azure blob with its own signed address), which answers 401 to a token that is not its own (#6459):
+    the token goes only to the host that it was sent to."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            new.remove_header("Authorization")
+        return new
+
+
+_OPENER = urllib.request.build_opener(_Redirect)
+
 
 def http(method, url, headers, body):
     """One HTTP call: (status, bytes). Tests pass their own function with the same form (recorded answers)."""
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with _OPENER.open(req, timeout=20) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -104,10 +125,21 @@ class Api:
                 msg = json.loads(out or b"{}").get("message") or ""
             except (ValueError, AttributeError):
                 msg = (out or b"")[:200].decode("utf-8", "replace")
-            raise Failed(f"{self.name} answered {status} to {method} {path}: {msg}")
+            raise Failed(f"{self.name} answered {status} to {method} {path}: {msg}", status)
         if raw:
             return out
         return json.loads(out) if out else {}
+
+    def artifact(self, art):
+        """The zip of one artifact, or None with the reason. The forge answers its download with a redirect to a
+        storage host; a refusal there says nothing of the token (the artifact list just read with it worked), so it
+        fails only this artifact, and its words never read as the forge's refusal of the token (#6459)."""
+        try:
+            return zipfile.ZipFile(io.BytesIO(self.call("GET", art["archive_download_url"], raw=True))), None
+        except Failed as e:
+            return None, f"the download of the artifact {art.get('name')} failed with HTTP status {e.status}"
+        except zipfile.BadZipFile:
+            return None, f"the artifact {art.get('name')} is not a zip file"
 
     def optional(self, path, default):
         """A read that some Gitea and Forgejo versions do not have (jobs, artifacts): default when they have none."""
@@ -163,16 +195,25 @@ def norm(run):
             "workflow": run.get("workflow_id") if isinstance(run.get("workflow_id"), str) else path.rsplit("/", 1)[-1]}
 
 
-def runs_of(api, workflow):
-    """The newest runs of a workflow, oldest first (so a newer version is handed on last). Gitea and Forgejo list the
-    runs of the whole repository: keep those of this workflow."""
+def runs_of(api, workflow, check_branch=None):
+    """The newest runs of a workflow, oldest first (so a newer version is handed on last). Pull-request runs are
+    skipped: a pipeline tracks the repository's own commits (push, tag, workflow_dispatch), not unmerged or fork PRs
+    whose runs may also be held for approval (conclusion 'action_required', #6473). Gitea and Forgejo list the runs
+    of the whole repository: keep those of this workflow."""
     if api.forge == "github":
-        runs = api.call("GET", f"/repos/{api.repo}/actions/workflows/{workflow}/runs?per_page={RUNS}").get(
-            "workflow_runs", [])
+        filters = "&" + urllib.parse.urlencode({"branch": check_branch, "event": "push"}) if check_branch else ""
+        runs = api.call(
+            "GET", f"/repos/{api.repo}/actions/workflows/{workflow}/runs?per_page={RUNS}&exclude_pull_requests=true"
+            + filters
+        ).get("workflow_runs", [])
     else:
         got = api.call("GET", f"/repos/{api.repo}/actions/runs?limit=50")
         listed = got.get("workflow_runs") or got.get("runs") or [] if isinstance(got, dict) else got
-        runs = [r for r in (norm(r) for r in listed) if r["workflow"] == workflow][:RUNS]
+        runs = [r for r in (norm(r) for r in listed) if r["workflow"] == workflow]
+    if check_branch:
+        runs = [r for r in runs if r.get("event") == "push" and r.get("head_branch") == check_branch
+                and ((r.get("head_repository") or {}).get("full_name") or api.repo).lower() == api.repo.lower()]
+    runs = [r for r in runs if not str(r.get("event") or "").startswith("pull_request")][:RUNS]
     return list(reversed(runs))
 
 
@@ -190,10 +231,10 @@ def waiting_for(stage, run, open_runs):
     return None
 
 
-def run_events(api, stage, run, waiting):
+def run_events(api, stage, run, waiting, release_check=False):
     """The pipelinerun events of one workflow run: queued, started, finished."""
     key = f"gh-run-{run['id']}"
-    m = LINK.search(run.get("display_title") or run.get("name") or "")
+    m = None if release_check else LINK.search(run.get("display_title") or run.get("name") or "")
     maxpm = {"stage": stage, "version": run.get("head_sha"), "ref": run.get("head_branch"),
              "title": (run.get("display_title") or "")[:200] or None, "run": int(m.group(1)) if m else waiting}
     base = {"pipelineName": stage, "url": run.get("html_url")}
@@ -233,7 +274,10 @@ def junit_reports(api, stage, run):
     for a in arts:
         if a.get("expired") or not (a["name"] == want if want else a["name"].lower().startswith("junit")):
             continue
-        with zipfile.ZipFile(io.BytesIO(api.call("GET", a["archive_download_url"], raw=True))) as z:
+        z, _why = api.artifact(a)
+        if z is None:
+            continue  # this report is skipped; the read of the run goes on (#6459)
+        with z:
             for name in z.namelist():
                 if name.lower().endswith(".xml"):
                     out.append({"run_key": f"gh-run-{run['id']}", "xml": z.read(name).decode("utf-8", "replace")})
@@ -296,15 +340,21 @@ def poll(req, api):
     done, deps = list(state.get("done") or []), set(state.get("deployments") or [])
     events, reports, runs = [], [], 0
     open_runs = req.get("runs") or []
+    check_branch = (req.get("pipeline") or {}).get("release_check_branch")
+    checks = {}
     for stage in (req.get("pipeline") or {}).get("stages") or []:
         if not stage.get("work"):
             continue  # this stage runs its own command on MaximizePM's computer
-        for run in runs_of(api, stage["work"]):
+        latest = runs_of(api, stage["work"], check_branch)
+        if check_branch:
+            checks[stage["name"]] = [f"gh-run-{r['id']}" for r in latest]
+        for run in latest:
             runs += 1
             mark = f"{run['id']}-{run.get('run_attempt') or 1}"
             if mark in done:
                 continue  # read to its end before
-            events += run_events(api, stage["name"], run, waiting_for(stage["name"], run, open_runs))
+            events += run_events(api, stage["name"], run, waiting_for(stage["name"], run, open_runs),
+                                 release_check=bool(check_branch))
             events += job_events(api, run)
             if run.get("status") == "completed":
                 reports += junit_reports(api, stage, run)
@@ -312,6 +362,8 @@ def poll(req, api):
     events += deploy_events(api, (req.get("pipeline") or {}).get("envs") or [], deps)
     out_state = {"done": done[-DONE_KEEP:], "deployments": sorted(deps)[-DONE_KEEP:],
                  "secrets_at": state.get("secrets_at") or 0}
+    if check_branch:
+        out_state["release_checks"] = checks
     names = secret_names(api, (req.get("pipeline") or {}).get("stages") or [], out_state)
     answer = {"events": events, "reports": reports, "counts": {"runs": runs}, "state": out_state}
     if names is not None:
@@ -371,7 +423,10 @@ def agent_artifact(api, run):
     if art is None:
         return {"note": f"the job left no artifact {AGENT_ART}"}
     out = {}
-    with zipfile.ZipFile(io.BytesIO(api.call("GET", art["archive_download_url"], raw=True))) as z:
+    z, why = api.artifact(art)
+    if z is None:
+        return {"note": why}
+    with z:
         names = {n.rsplit("/", 1)[-1]: n for n in z.namelist()}
         if "proof.json" in names:
             try:

@@ -231,6 +231,31 @@ class Runs(Base):
         self.assertIn("make prod-release-prepare", lines[3]["text"])
         self.assertIn("$0.42", lines[4]["text"])
 
+    def test_an_agy_runner_runs_agy_in_print_mode_and_keeps_its_last_words(self):
+        """#6249: Antigravity CLI on a runner: agy -p with the run's lists as its --settings rules, and its one JSON
+        object at the end as the run's result."""
+        host.SSH_RUNNER = lambda argv, data, timeout: (
+            (0, PROBE.replace("--\n100", "agy 1.5.13\n--\n100"), "") if argv[-1].startswith("uname") else (0, "", ""))
+        with self.assertRaisesRegex(RiverError, "one of: claude, codex, agy"):
+            runners.add(self.c, "ci-2", "ci@ci-2", cli="gemini", actor="mark")
+        self.add()
+        runners.change(self.c, "ci-1", cli="agy", actor="mark")
+        run, key, token = self.key_and_token()
+        script = self.spawned[0]["script"]
+        self.assertIn('agy -p "$MAXPM_PROMPT" --output-format json --mode accept-edits --settings', script)
+        self.assertIn('"allow":["command(maxpm)","command(git)"]', script)
+        self.assertNotIn("modelProvider", script)  # no GEMINI_API_KEY granted: agy's own sign-in on the runner
+        self.assertIn("MAXPM_AGENT_TYPE=antigravity", script)
+        with open(self.spawned[0]["path"], "w") as f:
+            f.write(json.dumps({"conversation_id": "c1", "status": "SUCCESS",
+                                "response": "Fixed the missing file; maxpm done 12."}) + "\n")
+        self.proc.code = 0
+        runners.serve_pass(self.c)
+        r = self.c.execute("SELECT * FROM runner_runs").fetchone()
+        self.assertEqual(r["result"], "Fixed the missing file; maxpm done 12.")
+        self.assertEqual([(x["kind"], x["text"]) for x in runners.log(self.c, r["id"])["lines"]],
+                         [("end", "finished: Fixed the missing file; maxpm done 12.")])
+
     def test_serve_stops_a_run_after_max_minutes(self):
         self.key_and_token()
         with core.tx(self.c):

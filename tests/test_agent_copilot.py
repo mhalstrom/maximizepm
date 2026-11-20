@@ -75,7 +75,19 @@ class Contract(Env):
             self.assertNotIn("", spec["choices"], key)
             self.assertEqual(spec["default"], "", key)
         words = a.build_command("w1", "/p", None, None, {"permissions": "", "mode": ""}, "go")
-        self.assertFalse([w for w in words if w in ("--mode",) or w.startswith(("--allow", "--assisted"))])
+        self.assertEqual([w for w in words if w in ("--mode",) or w.startswith(("--allow", "--assisted"))],
+                         ["--allow-tool=shell(maxpm:*)"])  # only the maxpm rule (#6417)
+
+    def test_a_session_runs_maxpm_with_no_question(self):
+        # #6417: Copilot asked 'Do you want to run this command?' at the first maxpm go of a new session. The start
+        # allows maxpm for that run, unless a permission mode already allows every tool.
+        a = agents.get("copilot")
+        rule = "--allow-tool=shell(maxpm:*)"
+        for perm, has in (("", True), ("assisted-approval", True), ("allow-all-tools", False), ("allow-all", False)):
+            self.assertEqual(rule in a.build_command("w1", "/p", None, None, {"permissions": perm}, "go"), has, perm)
+            self.assertEqual(rule in a.resume_command("368ff8ca", None, None, {"permissions": perm}), has, perm)
+        # One shell word, so the variadic --allow-tool takes no later word; the shell quotes its parentheses.
+        self.assertIn("'--allow-tool=shell(maxpm:*)' --add-dir", core.build_command("copilot", {"prompt": "go"}, None))
 
     def test_a_command_inside_copilot_is_copilots_also_when_it_was_started_from_claude_code(self):
         self.assertEqual(agents.from_env({"COPILOT_CLI": "1", "CLAUDECODE": "1"}).id, "copilot")
@@ -92,10 +104,12 @@ class Launch(Env):
         self.assertEqual(words, ["copilot", "--name", "w1", "--model", "auto", "--reasoning-effort", "high",
                                  "--allow-all-tools", "--mode", "plan", "--add-dir", q, "--no-color", "-i", "do #12"])
         self.assertIsInstance(words[-3], agents.Raw)
-        self.assertEqual(a.build_command(None, None, None, None, {}, None), ["copilot", "--add-dir", q])
+        self.assertEqual(a.build_command(None, None, None, None, {}, None),
+                         ["copilot", "--allow-tool=shell(maxpm:*)", "--add-dir", q])
         # A resumed session keeps its name: no --name.
         self.assertEqual(a.resume_command("368ff8ca", None, None, {"prompt": "go on"}, name="w1"),
-                         ["copilot", "--resume", "368ff8ca", "--add-dir", q, "-i", "go on"])
+                         ["copilot", "--resume", "368ff8ca", "--allow-tool=shell(maxpm:*)", "--add-dir", q, "-i",
+                          "go on"])
         self.assertIsNone(a.resume_command("", None, None, {}))
         # The start paths of core build the shell command through the adapter (#5181), with the prompt setting, and
         # load the hook plugin that reports the state (#5214).

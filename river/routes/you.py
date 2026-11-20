@@ -75,7 +75,9 @@ OPS = {
                                                    bool(a.get("mine"))),
     "register": lambda c, a, who: core.register(c, a["name"], bool(a.get("human")), a.get("note", "")),
     # An asker that waits at its prompt gets the answer typed there at once, not at the next pass (#5303).
-    "answer": lambda c, a, who: (core.answer(c, int(a["msg"]), a["body"], who), server.paste_answers(c))[0],
+    # choice: the option picked in the card's dialog (#6413); body is then the person's added words or empty.
+    "answer": lambda c, a, who: (core.answer(c, int(a["msg"]), a.get("body"), who, choice=a.get("choice")),
+                                 server.paste_answers(c))[0],
     "message_read": lambda c, a, who: server._message_read(c, int(a["msg"])),
     "send": lambda c, a, who: core.send(c, a["kind"], a["body"], a.get("to"), a.get("item"), a.get("reply"), who,
                                         a.get("level"), bool(a.get("blocked"))),

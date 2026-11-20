@@ -502,7 +502,7 @@ class SigninRequests(Base):
         from river.routes import secrets as routes_secrets
         r = self.ask()
         core.block(self.c, self.item, "waits for request r1 (sign-ins)", actor="dev")
-        core.release(self.c, self.item, "dev")
+        self.assertEqual(core._item(self.c, self.item)["status"], "open")
         routes_secrets.act(self.c, {"action": "approve", "request": r["id"]}, "mark")
         self.assertIsNone(self.c.execute("SELECT blocked_reason FROM items WHERE id=?", (self.item,)).fetchone()[0])
 

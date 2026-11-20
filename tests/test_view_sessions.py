@@ -2,6 +2,7 @@
 tests of each view are in a file of their own, tests/test_view_<view>.py.)"""
 import json
 import os
+import re
 import tempfile
 import time
 import types
@@ -10,7 +11,7 @@ from unittest import mock
 from pathlib import Path
 
 from river import core, server, sessions
-from tests import proc_after_exec
+from tests import proc_after_exec, timing
 from river.agents import codex as codex_agent
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -229,12 +230,12 @@ class Sessions(Base):
         self.assertEqual((got["model"]["value"], got["model"]["source"], got["model"]["live"]), ("opus", "session", True))
         # #4633: the models of its own provider, the launch dialog's list; the id it reports stays shown.
         self.assertEqual((got["model"]["kind"], got["model"]["choices"], got["model"]["reported"]),
-                         ("choice", ["haiku", "sonnet", "opus", "fable"], "claude-opus-5-5"))
+                         ("choice", ["fable", "opus", "sonnet", "haiku"], "claude-opus-5-5"))
         launch = next(o for o in core.launch_options(self.c) if o["platform"] == "claude-code")
         self.assertEqual([m["name"] for m in launch["models"]], got["model"]["choices"])
         cx = core.platform_models(self.c, "codex")
-        self.assertEqual([m["name"] for m in cx], ["luna", "terra", "sol", "astra"])
-        self.assertEqual(core.model_name_of(cx, cx[2]["id"]), "sol")
+        self.assertEqual([m["name"] for m in cx], ["astra", "sol", "luna", "terra"])  # newest, strongest first (#6256)
+        self.assertEqual(core.model_name_of(cx, next(m["id"] for m in cx if m["name"] == "sol")), "sol")
         self.assertIsNone(core.model_name_of(cx, "gpt-9"))
         with self.assertRaises(core.RiverError):
             sessions.check_value(sessions.setting_spec("codex", "model"), "opus", self.c, "codex")
@@ -287,7 +288,7 @@ class Sessions(Base):
         core.config_set(self.c, "question_popup_max", "0s")
         self.assertFalse(self.cards()[0]["waiting"][0]["old"])
         js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
-        self.assertIn("const popsUp = (s) => (s.waiting || []).filter(w => !w.old);", js)
+        self.assertIn("const popsUp = (s) => waitsOf(s).filter(w => !w.old);", js)  # #6438: with the decisions it put
         self.assertIn("if (!s || !popsUp(s).some(", js)
 
     def test_a_person_pins_a_session_to_the_top_until_it_ends(self):
@@ -358,13 +359,27 @@ class Sessions(Base):
         self.assertEqual(v["entries"], [])
         self.assertIn("No chat of nobody on this computer: MaximizePM does not know which agent it runs yet", v["note"])
 
+    def test_a_session_at_a_prompt_before_its_first_turn_says_so(self):
+        # #6242: Claude Code in a new folder stands at its trust question before it writes a chat: the view says that
+        # it waits at a prompt, with the prompt's state, not that a maxpm command records its log.
+        core.plain_make(self.c, "fresh", "started by the page")
+        trust = {"question": "Quick safety check: Is this a project you created or one you trust?",
+                 "options": ["No, exit", "Yes, I trust this folder"], "fixed": True}
+        v = sessions.view(self.c, "fresh", None, self.root, self.croot, prompt=trust, pane=True)
+        self.assertEqual((v["entries"], v["state"]), ([], "prompt"))
+        self.assertEqual(v["note"], "No chat of fresh yet: it waits at a prompt in its terminal, before its first turn.")
+        self.assertIn("No chat of fresh on this computer", sessions.view(self.c, "fresh", None, self.root, self.croot)["note"])
+        cards = sessions.views(self.c, {"fresh": "%1"}, self.root, self.croot, prompts={"fresh": trust}, ended_panes=set())
+        self.assertEqual([(c["state"], [w["kind"] for w in c["waiting"]]) for c in cards if c["name"] == "fresh"],
+                         [("prompt", ["prompt"])])
+
     def test_the_note_of_a_missing_chat_names_the_agent_and_why(self):
         # #5257: the note names the agent whose log MaximizePM looked for, and why it found none.
         core.register(self.c, "gm")
         with core.tx(self.c):
-            self.c.execute("UPDATE agents SET agent_type='gemini' WHERE name='gm'")
+            self.c.execute("UPDATE agents SET agent_type='antigravity' WHERE name='gm'")
         note = sessions.view(self.c, "gm", None, self.root, self.croot)["note"]
-        self.assertIn("no Gemini CLI session id of gm is recorded yet", note)
+        self.assertIn("no Antigravity CLI session id of gm is recorded yet", note)
         self.assertNotIn("Claude Code", note)
         core.register(self.c, "x1")
         from river import agents as _agents
@@ -526,9 +541,13 @@ class Adopt(Base):
             self.c.execute("UPDATE agents SET pid_cmd='codex -m x -c model_reasoning_effort=low' WHERE name='ag'")
         core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex")
         cmd = core.resume_command(self.c, "ag", "codex", TID)["command"]
-        self.assertTrue(cmd.startswith(f"codex resume {TID} -m "), cmd)
+        # The guard's hook flags (-c hooks.PreToolUse, -c hooks.state, #6254) come before the subcommand, as Codex's
+        # global options do (#6284).
+        self.assertTrue(cmd.startswith("codex -c 'hooks.PreToolUse="), cmd)
+        self.assertIn(f" resume {TID} -m ", cmd)
         self.assertIn("model_reasoning_effort=low", cmd)
 
+    @timing.local_only("live child process and ps timing")
     def test_a_resume_keeps_the_model_the_session_ran_on(self):
         """#5064: the manager's row had no model, its resume had no --model, and Claude Code took its own default
         (Fable). The resume takes the model of its command line, else of its transcript; with none it refuses."""
@@ -645,6 +664,7 @@ class Adopt(Base):
                    if r["key"] == "effort")
         self.assertEqual((row["value"], row["source"]), ("high", "changed now"))
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_keeps_the_settings_the_session_runs_with(self):
         """#5274: a restart took the profile's defaults for every setting the person did not change (Amp started with
         --visibility private came back without it). Now it keeps what the running command line shows, and changes
@@ -669,6 +689,7 @@ class Adopt(Base):
         self.assertIn("--permission-mode acceptEdits", line)  # kept, not the default
         self.assertIn("--remote-control", line)  # kept, not the default off
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_takes_the_folder_from_the_process_when_the_transcript_names_none(self):
         # #5262: Grok's and Copilot's logs have no cwd field, and Restart answered 'the transcript of ag does not name
         # its folder'. The folder of the agent's own process is the session's folder.
@@ -902,8 +923,16 @@ class Waiting(TmuxBase):
         r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "pick": 1}, "mark")
         self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
         self.pane["keys"].clear()
-        r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"}, "mark")
+        from unittest import mock
+        from tests import own_sleep
+        with mock.patch.object(server.time, "sleep", own_sleep(lambda s: self.tmux.calls.append(["sleep"]))):
+            r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"},
+                                            "mark")
         self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])
+        # The Enter goes a moment after the text, in a tmux command of its own: Codex took a text with its Enter as
+        # one paste, and the Enter stayed in its input line (#6259).
+        steps = [("sleep" if c == ["sleep"] else c[-1]) for c in self.tmux.calls if c[:1] in (["send-keys"], ["sleep"])]
+        self.assertEqual(steps[-3:], ["push to a branch first", "sleep", "Enter"])
         # A prompt that changed since the person read it gets no keys.
         self.pane["keys"].clear()
         self.pane["screen"] = PERMISSION.replace("git push origin main", "rm -rf build")
@@ -967,6 +996,586 @@ TRUST = """ Accessing workspace:
 
  Enter to confirm · Esc to cancel
 """
+
+# Claude Code 2.1.328's AskUserQuestion dialog, as its pane showed it in a scratch session (#6234). The tab that shows
+# now has a background colour; the plain text does not say which one it is.
+RULE = "─" * 110
+ASK_SINGLE = f"""❯ Ask me three questions.
+{RULE}
+←  \x1b[38;5;16m\x1b[48;5;153m ☐ Color \x1b[39m\x1b[49m ☐ Size  ☐ Extras  ✔ Submit  →
+
+Which color do you like?
+
+❯ 1. Red
+     warm
+  2. Blue
+     cool
+  3. Green
+     calm
+  4. Type something.
+{RULE}
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+ASK_BOXES = f"""{RULE}
+←  ☒ Color  ☒ Size  \x1b[48;5;153m ☐ Extras \x1b[49m ✔ Submit  →
+
+Which extras do you want?
+
+  1. [✔] Cheese
+         Add cheese
+❯ 2. [ ] Bacon
+         Add bacon
+  3. [✔] Onions
+         Add onions
+  4. [ ] Type something
+     Submit
+{RULE}
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+ASK_PREVIEW = f"""{RULE}
+←  \x1b[48;5;153m ☐ Layout \x1b[49m ☐ Deploy  ✔ Submit  →
+
+Which page layout do you prefer for the settings screen of the
+application?
+
+❯ 1. Sidebar                      ┌──────────────────────┐
+  2. Tabs                         │ | General| Name: [ ] │
+  3. Single page                  │ | Account| [Save]    │
+                                  └──────────────────────┘
+
+                                  Notes: press n to add notes
+
+{RULE}
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch
+questions · Esc to cancel
+"""
+ASK_REVIEW = f"""{RULE}
+←  ☒ Color  ☒ Size  ☒ Extras \x1b[48;5;153m ✔ Submit \x1b[49m →
+
+Review your answers
+
+ ● Which color do you like?
+   → Blue
+ ● Which size do you need?
+   → Medium please
+ ● Which extras do you want?
+   → Cheese, Onions
+
+❯ 1. Submit answers
+  2. Cancel
+"""
+# The dialogs of the other CLIs (#6235), from scratch sessions on 2026-11-19: Codex 0.159.1 (Plan mode), Copilot
+# 1.0.110, OpenCode 2.2.7 (its marked option has the colour of its number; the tab shown now is bold).
+CODEX_TWO = """› Ask me two questions.
+  Question 1/2 (2 unanswered)
+  Which color for the button?
+  › 1. Red (Recommended)  Use red for the button.
+    2. Green              Use green for the button.
+    3. Blue               Use blue for the button.
+    4. None of the above  Optionally, add details in notes (tab)
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+"""
+CODEX_NOTES = """  Question 2/2
+  Which name?
+    1. Rex (Recommended)  Choose Rex.
+    2. Tom                Choose Tom.
+  › 3. None of the above  Optionally, add details in notes (tab)
+  › Polly
+  tab or esc to clear notes | enter to submit all | ←/→ to navigate questions
+"""
+CODEX_UNANSWERED = """  Submit with unanswered questions?
+  1 unanswered question
+  › 1. Proceed  Submit with 1 unanswered question
+    2. Go back  Return to the first unanswered question
+  Press enter to confirm or esc to go back
+"""
+# Codex's question of Default mode (request_user_input_async, #6258), as codex-cli 0.159.1 showed it on 2026-11-20:
+# closed while its turn goes on, and open (shift+←) with two questions left.
+CODEX_QUEUED_CLOSED = """• Which color?
+  • Red
+  • Green
+• Working (21s • esc to interrupt)
+• Queued follow-up inputs
+  ? 2 questions · 12s
+    shift+← to answer
+› Ask Codex to do anything
+  GPT-6-Luna low · ~/notes
+  ? for shortcuts
+"""
+CODEX_QUEUED_OPEN = """• Working (21s • esc to interrupt)
+• Queued follow-up inputs
+  1 of 2
+  Which color for the
+  button?
+  › 1. Red
+    2. Green
+    3. Other
+  enter submit   ctrl+] skip   shift+→ main prompt   shift+← next question
+"""
+CODEX_QUEUED_TYPED = """• Queued follow-up inputs
+  Which size?
+    1. Small
+    2. Large
+  › 3. Huge
+  enter submit   ctrl+] skip   shift+→ main prompt
+"""
+CRULE = "─" * 100
+COPILOT_TWO = f""" ○ Asking user Waiting for response                     27s
+{CRULE}
+ Copilot needs information.
+ Please choose the button color and size.
+  Which color for the button?  [Which size?]
+ Which size?:
+   Small
+   Large
+ ❯ Other (type your answer below)
+ ↑/↓ select · enter accept · shift+tab prev · ctrl+d decline · esc cancel
+{CRULE}
+{CRULE}
+❯ Medium please
+{CRULE}
+"""
+COPILOT_MULTI = f"""{CRULE}
+ Copilot needs information.
+ Which toppings?
+ Which toppings?:
+ ❯ • Cheese
+   ✓ Bacon
+   • Onions
+   • Other (type your answer)
+ ↑/↓ select · space toggle · enter accept · ctrl+d decline · esc cancel
+{CRULE}
+"""
+_O, _G, _W, _B, _R = "\x1b[38;2;250;178;131m", "\x1b[38;2;128;128;128m", "\x1b[38;2;238;238;238m", "\x1b[1m", "\x1b[0m"
+OPENCODE_TWO = f"""  ┃  Questions
+  ┃
+  ┃  {_B}{_W}Button color{_R}  {_G}Size  {_G}Submit
+  ┃
+  ┃  {_W}Which color for the button?
+  ┃
+  ┃  {_G}1. {_W}Red
+  ┃     {_G}Choose red
+  ┃  {_O}2. {_O}Green
+  ┃     {_G}Choose green
+  ┃  {_G}3. {_W}Blue
+  ┃     {_G}Choose blue
+  ┃  {_G}4. {_W}Type your own answer
+  ┃
+  ┃  ⇆ tab  ↑↓ select  enter confirm  esc dismiss
+  ┃                                                         /work:main
+"""
+OPENCODE_REVIEW = f"""  ┃  Questions
+  ┃
+  ┃  {_G}Button color  {_G}Size  {_B}{_W}Submit{_R}
+  ┃
+  ┃  Button color: Green
+  ┃  Size: Medium please
+  ┃
+  ┃  ⇆ tab  enter submit  esc dismiss
+"""
+OPENCODE_MULTI = f"""  ┃  Questions
+  ┃
+  ┃  {_B}{_W}Toppings{_R}  {_G}Submit
+  ┃
+  ┃  Which toppings?
+  ┃
+  ┃  {_O}1. {_O}[ ] {_O}Cheese
+  ┃         {_G}Choose cheese
+  ┃  {_G}2. {_G}[✓] {_W}Bacon
+  ┃         {_G}Choose bacon
+  ┃  {_G}3. {_G}[ ] {_W}Type your own answer
+  ┃
+  ┃  ⇆ tab  ↑↓ select  enter toggle  esc dismiss
+"""
+ASK_ONE = f"""{RULE}
+ ☐ Pet
+
+Cat or dog?
+
+❯ 1. Cat
+     quiet
+  2. Dog
+     loud
+  3. Type something.
+{RULE}
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+
+class ManagerFirst(TmuxBase):
+    """#6282 (mark 2026-11-20: six agy 'Allow access to this file?' cards reached him: 'the type of issue you should be
+    able to resolve for me'): a session's prompt goes to the active manager first, as a person item does. The
+    person's card and alert wait question_hold; the manager answers with maxpm approve, or forwards it."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mgr")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        core.config_set(self.c, "prompt_wait", "0s")
+        self.addCleanup(server.PROMPTS.clear)
+
+    def card(self):
+        (c,) = [x for x in self.cards() if x["name"] == "ag"]
+        return c
+
+    def test_the_manager_answers_first_and_the_person_gets_what_it_leaves(self):
+        c = self.card()
+        self.assertEqual([w["kind"] for w in c["waiting"]], [])  # no card for the person, also before the alert
+        self.assertEqual(c["doing"], "Waits at a prompt: the manager mgr answers it first")
+        self.assertEqual(server.watch_prompts(self.c)["told"], ["ag"])
+        (alert,) = self.c.execute("SELECT * FROM messages WHERE from_agent='ag' AND to_agent='mark'").fetchall()
+        self.assertEqual(alert["held_for"], "mgr")
+        (boss,) = self.c.execute("SELECT body FROM messages WHERE to_agent='mgr' AND reply_to=?", (alert["id"],)).fetchall()
+        self.assertIn("maxpm approve ag <option number>", boss["body"])
+        self.assertIn(f"maxpm forward {alert['id']}", boss["body"])
+        self.assertEqual(core.needs_you(self.c, "mark"), [])
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], [])
+        # Only the active manager or a person answers; the option must be one of the prompt's.
+        core.register(self.c, "other")
+        with self.assertRaisesRegex(core.RiverError, "only the active manager or a person"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 1}, "other")
+        with self.assertRaisesRegex(core.RiverError, "the options 1 to 3: 1 = 1. Yes"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 4}, "mgr")
+        self.pane["keys"].clear()
+        r = server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 2}, "mgr")
+        self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
+        self.pane["keys"].clear()
+        server.OPS["prompt_approve"](self.c, {"agent": "ag", "text": "push to a branch first"}, "mgr")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])
+        # The prompt is gone: its alert closes, and the manager's alert with it.
+        self.pane["screen"] = "❯ \n"
+        server.watch_prompts(self.c)
+        core.sync_needs_you(self.c)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='mgr' AND read_at IS NULL")
+                         .fetchone()[0], 0)
+        # A prompt that the manager leaves: after question_hold the person gets its card and its alert.
+        self.pane["screen"] = PERMISSION
+        server.PROMPTS.clear()
+        server.watch_prompts(self.c)
+        with core.tx(self.c):
+            self.c.execute("UPDATE messages SET held_until='2000-01-01T00:00:00Z' WHERE held_for='mgr'")
+        core.sync_needs_you(self.c)
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        self.assertEqual(len(core.needs_you(self.c, "mark")), 1)
+
+    def test_an_expert_s_prompt_and_the_classifier_s_go_to_the_person(self):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='expert' WHERE name='ag'")
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role=NULL WHERE name='ag'")
+        # Policy p3: the auto mode classifier's prompt needs the person; maxpm approve refuses it.
+        self.pane["screen"] = PERMISSION.replace(" Do you want to proceed?",
+                                                 " Auto mode held this command for the server-side classifier to review\n"
+                                                 " Do you want to proceed?")
+        self.assertEqual([w["kind"] for w in self.card()["waiting"]], ["prompt"])
+        with self.assertRaisesRegex(core.RiverError, "policy p3"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 1}, "mgr")
+        server.watch_prompts(self.c)
+        self.assertEqual([r["held_for"] for r in self.c.execute(
+            "SELECT held_for FROM messages WHERE from_agent='ag' AND to_agent='mark'")], [None])
+
+
+class AskDialog(TmuxBase):
+    """#6234 (mark 2026-11-19): an expert showed Claude Code's AskUserQuestion dialog with four questions, and the
+    Sessions page said 'Answer it', but the click opened nothing: the page read no prompt from the pane. The card now
+    shows the dialog's tabs, its question, its options and their descriptions, and sends the CLI's keys."""
+
+    def setUp(self):
+        super().setUp()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+
+    def card(self, screen):
+        self.pane["screen"] = screen
+        self.pane["keys"].clear()
+        (w,) = [x for x in self.cards()[0]["waiting"] if x["kind"] == "prompt"]
+        return w
+
+    def answer(self, w, **kw):
+        return server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": w["sig"], **kw}, "mark")
+
+    def test_the_card_holds_the_tabs_the_question_and_the_options(self):
+        w = self.card(ASK_SINGLE)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["question"], a["multi"]),
+                         (["Color", "Size", "Extras", "Submit"], 0, "Which color do you like?", False))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:3]], [("Red", "warm"), ("Blue", "cool"),
+                                                                                ("Green", "calm")])
+        self.assertEqual((a["options"][3].get("text"), a["options"][4]["chat"]), (True, True))
+        self.assertEqual((w["question"], self.cards()[0]["state"]), ("Which color do you like?", "prompt"))
+        # Answered: Claude Code shows its input box again, and nothing waits.
+        self.pane["screen"] = "⏺ Answered Claude's questions:\n" + RULE + "\n❯ \n" + RULE + "\n"
+        self.assertEqual(self.cards()[0]["waiting"], [])
+        # A checklist in a reply, a numbered list under it, and the input box: no dialog.
+        self.pane["screen"] = ("⏺ The plan:\n ☐ Write the tests\n\n  1. Read the code\n  2. Fix it\n" + RULE
+                               + "\n❯ \n" + RULE + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
+        self.assertEqual(self.cards()[0]["waiting"], [])
+
+    def test_an_option_the_own_answer_and_chat_go_in_as_keys(self):
+        w = self.card(ASK_SINGLE)
+        r = self.answer(w, pick=1)
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Blue", ["Down", "Enter"]))
+        w = self.card(ASK_SINGLE)
+        r = self.answer(w, other="Purple,\nplease")
+        self.assertEqual((r["text"], self.pane["keys"]), ("Purple, please", ["Down", "Down", "Down", "Purple, please", "Enter"]))
+        w = self.card(ASK_SINGLE)
+        with self.assertRaisesRegex(core.RiverError, "write your own answer"):
+            self.answer(w, pick=3)
+        self.answer(w, pick=4)
+        self.assertEqual(self.pane["keys"], ["Down"] * 4 + ["Enter"])
+        # The question changed in the terminal since the person read it: no keys.
+        self.pane["keys"].clear()
+        self.pane["screen"] = ASK_SINGLE.replace("Which color", "Which colour")
+        with self.assertRaisesRegex(core.RiverError, "changed or is gone"):
+            self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], [])
+
+    def test_a_question_with_boxes_takes_the_ticks_then_goes_on(self):
+        w = self.card(ASK_BOXES)
+        a = w["ask"]
+        self.assertEqual(([o["checked"] for o in a["options"]], a["submit_stop"], a["at"], a["current"]),
+                         ([True, False, True, False, None], 4, 1, 2))
+        # Bacon only: Cheese off, Bacon on, Onions off (Enter turns the marked box over), then Submit.
+        self.answer(w, picks=[1])
+        self.assertEqual(self.pane["keys"], ["Up", "Enter", "Down", "Enter", "Down", "Enter", "Down", "Down", "Enter"])
+        w = self.card(ASK_BOXES)
+        r = self.answer(w, picks=[0, 2], other="Ketchup")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Ketchup", "Down", "Enter"])
+        self.assertEqual(r["picked"], "Cheese, Onions, Ketchup")
+        # Before another question the line is 'Next' (seen in the scratch session): the same place in the list.
+        w = self.card(ASK_BOXES.replace("     Submit", "     Next"))
+        self.assertEqual((w["ask"]["submit_stop"], w["ask"]["options"][3]["detail"]), (4, ""))
+
+    def test_the_tabs_move_with_the_arrows(self):
+        w = self.card(ASK_SINGLE)
+        self.answer(w, tab=3)
+        self.assertEqual(self.pane["keys"], ["Right"] * 3)
+        w = self.card(ASK_BOXES)
+        self.answer(w, tab=0)
+        self.assertEqual(self.pane["keys"], ["Left", "Left"])
+        w = self.card(ASK_SINGLE.replace("\x1b[38;5;16m\x1b[48;5;153m", "").replace("\x1b[39m\x1b[49m", ""))
+        self.assertIsNone(w["ask"]["current"])
+        with self.assertRaisesRegex(core.RiverError, "cannot tell which question"):
+            self.answer(w, tab=1)
+
+    def test_a_question_with_previews_has_no_text_and_its_chat_has_no_number(self):
+        w = self.card(ASK_PREVIEW)
+        a = w["ask"]
+        self.assertEqual(a["question"], "Which page layout do you prefer for the settings screen of the application?")
+        self.assertEqual([o["label"] for o in a["options"]], ["Sidebar", "Tabs", "Single page", "Chat about this"])
+        self.assertTrue(a["preview"][1].startswith("│ | General"))
+        with self.assertRaisesRegex(core.RiverError, "takes no text"):
+            self.answer(w, other="a wizard")
+        self.answer(w, pick=2)  # a digit only moves the marker here: the arrows, then Enter
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+
+    def test_the_review_and_a_dialog_of_one_question(self):
+        w = self.card(ASK_REVIEW)
+        a = w["ask"]
+        self.assertEqual((a["current"], a["question"], a["review"][2]),
+                         (3, "Review your answers", {"q": "Which extras do you want?", "a": "Cheese, Onions"}))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Enter"])
+        w = self.card(ASK_ONE)
+        self.assertEqual(([t["header"] for t in w["ask"]["tabs"]], w["ask"]["current"]), (["Pet"], 0))
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+
+class AskForms(TmuxBase):
+    """#6235 (mark 2026-11-19: test the question asking with the other agent types): the question dialogs of Codex
+    (request_user_input), Copilot (ask_user) and OpenCode (question), as their panes showed them in scratch sessions
+    on 2026-11-19, are read into the same card as Claude Code's and answered with each CLI's own keys."""
+
+    card, answer = AskDialog.card, AskDialog.answer
+
+    def kind(self, agent_type):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type=? WHERE name='ag'", (agent_type,))
+
+    def test_codex_answers_with_the_arrows_and_a_note(self):
+        self.kind("codex")
+        w = self.card(CODEX_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["multi"]),
+                         (["Question 1", "Question 2"], 0, 0, "Which color for the button?", False))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:2]],
+                         [("Red (Recommended)", "Use red for the button."), ("Green", "Use green for the button.")])
+        self.assertTrue(a["options"][3]["text"])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+        # Its own answer is 'None of the above' with a note (Tab opens the notes box).
+        r = self.answer(self.card(CODEX_TWO), other="Teal")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Teal", ["Down"] * 3 + ["Tab", "Teal", "Enter"]))
+        self.answer(self.card(CODEX_TWO), tab=1)
+        self.assertEqual(self.pane["keys"], ["Right"])
+        # The notes box is open with a text: the new text takes its place; an option closes the box first.
+        w = self.card(CODEX_NOTES)
+        self.assertEqual((w["ask"]["current"], w["ask"]["options"][2]["typed"]), (1, "Polly"))
+        self.answer(w, other="Polly the parrot")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 5 + ["Polly the parrot", "Enter"])
+        self.answer(self.card(CODEX_NOTES), pick=0)
+        self.assertEqual(self.pane["keys"], ["Tab", "Up", "Up", "Enter"])
+        # The question before a submit with a question unanswered: Proceed or Go back, no text.
+        w = self.card(CODEX_UNANSWERED)
+        self.assertEqual(([o["label"] for o in w["ask"]["options"]], w["ask"]["warn"]),
+                         (["Proceed", "Go back"], "1 unanswered question"))
+        with self.assertRaisesRegex(core.RiverError, "takes no text"):
+            self.answer(w, other="later")
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+
+    def test_codex_opens_its_closed_question_once_and_answers_it(self):
+        # #6258: Codex's Default mode asks while its turn goes on and shows the question closed; the page said
+        # 'working' and showed no card. MaximizePM opens it (shift+←) once, and the card answers it.
+        self.kind("codex")
+        fake = self.tmux
+
+        def runner(a):
+            if a[:1] == ["send-keys"] and a[-1] == "S-Left":
+                self.pane["screen"] = CODEX_QUEUED_OPEN
+            return fake(a)
+        server.TMUX_RUNNER = runner
+        server._ASK_OPENED.clear()
+        w = self.card(CODEX_QUEUED_CLOSED)
+        a = w["ask"]
+        self.assertEqual(self.pane["keys"], ["S-Left"])
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["question"], a["at"], a["multi"]),
+                         (["Question 1 of 2"], "Which color for the button?", 0, False))
+        self.assertEqual(([o["label"] for o in a["options"]], [bool(o.get("text")) for o in a["options"]]),
+                         (["Red", "Green", "Other"], [False, False, True]))
+        self.pane["keys"].clear()
+        self.answer(w, pick=1)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+        r = self.answer(self.card(CODEX_QUEUED_OPEN), other="Blue")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Blue", ["Down", "Down", "Blue", "Enter"]))
+        with self.assertRaisesRegex(core.RiverError, "write your own answer"):
+            self.answer(self.card(CODEX_QUEUED_OPEN), pick=2)
+        # A text typed on Other: a new text takes its place, and a pick of it sends it.
+        w = self.card(CODEX_QUEUED_TYPED)
+        self.assertEqual((w["ask"]["tabs"][0]["header"], w["ask"]["options"][2]["typed"]), ("Question", "Huge"))
+        self.answer(w, other="Tiny")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 4 + ["Tiny", "Enter"])
+        r = self.answer(self.card(CODEX_QUEUED_TYPED), pick=2)
+        self.assertEqual((r["picked"], self.pane["keys"]), ("Huge", ["Enter"]))
+        # The person went back to the main prompt in the terminal: the same closed question stays closed.
+        self.pane["screen"] = CODEX_QUEUED_CLOSED
+        self.pane["keys"].clear()
+        self.assertEqual([x["kind"] for x in self.cards()[0]["waiting"]], [])
+        self.assertEqual(self.pane["keys"], [])
+        # After a screen with no question, a closed question opens again.
+        self.pane["screen"] = "› Ask Codex to do anything\n"
+        self.cards()
+        self.card(CODEX_QUEUED_CLOSED)
+        self.assertEqual(self.pane["keys"], ["S-Left"])
+
+    def test_copilot_answers_with_tab_space_and_its_input_box(self):
+        self.kind("copilot")
+        w = self.card(COPILOT_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["warn"]),
+                         (["Which color for the button?", "Which size?"], 1, 2, "Which size?",
+                          "Please choose the button color and size."))
+        self.assertEqual(([o["label"] for o in a["options"][:2]], a["options"][2]["typed"]),
+                         (["Small", "Large"], "Medium please"))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Up", "Up", "Enter"])
+        self.answer(self.card(COPILOT_TWO), other="Huge")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 13 + ["Huge", "Enter"])
+        self.answer(self.card(COPILOT_TWO), tab=0)
+        self.assertEqual(self.pane["keys"], ["BTab"])
+        # More answers: Space turns a box over, the text goes into Other's input box, Enter answers.
+        w = self.card(COPILOT_MULTI)
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["multi"], w["ask"]["warn"]),
+                         ([False, True, False, None], True, ""))
+        r = self.answer(w, picks=[0], other="Ketchup")
+        self.assertEqual((r["picked"], self.pane["keys"]),
+                         ("Cheese, Ketchup", ["Space", "Down", "Space", "Down", "Down", "Ketchup", "Enter"]))
+
+    def test_opencode_reads_the_marked_option_from_its_colours(self):
+        self.kind("opencode")
+        w = self.card(OPENCODE_TWO)
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"]),
+                         (["Button color", "Size", "Submit"], 0, 1, "Which color for the button?"))
+        self.assertEqual([(o["label"], o["detail"]) for o in a["options"][:2]], [("Red", "Choose red"),
+                                                                                ("Green", "Choose green")])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Enter"])
+        # The own answer: Enter opens its input in its place, then the text and Enter.
+        self.answer(self.card(OPENCODE_TWO), other="Teal")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "Teal", "Enter"])
+        self.answer(self.card(OPENCODE_TWO), tab=2)
+        self.assertEqual(self.pane["keys"], ["Tab", "Tab"])
+        # With no colours the marked option is not known: no keys.
+        w = self.card(re.sub(r"\x1b\[[0-9;]*m", "", OPENCODE_TWO))
+        with self.assertRaisesRegex(core.RiverError, "cannot see the marked option"):
+            self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], [])
+        w = self.card(OPENCODE_REVIEW)
+        self.assertEqual((w["ask"]["current"], w["ask"]["review"][1]), (2, {"q": "Size", "a": "Medium please"}))
+        self.answer(w, pick=0)
+        self.assertEqual(self.pane["keys"], ["Enter"])
+        # More answers: Enter turns a box over, the own answer's input, then Tab to the Submit tab.
+        w = self.card(OPENCODE_MULTI)
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["at"]), ([False, True, False], 0))
+        self.answer(w, picks=[0], other="Ketchup")
+        self.assertEqual(self.pane["keys"], ["Enter", "Down", "Enter", "Down", "Enter", "Ketchup", "Enter", "Tab"])
+
+    def test_antigravity_answers_with_the_arrows_space_and_its_write_in_box(self):
+        """#6248: agy's ask_question dialog, as its pane showed it on 2026-11-19 (tests/fixtures/agy)."""
+        fix = Path(__file__).parent / "fixtures" / "agy"
+        screen = lambda name: (fix / f"pane_{name}.txt").read_text(encoding="utf-8")
+        self.kind("antigravity")
+        w = self.card(screen("blocked_ask"))
+        a = w["ask"]
+        self.assertEqual(([t["header"] for t in a["tabs"]], a["current"], a["at"], a["question"], a["multi"]),
+                         (["Question 1"], 0, 0, "Which color do you prefer?", False))
+        self.assertEqual([o["label"] for o in a["options"]], ["(Recommended) red", "green", "blue", "Write-in..."])
+        self.assertTrue(a["options"][3]["text"])
+        self.answer(w, pick=2)
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter"])
+        # The own answer: Enter on Write-in opens its box, then the text and Enter.
+        r = self.answer(self.card(screen("blocked_ask")), other="purple")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("purple", ["Down"] * 3 + ["Enter", "purple", "Enter"]))
+        # The box is open with a text: the new text takes its place.
+        w = self.card(screen("ask_writein_typed"))
+        self.assertEqual((w["ask"]["at"], w["ask"]["options"][3]["typed"]), (3, "purple"))
+        self.answer(w, other="teal")
+        self.assertEqual(self.pane["keys"], ["BSpace"] * 6 + ["teal", "Enter"])
+        # Two questions: Right and Left show the other one; the answer given before is marked chosen.
+        w = self.card(screen("ask_two_q1_back"))
+        self.assertEqual(([t["header"] for t in w["ask"]["tabs"]], w["ask"]["current"], w["ask"]["at"]),
+                         (["Question 1", "Question 2"], 0, 1))
+        self.assertEqual([o["chosen"] for o in w["ask"]["options"]], [False, True, False])
+        self.answer(w, tab=1)
+        self.assertEqual(self.pane["keys"], ["Right"])
+        # More answers: Space turns a box over (apple on, plum off; pear stays), Enter sends them all.
+        w = self.card(screen("ask_two_q2_ticked"))
+        self.assertEqual(([o["checked"] for o in w["ask"]["options"]], w["ask"]["multi"], w["ask"]["at"]),
+                         ([False, True, True, None], True, 2))
+        r = self.answer(w, picks=[0, 1])
+        self.assertEqual((r["picked"], self.pane["keys"]), ("(Recommended) apple, pear",
+                                                            ["Up", "Up", "Space", "Down", "Down", "Space", "Enter"]))
+
+    def test_an_adapter_names_a_known_form(self):
+        from river import agents
+        self.assertEqual(agents.check(codex_agent), [])
+        bad = types.SimpleNamespace(**{k: v for k, v in vars(codex_agent).items() if not k.startswith("__")})
+        bad.DETECT = dict(codex_agent.DETECT, ask="(", ask_form="x")
+        got = agents.check(bad)
+        self.assertTrue(any("ask_form" in x for x in got), got)
+        self.assertTrue(any("DETECT['ask']" in x for x in got), got)
 
 
 class Uploads(TmuxBase):
@@ -1193,16 +1802,12 @@ try {
             except PermissionError:
                 self.skipTest("no local port here")
             httpd.daemon_threads = True
+            from tests import open_tab
             threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            chrome = subprocess.Popen([
-                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-                f"http://127.0.0.1:{httpd.server_address[1]}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                ran = got.wait(30)
+                with open_tab(f"http://127.0.0.1:{httpd.server_address[1]}/"):
+                    ran = got.wait(30)
             finally:
-                chrome.kill()
-                chrome.wait()
                 httpd.shutdown()
                 httpd.server_close()
         self.assertTrue(ran, "browser test did not report")
@@ -1394,7 +1999,10 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
     if not _chrome():
         test.skipTest("no Chrome on this computer")
     window, frame = _chrome_window(size)
-    page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
+    fast_poll = b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);})();</script>'
+    app_tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
+    page = server.page_html("/sessions/ag").replace(app_tag, fast_poll + app_tag).replace(
+        b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
     got, result = threading.Event(), {}
 
     class H(server.Handler):
@@ -1424,17 +2032,13 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
         except PermissionError:
             test.skipTest("no local port here")
         httpd.daemon_threads = True
+        from tests import open_tab
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        chrome = subprocess.Popen([
-            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", f"--window-size={window}", f"--user-data-dir={test.dir.name}/browser",
-            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else '/sessions/ag?as=mark'}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        url = f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else '/sessions/ag?as=mark'}"
         try:
-            ran = got.wait(wait)
+            with open_tab(url, window=window):
+                ran = got.wait(wait)
         finally:
-            chrome.kill()
-            chrome.wait()
             httpd.shutdown()
             httpd.server_close()
     test.assertTrue(ran, "browser test did not report")
@@ -2100,7 +2704,7 @@ try {
     check(q("#newCodeBar").textContent.includes("MaximizePM was updated."), "the bar's text");
     // #6184: a line under the top bar that pushes the tab down, never over the message box of the chat.
     check(q("#newCodeBar").parentElement === q("#pageNotes"), "the bar in the line under the top bar");
-    await sleep(6000);
+    await sleep(600);
     const bar = q("#newCodeBar").getBoundingClientRect(), lay = q("#sessLayout").getBoundingClientRect();
     const box = q("#sessText").getBoundingClientRect();
     check(bar.top >= q("header").getBoundingClientRect().bottom - 1 && bar.bottom <= lay.top + 1, "the bar above the tab");
@@ -2108,7 +2712,7 @@ try {
     check(+sessionStorage.getItem("loads") === 1, "no reload by itself");
     q("#newCodeBar button").click();
   } else {
-    await sleep(3000);
+    await sleep(600);
     post({ loads: +sessionStorage.getItem("loads"), bar: !!q("#newCodeBar") });
   }
 } catch (e) { post({ error: String(e.stack || e) }); }
@@ -2130,7 +2734,7 @@ try {
     post({ error: "no reload for another state shape" });
   } else {
     await until(() => q("#newCodeBar"), "the bar after the one reload");
-    await sleep(5000);
+    await sleep(600);
     post({ loads: +sessionStorage.getItem("loads"), text: q("#newCodeBar span").textContent });
   }
 } catch (e) { post({ error: String(e.stack || e) }); }
@@ -2178,9 +2782,9 @@ try {
   files()[0].click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("board.png") && q("#spBody img.sp-img"), "board.png in a panel tab");
   q('#sessions [data-session="ag"] .srow-main').click();
-  await until(() => !q("#waitDlg").classList.contains("hidden") && q("#waitList .wq [data-file][data-checked]"), "the ! dialog's link");
-  q("#waitList .wq [data-file]").click();
-  await until(() => q("#waitDlg").classList.contains("hidden") && q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the dialog's link in the panel");
+  await until(() => !q("#sessAsk").classList.contains("hidden") && q("#sessAsk .wq [data-file][data-checked]"), "the link of the session's panel (#6438)");
+  q("#sessAsk .wq [data-file]").click();
+  await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the question's link in the side panel");
   q('#sessCol a[href^="http://localhost:5173"], #sessCol [data-url^="http://localhost:5173"]').click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title === "http://localhost:5173/app", "the local page in the panel");
   await until(() => q("#sessItem [data-open]"), "the session's item");  // drawn after the session's data comes (#4766)
@@ -2713,6 +3317,7 @@ class AdapterFolder(Base):
         self.assertEqual(tail["cwd"], "/tmp/proj")
         self.assertEqual(sessions.head_cwd("claude", self.log), None)  # an adapter with no chat_cwd: no head read
 
+    @timing.local_only("live child process and ps timing")
     def test_restart_with_new_settings_of_a_quiet_copilot_session(self):
         import subprocess
         from tests.test_server import FakeTmux

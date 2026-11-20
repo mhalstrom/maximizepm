@@ -77,6 +77,48 @@ class Contract(Home):
         (self.gh / "models_cache.json").write_text("{not json", encoding="utf-8")
         self.assertIsNone(grok.read_models())
 
+    def test_config_settings_reads_sandbox_profile_and_defaults_to_off(self):
+        # No config.toml, no GROK_SANDBOX: Grok's built-in default is off (#6315).
+        self.assertEqual(grok.config_settings({"GROK_HOME": str(self.gh)})["sandbox"], "off")
+        # [sandbox] profile in config.toml wins over the built-in default; a profile in another table is ignored.
+        (self.gh / "config.toml").write_text('[other]\nprofile = "ignored"\n[ui]\npermission_mode = "ask"\n',
+                                             encoding="utf-8")
+        got = grok.config_settings({"GROK_HOME": str(self.gh)})
+        self.assertEqual((got["permission_mode"], got["sandbox"]), ("ask", "off"))
+        (self.gh / "config.toml").write_text('[ui]\npermission_mode = "auto"\n[sandbox]\nprofile = "workspace"\n',
+                                             encoding="utf-8")
+        got = grok.config_settings({"GROK_HOME": str(self.gh)})
+        self.assertEqual((got["permission_mode"], got["sandbox"]), ("auto", "workspace"))
+        # GROK_SANDBOX wins over config.toml.
+        got = grok.config_settings({"GROK_HOME": str(self.gh), "GROK_SANDBOX": "read-only"})
+        self.assertEqual(got["sandbox"], "read-only")
+        # requirements.toml pins [sandbox] profile over both GROK_SANDBOX and config.toml.
+        (self.gh / "requirements.toml").write_text('[sandbox]\nprofile = "strict"\n', encoding="utf-8")
+        got = grok.config_settings({"GROK_HOME": str(self.gh), "GROK_SANDBOX": "read-only"})
+        self.assertEqual(got["sandbox"], "strict")
+        # Python 3.10 has no tomllib: the fallback parser reads [ui] and [sandbox] the same way (#6504).
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            got = grok.config_settings({"GROK_HOME": str(self.gh)})
+            self.assertEqual((got["permission_mode"], got["sandbox"]), ("auto", "strict"))
+            (self.gh / "requirements.toml").unlink()
+            got = grok.config_settings({"GROK_HOME": str(self.gh)})
+            self.assertEqual((got["permission_mode"], got["sandbox"]), ("auto", "workspace"))
+
+    def test_settings_dialog_shows_grok_sandbox_without_command_line_flag(self):
+        from river import sessions
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "g1")
+        conn.execute("UPDATE agents SET agent_type='grok', pid_cmd='grok go' WHERE name='g1'")
+        got = {s["key"]: s for s in sessions.session_settings(conn, "g1")["settings"]}
+        self.assertEqual((got["sandbox"]["value"], got["sandbox"]["source"]), ("off", "config"))
+        (self.gh / "config.toml").write_text('[sandbox]\nprofile = "workspace"\n', encoding="utf-8")
+        got = {s["key"]: s for s in sessions.session_settings(conn, "g1")["settings"]}
+        self.assertEqual((got["sandbox"]["value"], got["sandbox"]["source"]), ("workspace", "config"))
+        conn.execute("UPDATE agents SET pid_cmd='grok --sandbox read-only go' WHERE name='g1'")
+        got = {s["key"]: s for s in sessions.session_settings(conn, "g1")["settings"]}
+        self.assertEqual((got["sandbox"]["value"], got["sandbox"]["source"]), ("read-only", "command line"))
+
 
 class Launch(Home):
     def setUp(self):

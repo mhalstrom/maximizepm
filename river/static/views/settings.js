@@ -8,20 +8,26 @@ import { button, iconButton } from "../components/button.js";
 import { S } from "../page.js";
 import { renderCredentials } from "./credentials.js";
 import { labelOf, programOf } from "./settingLabels.js";
+import { loadAgents } from "../components/agents.js";
+import { modelChoices } from "../components/modelPick.js";
+import { effortsFor } from "../components/launchDialog.js";
+import { versionsHtml, wireVersions, onVersions, versionsNow } from "../components/agentUpdate.js";
 
-const AGENT_CLIS = /^(aider|amp|claude|codex|copilot|cursor|gemini|goose|grok|hermes|opencode|pi)_/;
+const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
 // [tab key, tab name, one line for its heading, test of a settings key (none: not a group of keys)]
 export const GROUPS = [
   ["credentials", "Credentials", ""],
   ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
     (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
-      || has("launch_agents", "agent_rules", "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
+      || has("launch_agents", "agent_rules", "agent_order", "agent_update_check", "agent_auto_update",
+             "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
              "prompt_wait", "stuck_after")(k)],
   ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
     (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)
       || has("max_leases", "max_sessions", "busy_max", "gone_after", "away_after", "owner_ttl", "reserve_ttl",
-             "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every")(k)],
+             "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every",
+             "command_hang_after", "command_hang_kill")(k)],
   ["work", "Work", "Reviews, releases, deploys, and how items are added, checked and cleaned up.",
     (k) => /^(review|release_|similar_|list_cleanup_)/.test(k)
       || has("auto_review", "deploy_timeout", "result_look", "push_guard", "due_warn_before",
@@ -82,6 +88,11 @@ export function renderSettings() {
   $("#setGroupNote").textContent = g[2];
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
+  $("#setProviders").classList.toggle("hidden", current !== "agents");
+  $("#setVersions").classList.toggle("hidden", current !== "agents");
+  $("#setDevices").classList.toggle("hidden", current !== "notifications");
+  if (current === "agents") { renderProviders(); renderVersions(); }
+  if (current === "notifications") renderDevices();
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
     .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
@@ -104,6 +115,136 @@ export function renderSettings() {
     tableGroup = current;
   }
 }
+
+// The agent providers (#6361, mark 2026-11-20: 'we should be able to set the agent usage priority and when all the
+// slots of a provider are used we go to the next provider down'; and 'with aggy there is a claude model usage credit
+// that has a seperate 5 hour limit'): one row for each entry in launch order, an agent and its model, so one agent can
+// have an entry for each model group. Each has its model and effort (empty: the agent's own setting, shown greyed),
+// its limit of active sessions (empty: no limit), the sessions it runs now, ↑ ↓ ✕, and Add. A change writes
+// agent_order for every project.
+// The Model and Effort of a row are lists (mark 2026-11-20: 'also the models and effort need to be dropdowns'): the
+// models the agent runs and the effort levels of the chosen model (else of the model the launch runs), from the
+// launch dialog's options of the agent. The first option is the agent's own setting (no value), with the model or
+// effort it gives now. A value the lists lack (typed into agent_order by hand) stays as an option. An agent with
+// no launch option keeps a text field.
+const optOf = (p) => (S.launch_options || []).find(o => o.platform === p.platform)
+  || (S.launch_options || []).find(o => o.agent_type === p.platform);
+function provField(i, k, p) {
+  const now = (k === "model" ? p.run_model : p.run_effort);
+  const label = `${esc(p.label)} ${k}`, opt = optOf(p);
+  if (!opt) return `<input data-prov-field="${k}" data-prov-i="${i}" value="${esc(p[k] || "")}" placeholder="${esc(now || "its default")}" aria-label="${label}">`;
+  const cur = p[k] || "";
+  let vals = k === "model" ? modelChoices(opt.models, cur).shown.map(m => m.name) : effortsFor(opt, p.model || p.run_model);
+  if (cur && !vals.includes(cur)) vals = [cur, ...vals];
+  const first = `its default${now && !p[k] ? ` (${now})` : ""}`;
+  return `<select data-prov-field="${k}" data-prov-i="${i}" aria-label="${label}">
+    <option value=""${cur ? "" : " selected"}>${esc(first)}</option>
+    ${vals.map(v => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+}
+// A text field the person types in keeps its text, and an open list stays open: the timed refresh does not draw the
+// rows again while a field or a list has focus. A button with focus does not stop it (#6393: after a click on Add
+// provider, an arrow or ✕ the focus stays on that button, and the list kept its old rows until a reload). After a
+// save, saveOrder draws the rows at once (force) and puts the focus back on the same control.
+// The agent CLIs' versions (#6430): drawn again with each poll of the part while Settings > Agents shows.
+let versionsOff = null;
+function renderVersions() {
+  const host = $("#setVersions");
+  const draw = (s) => {
+    if (host.classList.contains("hidden")) return;
+    const html = versionsHtml(s);
+    if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+  };
+  wireVersions(host, () => draw(versionsNow()));
+  if (!versionsOff) versionsOff = onVersions(draw);
+  draw(versionsNow());
+}
+function renderProviders(force) {
+  const host = $("#setProviders"), a = document.activeElement;
+  if (!force && host.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT")) return;
+  return loadAgents().then((agents) => drawProviders(host, agents));
+}
+// The data attribute that names a control of the list, so that the same control gets the focus after a redraw.
+const PROV_KEYS = ["provField", "provUp", "provDown", "provDel", "provAdd"];
+function focusKey(el) {
+  if (el.id === "provAdd") return "#provAdd";
+  const k = PROV_KEYS.find(x => el.dataset[x] !== undefined);
+  if (!k) return null;
+  const attr = k.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+  return k === "provField" ? `[data-prov-field="${el.dataset.provField}"][data-prov-i="${el.dataset.provI}"]`
+    : `[data-${attr}="${el.dataset[k]}"]`;
+}
+function drawProviders(host, agents) {
+  const P = S.providers || [], set = P.length && P[0].set;
+  const rows = P.map((p, i) => {
+    const use = p.limited ? chip("c-warn", "at usage limit") : p.remaining_pct != null ? `${Math.round(p.remaining_pct)}% left` : "";
+    return `<div class="prov-row">
+      <span class="prov-name"><span class="muted" title="Launch order">${p.pos}</span> ${esc(p.label)}</span>
+      <label class="prov-f">Model${provField(i, "model", p)}</label>
+      <label class="prov-f">Effort${provField(i, "effort", p)}</label>
+      <label class="prov-f prov-max">Max sessions<input data-prov-field="max" data-prov-i="${i}" inputmode="numeric" value="${p.max == null ? "" : p.max}" placeholder="no limit" aria-label="${esc(p.label)} max sessions"></label>
+      <span class="prov-used t-s${p.full ? " prov-full" : " muted"}">${p.used} running${p.full ? ", full" : ""}${use ? ` · ${use}` : ""}</span>
+      <span class="prov-acts">${iconButton("↑", `Move ${p.name} up`, { data: { "prov-up": i } })}${iconButton("↓", `Move ${p.name} down`, { data: { "prov-down": i } })}${iconButton("✕", `Remove ${p.name}`, { data: { "prov-del": i } })}</span>
+    </div>`;
+  }).join("");
+  // An agent can be added again, with another model (an entry for each model group).
+  const free = (agents || []).filter(a => a.launch && Object.keys(a.launch).length);
+  const html = `<div class="cred-sub">Agent providers, in launch order</div>
+    <div class="muted t-s set-note">A new session takes the first provider with a free slot and usage left. ${set ? ""
+      : "No order is set: these are the Start button's agents. A change here saves the order."}</div>
+    ${rows || `<div class="muted">No provider yet.</div>`}
+    ${free.length ? `<div class="prov-add"><select id="provAdd" aria-label="Agent to add">${free.map(a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join("")}</select>${button("Add provider", { data: { "prov-add": "1" } })}</div>` : ""}`;
+  if (host.dataset.sig === html) return;
+  // The control with focus gets it back after the redraw, with the text and the agent chosen in it.
+  const a = document.activeElement, key = host.contains(a) ? focusKey(a) : null;
+  const typed = key && a.tagName === "INPUT" ? { value: a.value, start: a.selectionStart, end: a.selectionEnd } : null;
+  const pick = $("#provAdd") && $("#provAdd").value;
+  host.innerHTML = html; host.dataset.sig = html;
+  const sel = $("#provAdd");
+  if (sel && pick && [...sel.options].some(o => o.value === pick)) sel.value = pick;
+  const back = key && host.querySelector(key);
+  if (!back) return;
+  back.focus();
+  if (typed) { back.value = typed.value; try { back.setSelectionRange(typed.start, typed.end); } catch (e) { /* no selection */ } }
+}
+// focus: the control that gets the focus after the redraw (an arrow follows its provider), or none to keep the one
+// that has it.
+async function saveOrder(list, focus) {
+  const value = list.map(p => [p.agent, ...["model", "effort", "max"].filter(k => p[k] != null && p[k] !== "")
+    .map(k => `${k} ${p[k]}`)].join(" ")).join(", ");
+  try {
+    if (value) await act("config_set", { key: "agent_order", value });
+    else await act("config_unset", { key: "agent_order" });
+    toast(value ? `Agent providers: ${value}` : "Agent providers: back to the Start button's agents");
+  } catch (e) { /* act showed the error */ }
+  await renderProviders(true);
+  const el = focus && $("#setProviders").querySelector(focus);
+  if (el) el.focus();
+}
+const provList = () => (S.providers || []).map(p => ({ agent: p.platform || p.agent, model: p.model, effort: p.effort, max: p.max }));
+$("#setProviders").addEventListener("change", (e) => {
+  const t = e.target, k = t.dataset.provField;
+  if (!k) return;
+  const v = t.value.trim();
+  if (k === "max" && v && !/^\d{1,4}$/.test(v)) { toast("Max sessions: a whole number, or empty for no limit", true); return; }
+  const L = provList(), i = +t.dataset.provI;
+  L[i] = { ...L[i], [k]: v === "" ? null : k === "max" ? +v : v };
+  saveOrder(L);
+});
+$("#setProviders").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); e.target.blur(); }
+});
+$("#setProviders").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-prov-up],[data-prov-down],[data-prov-del],[data-prov-add]");
+  if (!t) return;
+  const L = provList();
+  if (t.dataset.provAdd) return saveOrder([...L, { agent: $("#provAdd").value }]);
+  const i = +(t.dataset.provUp ?? t.dataset.provDown ?? t.dataset.provDel);
+  if (t.dataset.provDel !== undefined) return saveOrder(L.filter((_, x) => x !== i), "#provAdd");
+  const up = t.dataset.provUp !== undefined, j = up ? i - 1 : i + 1;
+  if (j < 0 || j >= L.length) return;
+  [L[i], L[j]] = [L[j], L[i]];
+  saveOrder(L, `[data-prov-${up ? "up" : "down"}="${j}"]`);  // the arrow follows its provider
+});
 
 // A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
 export async function saveRow(el) {
@@ -175,8 +316,31 @@ $("#regGo").addEventListener("click", async () => {
   toast(`${n} is registered, and is You are on this page`);
 });
 
+// Paired phones (#6471): each phone that scanned the setup guide's QR code, with Remove.
+function renderDevices() {
+  const host = $("#setDevices");
+  const D = S.devices || [];
+  const plat = (p) => p === "ios" ? "iPhone" : p === "android" ? "Android" : p;
+  const rows = D.map(d => `<div class="dev-row" data-device-id="${d.id}">
+    <div class="dev-main">
+      <b>${esc(d.name)}</b> ${chip("c-p", esc(plat(d.platform)))}${d.dead_at ? " " + chip("c-warn", "push token expired") : ""}
+      <div class="muted t-s">paired ${ago(d.paired_at)} · last seen ${ago(d.last_seen)}</div>
+    </div>
+    <div class="dev-acts">${button("Remove", { kind: "warn", data: { "device-remove": d.id }, title: "Remove device" })}</div>
+  </div>`).join("");
+  const html = `<div class="cred-sub">Paired phones</div>
+    <div class="muted t-s set-note">Pair a phone by scanning the QR code in the setup guide (Your phone).</div>
+    ${rows || `<div class="muted t-s">No paired phones yet.</div>`}`;
+  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+}
+
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
+  if (t.dataset.deviceRemove) return run(async () => {
+    const id = +t.dataset.deviceRemove;
+    const d = (S.devices || []).find(x => x.id === id);
+    await act("device_remove", { id }).then(() => toast(d ? `Removed ${d.name}` : "Removed")).catch(() => {});
+  });
   if (t.dataset.retirePolicy) return run(async () => {
     const p = (S.policies || []).find(x => x.kind === "user" && x.id === +t.dataset.retirePolicy);
     if (p && !confirm(`Retire ${p.pid}? It is deleted, and no briefing shows it again.\n${p.text}`)) return;

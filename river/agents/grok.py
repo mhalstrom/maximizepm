@@ -17,6 +17,7 @@ Read from Grok 1.0.77 on macOS (grok --help, ~/.grok/docs/user-guide, a recorded
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -105,6 +106,87 @@ EFFORT = {
 }
 
 
+# The default effort of each model as Grok's cache gave it on 2026-11-20 (reasoning_effort, the level marked default).
+SEEN_DEFAULT_EFFORT = {"grok-4.7": "high"}
+
+
+def _toml_file(path):
+    """Parse a TOML file into a dict, or {} when missing, unreadable, or invalid."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        import tomllib
+        got = tomllib.loads(text)
+        return got if isinstance(got, dict) else {}
+    except ImportError:
+        pass
+    except ValueError:
+        return {}
+    # Python 3.10 has no tomllib: parse [section] headers and string key = "value" lines (#6504).
+    out, cur = {}, None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        m = re.match(r"^\[([A-Za-z0-9_.-]+)\]\s*(?:#.*)?$", s)
+        if m:
+            cur = out.setdefault(m.group(1), {})
+            continue
+        m = (re.match(r'^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*(?:#.*)?$', s)
+             or re.match(r"^([A-Za-z0-9_-]+)\s*=\s*'([^']*)'\s*(?:#.*)?$", s))
+        if m:
+            (out if cur is None else cur)[m.group(1)] = m.group(2)
+    return out
+
+
+def _sandbox_profile(cfg):
+    """The [sandbox] profile string of a parsed Grok TOML file, or ""."""
+    sb = cfg.get("sandbox")
+    val = sb.get("profile") if isinstance(sb, dict) else None
+    return val.strip() if isinstance(val, str) else ""
+
+
+def config_settings(env=None):
+    """What a Grok session takes when nothing names it (#6280, #6315): the model of its cache when it lists one
+    (grok-4.7 on 2026-11-20), that model's default effort (its reasoning_effort: high), [ui] permission_mode of
+    ~/.grok/config.toml, and its sandbox profile (requirements.toml pin, else GROK_SANDBOX, else [sandbox] profile of
+    ~/.grok/config.toml, else 'off', per ~/.grok/docs/user-guide/18-sandbox.md)."""
+    env = os.environ if env is None else env
+    cache = _models_cache(env)
+    got = {}
+    if len(cache) == 1:
+        model, row = next(iter(cache.items()))
+        info = row.get("info") if isinstance(row, dict) else None
+        got = {"model": model, "effort": info.get("reasoning_effort") if isinstance(info, dict) else None}
+    elif not cache and len(DESCRIBE["models"]) == 1:
+        # Grok removes its cache while a new session fetches the list (seen on 2026-11-20): its one described model,
+        # and the default effort the cache gave it then.
+        model = DESCRIBE["models"][0]
+        got = {"model": model, "effort": SEEN_DEFAULT_EFFORT.get(model)}
+    home = grok_home(env)
+    try:
+        text = (home / "config.toml").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    cfg = _toml_file(home / "config.toml")
+    ui = cfg.get("ui")
+    pm = ui.get("permission_mode") if isinstance(ui, dict) else None
+    if not isinstance(pm, str) or not pm:
+        m = re.search(r'^\s*permission_mode\s*=\s*"([^"]+)"', text, re.M)
+        pm = m.group(1) if m else None
+    if pm:
+        got["permission_mode"] = pm
+    req = _toml_file(home / "requirements.toml")
+    got["sandbox"] = _sandbox_profile(req) or (env.get("GROK_SANDBOX") or "").strip() or _sandbox_profile(cfg) or "off"
+    return got
+
+
+# Where the Settings dialog reads each setting of a running session (#6280, #6315).
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "permission_mode": ("config",), "sandbox": ("config",)}
+
+
 def read_effort_levels(model):
     """The effort levels that Grok offers for model (models_cache.json, reasoning_efforts), lowest first; None when
     the cache does not know the model, so EFFORT['levels'] stands; [] for a model with no effort."""
@@ -159,6 +241,82 @@ def resume_command(session_ref, model, effort, settings, name=None):
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
 
 
+def trust_workspace(folder, command, env=None):
+    """Add a worktree that MaximizePM made to $GROK_HOME/trusted_folders.toml (#6339), so Grok starts there without
+    its folder trust prompt."""
+    if not folder:
+        return command
+    path = grok_home({**os.environ, **(env or {})}) / "trusted_folders.toml"
+    real = os.path.realpath(str(folder))
+    header = f"[folders.{json.dumps(real)}]"
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return command
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip() == header:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("["):
+                if re.match(r"^\s*trusted\s*=\s*true\b", lines[j]):
+                    return command
+                if re.match(r"^\s*trusted\s*=\s*false\b", lines[j]):
+                    lines[j] = "trusted = true"
+                    try:
+                        _write(path, "\n".join(lines) + "\n")
+                    except OSError:
+                        pass
+                    return command
+                j += 1
+            lines.insert(i + 1, "trusted = true")
+            try:
+                _write(path, "\n".join(lines) + "\n")
+            except OSError:
+                pass
+            return command
+    block = f"{header}\ntrusted = true\ndecided_at = {int(time.time())}\n"
+    sep = "\n\n" if text.strip() else ""
+    new_text = (text.rstrip() + sep + block) if text.strip() else block
+    try:
+        _write(path, new_text)
+    except OSError:
+        pass
+    return command
+
+
+def untrust_workspace(folder, env=None):
+    """Remove a deleted MaximizePM worktree from $GROK_HOME/trusted_folders.toml (#6339)."""
+    if not folder:
+        return
+    path = grok_home({**os.environ, **(env or {})}) / "trusted_folders.toml"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    headers = {f"[folders.{json.dumps(p)}]" for p in (str(folder), os.path.realpath(str(folder)))}
+    out, skip, changed = [], False, False
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("["):
+            skip = s in headers
+            if skip:
+                changed = True
+                while out and not out[-1].strip():
+                    out.pop()
+                continue
+        if not skip:
+            out.append(ln)
+    if not changed:
+        return
+    new_text = "\n".join(out).strip()
+    try:
+        _write(path, (new_text + "\n") if new_text else "")
+    except OSError:
+        pass
+
+
 def parse_command(words):
     """A hand-written grok command that a profile builds exactly: -m/--model {model}, --reasoning-effort/--effort
     {effort}, --permission-mode <a known mode> (--always-approve and --yolo are bypassPermissions), --sandbox <a
@@ -194,7 +352,7 @@ def parse_command(words):
 # The session id: the SessionStart hook reports it (maxpm report --session-id, with the resume command). Grok also sets
 # GROK_SESSION_ID in the commands its tools run (Grok 1.0.77; it sets GROK_AGENT there too, but a person may set that
 # one to pick an agent).
-IDENTITY = {"source": "hook", "env": None, "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "hook", "env": None, "pane": None, "url": None,
             "inside_env": ["GROK_SESSION_ID"]}
 
 STATE = {"state": "hook", "session_id": "hook"}
@@ -216,6 +374,8 @@ DETECT = {
     # limit), and the free usage limit's own words.
     "blocked": [r"Do you trust the contents of this directory\?", r"(?m)^\s*No, quit\s+n\s*$",
                 r"(?m)^\s*┃\s+\d+ \([○●]\) \S", r"You hit your free usage limit"],
+    # Limit-stop text (#6348): Grok's free usage limit and rate limit messages.
+    "limit": [r"(?i)You hit your free usage limit", r"(?i)\busage\s+limit\s+reached\b", r"(?i)\brate\s+limit\s+reached\b"],
     "tell_instead": r"No, reject \(type to add feedback\)",
     "image_paste": "[Image #{n}]",
     "menu": "●",  # the selected option: "3 (●) Yes, proceed"; the others are "(○)"
@@ -815,3 +975,8 @@ def read_commands(folder):
 # Grok reads AGENTS.md and CLAUDE.md (and Agents.md, AGENT.md, CLAUDE.local.md) in each folder: the AGENTS.md that
 # MaximizePM's setup writes for every agent reaches it too, so a second file would say the same twice.
 SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.grok/skills", "voice": None, "open_link": None}
+
+# 12. Update (#6430): grok update --check --json prints {"currentVersion", "latestVersion", ...} (grok 1.0.89);
+# grok update --version <v> installs one; grok -p answers one request and exits.
+UPDATE = {"smoke": ["-p", "Reply OK", "-m", "{model}"], "self": ["update", "--version", "{version}"],
+          "self_check": ["update", "--check", "--json"], "self_read": r'"latestVersion"\s*:\s*"([^"]+)"'}

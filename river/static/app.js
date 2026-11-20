@@ -1,4 +1,4 @@
-import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left, getJson, ownSignIn } from "./lib.js";
+import { $, esc, store, actor, toast, act, typeAction, clip, fillSelect, hooks, artId, ago, left, getJson, ownSignIn } from "./lib.js";
 import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
@@ -11,12 +11,14 @@ import { drawBell, wireBell } from "./components/notifyBell.js";
 import { drawPause, wirePause } from "./components/pauseButton.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
-import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
+import { button } from "./components/button.js";
+import { openInPanel, onPanel, onPageView, pageView, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { browserOpens, openBrowser } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { installMics } from "./components/dictate.js";
 import { showRelease, openRelease } from "./components/releaseUpdate.js";
+import { poll as agentVersions } from "./components/agentUpdate.js";
 import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
@@ -36,7 +38,6 @@ import * as ops from "./views/ops.js";
 import * as deploy from "./views/deploy.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
-import { renderHealth } from "./views/health.js";
 import * as settings from "./views/settings.js";
 import { renderCredentials } from "./views/credentials.js";
 import { signinAsks } from "./views/signinAsk.js";
@@ -46,9 +47,13 @@ Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (
   openPlan: (view) => showPlan(view),
   // The Deploy tab (#6136) on what deploy.D names now: a new entry in the history, so Back returns.
   deployGo: async () => { if (tab !== "deploy") return setTab("deploy"); syncUrl(true); return deploy.renderDeploy(true); },
+  deployReplaceUrl: () => syncUrl(false),
   // One project in Plan (#5879: a project's own browser in the Browsers view has no session to open).
   openProject: (name) => { setScope(name, ""); return showPlan("overview"); },
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },
+  // A line of Your action items that a session asks (#6438; ev: the Needs you event): that session, with the line in
+  // its panel; false when that session does not hold it.
+  openSessionAsk: async (name, ev) => { await setTab("sessions"); return sessionsTab.openAsk(name, ev); },
   // The You view of Sessions (#5102): what waits on the person; takeovers opens the list of items an agent took over.
   openYou: async (takeovers) => { await setTab("sessions"); sessionsTab.showYou(true); if (takeovers) youView.openTakeovers(); } });
 let openItem = null, drawerItem = null;  // drawerItem: the open item as /api/item gave it
@@ -282,14 +287,15 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
   const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), anyStarted()]);
-  if (setupDialog.isOpen() && firstRun !== setupSig && !$("#setupSteps").contains(document.activeElement)) openSetup();
+  if (setupDialog.isOpen() && firstRun !== setupSig && !$("#setupSteps").contains(document.activeElement)
+      && !$("#setupSteps [data-ff-move]")) openSetup();
   setupSig = firstRun;
 }
 
@@ -372,7 +378,7 @@ $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
   plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals();
-  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
+  renderGraph(false); renderLog(true); ops.renderOps(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -451,6 +457,8 @@ function readUrl() {
   // Plan (#5102): /plan/<view>?project=<p>&goal=<g>. The old paths (/board, /projects, ...) answer "not found".
   // Releases and Pipelines left Plan for the Deploy tab (#6136): their old addresses show Deploy's pipelines.
   if (r.tab === "plan" && ["releases", "pipelines"].includes(parts[1])) { r.tab = "deploy"; parts.splice(1); }
+  // Health left Plan for the Cost page (#6217): its old address shows Cost.
+  if (r.tab === "plan" && parts[1] === "health") { r.tab = "sessions"; r.pane = "cost"; }
   if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
   if (r.tab === "deploy") r.deploy = deploy.fromUrl(parts.slice(1));
@@ -493,7 +501,7 @@ function setTab(name, push = true) {
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   plan.renderPlanViews(); plan.renderPlanSide();
-  renderLog(true); renderHealth(true); ops.renderOps(true);
+  renderLog(true); ops.renderOps(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   deploy.renderDeploy(tab === "deploy");  // shown: it reads and draws; hidden: its pipeline stops reading
@@ -623,6 +631,14 @@ async function openSetup() {
 }
 const setupDialog = makeDialog($("#setup"));
 let setupSig = "";
+// While an install or a sign-in window runs (#6239), the guide asks again every 3 s for its last lines and the
+// agent's state; not while the person types in a field of the guide.
+let setupPoll = false;
+setInterval(() => {
+  const f = document.activeElement;
+  if (setupPoll && setupDialog.isOpen() && !document.hidden && !$("#setupSteps [data-ff-move]")
+      && !(f && $("#setupSteps").contains(f) && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName))) openSetup();
+}, 3000);
 function closeSetup() { setupDialog.close(); }
 // A remote host (#5882): the last result of Set up and of an agent sign-in there, so a new draw of the guide keeps them.
 let hostTarget = "", hostRes = null, hostSign = null;
@@ -641,16 +657,17 @@ function hostHtml() {
     : p.enable && p.enable.url ? `<div>Tailscale on ${esc(r.target)} waits for one approval:
         <a href="${esc(p.enable.url)}" target="_blank" rel="noopener">${esc(p.enable.url)}</a>. Then press Set up again.</div>`
     : `<div>Tailscale does not run on ${esc(r.target)}: install it there, sign in, and press Set up again.</div>`;
-  const sg = hostSign;
-  const sign = !sg ? "" : sg.signed_in ? `<div>${sg.agent === "claude" ? "Claude Code" : "Codex"} is signed in on ${esc(r.target)}.</div>`
+  // The agents that sign in on a host come from the server (agentlogin.AGENTS, #6255): a button and a name for each.
+  const agents = r.signin || [];
+  const sg = hostSign, name = sg && ((agents.find(a => a.agent === sg.agent) || {}).name || sg.agent);
+  const sign = !sg ? "" : sg.signed_in ? `<div>${esc(name)} is signed in on ${esc(r.target)}.</div>`
     : `<div>Open <a href="${esc(sg.url)}" target="_blank" rel="noopener">the sign-in page</a> and sign in.
-        ${sg.code ? `Type this code there: <b>${esc(sg.code)}</b>. Codex finishes by itself.` : ""}</div>`
+        ${sg.code ? `Type this code there: <b>${esc(sg.code)}</b>. ${esc(name)} finishes by itself.` : ""}</div>`
       + (sg.paste ? `<div class="su-track"><input id="suHostCode" placeholder="the code that the page shows">
           <button class="btn primary" data-su="hostcode">Send code</button></div>` : "");
   return `<ul class="su-steps">${lines}</ul>${moved}${page}
     <div>Sign the agents in there, once each:
-      <button class="btn" data-su="hostsignin" data-agent="claude">Claude Code</button>
-      <button class="btn" data-su="hostsignin" data-agent="codex">Codex</button></div>${sign}`;
+      ${agents.map(a => `<button class="btn" data-su="hostsignin" data-agent="${esc(a.agent)}">${esc(a.name)}</button>`).join("\n      ")}</div>${sign}`;
 }
 function renderSetup(st) {
   // The first run is a short path in order (you, river for agents, a folder, an agent, a first task, Start);
@@ -694,34 +711,66 @@ function renderSetup(st) {
       : rc.launcher === "old" ? "The maxpm command still points at an older copy of MaximizePM. Update it to this one."
       : "The agents you start talk to MaximizePM with a small command, maxpm. One click adds it to this Mac.",
     rc.in_app_image ? "" : `<button class="btn primary" data-su="maxpmcmd">${rc.launcher === "old" ? "Update" : "Add"} the maxpm command</button>`));
-  // One instructions file for every agent: AGENTS.md holds the rules; an old CLAUDE.md gives its rules to it (#6024).
+  // Every agent session runs in tmux (#6237). The app carries its own, so this step shows only for an install
+  // without the app and no tmux: one click on a Mac (Homebrew, or its installer first), the command on Linux.
+  if (!st.tmux) out.push(step(false, "Install tmux",
+    !st.tmux_click ? `Every agent session runs in tmux. Run this in a terminal, then check again: <code>${esc(st.tmux_install)}</code>`
+      : st.brew ? "Every agent session runs in tmux, a program for terminals. One click installs it with Homebrew, in a Terminal window."
+      : "Every agent session runs in tmux, a program for terminals. One click opens a Terminal window that installs Homebrew first (type your Mac password there), then tmux.",
+    (st.tmux_click ? `<button class="btn primary" data-su="tmux">Install tmux</button>` : "")
+      + `<button class="btn" data-su="recheck">Check again</button>`));
   const blocks = st.folders.filter(f => f.exists && (f.agents_md !== "current" || (f.empty_old || []).length));
-  const layouts = { claude_only: "its CLAUDE.md has rules that Codex and other agents don't read",
-    both: "its CLAUDE.md has rules that Codex and other agents don't read" };
+  const ruleFiles = f => (f.old_with_rules || []).join(" and ");
   out.push(step(st.folders.length > 0 && blocks.length === 0, "Add a project folder",
     st.folders.length ? st.folders.map(f => `<div title="${esc(f.path)}">${esc(f.path.replace(/^\/(Users|home)\/[^/]+/, "~"))} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
-      + (!f.exists ? " · folder not found" : layouts[f.layout] ? " · " + esc(layouts[f.layout]) : "")
-      + (layouts[f.layout] ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
-          title="Move to AGENTS.md">Share them with every agent</button>` : "")
+      + (!f.exists ? " · folder not found" : ruleFiles(f) ? " · Rules in " + esc(ruleFiles(f)) : "")
+      + (ruleFiles(f) ? " " + button("Move rules to AGENTS.md", { data: { su: "block", move: "1", path: f.path } }) : "")
       + `</div>`).join("")
       + `<details style="margin-top:6px"><summary>Add another folder</summary>${folderForm()}</details>`
       : "The folder of something you're building. Agents you start work in it." + folderForm(),
     blocks.map(f => `<button class="btn" data-su="block" data-path="${esc(f.path)}">Update ${esc(f.path.split("/").pop())}</button>`).join("")));
+  for (const warning of st.agy_instruction_warnings || []) {
+    out.push(`<div class="sub">${esc(warning).replaceAll("/", "/<wbr>")}</div>`);
+  }
   // An agent the Start button can open: installed here, and on the Start button's list.
+  // Choose an agent (#6239): every agent with its state from a real check (a green check: the program is on this
+  // computer; an empty circle: it is not, with Install), Claude Code and Codex first, the others under More agents.
+  // Add puts an installed agent on the Start button; Install runs its vendor's install and Sign in its own sign-in,
+  // each in a window of the Terminal tab that the guide shows the last lines of.
   const ready = (st.start_agents || []).filter(a => a.found).map(a => a.label);
-  const addable = st.agent_clis.filter(a => a.found && !a.added);
-  const none = !ready.length && !addable.length;
-  const addBtns = addable.map(a => `<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="${esc(a.command)}">Add ${esc(a.label)}</button>`).join("");
+  const clis = st.agent_clis || [];
+  const signedOut = clis.filter(a => a.found && a.added && a.signed_in === false);
+  const agentRow = (a) => {
+    const job = a.jobs.install && a.jobs.install.running ? a.jobs.install : a.jobs.signin || a.jobs.install;
+    const btns = [];
+    if (job) btns.push(`<button class="btn" data-su="job" data-pane="${esc(job.pane)}" data-name="${esc(job.name)}">${job.running ? "Show" : "Show the window"}</button>`);
+    if (a.found && !a.added) btns.push(`<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="Add to Start button">Add</button>`);
+    if (a.found && a.signin && a.signed_in !== true) btns.push(`<button class="btn${a.signed_in === false ? " primary" : ""}" data-su="signin" data-platform="${esc(a.platform)}">Sign in</button>`);
+    if (!a.found && a.install && !(job && job.running))
+      btns.push(`<button class="btn${a.main && !ready.length ? " primary" : ""}" data-su="install" data-platform="${esc(a.platform)}" title="${esc(a.install.command)}">Install</button>`);
+    const state = job && job.running ? (job === a.jobs.install ? "installing…" : "signing in…")
+      : !a.found && job && job === a.jobs.install && job.exit ? `the install stopped (exit ${job.exit}): Show has its output`
+      : a.found ? [a.added ? "on the Start button" : "installed", a.signed_in === true ? "signed in" : a.signed_in === false ? "not signed in" : ""].filter(Boolean).join(", ")
+      : "not installed";
+    const tail = job && job.tail.length ? `<div class="su-tail">${job.tail.map(esc).join("<br>")}</div>` : "";
+    return `<div class="su-agent"><span class="su-am ${a.found ? "ok" : "no"}" aria-hidden="true">${a.found ? "✓" : "○"}</span>
+      <b title="${esc(a.path || a.label)}">${esc(a.label)}</b> <span class="muted">${state}</span>
+      <span class="su-ab">${btns.join("")}</span>${tail}</div>`;
+  };
+  const mains = clis.filter(a => a.main), others = clis.filter(a => !a.main);
+  const anyJob = clis.some(a => (a.jobs.install && a.jobs.install.running) || (a.jobs.signin && a.jobs.signin.running));
+  const agentList = mains.map(agentRow).join("")
+    + (others.length ? `<details class="su-more" ${others.some(a => a.found || Object.keys(a.jobs).length) ? "open" : ""}>
+        <summary>More agents</summary>${others.map(agentRow).join("")}</details>` : "")
+    + (anyJob ? "" : `<button class="btn" data-su="recheck">Check again</button>`);
+  setupPoll = anyJob;
   const opens = "The Start button opens " + ready.map(esc).join(" or ")
     + (st.tmux ? " in a tmux pane (maxpm view in a terminal shows every agent side by side)."
       : ` in a tmux pane, and tmux is not installed: ${esc(st.tmux_install || "brew install tmux")}.`);
-  out.push(step(ready.length > 0, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
-    ready.length ? (addable.length ? `<span class="fix" style="display:inline-flex">${addBtns}</span>` : "")
-      : none ? `No AI coding agent is installed on this Mac yet. Install one, then check again:
-          <a href="https://docs.claude.com/en/docs/claude-code/setup" target="_blank" rel="noopener">Claude Code</a> or
-          <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>.`
-      : "Found on this Mac: " + addable.map(a => esc(a.label)).join(", ") + ". Add one to the Start button.",
-    (none ? `<button class="btn" data-su="recheck">Check again</button>` : "") + addBtns));
+  out.push(step(ready.length > 0 && !signedOut.length, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
+    (ready.length ? signedOut.length ? `Sign in to ${signedOut.map(a => esc(a.label)).join(" and ")}: the sign-in opens in a terminal window here.`
+        : "" : "Install an AI coding agent, sign in to it, and add it to the Start button.")
+      + `<div class="su-agents">${agentList}</div>`));
   // The Browser pane needs Google Chrome (#5624): a missing Chrome shows here, not only in More.
   const chromeStep = extra(st.chrome !== false, "Google Chrome for the Browser",
     st.chrome === false ? "The Browser shows web pages to you and your agents, and it needs Google Chrome. Download it, install it, then check again."
@@ -774,8 +823,9 @@ function renderSetup(st) {
   // Serve or HTTPS is not on for the tailnet (#5865): tailscale serve waits for the person's approval at a link.
   const en = tn.enable, said = en && en.text ? ` Tailscale says: “${esc(en.text)}”` : "";
   more.push(extra(!!tn.serving, "Your phone",
-    tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code.
-        Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>`
+    tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code to pair the app.
+        Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>${tn.pair_code
+          ? `<div class="su-pair"><span class="muted t-s">Pairing code expires in 10 minutes.</span> <button class="btn" data-su="recheck">New code</button></div>` : ""}`
       : !tn.installed ? "See your sessions and answer them from your phone, free, over Tailscale: a private network of your own devices. Install Tailscale here and on your phone, and sign in on both with the same account."
       : !tn.running ? "Tailscale is installed. Open it and sign in, then check again."
       : tn.https === false ? `HTTPS certificates are off for your tailnet. Open <a href="${esc(tn.https_admin)}" target="_blank" rel="noopener">${esc(tn.https_admin)}</a>,
@@ -809,6 +859,12 @@ function renderSetup(st) {
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
     missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",
     `<button class="btn" data-su="skills">Install skills</button>`));
+  // A desktop chat app on this computer (#6477, GitHub #8): it reaches MaximizePM through maxpm mcp once its config
+  // has it. Shown only when the app is here; the click writes the config (maxpm setup-agent does the same).
+  for (const d of st.desktop_apps || []) more.push(extra(d.added, `MaximizePM in the ${esc(d.name)}`,
+    `Plan work, see what waits on you, and answer it in a chat in the ${esc(d.name)}`
+      + (d.agent === "codex" ? " (Work and Codex modes)" : "") + ". Quit and reopen the app after you add it.",
+    button("Add to the app", { data: { su: "desktop", agent: d.agent } })));
   more.push(extra(st.ntfy_ready && st.notify_channels.includes("ntfy"), "Phone notifications",
     st.ntfy_ready ? "Channels: " + (st.notify_channels.map(esc).join(", ") || "none") : "Get a push on your phone when something needs you (ntfy).",
     `<button class="btn" data-su="ntfy">Turn on ntfy</button><span id="suNtfy" class="sub"></span>`));
@@ -832,6 +888,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
     } else if (k === "block") await act("setup_block", { path: b.dataset.path,
       move: b.dataset.move === undefined ? null : b.dataset.move === "1" });
     else if (k === "skills") await act("setup_skills", {});
+    else if (k === "desktop") toast(await act("setup_desktop", { agent: b.dataset.agent }));
     else if (k === "mode") await act("config_set", { key: "queue", value: b.dataset.mode });
     else if (k === "task") {
       const title = $("#suTaskTitle").value.trim(); if (!title) return toast("Write the item first", true);
@@ -852,11 +909,20 @@ $("#setupSteps").addEventListener("click", async (e) => {
     else if (k === "hostsignin") hostSign = await act("host_signin", { target: hostTarget, agent: b.dataset.agent });
     else if (k === "hostcode") {
       const code = $("#suHostCode").value.trim(); if (!code) return toast("Paste the code from the sign-in page first", true);
-      hostSign = await act("host_signin", { target: hostTarget, agent: "claude", code });
+      hostSign = await act("host_signin", { target: hostTarget, agent: hostSign.agent, code });
     }
     else if (k === "relay") await connectRelay();
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
+    else if (k === "tmux") { const r = await act("setup_tmux", {}); toast(r.note || "A Terminal window installs tmux"); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
+    else if (k === "install" || k === "signin") {  // #6239: a window of the Terminal tab runs it; the guide shows its end
+      try {
+        const r = await typeAction(k === "install" ? "setup_agent_install" : "setup_agent_signin", { platform: b.dataset.platform });
+        if (k === "signin") openTerminal(r.pane, { shell: true, title: r.name });
+        else toast(`${r.name}: the last lines show here. Show opens the whole window.`);
+      } catch (err) { toast(err.message || "failed", true); }
+    }
+    else if (k === "job") { openTerminal(b.dataset.pane, { shell: true, title: b.dataset.name }); return; }
     else if (k === "ntfy") {
       const r = await act("setup_ntfy", {});
       await openSetup();
@@ -966,10 +1032,14 @@ async function openArtifact(session, id) {
   openInPanel(target, session);
 }
 window.addEventListener("popstate", openFromUrl);
+// A link to a view of this page (a session, its Browser, an item; #6425): a new history entry, shown as at a load.
+onPageView((url) => { if (url !== location.pathname + location.search) history.pushState(null, "", url); return openFromUrl(); });
 // A link to a session's file or page anywhere on the page (#4689): the Sessions tab, that session, its side panel.
 window.riverOpenInPanel = async (session, target) => {
   // A page with the person's own sign-in opens in a new tab in the click itself, before an await can lose it (#5804).
-  if (ownSignIn(target)) return openInPanel(target, session);
+  if (ownSignIn(target) || pageView(target)) return openInPanel(target, session);  // a view of this page: its address
+  // A link in the item drawer (its Artifacts, #6208): the drawer closes, so the panel it opens is not behind it.
+  if (drawer.isOpen()) { drawer.close(); openItem = null; }
   if (tab !== "sessions") await setTab("sessions");
   if (session) sessionsTab.pick(session);
   openInPanel(target, session);
@@ -1118,6 +1188,8 @@ $("#searchBtn").onclick = () => { headerOpen(null); openSearch(); };
   header.addEventListener("focusin", () => header.classList.remove("hdr-hide"));
 }
 checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUpdate().catch(() => {}); }, 30 * 60 * 1000);
+// An agent CLI that is out of date opens its dialog (#6430); the part polls api/agent-versions itself.
+agentVersions().catch(() => {});
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.
 setInterval(() => {
   if (document.hidden || updateMode !== "update") return;  // hidden, or already asking for a restart
@@ -1144,6 +1216,8 @@ refresh().finally(() => { booting = false; }).then(openFromUrl).then(maybeSetup)
   if (boot) { boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`; boot.className = "boot-note load-err"; boot.setAttribute("role", "alert"); }
 });
 setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
+// A page that shows again reads the state at once (#6242): the desktop app's window is hidden while another covers it.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh().catch(() => {}); });
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.
 setInterval(() => { if (document.hidden) needsYou.pollNeedsYou().catch(() => {}); }, 15000);
 

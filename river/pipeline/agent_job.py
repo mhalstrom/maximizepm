@@ -100,8 +100,45 @@ TRANSCRIPT_MAX = 1 << 20  # bytes of a transcript kept
 # It gets no push: the job pushes its commit after it, with a token that the agent's step does not hold.
 ALLOW = ("Read Edit Write Glob Grep Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(git show:*) "
          "Bash(git add:*) Bash(git commit:*)")
-SECRET = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY"}  # the repository secret of the model key
+# The repository secret of the model key. Antigravity CLI (agy, #6249) takes a Gemini API key with its model provider
+# gemini (antigravity.google/docs/install), which agy_line sets for the run alone.
+SECRET = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY", "agy": "GEMINI_API_KEY"}
 PACKAGE = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"}  # npm, inside the job only
+# agy is no npm package: Google's script puts its one program into the folder that --dir names (its install.sh, read
+# 2026-11-20). The jobs put it where the agent's own user reads it.
+AGY_INSTALL = "curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir {dir}"
+
+
+def install_line(cli, folder="/usr/local/bin"):
+    """The shell command that installs the job's agent CLI: npm for Claude Code and Codex; agy into `folder`."""
+    if cli == "agy":
+        return AGY_INSTALL.format(dir=folder)
+    return f"npm install -g {PACKAGE[cli]}"
+
+
+def agy_rules(tools):
+    """Claude Code's tool rules as agy's permission rules (#6249): Bash(<command>:*) and Bash(<command>) become
+    command(<command>), the form agy took for maxpm (river/agents/antigravity.py ALLOW_MAXPM). agy's --mode
+    accept-edits takes the file tools (Read, Edit, Write, Glob, Grep); another rule has no agy form and is left out.
+    A rule of several words (command(git commit)) matches a command that starts with them (measured, #6251)."""
+    out = []
+    for t in tools:
+        m = re.match(r"^Bash\((.+?)(?::\*)?\)$", t.strip())
+        if m and f"command({m.group(1).strip()})" not in out:
+            out.append(f"command({m.group(1).strip()})")
+    return out
+
+
+def agy_line(tools, deny=(), provider=True):
+    """agy in print mode with no terminal (#6249): one JSON object at its end (conversation_id, status, response,
+    error), file changes with no question (--mode accept-edits), and the commands of `tools` allowed and of `deny`
+    refused, for this run alone (--settings, never saved). provider: the model provider gemini, which takes
+    GEMINI_API_KEY; False: agy's own sign-in."""
+    settings = {"permissions": {"allow": agy_rules(tools), **({"deny": agy_rules(deny)} if deny else {})}}
+    if provider:
+        settings["modelProvider"] = "gemini"
+    return ('agy -p "$MAXPM_PROMPT" --output-format json --mode accept-edits --settings '
+            + shlex.quote(json.dumps(settings, separators=(",", ":"))))
 _SECRET_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,99}$")
 SCRIPT = "/tmp/maxpm-agent.sh"  # the Pulumi job's script, which its first pre-run command writes
 PATCH_MAX = 300_000  # bytes of a patch that a Pulumi job prints in its log
@@ -444,6 +481,9 @@ def _agent_cmd(cli, tools, max_cost):
     if cli == "codex":
         return ('codex exec --json --sandbox workspace-write --skip-git-repo-check "$MAXPM_PROMPT" '
                 '> "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
+    if cli == "agy":
+        return (agy_line(tools) + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" '
+                '|| echo $? > "$MAXPM_OUT/agent-exit"')
     return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
             f'--max-budget-usd {float(max_cost):g} --add-dir {OUT} --allowedTools '
             + " ".join(shlex.quote(t) for t in tools)
@@ -504,7 +544,10 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         '          mkdir -p "$MAXPM_OUT"',
         f'          gh run view {run} --repo "$GITHUB_REPOSITORY" --log-failed 2>&1 | tail -c 200000 > "$MAXPM_OUT/failed.log" || true',
         "      - name: Install the agent CLI",
-        f"        run: npm install -g {PACKAGE[cli]}",
+        *([f"        run: {install_line(cli)}"] if cli != "agy" else [
+            "        run: |",
+            f'          {install_line(cli, "$HOME/.local/bin")}',
+            '          echo "$HOME/.local/bin" >> "$GITHUB_PATH"']),
         "      - name: The agent",
         "        env:",
         f"          {SECRET[cli]}: ${{{{ secrets.{secret} }}}}",
@@ -573,7 +616,8 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         f'              branch="maxpm/fix-{run}"',
         '              if git -c core.hooksPath=/dev/null push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$head:refs/heads/$branch"; then',
         '                python3 -I -c \'import json,sys; t=[json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]; '
-        'r=[x.get("result") for x in t if x.get("type")=="result"]; print((r[-1] if r else "") or "The agent of MaximizePM made this fix.")\' '
+        'r=[x.get("result") if x.get("type")=="result" else x.get("response") for x in t if x.get("type")=="result" or "conversation_id" in x]; '
+        'print((r[-1] if r else "") or "The agent of MaximizePM made this fix.")\' '
         '"$MAXPM_OUT/transcript.jsonl" > "$MAXPM_OUT/summary.md" 2>/dev/null || echo "The agent of MaximizePM made this fix." > "$MAXPM_OUT/summary.md"',
         '                pr=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" '
         '--title "maxpm agent: fix $WORKFLOW for ${FAILED:0:7}" --body-file "$MAXPM_OUT/summary.md" 2>"$MAXPM_OUT/pr.err") '
@@ -667,9 +711,9 @@ def _isolate(email):
         'agent() { python3 -I "$PRIV/gate.py" "$MAXPM_UID" "$WORK/home" "$@" < /dev/null; }',
         "# The agent's user changes nothing of this checkout and reads nothing of its .git (a remote may hold a token).",
         "chmod -R go-w . 2>/dev/null; chmod -R go-rwx .git 2>/dev/null",
-        '{ grep -q "^maxpm-agent:" /etc/passwd || echo "maxpm-agent:x:$MAXPM_UID:$MAXPM_UID::$WORK/home:/bin/sh" '
+        '[ "$(id -u)" = 0 ] && { grep -q "^maxpm-agent:" /etc/passwd || echo "maxpm-agent:x:$MAXPM_UID:$MAXPM_UID::$WORK/home:/bin/sh" '
         ">> /etc/passwd; } 2>/dev/null",
-        '{ grep -q "^maxpm-agent:" /etc/group || echo "maxpm-agent:x:$MAXPM_UID:" >> /etc/group; } 2>/dev/null',
+        '[ "$(id -u)" = 0 ] && { grep -q "^maxpm-agent:" /etc/group || echo "maxpm-agent:x:$MAXPM_UID:" >> /etc/group; } 2>/dev/null',
         'mkdir -p "$WORK/home"',
         'git clone -q --no-hardlinks --no-checkout . "$WORK/repo" 2> "$PRIV/clone.err" && '
         'git -C "$WORK/repo" checkout -q --detach "$FAILED" 2>> "$PRIV/clone.err"',
@@ -804,6 +848,9 @@ def gitlab_script(cli, secret, max_cost, tools):
         agent = (f'(cd "$WORK/repo" && agent {key} codex exec --json --sandbox workspace-write --skip-git-repo-check '
                  '"$MAXPM_PROMPT" > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > '
                  '"$MAXPM_OUT/agent-exit")')
+    elif cli == "agy":
+        agent = (f'(cd "$WORK/repo" && agent {key} {agy_line(tools)} > "$MAXPM_OUT/transcript.jsonl" '
+                 '2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit")')
     else:
         agent = (f'(cd "$WORK/repo" && agent {key} claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose '
                  f'--permission-mode dontAsk --max-budget-usd {float(max_cost):g} --add-dir "$MAXPM_OUT" '
@@ -844,7 +891,7 @@ def gitlab_script(cli, secret, max_cost, tools):
         'if [ -f "$MAXPM_OUT/skip" ]; then',
         f'  echo "{JOB}: $(cat "$MAXPM_OUT/skip"): no agent"',
         "else",
-        f'npm install -g {PACKAGE[cli]} > "$MAXPM_OUT/npm.log" 2>&1',
+        f'{install_line(cli)} > "$MAXPM_OUT/npm.log" 2>&1',
         'chmod -R go-rwx "$CI_PROJECT_DIR.tmp" 2>/dev/null  # the CI/CD variables of type File',
         *_isolate("maxpm-agent@users.noreply.gitlab.com"),
         'if [ ! -s "$MAXPM_OUT/error" ]; then',
@@ -1085,7 +1132,9 @@ _PR_PY = r'''import json, os, sys, urllib.request
 repo = sys.argv[1].split("/", 1)[1]
 try:
     t = [json.loads(x) for x in open(os.environ["MAXPM_OUT"] + "/transcript.jsonl") if x.startswith("{")]
-    body = ([x.get("result") for x in t if x.get("type") == "result"] or [""])[-1]
+    # Claude Code's result line, or agy's one JSON object (#6249)
+    body = ([x.get("result") if x.get("type") == "result" else x.get("response")
+             for x in t if x.get("type") == "result" or "conversation_id" in x] or [""])[-1]
 except (OSError, ValueError):
     body = ""
 req = urllib.request.Request("https://api.github.com/repos/%s/pulls" % repo, method="POST", data=json.dumps({
@@ -1112,8 +1161,8 @@ def pulumi_script(c):
         'FAILED=$(git rev-parse HEAD); BRANCH=""; PR=""; TEST_EXIT=""',
         'curl -sS -H "Authorization: token $PULUMI_ACCESS_TOKEN" "$MAXPM_RUN_URL" > "$MAXPM_OUT/failed-run.json" '
         '2> "$MAXPM_OUT/curl.err"',
-        f'npm install -g {PACKAGE[c["cli"]]} > "$MAXPM_OUT/install.log" 2>&1 || echo "npm install -g '
-        f'{PACKAGE[c["cli"]]} failed: $(tail -1 "$MAXPM_OUT/install.log")" > "$MAXPM_OUT/error"',
+        f'{install_line(c["cli"])} > "$MAXPM_OUT/install.log" 2>&1 || echo "the install of {c["cli"]} '
+        f'failed: $(tail -1 "$MAXPM_OUT/install.log")" > "$MAXPM_OUT/error"',
         "# The agent and the test run as another user, with the model key and neither the git token nor the Pulumi",
         "# token: they cannot push, change nothing in Pulumi, and cannot read the tokens of this shell (#6179).",
         *_isolate("maxpm-agent@users.noreply.github.com"),
@@ -1197,7 +1246,8 @@ def setup_pulumi(conn, pipeline, env=None, stack=None, branch=None, cli="claude"
     if not show and not (env and _ESC_ENV.match(env)):
         raise RiverError("--env names the Pulumi ESC environment that holds the model key, project/env or "
                          "org/project/env; a person sets the key there (ANTHROPIC_API_KEY, or CODEX_API_KEY with "
-                         "--cli codex), and MAXPM_GIT_TOKEN when the fix should come back as a branch")
+                         "--cli codex, GEMINI_API_KEY with --cli agy), and MAXPM_GIT_TOKEN when the fix should come "
+                         "back as a branch")
     stack = stack or old.get("stack") or p["repo"]
     if not _STACK.match(stack or ""):
         raise RiverError("--stack is the stack whose deployments run the job, org/project/stack (default: the "

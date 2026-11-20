@@ -614,10 +614,11 @@ RELAY_PAGE = "relay-page"  # PEER.value of a request from the page through the r
 # PEER.value (TAILNET_PAGE, client port, serve port, login) of a request that tailscale serve forwarded from an allowed
 # tailnet login (mcp.tailnet_refusal passed it, #5863, #5869).
 TAILNET_PAGE = "tailnet-page"
-# The programs of agent CLIs (the adapters' DETECT process, river/agents) and node, which runs pi, Gemini and the Codex
-# wrapper. Claude Code's process has its version as its name (2.1.325): VERSION_NAME.
-AGENT_PROGRAMS = {"claude", "codex", "copilot", "cursor-agent", "gemini", "goose", "grok", "hermes", "opencode", "amp",
-                  "aider", "pi", "node"}
+# The programs of agent CLIs (the adapters' DETECT process, river/agents) and node, which runs pi and the Codex
+# wrapper. Claude Code's process has its version as its name (2.1.325): VERSION_NAME. Antigravity CLI runs as agy
+# (Google's script) or antigravity (Homebrew's cask, behind its agy wrapper).
+AGENT_PROGRAMS = {"claude", "codex", "agy", "antigravity", "copilot", "cursor-agent", "goose", "grok", "hermes",
+                  "opencode", "amp", "aider", "pi", "node"}
 VERSION_NAME = re.compile(r"^\d+\.\d+\.\d+")
 
 

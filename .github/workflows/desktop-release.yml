@@ -1,38 +1,54 @@
-# The desktop app: on a version tag (v0.1.0), build the macOS .dmg files (Apple silicon and Intel) and attach
-# them to a GitHub Release for that tag, with the code archive and manifest.json that the app's Update reads (#5601).
+# The desktop app: build the macOS .dmg files (Apple silicon and Intel) of one commit and attach them to a DRAFT GitHub
+# Release for a version tag (v0.1.0), with the code archive and manifest.json that the app's Update reads (#5601).
+# Nothing is public: the deploy hook of maximizepm-github (scripts/release/github-release.sh) starts this workflow after
+# it pushed main, the person approves the draft, and then the hook pushes the tag and publishes the draft with these
+# same files (#6213, mark 2026-11-19: 'the tag to be a final step with a manual approval'). A push of a tag starts
+# nothing. By hand: gh workflow run desktop-release.yml -R mhalstrom/maximizepm -f tag=v1.5.0 -f sha=<commit of main>
 # With the five signing secrets (#5615: APPLE_CERT_P12, APPLE_CERT_PASSWORD, APPLE_API_KEY_P8, APPLE_API_KEY_ID,
 # APPLE_API_ISSUER; desktop/scripts/signing-secrets.sh sets them) the apps are signed with the Developer ID and the
 # hardened runtime, notarized and stapled, and so are the .dmg files. With none of them the apps are signed ad hoc as
 # before, and the first open needs Open Anyway in System Settings.
 name: desktop-release
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and publish, for example v0.1.0 (it is created if it does not exist)"
+        description: "The version tag of the draft release, for example v0.1.0 (the tag itself is made only when the draft is published)"
         required: true
+      sha:
+        description: "The commit to build (default: the head of the branch the run starts on)"
+        required: false
 permissions:
   contents: write
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  TAG: ${{ github.event.inputs.tag }}
+  SHA: ${{ github.event.inputs.sha || github.sha }}
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
 jobs:
-  # Before the release builds (#4636): the unit tests, and the wheel builds, installs and runs. The desktop smoke
-  # test (maxpm serve starts and stops) runs in the mac jobs before their build step.
+  # The unit tests and the wheel (#4636), as a report only (#6499, mark 2026-11-20: 'these types of issues should not
+  # block deployment. especially if they are failing on github.'): the release's own test step on the release commit
+  # (scripts/release/github-release.sh) is the gate, so the mac job does not wait on this one, and a failure here is a
+  # note on the release (scripts/release/downloads.py, REPORT_ONLY), never a stop. The desktop smoke test (maxpm serve
+  # starts and stops) runs in the mac jobs before their build step.
   checks:
     runs-on: ubuntu-latest
     steps:
+      - name: The tag and the commit
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, not $TAG"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full commit id, not $SHA"; exit 1; }
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      # Without the tests that start a real browser (mark 2026-11-12): they run in tests.yml on each push, and a slow
-      # runner must not stop a release.
-      - name: Tests (standard library only, without the browser tests)
+      # Without the browser tests (mark 2026-11-12) or latency/timing/process tests (#6504, mark 2026-11-20):
+      # they run locally, and a slow runner must not stop a release.
+      - name: Tests (standard library only, without browser or timing-sensitive tests)
         env:
           MAXPM_NO_BROWSER: "1"
+          MAXPM_SKIP_LOCAL_ONLY: "1"
         run: python -m unittest discover -s tests -t . -v
       - name: Wheel builds and runs
         run: |
@@ -43,10 +59,15 @@ jobs:
           MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm guide | head -1
           MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm project add demo
   mac:
-    needs: checks
     runs-on: macos-latest
     steps:
+      - name: The tag and the commit
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, not $TAG"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full commit id, not $SHA"; exit 1; }
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -173,6 +194,8 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -181,10 +204,12 @@ jobs:
           node-version: "22"
       # The browser tests run in tests.yml on each push, not in a release (#5583: on the Intel runner of v0.2.0 a
       # dictation test waited 15 s for words that come in under 1 s on Linux and Apple silicon, and no release was
-      # made). This job checks the Intel build.
-      - name: Tests on Intel (standard library only, without the browser tests)
+      # made). This job checks the Intel build. The unit tests here report only, as the checks job does (#6499).
+      - name: Tests on Intel (standard library only, without browser or timing-sensitive tests; a report only)
+        continue-on-error: true
         env:
           MAXPM_NO_BROWSER: "1"
+          MAXPM_SKIP_LOCAL_ONLY: "1"
         run: python -m unittest discover -s tests -t .
       - uses: actions/download-artifact@v4
         with:
@@ -214,6 +239,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ env.SHA }}
           sparse-checkout: desktop/release-notes.md
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
@@ -222,20 +248,26 @@ jobs:
           merge-multiple: true
       # A re-run of failed jobs (run attempt 2 and later) gets HTTP 403 'Resource not accessible by integration' when it
       # creates the release, with the same contents: write token (v0.1.4 and v1.0.0); every first attempt published
-      # (#5606). After a failed build, start a new run for the tag instead of a re-run:
-      #   gh workflow run desktop-release.yml -R mhalstrom/maximizepm -f tag=<tag>
-      - name: Publish the GitHub Release
+      # (#5606). After a failed build, start a new run instead of a re-run (the deploy hook does: a new run of the hook
+      # builds again).
+      - name: The draft GitHub Release (never a published one)
         env:
           ATTEMPT: ${{ github.run_attempt }}
         run: |
           ls -l dist
-          # The notes: desktop/release-notes.md, with {TAG} and {VERSION} filled in.
+          # The notes: desktop/release-notes.md, with {TAG} and {VERSION} filled in; the deploy hook writes the
+          # release's own notes on the draft after this run.
           sed -e "s/{TAG}/${TAG}/g" -e "s/{VERSION}/${TAG#v}/g" desktop/release-notes.md > "$RUNNER_TEMP/notes.md"
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          draft=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [ "$draft" = false ]; then
+            echo "::error::The release $TAG is published already; this workflow changes only a draft"
+            exit 1
+          elif [ "$draft" = true ]; then
             gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
-          elif ! gh release create "$TAG" dist/* --title "MaximizePM ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" -R "$GITHUB_REPOSITORY"; then
+            gh release edit "$TAG" --target "$SHA" -R "$GITHUB_REPOSITORY"
+          elif ! gh release create "$TAG" dist/* --draft --title "MaximizePM ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$SHA" -R "$GITHUB_REPOSITORY"; then
             if [ "$ATTEMPT" -gt 1 ]; then
-              echo "::error::A re-run (attempt $ATTEMPT) cannot create the release. Start a new run for the tag: gh workflow run desktop-release.yml -R $GITHUB_REPOSITORY -f tag=$TAG"
+              echo "::error::A re-run (attempt $ATTEMPT) cannot create the release. Start a new run: gh workflow run desktop-release.yml -R $GITHUB_REPOSITORY -f tag=$TAG -f sha=$SHA"
             fi
             exit 1
           fi

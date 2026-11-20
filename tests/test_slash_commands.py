@@ -10,6 +10,7 @@ from unittest import mock
 from river import agents, core, server, sessions
 from river.agents import slash
 from river.core import RiverError
+from tests import own_sleep
 from tests.test_view_sessions import DRIVE_HEAD, TmuxBase, claude_line, drive_page
 
 
@@ -278,7 +279,8 @@ class SentFromThePage(TmuxBase):
     def send(self, text, shown):
         self.pane["screen"] = shown
         slept = []
-        with mock.patch.object(server, "ENTER_PAUSE", 0.25), mock.patch.object(server.time, "sleep", slept.append):
+        with mock.patch.object(server, "ENTER_PAUSE", 0.25), \
+                mock.patch.object(server.time, "sleep", own_sleep(slept.append)):
             r = server.OPS["session_send"](self.c, {"agent": "ag", "text": text}, "mark")
         return r, slept
 

@@ -18,7 +18,8 @@ Each part is optional unless it is marked required; the page shows only what an 
  8. Input: INPUT.
  9. Resume: resume_command().
 10. Commands: COMMANDS, and optionally read_commands(folder).
-11. Setup: SETUP, and optionally write_mcp_config().
+11. Setup: SETUP, and optionally write_mcp_config() and desktop_app().
+12. Update: UPDATE (how to read its version, update it and test it; river/agentupdate.py).
 
 The loader refuses a module without a valid DESCRIBE. A module without build_command loads (the built-in claude and
 codex modules have only their describe part until #5181), but no start path can start it: Adapter.build_command
@@ -66,16 +67,257 @@ FAMILIES = ("claude", "openai", "multi")
 #                       ("change it in its terminal with /models"), or None,
 #      "platform":      the name that settings, launch profiles (@claude-code) and a session's agent type store, when
 #                       it is not the id (Claude Code: "claude-code"); it must be the id or an alias (#5185),
+#      "tiers":         the tier words of its model names that TIER_STRENGTH does not know, strongest first
+#                       (Antigravity: ["neon", "carbon", "argon", "hydrogen"]); order_models uses them (#6256),
 #    }
-# read_models() -> [model name or CLI id] | None: an optional reader of the models the CLI knows now (Codex:
-# ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
+# read_models() -> [model name or CLI id, or a dict of model facts] | None: an optional reader of the models the CLI
+# knows now (Codex: ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands. A dict
+# gives what a name cannot say (#6256): {"name": the id the CLI takes, "label": the name people read, "efforts": the
+# agent's effort levels for this model ([] for none), "version": "4.1" (its generation), "tier": a number (higher is
+# stronger)}; order_models reads the version and the tier from the name when the dict leaves them out.
 # context_window(model) -> int | None: the tokens of that model's context window, for the context meter of a session
 # (#5224); None when the adapter does not know it.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
                  "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
                  "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str,
-                 "model_restart": bool, "model_note": (str, type(None))}
+                 "model_restart": bool, "model_note": (str, type(None)), "tiers": (list, tuple)}
 DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
+
+# ---------------------------------------------------------------------------------------------------------------
+# One order of models for every agent (#6256, mark 2026-11-19): newest generation first; within a generation, the
+# strongest model first (Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5, then the Claude 4 models). The models of one
+# provider and one maker stay together, in the order the agent first names them. order_models is the one sort; each
+# adapter feeds it its model facts (DESCRIBE['tiers'], the dicts of read_models).
+# ---------------------------------------------------------------------------------------------------------------
+
+# The strength of the tier words that MaximizePM knows, higher is stronger. An adapter adds its own (DESCRIBE['tiers']).
+TIER_STRENGTH = {"fable": 4, "opus": 3, "sonnet": 2, "haiku": 1,
+                 "astra": 4, "sol": 3, "terra": 2, "luna": 1,
+                 "ultra": 4, "pro": 3, "flash": 2, "lite": 1, "mini": 1, "nano": 0}
+
+# The maker of a model, from a word of its name: the words of one maker keep its models together.
+MAKER_WORDS = {"anthropic": "anthropic", "claude": "anthropic", "fable": "anthropic", "opus": "anthropic",
+               "sonnet": "anthropic", "haiku": "anthropic",
+               "openai": "openai", "gpt": "openai", "astra": "openai", "sol": "openai", "terra": "openai",
+               "luna": "openai", "codex": "openai",
+               "google": "google", "gemini": "google", "gemma": "google"}
+
+# Names that are no model but a choice of the agent itself: they come first.
+CHOICE_MODELS = ("auto", "default")
+
+# The effort level at the end of a model id (gemini-4-neon-high, claude-opus-5-5-xhigh, gpt-5.6-sol-max-fast).
+LEVEL_SUFFIX = re.compile(r"-(none|minimal|low|medium|high|xhigh|extra-high|max)(-fast)?$")
+
+_WORD = re.compile(r"[-_./: ()]+")
+_VERSION = re.compile(r"[a-z]?(\d{1,3}(?:\.\d{1,3})*)")
+
+
+def model_words(name):
+    """The words of a model name, lower case: 'amazon-bedrock/anthropic.claude-opus-4-1' -> [..., 'claude', 'opus',
+    '4', '1']."""
+    return [w for w in _WORD.split(str(name or "").lower()) if w]
+
+
+def model_version(name):
+    """The version of a model name as numbers, or (): 'claude-opus-5-5' -> (5, 5), 'gpt-6.1-sol' -> (6, 1),
+    'deepseek-v4.1-flash' -> (4, 1), 'gemini-4-neon' -> (4,). The first run of number words counts; a word such as
+    '120b' or '900k' (a size) is no version, and neither is a date (20250805)."""
+    model = str(name or "").lower().rsplit("/", 1)[-1]
+    out = []
+    for w in re.split(r"[-_ ]+", model):
+        m = _VERSION.fullmatch(w)
+        if m:
+            out += [int(x) for x in m.group(1).split(".")]
+        elif out:
+            break
+    return tuple(out)
+
+
+def model_tier(name, tiers=()):
+    """The strength of a model's tier word: the adapter's own words (tiers, strongest first) first, else
+    TIER_STRENGTH; 0 when the name has no tier word."""
+    words = model_words(name)
+    own = [t.lower() for t in tiers or ()]
+    for w in words:
+        if w in own:
+            return len(own) - own.index(w)
+    return max((TIER_STRENGTH[w] for w in words if w in TIER_STRENGTH), default=0)
+
+
+def model_maker(name):
+    """The maker of a model ('anthropic', 'openai', 'google'), else the first word of its model part ('deepseek')."""
+    words = model_words(str(name or "").rsplit("/", 1)[-1])
+    return next((MAKER_WORDS[w] for w in words if w in MAKER_WORDS), words[0] if words else "")
+
+
+def _version_of(m):
+    v = m.get("version")
+    if v is None:
+        return model_version(m.get("name")) or model_version(m.get("id"))
+    return tuple(int(x) for x in re.findall(r"\d+", str(v)))
+
+
+class CliList:
+    """A list that a CLI prints (`agy models`, `cursor-agent models`, `pi --list-models`; #6257). Only maxpm serve
+    starts the CLI: each pass of its loop calls refresh_lists(), which reads a list older than `ttl` seconds in a
+    thread and keeps it in a file beside the queue (cli-lists/<exe>.json). get() starts nothing (#6510: a page build
+    in a fresh process started `cursor-agent models`, which asks api2.cursor.sh over the network; p147: a page build
+    answers in 100 ms): it gives the last read of this process or of serve's file, else the fallback. parse(text) ->
+    a list of JSON values; runner: a test hook, a function () -> the text, used instead of the command."""
+
+    LOOK = 30  # seconds between two looks at the file: serve's loop may run in another process (river/loop.py)
+    ALL = []
+
+    def __init__(self, argv, parse, fallback=(), ttl=600, timeout=60):
+        import threading
+        self.argv, self.parse, self.fallback, self.ttl, self.timeout = list(argv), parse, list(fallback), ttl, timeout
+        self.runner = None
+        self.state = {"at": 0.0, "list": None, "reader": None, "looked": 0.0, "mtime": None}
+        self.lock = threading.Lock()
+        CliList.ALL.append(self)
+
+    def path(self):
+        from .. import core
+        return core.db_path().parent / "cli-lists" / f"{Path(self.argv[0]).name}.json"
+
+    def get(self):
+        import time
+        with self.lock:
+            now = time.time()
+            if now - self.state["looked"] >= self.LOOK:
+                self.state["looked"] = now
+                self._load()
+            got = self.state["list"]
+        return list(got if got is not None else self.fallback)
+
+    def refresh(self):
+        """Start a read in a thread when the list is older than ttl and no read runs (maxpm serve's loop)."""
+        import threading
+        import time
+        with self.lock:
+            self._load()
+            if self.state["reader"] is None and (self.state["list"] is None
+                                                 or time.time() - self.state["at"] >= self.ttl):
+                self.state["reader"] = threading.Thread(target=self._read, daemon=True, name=f"{self.argv[0]}-list")
+                self.state["reader"].start()
+
+    def wait(self):
+        """Wait for a read that runs (tests)."""
+        r = self.state["reader"]
+        if r is not None:
+            r.join()
+
+    def reset(self):
+        """Forget the list, and remove its file (tests)."""
+        with self.lock:
+            self.state.update(at=0.0, list=None, reader=None, looked=0.0, mtime=None)
+            try:
+                self.path().unlink()
+            except OSError:
+                pass
+
+    def _load(self):
+        """Take serve's file when it is newer than the list this process holds (inside the lock)."""
+        import json
+        try:
+            p = self.path()
+            mtime = p.stat().st_mtime
+            if mtime == self.state["mtime"]:
+                return
+            d = json.loads(p.read_text(encoding="utf-8"))
+            got, at = d["list"], float(d["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        self.state["mtime"] = mtime
+        if isinstance(got, list) and got and at > self.state["at"]:
+            self.state.update(list=got, at=at)
+
+    def _read(self):
+        import json
+        import subprocess
+        import time
+        got = []
+        try:
+            out = self.runner() if self.runner else subprocess.run(
+                self.argv, capture_output=True, text=True, timeout=self.timeout, stdin=subprocess.DEVNULL).stdout
+            got = list(self.parse(out or ""))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        finally:
+            at = time.time()
+            with self.lock:
+                self.state.update(at=at, list=got or list(self.fallback), reader=None)
+            if got:
+                try:
+                    p = self.path()
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = p.with_name(f".{p.name}.{os.getpid()}")
+                    tmp.write_text(json.dumps({"at": at, "argv": self.argv, "list": got}), encoding="utf-8")
+                    os.replace(tmp, p)
+                except (OSError, TypeError, ValueError):
+                    pass
+
+
+def refresh_lists(conn=None):
+    """maxpm serve, each pass: read each CLI's list that is older than its ttl, in a thread (CliList.refresh)."""
+    for cl in CliList.ALL:
+        cl.refresh()
+
+
+def split_levels(rows, levels=("none", "minimal", "low", "medium", "high", "xhigh", "max")):
+    """Models whose ids carry the effort level (#6257: Cursor's gpt-5.6-sol-high, gpt-5.3-codex-low-fast): one row per
+    model, {"name": the id without the level, "label", "efforts": its levels low to high}. rows: (id, label) in the
+    CLI's order. A '-fast' end stays on the model (gpt-5.3-codex-fast), the level goes before it; a label loses its
+    level words ('Codex 5.3 Low Fast' -> 'Codex 5.3 Fast'). A model that the CLI also lists with no level keeps that
+    id's label."""
+    lv = re.compile(r"^(.+?)-(" + "|".join(levels) + r")(-fast)?$")
+    words = re.compile(r"\s+(?:None|Minimal|Low|Medium|High|Extra High|XHigh|Max)\b", re.I)
+    out = {}
+    for mid, label in rows:
+        m = lv.match(mid)
+        base, level = ((m.group(1) + (m.group(3) or "")), m.group(2)) if m else (mid, None)
+        row = out.setdefault(base, {"name": base, "label": None, "efforts": []})
+        if level is None:
+            row["label"] = label  # the id with no level names the model best
+            continue
+        if level not in row["efforts"]:
+            row["efforts"].append(level)
+        if row["label"] is None:
+            row["label"] = " ".join(words.sub("", label).split())
+    for row in out.values():
+        row["efforts"].sort(key=list(levels).index)
+    return list(out.values())
+
+
+_ORDER_MEMO = {}
+
+
+def order_models(models, tiers=()):
+    """The models in the one order of #6256, as a new list. models: model names or dicts with a "name" (and the facts
+    "id", "version", "tier" of read_models). The agent's own choices (auto) first; then each provider (the part before
+    a '/') and each maker in the order the list first names them; within one maker the newest generation (the first
+    number of the version; a name with no version is the current model), then the strongest tier, then the newer
+    version, then the shorter name. Each list is sorted once (OpenCode's list has hundreds)."""
+    rows = [m if isinstance(m, dict) else {"name": m} for m in models or ()]
+    memo_key = (tuple((r.get("name"), r.get("id"), r.get("version"), r.get("tier")) for r in rows), tuple(tiers or ()))
+    order = _ORDER_MEMO.get(memo_key)
+    if order is None:
+        providers, makers, keys = {}, {}, []
+        for i, r in enumerate(rows):
+            name = str(r.get("name") or "")
+            provider = name.split("/", 1)[0] if "/" in name else ""
+            maker = model_maker(name) or model_maker(r.get("id"))
+            p = providers.setdefault(provider, len(providers))
+            g = makers.setdefault((provider, maker), len(makers))
+            v = _version_of(r)
+            tier = r["tier"] if r.get("tier") is not None else model_tier(name, tiers) or model_tier(r.get("id"), tiers)
+            keys.append((name.lower() not in CHOICE_MODELS, p, g, -(v[0] if v else 10 ** 6), -tier,
+                         tuple(-x for x in (v + (0,) * 4)[:4]), len(name), i))
+        order = [k[-1] for k in sorted(keys)]
+        if len(_ORDER_MEMO) > 64:
+            _ORDER_MEMO.clear()
+        _ORDER_MEMO[memo_key] = order
+    return [models[i] for i in order]
 
 # 2. Settings. SETTINGS = [{
 #      "key":     the option's name; its config key is DESCRIBE["prefix"] + key (claude_permission_mode),
@@ -102,6 +344,13 @@ SETTING_KEYS = {"key": str, "label": str, "kind": str, "choices": (list, tuple),
                 "flag": (list, tuple), "live": (str, type(None)), "read": (str, type(None)), "config": bool,
                 "session": bool, "note": (str, type(None))}
 
+# config_settings() -> {setting key: value}: optional, what a session of the agent takes from the agent's own config
+# when its command line names nothing (#6280: ~/.codex/config.toml model and model_reasoning_effort; agy's mode is
+# auto), the agent's built-in default where its config names none. The Settings dialog of a session shows it last.
+# SETTINGS_READ = {setting key: (source, ...)}: where the Settings dialog reads each setting of a running session
+# (session_specs: model, effort and each setting with session True) when its command line names none: "chat"
+# (chat_settings), "screen" (screen_settings), "config" (config_settings). A toggle with a flag needs none (its flag
+# is on the command line or not). tests/test_model_order.py refuses a setting with no source (#6280).
 # 3. Effort. EFFORT = None (the agent has no effort; the page hides it) or {
 #      "levels": the agent's own levels, or None when read_effort_levels(model) reads them from the CLI per model,
 #      "map":    {MaximizePM level: the agent's level}; a level with no entry goes as it is,
@@ -126,7 +375,7 @@ EFFORT_KEYS = {"levels": (list, tuple, type(None)), "map": dict, "flag": (list, 
 # -> a profile {"settings": {key: value}, "prompt": str} read back from an old hand-written command (a list of words;
 # "{model}" and "{effort}" stand for the values MaximizePM fills in), or None when a profile cannot build it exactly.
 LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extra_dirs", "fork", "resume",
-                       "autocompact", "background", "fixed_on_resume", "mcp_config")
+                       "autocompact", "background", "fixed_on_resume", "mcp_config", "read_dirs")
 #    session_name: it takes a session name; system_prompt_file: the maxpm skill goes into its system prompt;
 #    hooks_file: MaximizePM's hooks file goes on its command line; extra_dirs: the queue folder goes on its command
 #    line as a folder it may write; fork: a session starts as a fork of another one; resume: build_command resumes a
@@ -134,16 +383,21 @@ LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extr
 #    the background and wakes the session when it ends (maxpm wait runs there, not in the foreground);
 #    fixed_on_resume: a resume keeps the settings the session started with and refuses a flag that differs (Hermes),
 #    so resume_command passes none, and the Settings dialog changes them live or not at all (#5252); mcp_config: it
-#    takes a file of MCP servers to add on its command line (the project browser's Playwright MCP, browser_mcp, #5405).
+#    takes a file of MCP servers to add on its command line (the project browser's Playwright MCP, browser_mcp, #5405);
+#    read_dirs: it reads the project's read_dirs with no question for each file, writes nothing in them and reads none
+#    of their secret files (#6281); build_command turns the keys read_dirs and secret_files into its own form, or
+#    needs none (Codex: its sandbox reads the whole disk).
 # The MaximizePM keys in settings, each only when the caller wants it and LAUNCH has its capability:
 LAUNCH_KEYS = {
     "system_prompt_file": "True: put the maxpm skill into the system prompt",
-    "hooks_file": "the path of MaximizePM's hooks file",
+    "hooks_file": "the path of MaximizePM's hooks file, or of the queue guard alone (core.settings_file, #6412)",
     "fork": "the session id to start a fork of",
     "resume": "the session id to resume (resume_command)",
     "autocompact": "the token count to compact at",
     "mcp_config": "the path of a file of MCP servers to add (browser_mcp: Playwright MCP on the project's browser)",
     "noflags": "the words a person took out of the args setting (they stay out of what the adapter adds itself)",
+    "read_dirs": "[absolute folders] the session reads with no question for each file and writes nothing in (#6281)",
+    "secret_files": "[absolute paths] the secret files in read_dirs at the start (core.secret_files), never read",
 }
 
 
@@ -160,9 +414,6 @@ FIRST_PROMPTS = ("argv", "paste")
 # 5. Session identity. IDENTITY = {
 #      "source":     how MaximizePM learns the session's id after the start: one of IDENTITY_SOURCES,
 #      "env":        the variable that holds it ("env" source), or None,
-#      "log_glob":   the glob of the new log file in a known folder ("log" source; ~ expands), or None; with the
-#                    "log" source, the module's session_from_log(folder, env) gives the id to a command inside the
-#                    agent (core.session_from_env, #5819),
 #      "pane":       a regex whose group 1 is the id in the pane's text ("pane" source), or None,
 #      "url":        its web link with {id} ("https://.../{id}"), or one link for every session (Codex's web app), or None,
 #      "inside_env": the variables that tell that a command runs inside this agent (CLAUDECODE, CODEX_THREAD_ID);
@@ -181,8 +432,8 @@ FIRST_PROMPTS = ("argv", "paste")
 # finds the chat before the session's first maxpm command (#5280).
 # With source "env" and CHAT["ref"] "session", each maxpm command records the id it finds in "env" for the acting
 # agent (core.session_from_env, agent_sessions): the Sessions tab then finds the agent's chat log by it (#5212).
-IDENTITY_SOURCES = ("hook", "env", "log", "pane")
-IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
+IDENTITY_SOURCES = ("hook", "env", "pane")
+IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "pane": (str, type(None)),
                  "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None)),
                  "process": (str, type(None))}
 IDENTITY_PROCESS = ("ancestor", "terminal", "nearest_terminal")
@@ -226,6 +477,11 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #     st["ttl"] the cache lifetime the log shows ("1h", "5m"; None: the cache_ttl setting), st["model"];
 #   chat_texts(raw) -> [(text, time, how)]: the texts of one log line (bytes) where the Artifacts tab looks for files
 #     and links; how is "wrote" for the path of a CHAT["file_tools"] call, else "named". Tool results are left out.
+#   background_scan(path, start, st) -> end: fold the complete lines of the log from byte start on (new_lines) into
+#     st (a dict, {} at first; the reader keeps its own keys there) and return the byte after the last one. Its tasks
+#     are st["tasks"]: {task id: {"id", "kind" ("command" or "subagent"), "at" (start, datetime), "what" (a short
+#     description), "command", "end" (datetime, None while it runs), "status"}}: the background commands and
+#     subagents that the agent CLI started (core.session_tasks, #6454). Only for an agent with LAUNCH["background"].
 #   chat_limits(lines) -> [{"name", "used_percent", "window_minutes", "resets_at"}, ..., {"name": "credits",
 #     "text"}] | None: the plan limits that the log says last (Codex: the rate_limits of its token_count events), for
 #     the Usage panel (#5224); None when the agent writes none to its log (they show only on its screen).
@@ -248,7 +504,14 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 # No chain of fallbacks: each signal has one declared source.
 # install_hooks(folder, report) -> [argv words to add to the start] | None: puts the hooks in place (core.with_hooks
 # puts words that start with env before the command, other words right after the program); `report` is the
-# maxpm report command (a list of argv words) that each hook runs with its --state.
+# maxpm report command (a list of argv words) that each hook runs with its --state. An adapter whose state comes from
+# DETECT may have install_hooks too, for a hook before a shell command only (Codex, #6254): read_hook gives "run".
+# project_hooks(folder, report, on) -> the hook file's path | None: for a CLI that loads hooks only from a file in the
+# project (agy's .agents/hooks.json, #6351): puts MaximizePM's hooks into the start folder's file (on) or takes them
+# out (off), keeping the person's own hooks; behind the agent's setting activity_hooks (core.project_hooks).
+# hook_answer(res) -> text | None: what maxpm report --hook <id> prints for this CLI (its own JSON), from what
+# core.hook_report returned (deny, remind) and the messages that wait at a turn end (deliver: core.turn_end_messages).
+# Without it, the output is Claude Code's JSON (Codex reads the same).
 # read_hook(payload) -> a hook report (HOOK_REPORT_KEYS) | None: for a hook that passes its own input on stdin
 # (maxpm report --hook <id>; Claude Code's JSON), what that input says. None: the input is no event of this agent.
 # A hook report = {
@@ -265,6 +528,12 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "run":     the shell command that the agent is about to run (a hook before the tool call), or None: MaximizePM
 #                 may refuse it (core.push_guard, #5381); the hook records nothing else,
 #    }
+# screen_settings(lines) -> {setting key: value}: optional, the settings that the session's screen shows now (agy's
+# footer: mode, model and effort, #6260), from the plain lines of its pane; {} when the screen shows none. The Settings
+# dialog of a session takes them before the chat log's (chat_settings): the screen shows a change at once.
+# model_group(model) -> str | None: optional, the quota group of a model when the agent counts its usage per group of
+# models (agy: 'Gemini models', 'Claude and GPT models', #6382), named as screen_limits names its windows
+# ('<group>: 5-hour'). A limit stop of a session then limits only its model's group; None: the whole agent.
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
 #      "process_args": optional: a regex that finds the agent in the command line (ps args) of a process on the
@@ -273,6 +542,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "idle":         a regex of the pane when the agent waits at its prompt,
 #      "working":      a regex of the pane while it runs a turn ("esc to interrupt"),
 #      "blocked":      [regexes], one for each screen that waits for a person (a permission menu, a question, trust),
+#      "refused":      optional: [regexes] of an error that ends each turn because the provider refuses the model or
+#                      the account (Codex's 400 'model is not supported', #6429); a group (?P<model>...) names the
+#                      model. The pane watcher then ends the session and starts its item on the next provider,
 #      "tell_instead": a regex of the menu option that lets the person type an answer instead, or None,
 #      "image_paste":  how a pasted image shows in its prompt, with {n} ("[Image #{n}]"), or None,
 #      and the layout of a blocked screen, each optional (DETECT_LAYOUT holds the values of a key left out):
@@ -289,14 +561,16 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      (OpenCode: "Allow once   Always allow   Reject      ⇆ select  enter confirm"); Left and Right
 #                      move in it. Its selected option shows by colour only, so the page takes the first one as
 #                      selected (OpenCode selects it at each new request). "": no such menu (#5281),
-#      "behind":       a regex of a question that the CLI draws under another question while the keys answer the one
-#                      above it (Gemini's added folder trust under a tool question, #5818); the page then reads the
-#                      question above. "": none,
-#      "header":       a regex of the line above a tool question that names the tool (group 1) and what it runs or
-#                      changes (group 2, optional): Gemini's "? Shell  touch notes.txt" (#5817). "": the built-in
-#                      reading (a line that starts with command, file, edit, fetch or tool),
 #      "fixed":        a regex of a question (its text or an option) that takes only one of its options, no typed text,
 #                      when it has no "tell_instead" option: the question card then has no Other (#5904). "": none,
+#      "ask":          a regex of the first line of the CLI's own question dialog (Claude Code's AskUserQuestion: its
+#                      tab line "←  ☐ Color  ☒ Size  ✔ Submit  →", or " ☐ Pet" for one question); the page then reads
+#                      the dialog and answers it on its own card (#6234). "": none,
+#      "ask_form":     how that dialog is drawn and answered: "claude" (server._ask_dialog), or a form of
+#                      river/ask_forms: "codex", "copilot", "opencode" (#6235),
+#      "ask_open":     {"line": a regex of the line that shows a question closed, "keys": the tmux keys that open
+#                      it}, or None. Codex's Default mode shows a question closed ('? 1 question', 'shift+← to
+#                      answer'); MaximizePM opens each one once, so that the page reads it (#6258),
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -307,9 +581,11 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
+               "limit": (list, tuple), "refused": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "behind": str, "header": str, "fixed": str}
+               "fixed": str, "ask": str, "ask_form": str, "ask_open": (dict, type(None))}
+ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity")
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -324,11 +600,12 @@ DETECT_LAYOUT = {
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"
             r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
     "row": "",
-    "behind": "",
-    "header": "",
-    # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Gemini's 'Trust folder', Cursor,
+    # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Antigravity CLI, Cursor,
     # Copilot, Grok, Pi): its Esc exits the CLI, so the card offers no Other there (#5904).
     "fixed": r"(?i)\btrust\b",
+    "ask": "",
+    "ask_form": "claude",
+    "ask_open": None,
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
@@ -367,9 +644,7 @@ COMMAND_RUNS = ("now", "menu", "terminal")
 COMMAND_PAGES = ("usage",)
 
 # 11. Setup (#5184). SETUP = {
-#      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
-#      "import":       the line with {file} by which its instruction file imports another one ("@{file}"), or None;
-#                      an agent whose file is not SHARED_INSTRUCTIONS and that has it reads AGENTS.md through it,
+#      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md),
 #      "replaces":     the instruction file it read before, whose rules maxpm init moves into SHARED_INSTRUCTIONS and
 #                      then deletes (Claude Code: CLAUDE.md, #6024), or None,
 #      "skills_dir":   the folder of its skills (~ expands), or None,
@@ -380,31 +655,81 @@ COMMAND_PAGES = ("usage",)
 #    }
 # write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
 # mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
-SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "replaces": (str, type(None)),
+# desktop_app() -> None when the agent's desktop chat app is not on this computer, else {"name": the app's name,
+# "added": True when its config has MaximizePM's server, "path": that config file}: the setup guide offers
+# write_mcp_config() for it (#6477).
+# write_guard(path=None, remove=False) -> one text that says what changed: adds the queue guard (#6412: no write to
+# the queue file and its -wal and -shm files) to the agent's own settings, for sessions that a person starts by hand
+# (maxpm setup-agent --guard), or takes it out again.
+SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
               "skills_dir": (str, type(None)),
               "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
               "no_link": (str, type(None))}
 
+# 12. Update (#6430). UPDATE = {
+#      "version":    the arguments that print the installed version (default ["--version"]),
+#      "smoke":      the arguments of one short request that is not interactive and must answer OK, the test after an
+#                    update ({model}: the id of the agent's default model; with none, the word and the flag before it
+#                    go), or None: the version command is the test,
+#      "self":       the arguments of the CLI's own update command, for a program that no package manager installed
+#                    ({version}: the version to install; with none, its newest), or None,
+#      "self_check": the arguments of the CLI's own check for a newer version, and "self_read" a regex whose group 1
+#                    reads the newest version from its output,
+#      "npm", "pypi", "brew", "cask": the package where the vendor publishes the same versions, for the newest version
+#                    of a program that updates itself (Claude Code: npm @anthropic-ai/claude-code),
+#      "service":    a regex of the args of the CLI's background server, which is no session: an update does not wait
+#                    for it, and stops it after the update, so the next start runs it on the new version (OpenCode:
+#                    'opencode serve --service', #6461),
+#    }
+# A program that npm, Homebrew, uv or pipx installed updates with that package manager: river/agentupdate.py reads the
+# method from where the program is (install_of), and these keys only add to it.
+UPDATE_KEYS = {"version": (list, tuple), "smoke": (list, tuple, type(None)), "self": (list, tuple, type(None)),
+               "self_check": (list, tuple), "self_read": str, "npm": str, "pypi": str, "brew": str, "cask": str,
+               "service": str}
+
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
     "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models", "context_window"), "required": True},
-    "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ()},
+    "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ("config_settings",)},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
-    "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
+    "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command", "trust_workspace",
+                                                       "untrust_workspace", "install_guard"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
                                                         "chat_settings", "chat_cache_line", "chat_texts",
-                                                        "chat_limits")},
-    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
-    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ()},
+                                                        "chat_limits", "background_scan")},
+    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook", "project_hooks",
+                                                           "hook_answer")},
+    "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ("screen_settings", "screen_limits", "limit_stop",
+                                                             "latest_limits", "model_group")},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
     "commands": {"data": ("COMMANDS", COMMAND_KEYS), "functions": ("read_commands",)},
-    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
+    "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config", "write_guard", "desktop_app")},
+    "update": {"data": ("UPDATE", UPDATE_KEYS), "functions": ()},
 }
 
-BUILTIN = ("claude", "codex", "pi", "copilot", "hermes", "gemini", "grok", "opencode", "goose", "aider", "amp", "cursor")
+def new_lines(path, start, chunk=1 << 22):
+    """(offset, end, text) of each complete line of the file from byte start on: where it starts, the byte after its
+    newline, and its text. A last line with no newline yet is left for the next read. It reads chunk bytes at a time:
+    a first read of a log of 280 MB holds no copy of the whole file."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        rest, pos = b"", start
+        while True:
+            got = f.read(chunk)
+            if not got:
+                return
+            got = rest + got
+            cut = got.rfind(b"\n") + 1
+            rest = got[cut:]
+            for line in got[:cut].split(b"\n")[:-1]:
+                yield pos, pos + len(line) + 1, line.decode("utf-8", "replace")
+                pos += len(line) + 1
+
+
+BUILTIN = ("claude", "codex", "antigravity", "pi", "copilot", "hermes", "grok", "opencode", "goose", "aider", "amp", "cursor")
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
@@ -543,9 +868,18 @@ def check(module, mid=None):
     if det is not None:
         out += _shape("DETECT", det, DETECT_KEYS, ("idle", "working", "blocked"))
         if isinstance(det, dict):
-            for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args"):
+            for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args", "ask"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
+            if isinstance(det.get("ask_open"), dict):
+                op = det["ask_open"]
+                if not isinstance(op.get("line"), str) or not op.get("keys") or \
+                        not all(isinstance(k, str) for k in op.get("keys") or ()):
+                    out.append("DETECT['ask_open'] needs a 'line' regex and a list of 'keys'")
+                else:
+                    out += _regex("DETECT['ask_open']['line']", op["line"])
+            if isinstance(det.get("ask_form"), str) and det["ask_form"] not in ASK_FORMS:
+                out.append(f"DETECT['ask_form'] is {det['ask_form']!r}, not one of {', '.join(ASK_FORMS)}")
             if isinstance(det.get("item"), str):
                 if "{mark}" not in det["item"]:
                     out.append("DETECT['item'] has no {mark}")
@@ -556,6 +890,9 @@ def check(module, mid=None):
                                    ["DETECT['item'] has a group of its own; use (?:...)"])
             for i, p in enumerate(det.get("blocked") or ()):
                 out += _regex(f"DETECT['blocked'][{i}]", p) if isinstance(p, str) else [f"DETECT['blocked'][{i}] is no str"]
+            for key in ("limit", "refused"):
+                for i, p in enumerate(det.get(key) or ()):
+                    out += _regex(f"DETECT[{key!r}][{i}]", p) if isinstance(p, str) else [f"DETECT[{key!r}][{i}] is no str"]
     if getattr(module, "INPUT", None) is not None:
         out += _shape("INPUT", module.INPUT, INPUT_KEYS)
         keys = module.INPUT.get("interrupt") if isinstance(module.INPUT, dict) else None
@@ -578,6 +915,16 @@ def check(module, mid=None):
             out.append(f"COMMANDS[{i}]['setting'] is {c['setting']!r}, which is no setting of the Settings dialog")
     if getattr(module, "SETUP", None) is not None:
         out += _shape("SETUP", module.SETUP, SETUP_KEYS, ("instructions",))
+    up = getattr(module, "UPDATE", None)
+    if up is not None:
+        out += _shape("UPDATE", up, UPDATE_KEYS)
+        if isinstance(up, dict):
+            for k in ("self_read", "service"):
+                if isinstance(up.get(k), str):
+                    out += _regex(f"UPDATE[{k!r}]", up[k])
+            for k in ("version", "smoke", "self", "self_check"):
+                if isinstance(up.get(k), (list, tuple)) and not all(isinstance(w, str) for w in up[k]):
+                    out.append(f"UPDATE[{k!r}] holds a word that is no str")
     for part in PARTS.values():
         for f in part["functions"]:
             v = getattr(module, f, None)
@@ -614,6 +961,7 @@ class Adapter:
         self.input = dict(getattr(m, "INPUT", None) or {})
         self.commands = list(getattr(m, "COMMANDS", None) or ())
         self.setup = getattr(m, "SETUP", None)
+        self.update = getattr(m, "UPDATE", None)
 
     def __repr__(self):
         return f"<Adapter {self.id} ({self.source})>"
@@ -662,23 +1010,62 @@ class Adapter:
             out.append({"label": s["key"].replace("_", " ").capitalize(), "choices": [], "text": "", "flag": [],
                         "live": None, "read": None, "config": True, "session": False, "note": None, **s,
                         "default": s.get("default", "off" if kind == "toggle" else "")})
+        # Every agent's default model and effort (#6264: agy_model gemini-4-neon, agy_effort medium): a start that
+        # names none takes them (core._launch_agent_cmd). No flag: MaximizePM gives them to build_command as its
+        # model and effort. Text, so the launch dialog does not list them under More (it has its own two fields).
+        have = {s["key"] for s in out}
+        if self.describe.get("prefix"):
+            if "model" not in have:
+                out.append(self._default_spec("model", "Default model", "the model a start of this agent takes when it "
+                                              "names none; empty: the agent's own default"))
+            if "effort" not in have and self.effort:
+                out.append(self._default_spec("effort", "Default effort", "the effort a start of this agent takes when "
+                                              "it names none; empty: the agent's own default"))
         return out
+
+    @staticmethod
+    def _default_spec(key, label, text):
+        return {"key": key, "label": label, "kind": "text", "choices": [], "default": "", "text": text, "flag": [],
+                "live": None, "read": None, "config": True, "session": False, "note": None}
 
     def options(self):
         """{key: spec} of the settings that are config keys (<prefix><key>): the options of a launch profile
         (@<agent> key=value in launch_agents), the Setup section and the launch dialog."""
         return {s["key"]: s for s in self.setting_specs() if s["config"]}
 
-    def effort_choices(self):
-        """The effort levels the launch dialog and the Settings dialog offer, as MaximizePM names them: each level of
-        MaximizePM whose name for the agent (EFFORT['map'], else the same name) is one of EFFORT['levels'], or every
-        level when the levels come from the CLI per model; [] when the agent has no effort."""
+    def effort_choices(self, levels=None):
+        """The effort levels the launch dialog and the Settings dialog offer, as MaximizePM names them, low to high:
+        each level of the agent (levels, else EFFORT['levels']) once (#6256). A MaximizePM level that EFFORT['map']
+        turns into another level's name (Aider: xhigh and max are high) is no second choice: the level of the same
+        name stands for it, else the highest level that maps to it. Every MaximizePM level when the levels come from
+        the CLI per model and none is given; [] when the agent has no effort."""
         if not self.effort:
             return []
-        levels = self.effort.get("levels")
+        levels = self.effort.get("levels") if levels is None else levels
         if not levels:
             return list(MAXPM_EFFORTS)
-        return [lv for lv in MAXPM_EFFORTS if self.effort_name(lv) in levels]
+        pick = {}
+        for lv in MAXPM_EFFORTS:
+            name = self.effort_name(lv)
+            if name in levels and (lv == name or pick.get(name) != name):
+                pick[name] = lv
+        return [lv for lv in MAXPM_EFFORTS if lv in pick.values()]
+
+    def model_efforts(self, model_id, levels=None):
+        """The effort levels (MaximizePM names, low to high) that model model_id takes (#6256): from levels (the
+        agent's names, a model dict of read_models), else read_effort_levels(model_id); None when neither knows the
+        model (the agent's levels stand), [] when the model takes no effort."""
+        if not self.effort:
+            return []
+        if levels is None:
+            f = self._fn("read_effort_levels")
+            try:
+                levels = f(model_id) if f and model_id else None
+            except Exception:  # noqa: BLE001 - a reader of a CLI's files: the agent's levels, not an error page
+                levels = None
+        if levels is None:
+            return None
+        return self.effort_choices(list(levels)) if levels else []
 
     def session_specs(self):
         """The Settings dialog of a running session: the model, the effort, then each setting with session True.
@@ -710,7 +1097,12 @@ class Adapter:
 
     def read_models(self):
         f = self._fn("read_models")
-        got = f() if f else None
+        if f is None:
+            return list(self.describe["models"])
+        # Once in a page state build (#6394): it reads the CLI's files (a JSON cache, a SQLite file), and the
+        # launch options of each entry asked again.
+        from .. import core
+        got = core._memo(("read_models", self.id, self.source), f)
         return list(got) if got else list(self.describe["models"])
 
     def context_window(self, model):
@@ -733,6 +1125,21 @@ class Adapter:
     def parse_command(self, argv):
         f = self._fn("parse_command")
         return f(list(argv)) if f else None
+
+    def trust_workspace(self, folder, command, env=None):
+        """Trust a worktree that MaximizePM made before the agent starts there (#6339), via a start flag on `command`
+        or the CLI's own trusted-folders file. Returns the command (with any added flags)."""
+        f = self._fn("trust_workspace")
+        if f is None or not folder:
+            return command
+        got = f(folder, command, env)
+        return command if got is None else got
+
+    def untrust_workspace(self, folder, env=None):
+        """Remove a deleted MaximizePM worktree from the CLI's trusted-folders file (#6339), if the adapter added it."""
+        f = self._fn("untrust_workspace")
+        if f is not None and folder:
+            f(folder, env)
 
     def start_session(self, name, settings=None):
         """The session id that a start with this name and these settings chooses (start_session), or None."""
@@ -795,9 +1202,37 @@ class Adapter:
             return None
         return f(session_ref, root=root) if root else f(session_ref)
 
+    def background_scan(self, path, start, st):
+        """The byte after the last line that the module's background_scan read into st, or None without the reader
+        or for an agent with no background commands (LAUNCH['background'] false: Codex)."""
+        f = self._fn("background_scan")
+        if f is None or not (self.launch or {}).get("background"):
+            return None
+        return f(path, start, st)
+
     def chat_settings(self, lines):
         f = self._fn("chat_settings")
         return dict(f(list(lines)) or {}) if f else {}
+
+    def config_settings(self):
+        """What a session takes from the agent's own config (#6280), {} without the reader or when it fails."""
+        f = self._fn("config_settings")
+        try:
+            return {k: v for k, v in dict(f() or {}).items() if v} if f else {}
+        except Exception:  # noqa: BLE001 - a reader of a CLI's files: the other sources stand
+            return {}
+
+    def settings_read(self):
+        """{setting key: (source, ...)}: the module's SETTINGS_READ (#6280)."""
+        return {k: tuple(v) for k, v in dict(getattr(self.module, "SETTINGS_READ", None) or {}).items()}
+
+    def screen_settings(self, lines):
+        """The settings the session's screen shows now (#6260), {} without the reader or when it fails."""
+        f = self._fn("screen_settings")
+        try:
+            return dict(f(list(lines)) or {}) if f else {}
+        except Exception:  # noqa: BLE001 - a reader of a screen: the other sources stand
+            return {}
 
     def chat_usage(self, lines):
         """{"input", "output", "cache_read", "cache_write"} token counts of the lines, or None without the reader."""
@@ -806,12 +1241,70 @@ class Adapter:
         return dict(got) if got else None
 
     def chat_limits(self, lines):
-        """The plan limits the chat log says last (#5224): [{"name", "used_percent", "window_minutes", "resets_at"
-        (ISO or None)}], {"credits": text} entries too; None when the agent writes none to its log (they show only
-        on its screen). chat_limits(lines) -> list | None."""
+        """The plan limits the chat log says last (#5224): [{"name", "used_percent", "remaining_percent",
+        "window_minutes", "resets_at" (ISO or None)}], {"credits": text} entries too; None when the agent writes none
+        to its log (they show only on its screen). chat_limits(lines) -> list | None."""
         f = self._fn("chat_limits")
         got = f(list(lines)) if f else None
-        return list(got) if got is not None else None
+        return _norm_limits(got) if got is not None else None
+
+    def screen_limits(self, lines, now=None):
+        """The plan or quota limits shown on the session's screen (/usage, /status, #6348), in the same shape as
+        chat_limits; None when the screen shows none or the adapter has no reader."""
+        f = self._fn("screen_limits")
+        if f is None:
+            return None
+        try:
+            got = f(list(lines), now=now) if "now" in f.__code__.co_varnames[:f.__code__.co_argcount] else f(list(lines))
+        except Exception:  # noqa: BLE001 - a reader of a screen: none, not a loop error
+            return None
+        return _norm_limits(got) if got else None
+
+    def model_group(self, model):
+        """The quota group of `model` (#6382), or None without the reader or for a model of no group."""
+        f = self._fn("model_group")
+        try:
+            return (f(model) or None) if f and model else None
+        except Exception:  # noqa: BLE001 - a reader of a name: the whole agent counts
+            return None
+
+    def latest_limits(self, root=None):
+        """The plan limits that the agent wrote last to any of its logs (#6348: Codex), in the shape of chat_limits,
+        read also when no session of the agent runs; None when the adapter has no reader or no log has them."""
+        f = self._fn("latest_limits")
+        if f is None:
+            return None
+        try:
+            got = f(root=root)
+        except Exception:  # noqa: BLE001 - a reader of the agent's logs: none, not a loop error
+            return None
+        return _norm_limits(got) if got else None
+
+    def limit_stop(self, lines, now=None):
+        """Whether the session's screen shows that it stopped at its usage/quota limit (#6348):
+        {"message": str, "resets_at": ISO | None, "resets_text": str | None}, or None."""
+        f = self._fn("limit_stop")
+        if f is not None:
+            try:
+                return f(list(lines), now=now) if "now" in f.__code__.co_varnames[:f.__code__.co_argcount] else f(list(lines))
+            except Exception:  # noqa: BLE001 - a reader of a screen: none, not a loop error
+                return None
+        pats = (self.detect or {}).get("limit")
+        return match_limit_stop(lines, pats, now=now) if pats else None
+
+    def model_refused(self, lines):
+        """Whether the session's screen shows that the provider refuses its model or account (DETECT['refused'],
+        #6429): {"message": the error's words, "model": the model it names or None}, or None. The lines are read
+        as one text, since a long error wraps over several lines of the pane."""
+        pats = (self.detect or {}).get("refused")
+        if not pats:
+            return None
+        text = re.sub(r"\s+", " ", " ".join(str(x).strip() for x in lines or ()))
+        for p in pats:
+            m = re.search(p, text)
+            if m:
+                return {"message": text[m.start():m.end() + 80].strip()[:240], "model": m.groupdict().get("model")}
+        return None
 
     def chat_cache_line(self, raw, st):
         f = self._fn("chat_cache_line")
@@ -829,6 +1322,14 @@ class Adapter:
     def install_hooks(self, folder, report):
         f = self._fn("install_hooks")
         return f(folder, list(report)) if f else None
+
+    def project_hooks(self, folder, report, on):
+        f = self._fn("project_hooks")
+        return f(folder, list(report), bool(on)) if f and folder else None
+
+    def hook_answer(self, res):
+        f = self._fn("hook_answer")
+        return f(dict(res)) if f else None
 
     def read_hook(self, payload):
         """What a hook's own input says (a hook report, HOOK_REPORT_KEYS, with a default for each key left out), or
@@ -849,6 +1350,23 @@ class Adapter:
         if f is None:
             raise RiverError(f"agent {self.id} has no MCP config writer (write_mcp_config); add it to {self._file()}")
         return f(path, remove)
+
+    def desktop_app(self):
+        """Its desktop chat app on this computer ({name, added, path}), or None."""
+        f = self._fn("desktop_app")
+        return f() if f else None
+
+    def write_guard(self, path=None, remove=False):
+        f = self._fn("write_guard")
+        if f is None:
+            raise RiverError(f"agent {self.id} has no queue guard for sessions started by hand: its sandbox takes "
+                             f"the rule only at each start, which MaximizePM adds itself")
+        return f(path, remove)
+
+    def install_guard(self, folder=None):
+        """The words that load the queue guard (#6412) for a start without MaximizePM's hooks file, or []."""
+        f = self._fn("install_guard")
+        return [str(w) for w in f(folder) or ()] if f else []
 
     def inside(self, env):
         """Whether a command with environment `env` runs inside this agent (IDENTITY['inside_env'])."""
@@ -883,6 +1401,15 @@ def _builtin(mid):
 
 
 def _key():
+    """The override folder and its files with their times. Inside a page state build (core.BUILD_MEMO), read once:
+    a build looked up adapters about 400 times, and each lookup made a stat of the folder (#6394)."""
+    from .. import core
+    if core.BUILD_MEMO.get() is not None:
+        return core._memo("agents._key", _key_now)
+    return _key_now()
+
+
+def _key_now():
     d = override_dir()
     try:
         files = sorted((p.name, p.stat().st_mtime_ns) for p in d.glob("*.py")) if d.is_dir() else []
@@ -1001,16 +1528,15 @@ def by_exe(exe):
 # Setup (#5184): the instruction files of a project folder, the MCP server entry, and what the page reads
 # ---------------------------------------------------------------------------------------------------------------
 
-# The instruction file that most agents read in a project folder (Claude Code, Codex, OpenCode, Amp and others). An
-# agent with its own file and an import line (SETUP["import"]) reads it through that line: Gemini's GEMINI.md is
-# "@AGENTS.md".
+# The instruction file that most agents read in a project folder (Claude Code, Codex, Antigravity CLI, OpenCode, Amp
+# and others).
 SHARED_INSTRUCTIONS = "AGENTS.md"
 
 
 def replaced_files():
     """[(old, label)]: the instruction file that an agent read before it read SHARED_INSTRUCTIONS (SETUP["replaces"]),
-    and that agent's label, one entry per file, in registry order; [('CLAUDE.md', 'Claude Code')] with the built-in
-    agents (#6024). maxpm init moves the rules of each one into SHARED_INSTRUCTIONS and deletes it."""
+    and that agent's label, one entry per file, in registry order. maxpm init moves the rules of each one into
+    SHARED_INSTRUCTIONS and deletes it."""
     out, seen = [], set()
     for m in ids():
         a = load()[m]
@@ -1018,21 +1544,6 @@ def replaced_files():
         if old and old != SHARED_INSTRUCTIONS and old not in seen:
             seen.add(old)
             out.append((old, a.label))
-    return out
-
-
-def import_files():
-    """[(own, line, label)] for every agent whose own instruction file reads SHARED_INSTRUCTIONS through an import line
-    (SETUP["import"]), one entry per file, in registry order: ('GEMINI.md', '@AGENTS.md', 'Gemini CLI') with the
-    built-in agents (#5218). maxpm init writes each of them."""
-    out, seen = [], set()
-    for m in ids():
-        a = load()[m]
-        st = a.setup or {}
-        own = st.get("instructions")
-        if st.get("import") and own not in (None, SHARED_INSTRUCTIONS) and own not in seen:
-            seen.add(own)
-            out.append((own, st["import"].format(file=SHARED_INSTRUCTIONS), a.label))
     return out
 
 
@@ -1073,9 +1584,169 @@ def page_list():
     return {"agents": out, "errors": errors()}
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Tier 1 (#6252, mark 2026-11-19: 'we should add it and have a definitive feature set')
+# ---------------------------------------------------------------------------------------------------------------
+
+# The tier 1 agents, by adapter id. Each one has every feature of the Tier 1 section of docs/agent-adapters.md;
+# tests/test_agent_tier1.py fails when one lacks a feature that the section does not name as an exception. The setup
+# guide shows them first (Choose an agent).
+TIER1 = ("claude", "codex", "antigravity")
+
+
+def is_tier1(name):
+    """Whether `name` (an id, an alias or a platform name: claude-code) names a registered tier 1 agent."""
+    a = find(name)
+    return bool(a) and a.id in TIER1
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Usage limits & reset-time parsing (#6348)
+# ---------------------------------------------------------------------------------------------------------------
+
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+_ISO_RX = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))\b")
+_REL_RX = re.compile(
+    r"(?:resets?\s+in|refreshes\s+in|try\s+again\s+in|available\s+in|wait)\s+~?\s*"
+    r"((?:\d+\s*(?:d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)\s*)+)",
+    re.I,
+)
+_REL_PART = re.compile(r"(\d+)\s*(d(?:ays?)?|h(?:ours?|rs?)?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)", re.I)
+_TZ_RX = re.compile(r"\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)*)\)")
+_DATE_TIME_RX = re.compile(
+    r"(?:resets?(?:\s+at)?|try\s+again\s+at)\s+"
+    r"(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:,?\s*(?:at\s+)?)?)?"
+    r"(?:(?P<hour>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ampm>am|pm)\b|(?P<h24>\d{1,2}):(?P<m24>\d{2})\b)?"
+    # Codex /status: '(resets 2:46 PM on 26 Nov)'
+    r"(?:\s+on\s+(?P<day2>\d{1,2})\s+(?P<mon2>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)?",
+    re.I,
+)
+
+
+def parse_reset_time(text, now=None):
+    """Parse a reset time from a CLI usage or limit-stop message (#6348).
+    Returns (resets_at_iso_utc_or_None, resets_text_or_None)."""
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    s = " ".join(str(text or "").split())
+    if not s:
+        return None, None
+    if now is None:
+        from .. import core
+        now = core.now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    # 1. Exact ISO timestamp
+    m = _ISO_RX.search(s)
+    if m:
+        raw = m.group(1)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ"), raw
+        except ValueError:
+            pass
+    # 2. Relative duration: 'Resets in ~30m', 'resets in 2h 15m', 'Try again in 45 minutes'
+    m = _REL_RX.search(s)
+    if m:
+        span = m.group(1).strip()
+        secs = 0
+        for num, unit in _REL_PART.findall(span):
+            u = unit[0].lower()
+            secs += int(num) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u]
+        if secs > 0:
+            dt = (now + timedelta(seconds=secs)).astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ"), f"in {span}"
+    # 3. Date / clock time: 'resets 3pm (America/Los_Angeles)', 'resets Nov 25, 3pm', 'resets 14:30'
+    m = _DATE_TIME_RX.search(s)
+    if m and (m.group("hour") or m.group("h24") or m.group("mon")):
+        tz_m = _TZ_RX.search(s[m.start():])
+        # A clock time with no zone is the computer's own time (Codex: 'resets 2:09 PM').
+        from .. import core
+        tz = core._machine_zone()
+        if tz_m:
+            try:
+                tz = ZoneInfo(tz_m.group(1))
+            except Exception:  # noqa: BLE001 - '(Sonnet only)' is no zone
+                tz_m = None
+        local_now = now.astimezone(tz)
+        hour = minute = 0
+        if m.group("hour"):
+            hour = int(m.group("hour"))
+            minute = int(m.group("min") or 0)
+            ampm = m.group("ampm").lower()
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+        elif m.group("h24"):
+            hour, minute = int(m.group("h24")), int(m.group("m24"))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            try:
+                if m.group("mon") or m.group("mon2"):
+                    mon = _MONTHS[(m.group("mon") or m.group("mon2")).lower()[:3]]
+                    day = int(m.group("day") or m.group("day2"))
+                    year = local_now.year
+                    cand = datetime(year, mon, day, hour, minute, tzinfo=tz)
+                    if cand < local_now - timedelta(hours=1):
+                        cand = datetime(year + 1, mon, day, hour, minute, tzinfo=tz)
+                else:
+                    cand = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if cand <= local_now:
+                        cand += timedelta(days=1)
+                raw = m.group(0).strip()
+                if tz_m and tz_m.group(0) not in raw:
+                    raw += f" {tz_m.group(0)}"
+                return cand.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), raw
+            except ValueError:
+                pass
+    return None, None
+
+
+def match_limit_stop(lines, patterns, now=None):
+    """Scan pane `lines` for any regex in `patterns`. Returns {"message", "resets_at", "resets_text"} or None."""
+    if not patterns:
+        return None
+    seq = [str(ln) for ln in (lines or ())]
+    compiled = [re.compile(p) for p in patterns]
+    for i in range(len(seq) - 1, -1, -1):
+        line = seq[i].strip()
+        if not line:
+            continue
+        if any(rx.search(line) for rx in compiled):
+            # Include up to 2 neighboring lines when reset time appears on the next line.
+            chunk = " ".join(x.strip() for x in seq[i:min(len(seq), i + 3)] if x.strip())
+            resets_at, resets_text = parse_reset_time(chunk, now=now)
+            msg = line
+            if resets_text and resets_text.lower() not in msg.lower() and i + 1 < len(seq):
+                nxt = seq[i + 1].strip()
+                if nxt and re.search(r"(?i)reset|try again|available", nxt):
+                    msg = f"{msg} · {nxt}"
+            return {"message": msg[:240], "resets_at": resets_at, "resets_text": resets_text}
+    return None
+
+
+def _norm_limits(rows):
+    """Normalize plan/quota limit rows so every percentage row carries both used_percent and remaining_percent."""
+    out = []
+    for r in rows or ():
+        if not isinstance(r, dict):
+            continue
+        d = dict(r)
+        if d.get("used_percent") is not None and d.get("remaining_percent") is None:
+            d["used_percent"] = round(max(0.0, min(100.0, float(d["used_percent"]))), 1)
+            d["remaining_percent"] = round(max(0.0, 100.0 - d["used_percent"]), 1)
+        elif d.get("remaining_percent") is not None and d.get("used_percent") is None:
+            d["remaining_percent"] = round(max(0.0, min(100.0, float(d["remaining_percent"]))), 1)
+            d["used_percent"] = round(max(0.0, 100.0 - d["remaining_percent"]), 1)
+        out.append(d)
+    return out
+
+
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
-           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files", "import_files",
-           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
+           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files",
+           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "TIER1", "is_tier1",
+           "parse_reset_time", "match_limit_stop"]
 
 
 # Last, after every name above: core imports the built-in adapters while it loads (their setting defaults), and they import

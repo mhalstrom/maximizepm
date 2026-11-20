@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import gc
 import gzip
 import hmac
@@ -16,7 +17,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, dictation, relay
+from . import agentinstall, ask_forms, core, dictation, relay
 from .core import RiverError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -170,36 +171,46 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
 
 
 def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
-                  prompt=None, folder=None):
+                  prompt=None, folder=None, reuse_workspace_from=None, auto_agent=False):
     """Start work on one ready item: a session that waits for work in its project gets it (push);
     else river names a new session, reserves the item for it (push), and opens the chosen agent in the
     project folder with MAXPM_AGENT set to that name and MAXPM_FOCUS=item:<id>, so its first maxpm go takes it.
-    With a custom prompt (maxpm launch --prompt) it always opens a new session."""
+    With a custom prompt (maxpm launch --prompt) it always opens a new session.
+    reuse_workspace_from: another session's name whose active worktree this new session continues (#6348).
+    auto_agent: `agent` is maxpm serve's preference, and the provider list replaces it when it is full (#6361)."""
     t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
-                           prompt=prompt, folder=folder)
-    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
+                           prompt=prompt, folder=folder, auto_agent=auto_agent)
+    waiting = None if (t["custom_prompt"] or reuse_workspace_from) else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
         _give_scope(conn, waiting, [f"tasks:{t['item']['id']}"], "Dispatch pushed it to this session", only_widen=True)
         return {**t, "pushed_to": waiting}
     _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go")
-    return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it")
+    started = _start_for_item(conn, t, runner, actor, "Dispatch started this session for it",
+                              reuse_workspace_from=reuse_workspace_from)
+    if agent is not None and not auto_agent:  # a person's or the manager's choice: a fresh session keeps it (#6419)
+        core.keep_dispatched_agent(conn, t["item"]["id"], t["agent"], core._project(conn, t["project"])["id"], actor)
+    return started
 
 
-def _start_for_item(conn, t, runner, actor, why, by="the page"):
+def _start_for_item(conn, t, runner, actor, why, by="the page", reuse_workspace_from=None):
     """Name a new session, reserve the item for it (push), and open the agent with MAXPM_AGENT and
     MAXPM_FOCUS=item:<id>: its first maxpm go claims that item, or says why not. A session that never runs
     a river command is a manager finding (not connected) and does not count as the project's agent."""
-    import secrets
-    name = f"{t['project']}-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, t["project"])  # never a stopped session's name (#6359)
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     _give_scope(conn, name, [f"tasks:{t['item']['id']}"], f"{by}: {why}")
+    reassigned = False
     try:
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
+        if reuse_workspace_from:
+            reassigned = core.workspace_reassign(conn, reuse_workspace_from, name) is not None
         t = _workspace(conn, t, name, core._project(conn, t["project"])["id"])
         _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner, conn)
     except Exception as e:
+        if reassigned:
+            core.workspace_reassign(conn, name, reuse_workspace_from)
         _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
     if t.get("custom_prompt"):  # what the session was told, for the people who read the item's history
         flat = " ".join(t["custom_prompt"].split())
@@ -260,7 +271,6 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once.
     It is the person's assistant (#5110): its own session type, named for its job (you-<id>), long-lived, with no
     queue work. One per person: while it runs, this opens it again ("existing") and starts nothing."""
-    import secrets
     person = core._person(conn, person)
     have = core.assistant_of(conn, person)
     if have:
@@ -274,9 +284,7 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     p = next((x for x in projects if x["path"]), None)
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
-    name = f"you-{secrets.token_hex(2)}"
-    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
-        name = f"you-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, "you")
     core.assistant_make(conn, name, person)
     try:
         t = _open_focused(conn, p, f"needs:@{person}", runner, agent, model, effort, options, agent_name=name)
@@ -293,7 +301,6 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
     one. The project whose folder holds it (the deepest) gives the launch settings; a folder of no project, the
     global ones. Its first prompt is prompt, or none: no maxpm go and no queue skill. It is a session with no item
     (core.plain_make): no queue work, no worker slot, and the worker rules never end it."""
-    import secrets
     if folder:
         path = Path(str(folder)).expanduser()
         if not path.is_absolute():
@@ -313,9 +320,7 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
         prompt = None
     _can_open_terminal(runner, f"cd {path} && claude")
     base = re.sub(r"[^a-z0-9]+", "-", (project["name"] if project else path.name).lower()).strip("-")[:24] or "session"
-    name = f"{base}-{secrets.token_hex(2)}"
-    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
-        name = f"{base}-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, base)
     title = core._short_title(" ".join(str(prompt).split()) if prompt else path.name)
     t = {"project": project["name"] if project else None, "path": str(path), "session_title": title or name,
          **core._launch_agent_cmd(conn, project["id"] if project else None, agent, model, effort, options, title or name,
@@ -409,6 +414,25 @@ def workspace_sweep(conn):
 WORKSPACE_LOOK = core.timedelta(minutes=10)
 
 
+def _untrust_workspace(path):
+    """Remove a deleted MaximizePM worktree from any CLI's trusted-folders file (#6339)."""
+    for ad in core._adapters().load().values():
+        ad.untrust_workspace(path)
+
+
+def _workspace_for(conn, name, folder):
+    """The worktree path when `folder` is inside the worktree MaximizePM made for `name`, else None."""
+    have = core.workspace_of(conn, name)
+    if not have or not folder:
+        return None
+    try:
+        if Path(folder).resolve().is_relative_to(Path(have["path"]).resolve()):
+            return have["path"]
+    except OSError:
+        pass
+    return None
+
+
 def _workspace_remove(w, force=False):
     """Remove one worktree and its branch; None when done (or its folder is gone). Else the reason it stays,
     because something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks.
@@ -418,10 +442,12 @@ def _workspace_remove(w, force=False):
         _git(repo, "worktree", "prune", check=False)
         if force:
             _git(repo, "branch", "-D", w["branch"], check=False)
+        _untrust_workspace(w["path"])
         return None
     if force:
         _git(repo, "worktree", "remove", "--force", str(wt))
         _git(repo, "branch", "-D", w["branch"], check=False)
+        _untrust_workspace(w["path"])
         return None
     dirty = _git(wt, "status", "--porcelain", check=False)
     if dirty:
@@ -432,6 +458,7 @@ def _workspace_remove(w, force=False):
         return f"{ahead} commit{'s' if ahead != '1' else ''} on {w['branch']} not in {repo.name}'s HEAD"
     _git(repo, "worktree", "remove", str(wt))
     _git(repo, "branch", "-d", w["branch"], check=False)
+    _untrust_workspace(w["path"])
     return None
 
 
@@ -541,7 +568,6 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
     it registers as (MAXPM_AGENT), when the caller registered one. Else river names the session (<project>-<hex>, the
     name its maxpm go would choose) and registers it before it starts (#5201): the pane then carries @maxpm_agent at
     once, so the page never shows 'This session runs outside tmux' for a pane that maxpm opened itself."""
-    import secrets
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     kind = focus.split(":")[0]
     if agent is None and kind in FOCUS_ROLES:  # agent_for.<role>, else default_agent (#5168)
@@ -551,9 +577,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, title)}
     named = agent_name
     if named is None:
-        named = f"{p['name']}-{secrets.token_hex(2)}"
-        while conn.execute("SELECT 1 FROM agents WHERE name=?", (named,)).fetchone():
-            named = f"{p['name']}-{secrets.token_hex(2)}"
+        named = core.new_agent_name(conn, p["name"])
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
         _give_scope(conn, named, _focus_scope(conn, focus, p["name"]), f"started for {focus}")
     try:
@@ -583,7 +607,6 @@ def manage_command(cmd):
 def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=None, options=None):
     """Start manager (the page's Manager section): the chosen agent with manage in place of go, in the folder
     of the first project that has one, compacted at manager_autocompact. Refuses while a manager is active."""
-    import secrets
     other = core.active_manager(conn)
     if other:
         raise RiverError(f"{other} is the active manager; open its chat instead")
@@ -597,7 +620,7 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager",
                                   autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact")))}
     t["command"] = manage_command(t["command"])
-    name = f"manager-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, "manager")
     core.register(conn, name, note="started from the page as the manager")
     core._set_role_note(conn, name, "manager", None)  # the next Start manager sees it at once
     try:
@@ -767,6 +790,11 @@ def _started(conn, name, t):
     platform = t.get("platform") or core._exe_platform(t.get("command") or "")
     if name and platform:
         core.set_agent_type(conn, name, platform)
+    if name and t.get("model"):  # its provider entry counts it at once (#6361), before its first maxpm go says it
+        try:
+            core.set_agent_model(conn, name, t["model"])
+        except RiverError:
+            pass
     if name and t.get("session_id"):
         core.record_session(conn, name, t["session_id"])  # a start that chose its session's id (Aider, #5280)
 
@@ -784,7 +812,21 @@ def _open_terminal(t, env, runner=None, conn=None):
     # The agent uses the same queue as this page: a page on a MAXPM_DB queue starts agents on it too.
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
-    assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    # A worktree that MaximizePM made for this session is trusted before the agent starts (#6339). Codex also trusts a
+    # project's linked folder (maxpm project path), for this start only: its -c flag writes nothing to ~/.codex
+    # (mark 2026-11-20, #6432). agy does the same with its session-only --settings (#6456). Another folder, and
+    # Copilot and Grok in a project folder (their trust is a file in their home), keep their trust prompt.
+    platform = t.get("platform") or core._exe_platform(t.get("command") or "")
+    if platform and (t.get("workspace") or (platform in ("codex", "antigravity") and conn is not None
+                                            and t.get("path") and core.projects_for_dir(conn, t["path"]))):
+        ad = core._adapters().find(platform)
+        if ad is not None:
+            t["command"] = ad.trust_workspace(t["path"], t["command"], env)
+    if platform and conn is not None and t.get("path"):
+        # A CLI that loads hooks only from the project (agy, #6351): its start folder's hook file follows the
+        # setting <prefix>activity_hooks before the agent starts.
+        core.project_hooks(conn, platform, t["path"], t.get("project"))
+    assign =" ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
     if t.get("setup"):
         # The project's own setup of a new worktree (workspace setup, #5856), with the session's variables, before the
         # agent. A failed setup is printed; the agent starts anyway, and the person and the agent see the output.
@@ -797,17 +839,26 @@ def _open_terminal(t, env, runner=None, conn=None):
         line = f"cd {shlex.quote(t['path'])} && export {assign} && {t['command']}"
     else:
         line = f"cd {shlex.quote(t['path'])} && " + (f"{assign} " if assign else "") + t["command"]
-    if (t.get("platform") or core._exe_platform(t.get("command") or "")) == "claude-code" \
-            and claude_untrusted(t["path"], env):
+    if platform == "claude-code" and claude_untrusted(t["path"], env):
         t["trust"] = str(t["path"])  # the reply says that Claude Code asks first (#5892); MaximizePM answers nothing
+    if platform and t.get("path"):
+        t["no_instructions"] = missing_instructions(t["path"], platform)  # the reply says so (#6411)
     if runner:
         runner(line)
         return
-    token = None
+    token, pane_env = None, {}
     if conn is not None and env.get("MAXPM_AGENT"):
         r = conn.execute("SELECT role FROM agents WHERE name=?", (env["MAXPM_AGENT"],)).fetchone()
         token = core.token_new(conn, env["MAXPM_AGENT"], role=r["role"] if r else None)
-    t["tmux_pane"], pid = _tmux_open(t, env, line, {core.TOKEN_ENV: token} if token else None)
+        pane_env[core.TOKEN_ENV] = token
+    if env.get("MAXPM_AGENT"):
+        # #6398: the session's own build folder, outside every scratchpad, in the pane's environment like the token
+        # (the typed line stays short); serve removes it when the session ended (river/scratch.py).
+        from . import scratch
+        d = scratch.build_dir(conn, env["MAXPM_AGENT"], make=TMUX_RUNNER is None)
+        if d is not None:
+            pane_env[scratch.ENV] = str(d)
+    t["tmux_pane"], pid = _tmux_open(t, env, line, pane_env or None)
     if token and t["tmux_pane"]:
         core.token_bind(conn, token, t["tmux_pane"], pid)
     if t.get("first_prompt") and t.get("platform") and t["tmux_pane"]:
@@ -837,6 +888,22 @@ def claude_untrusted(folder, env=None):
         if isinstance(got, dict) and got.get("hasTrustDialogAccepted"):
             return False
     return True
+
+
+def missing_instructions(folder, platform):
+    """The instruction file that the agent reads (its adapter's SETUP["instructions"], AGENTS.md) when neither it nor
+    the file it read before (SETUP["replaces"], Claude Code's CLAUDE.md) is in the folder or a folder above it; else
+    None (#6411). An agent started there works with only the maxpm briefing and policies: no secret file rules, no
+    build folder. None also for an agent with no adapter or no SETUP."""
+    ad = core._adapters().find(platform) if platform else None
+    setup = getattr(ad, "setup", None) or {}
+    names = [n for n in (setup.get("instructions"), setup.get("replaces")) if n]
+    if not names or not folder:
+        return None
+    here = Path(str(folder)).expanduser()
+    if any(Path(p, n).is_file() for p in (here, *here.parents) for n in names):
+        return None
+    return names[0]
 
 
 def hold_first_prompt(pane, kind, prompt):
@@ -892,7 +959,7 @@ def paste_answers(conn):
     prompt (a person answers that first), or a running turn. An answer the asker read (maxpm inbox) goes no more; one
     whose asker has no pane waits, and fresh_sessions gives it to a fresh session as other news.
     Returns {message id: pane} of what it typed."""
-    rows = conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.body, m.reply_to FROM messages m JOIN agents a ON "
+    rows = conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.body, m.reply_to, m.choice FROM messages m JOIN agents a ON "
                         "a.name=m.to_agent WHERE m.kind='answer' AND m.native_status=? AND m.read_at IS NULL ORDER BY m.id",
                         (core.ANSWER_TO_PANE,)).fetchall()
     if not rows or not core.tmux_path() and TMUX_RUNNER is None:
@@ -905,7 +972,7 @@ def paste_answers(conn):
         if not _idle_prompt(conn, agent, pane):
             continue
         q = core._message(conn, r["reply_to"])
-        text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]))
+        text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]), r["choice"])
         with core.tx(conn):  # first, so an answer is never typed twice
             if not conn.execute("UPDATE messages SET native_status=?, read_at=?, state='read' WHERE id=? AND "
                                 "native_status=? AND read_at IS NULL",
@@ -949,12 +1016,21 @@ EXIT_MARK = "@maxpm_exit"
 
 
 def _tmux_cmd():
-    """The tmux command line, or None when tmux is not installed."""
+    """The tmux command line, or None when tmux is not installed. The app's own tmux runs its own server
+    (-L maximizepm, #6237): every command (start, capture, keys, view, the Terminal tab) goes through here."""
     import shutil
     if TMUX_CMD:
         return TMUX_CMD if shutil.which(TMUX_CMD[0]) else None
     exe = core.tmux_path()
-    return [exe] if exe else None
+    if not exe:
+        return None
+    return [exe, "-L", core.TMUX_SOCKET] if exe == core.bundled_tmux() else [exe]
+
+
+def tmux_line():
+    """The tmux command as a person types it in a terminal (the app's own tmux: its path and server)."""
+    import shlex
+    return " ".join(shlex.quote(w) for w in (_tmux_cmd() or ["tmux"]))
 
 
 def _tmux(*args, check=True):
@@ -974,7 +1050,7 @@ def _tmux(*args, check=True):
     except (OSError, subprocess.SubprocessError) as e:
         raise RiverError(f"tmux {args[0]}: {e}")
     if r.returncode:
-        why = (r.stderr or r.stdout).strip()
+        why = (r.stderr or r.stdout).strip() or _exit_words(r.returncode)
         # A sandboxed session (Claude Code's sandbox, Codex's) cannot reach the tmux socket at all.
         if "Operation not permitted" in why or "Permission denied" in why:
             raise RiverError(f"tmux {args[0]}: {why}. A sandbox around this session blocks the tmux socket: run "
@@ -985,13 +1061,29 @@ def _tmux(*args, check=True):
     return r.stdout.rstrip("\n")
 
 
+def _exit_words(code):
+    """How a program that printed nothing ended: 'stopped by SIGSEGV' or 'exit status 1'. A tmux that crashed at its
+    server start printed nothing, and the start error said only 'tmux new-session: ' (#6240)."""
+    import signal
+    if code < 0:
+        try:
+            return f"stopped by {signal.Signals(-code).name} (it printed nothing)"
+        except ValueError:
+            return f"stopped by signal {-code} (it printed nothing)"
+    return f"exit status {code} (it printed nothing)"
+
+
 def _tmux_env():
     """The environment for a tmux command. The first command starts the tmux server, and every pane gets
     the server's environment: when an agent session runs maxpm launch, its own name, focus, and session
     ids (MAXPM_*, CLAUDE*, CODEX_*) must stay out, or each new agent would start as a copy of that session."""
     import os
     keep = ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
-    return {k: v for k, v in os.environ.items() if k in keep or not k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}
+    env = {k: v for k, v in os.environ.items() if k in keep or not k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}
+    # The folders where agent installers put programs (#6239): the server that this command starts gives its panes
+    # this PATH, so an agent that the setup guide found also starts from an app that Finder opened.
+    env["PATH"] = agentinstall.extra_path(env.get("PATH", ""))
+    return env
 
 
 def _tmux_panes(everywhere=False):
@@ -1087,7 +1179,8 @@ def _tmux_open(t, env, line, pane_env=None):
     own login shell and river types the command line into it, as Terminal's do script does: the shell's PATH finds
     the agent CLI, and the pane stays (with what the agent printed) after the agent ends. Nothing takes
     the keyboard: a person who answers a prompt in another pane keeps typing there. pane_env goes into the
-    environment of this pane alone (tmux -e; never tmux's global environment): the session's token (#5972)."""
+    environment of this pane alone (tmux -e; never tmux's global environment): the session's token (#5972) and its
+    build folder (#6398)."""
     name = t.get("session_title") or t["project"]
     new = ["-c", t["path"], *(x for k, v in (pane_env or {}).items() for x in ("-e", f"{k}={v}")),
            "-P", "-F", "#{pane_id} #{pane_pid}"]
@@ -1702,6 +1795,10 @@ def restart_blocked(conn):
     stages = pipeline_runner.running_text()  # #6114: a restart would end the stage's command
     if stages:
         return stages
+    from . import agentupdate
+    ups = agentupdate.running_text()  # #6430: a restart would end an agent CLI's update halfway
+    if ups:
+        return ups
     runs = core.hooks_running(conn, serve=SERVE_PROCESS["id"], boot=_boot_iso())
     return core.hooks_running_text(runs) if runs else None
 
@@ -2040,8 +2137,10 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
         core._touch_agent(conn, name)
         core._event(conn, None, "maxpm", f"{name} {why}: its process {pid} ended, and the same chat resumes "
                                          f"({t['agent']})")
+    wt = _workspace_for(conn, name, cwd)
     spec = {"command": t["command"], "path": cwd, "project": name, "session_title": a.get("session") or name,
-            "platform": t.get("platform"), "first_prompt": t.get("first_prompt")}
+            "platform": t.get("platform"), "first_prompt": t.get("first_prompt"),
+            **({"workspace": wt} if wt else {})}
     _open_terminal(spec, t["env"], runner, conn)
     return spec.get("tmux_pane")
 
@@ -2073,7 +2172,8 @@ def _quiet_session(conn, agent, who):
     if not path:
         raise RiverError(f"no transcript of {agent} on this computer, so MaximizePM cannot tell when it is quiet")
     tail = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)
-    if tail["turn"] != "idle" or a.get("activity_prompt") or core.waits_on_person(conn, [agent]):
+    idle = tail["turn"] == "idle" or (tail["turn"] == "working" and sessions._screen_idle(conn, a, tail.get("turn_at")))
+    if not idle or a.get("activity_prompt") or core.waits_on_person(conn, [agent]):
         raise RiverError(f"{agent} works now or waits on a prompt or an answer; change its settings when its turn has ended")
     return a, kind, path, tail
 
@@ -2313,6 +2413,7 @@ def _pane_screen(agent, pane):
 # sees it until a person looks. PROMPTS remembers, for each agent whose screen shows a prompt now, the lines
 # river saw ("sig"), since when, and the alert it sent for them ("told").
 PROMPTS = {}
+LIMIT_SEEN = {}  # agent -> the limit-stop message that watch_prompts read last on its screen (#6348)
 PROMPT_LINES = 15  # a prompt is at the end of the screen: text further up is what the agent wrote before
 _ESCAPES = None
 
@@ -2337,7 +2438,9 @@ def _layout(detect=None):
     from . import agents
     d = {**agents.DETECT_LAYOUT, **{k: v for k, v in (detect or {}).items() if k in agents.DETECT_LAYOUT}}
     tell = (detect or {}).get("tell_instead") or r"(?i)\bno\b.*\btell\b"
-    key = (*sorted(d.items()), tell)
+    op = d.pop("ask_open", None) or {}
+    opener = (op.get("line"), tuple(op.get("keys") or ())) if op.get("line") else None
+    key = (*sorted(d.items()), tell, opener)
     got = _LAYOUTS.get(key)
     if got is None:
         # An option's line: its indent, then the mark where DETECT['item'] puts it ("{mark}": first; Grok: after the
@@ -2349,9 +2452,9 @@ def _layout(detect=None):
                                "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
-                               "behind": d["behind"] and re.compile(d["behind"]),
-                               "header": d["header"] and re.compile(d["header"]),
-                               "fixed": d["fixed"] and re.compile(d["fixed"])}
+                               "fixed": d["fixed"] and re.compile(d["fixed"]),
+                               "ask": d["ask"] and re.compile(d["ask"]), "ask_form": d["ask_form"],
+                               "ask_open": opener and (re.compile(opener[0]), list(opener[1]))}
     return got
 
 
@@ -2429,8 +2532,8 @@ def kill_agent(conn, agent, reason, actor=None, by_serve=False):
 
 def _programs(lines):
     """The program names of command lines: for each one, the base name of its program and, for an interpreter, of
-    the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/gemini'
-    gives node and gemini; 'python3 -m aider' gives python3 and aider)."""
+    the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/pi'
+    gives node and pi; 'python3 -m aider' gives python3 and aider)."""
     import os
     names = []
     for line in lines:
@@ -2606,7 +2709,8 @@ def wake_loop(stop):
 def shells_loop(stop):
     """The thread of maxpm serve that reads the shell commands of each session (core.record_shells) every
     shells_every (#5830): a pass of the loop comes only every notify_interval, too late to show that a session
-    runs a command now. 0s: it reads none and looks at the setting again each minute. No error ends it."""
+    runs a command now. It reads the background tasks of each session too (core.record_tasks, #6454), from the new
+    lines of its chat log. 0s: it reads none and looks at the setting again each minute. No error ends it."""
     conn = None
     while not stop.is_set():
         every = 60.0
@@ -2615,7 +2719,10 @@ def shells_loop(stop):
                 conn = core.connect()
             step = core.parse_duration(core.setting(conn, "shells_every")).total_seconds()
             if step:
-                core.record_shells(conn)
+                try:
+                    core.record_shells(conn)
+                finally:
+                    core.record_tasks(conn)
                 every = step
         except Exception:  # noqa: BLE001 - the next pass tries again, with a new connection
             try:
@@ -2829,26 +2936,7 @@ def _prompt_found(tail, rx, layout=None):
         return None  # more under it: the spinner, the input box, the status line, or the next tool call
     if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
         return None
-    if lay.get("behind") and parts["question"] and lay["behind"].search(parts["question"]):
-        return _prompt_above(tail, parts, rx, lay) or parts
     return parts
-
-
-def _prompt_above(tail, parts, rx, lay):
-    """The prompt that shows above a 'behind' question's box (DETECT['behind']), or None (#5818). Gemini draws the
-    trust question of an added folder under a waiting tool question, but Enter answers the tool question: the page
-    read the trust question, and its 'Yes' would have allowed the command."""
-    rows = list(getattr(tail, "above", ())) + list(tail)
-    n = len(rows) - len(tail) + parts["start"]
-    framed = re.compile(f"^\\s*[{lay['box']}]")
-    while n > 0 and framed.match(rows[n - 1]) and not _CORNER.match(rows[n]):
-        n -= 1
-    rows = rows[:n]
-    if not rows:
-        return None
-    up = _Tail(rows[-PROMPT_LINES:])
-    up.above = rows[-PROMPT_LINES - PROMPT_ABOVE:-PROMPT_LINES] if len(rows) > PROMPT_LINES else []
-    return _prompt_found(up, rx, lay)
 
 
 def _footer(line, layout=None):
@@ -2861,16 +2949,10 @@ def _prompt_command(lines, layout=None):
     """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
     command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
-    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it.
-    An adapter's DETECT['header'] reads both from the header line itself (Gemini: '? Shell  touch notes.txt', #5817)."""
+    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
     lay = layout or _layout()
     rule = lay["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
-    if lay.get("header"):
-        m = next((m for m in map(lay["header"].match, reversed(lines)) if m), None)
-        if m:
-            cmd = m.group(2).strip() if m.re.groups >= 2 and m.group(2) else None
-            return {"tool": m.group(1).strip(), "command": cmd and cmd[:200], "why": why}
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
                  and len(lines[n].strip()) < 60), None)
@@ -2879,7 +2961,9 @@ def _prompt_command(lines, layout=None):
     below = lines[head + 1:]
     rules = [n for n, x in enumerate(below) if rule.match(x)]
     body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not rule.match(x)]
-    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")]
+    # Antigravity CLI puts the label 'Requesting permission for:' over the command (#6248).
+    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")
+            and x.strip() != "Requesting permission for:"]
     cmd = body[0] if body else None
     if cmd and len(body) > 1 and len(rules) >= 2:
         cmd += " …"  # a command of more lines: the first one names it
@@ -2962,7 +3046,7 @@ def watch_prompts(conn):
     {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
     "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids, procs, asks = {}, {}, {}, {}, {}
+    waiting, states, ids, procs, asks, whys, limit_hits = {}, {}, {}, {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     terminals = agent_terminals(conn)
     for agent in [a for a in STILL if a not in terminals or a in stopped]:
@@ -2983,14 +3067,49 @@ def watch_prompts(conn):
         pid = _pane_process(conn, agent, ad)
         if pid:
             procs[agent] = pid
+        plain_text = _plain(screen["text"])
+        tail = _prompt_tail(plain_text)
+        if ad is not None:
+            # A limit stop counts only on a screen that shows no turn at work (a working session may show the words
+            # in a file or a diff), and once for each message: agy keeps the old message on the screen after the
+            # reset, and its 'Resets in 29m45s' read again would move the reset time on each pass.
+            working = (ad.detect or {}).get("working")
+            hit = None if working and any(re.search(working, x) for x in tail) else ad.limit_stop(tail)
+            if hit and LIMIT_SEEN.get(agent) == hit.get("message"):
+                hit = None
+            if hit:
+                LIMIT_SEEN[agent] = hit.get("message")
+                core.record_agent_limit(conn, ad.id, limited=True, resets_at=hit.get("resets_at"),
+                                        resets_text=hit.get("resets_text"), reason=hit.get("message"),
+                                        source="limit_stop", session=agent,
+                                        model=_limit_model(conn, agent, ad, plain_text.splitlines()))
+                limit_hits[agent] = (ad, hit, pane)
+                STILL.pop(agent, None)
+                continue
+            ref = _model_refused(conn, agent, ad, plain_text, working)
+            if ref:
+                limit_hits[agent] = (ad, ref, pane)
+                STILL.pop(agent, None)
+                continue
+            if ad.has("screen_limits"):
+                scr_lim = ad.screen_limits(plain_text.splitlines())
+                # The same /usage screen on the next pass is no new reading: its 'Resets in 2h' read again moves.
+                sig = scr_lim and repr([(w.get("name"), w.get("used_percent"), w.get("resets_text")) for w in scr_lim])
+                if sig and LIMIT_SEEN.get(("screen", agent)) == sig:
+                    scr_lim = None
+                elif sig:
+                    LIMIT_SEEN[("screen", agent)] = sig
+                if scr_lim:
+                    at_lim = any((w.get("used_percent") or 0) >= 100 for w in scr_lim)
+                    core.record_agent_limit(conn, ad.id, limited=at_lim, windows=scr_lim, source="screen")
         if pattern:
-            tail = _prompt_tail(_plain(screen["text"]))
             parts = _prompt_found(tail, rx, layout)
             if parts:
                 held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                     "ORDER BY id", (agent,)).fetchone()
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
+                whys[agent] = parts.get("why")
                 STILL.pop(agent, None)
                 if q is not None and parts.get("command"):  # a permission prompt for a command (#5959)
                     asks[agent] = parts
@@ -3016,6 +3135,10 @@ def watch_prompts(conn):
         "SELECT id, from_agent, body FROM messages WHERE kind='alert' AND read_at IS NULL AND body LIKE ?",
         (core.PROMPT_NOTE + "%",))]
     closed = [m["id"] for m in alerts if waiting.get(m["from_agent"], ("",))[0] != m["body"]]
+    if limit_hits:
+        restarts = _handle_limit_stops(conn, limit_hits)
+        if restarts:
+            reported["limit_restarts"] = restarts
     if not waiting and not closed:
         return {"waiting": {}, "told": [], "closed": [], **reported}  # the usual pass: nothing to write
     with core.tx(conn):
@@ -3037,8 +3160,13 @@ def watch_prompts(conn):
                 if link:
                     conn.execute("UPDATE agents SET session_url=? WHERE name=?", (link, agent))
             to = [manager] if q is None and manager and manager != agent else people
+            # #6282: a prompt that the manager may answer (a file read, a command, an edit) goes to it first, as a
+            # person item does: the person's alert is held for question_hold. Not the classifier's (policy p3).
+            hold = q is not None and not whys.get(agent) and core.prompt_hold_manager(conn, agent)
             for person in to:
-                core._send(conn, "alert", agent, body, to=person, item_id=held)
+                mid = core._send(conn, "alert", agent, body, to=person, item_id=held)
+                if hold and person in people:
+                    core._hold_question(conn, mid)
             if to:  # with no person in the queue yet, the first one who registers gets it
                 st["told"] = body
                 told.append(agent)
@@ -3091,6 +3219,396 @@ def _end_at_prompt(conn, waiting, asks, t):
             core.sync_needs_you(conn)
         out.append(agent)
     return out
+
+
+def _model_refused(conn, agent, ad, text, working):
+    """#6429: a session whose agent refused its model or account at its turn (DETECT['refused']: Codex 0.159.1
+    answered each turn with a 400 'model is not supported when using Codex with a ChatGPT account', and four sessions
+    sat at their prompt with no alert). Only before the session's claim: an error of its first turn, not words in a
+    file or a diff of a session at work. Records the refusal (core.record_model_refused, so launches skip the entry for
+    MODEL_REFUSED_HOLD) and alerts the manager once for it. Returns the hit for _handle_limit_stops, or None."""
+    lines = [x for x in text.splitlines() if x.strip()][-(PROMPT_LINES + PROMPT_ABOVE):]
+    if working and any(re.search(working, x) for x in lines[-PROMPT_LINES:]):
+        return None
+    got = ad.model_refused(lines)
+    if not got or LIMIT_SEEN.get(("refused", agent)) == got["message"]:
+        return None
+    if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (agent,)).fetchone():
+        return None
+    LIMIT_SEEN[("refused", agent)] = got["message"]
+    r = conn.execute("SELECT model FROM agents WHERE name=?", (agent,)).fetchone()
+    model = got["model"] or None
+    what = f"model {model}" if model else "the account"
+    if core.record_model_refused(conn, ad.id, model, got["message"], session=agent):
+        manager = core.active_manager(conn)
+        to = [manager] if manager and manager != agent else [
+            x["name"] for x in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+        text = (f"{agent} ({ad.label}) failed at its first turn: {ad.label} refuses {what} ({got['message']}). "
+                f"maxpm serve ends it and starts its item on the next agent of agent_order; launches skip "
+                f"{ad.label} with {what} for {core.MODEL_REFUSED_HOLD.seconds // 3600}h. Fix the cause: update the "
+                f"{ad.label} CLI, or name another model in agent_order (maxpm config get agent_order).")
+        with core.tx(conn):
+            for p in to:
+                core._send(conn, "alert", "maxpm", text, to=p)
+            core.sync_needs_you(conn)
+    return {"message": got["message"], "refused": what, "model": model or (r["model"] if r else None)}
+
+
+def _limit_model(conn, agent, ad, lines):
+    """The model of a session that stopped at its usage limit (#6382), so the limit covers only its model group (agy
+    counts Gemini apart from Claude and GPT): what its screen shows (agy's footer), else the model it declared
+    (agents.model, MAXPM_MODEL at its launch), else its held item's model, else the agent's default (agy_model)."""
+    shown = ad.screen_settings(lines).get("model")
+    if shown:
+        return shown
+    r = conn.execute("SELECT model FROM agents WHERE name=?", (agent,)).fetchone()
+    if r and r["model"]:
+        return r["model"]
+    it = conn.execute("SELECT model, project_id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                      "ORDER BY id", (agent,)).fetchone()
+    if it and it["model"]:
+        return it["model"]
+    return core.agent_default(conn, ad, "model", it["project_id"] if it else None)
+
+
+def _handle_limit_stops(conn, limit_hits):
+    """#6348: When a worker session stops at its usage limit, stop it with a handback note and start its item again
+    with the next provider of agent_order that has usage left and a free slot (#6361: core.agent_providers), continuing the
+    uncommitted work in the same folder/worktree. Returns a list of restart/alert result dicts."""
+    out = []
+    for agent, (ad, hit, _pane) in sorted(limit_hits.items()):
+        ag = conn.execute("SELECT role, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
+        if not ag or ag["stop_at"] is not None:
+            continue
+        held = [dict(r) for r in conn.execute(
+            "SELECT id, title, project_id, tier, model FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+            "ORDER BY id", (agent,)).fetchall()]
+        claimed = bool(held)
+        if not held and ag["role"] not in ("manager", "expert"):
+            held = _unclaimed_work(conn, agent)  # #6418: it stopped at its first prompt, before its claim
+        msg = hit.get("message") or f"{ad.label} usage limit reached"
+        reset_part = f" (resets {hit['resets_text'] or hit['resets_at']})" if (hit.get("resets_text") or hit.get("resets_at")) else ""
+        # #6429: a refused model or account ends the session as a limit stop does; _model_refused alerted already.
+        stop_what = (f"{ad.label} refused {hit['refused']}" if hit.get("refused")
+                     else f"{ad.label} usage limit{reset_part}")
+        if hit.get("refused") and (ag["role"] in ("manager", "expert") or not held):
+            continue
+        if ag["role"] in ("manager", "expert") or not held:
+            key = f"limit_alert:{agent}:{hit.get('resets_at') or msg[:40]}"
+            with core.tx(conn):
+                if not conn.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone():
+                    conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, core.iso(core.now())))
+                    manager = core.active_manager(conn)
+                    to = [manager] if manager and manager != agent else [
+                        r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+                    for p in to:
+                        core._send(conn, "alert", "maxpm",
+                                   f"{agent} ({ad.label}) stopped at its usage limit{reset_part}: {msg}", to=p)
+                    core.sync_needs_you(conn)
+            continue
+        handback = f"stopped at {stop_what}: {msg}"
+        try:
+            kill_agent(conn, agent, handback, "maxpm", by_serve=True)
+        except RiverError as e:
+            print(f"maxpm: could not stop {agent} ({stop_what}): {e}", file=sys.stderr, flush=True)
+            continue
+        PROMPTS.pop(agent, None)
+        primary = held[0]
+        fb = core.fallback_agent(conn, ad.id, project_id=primary["project_id"], model=primary.get("model"))
+        if fb is None:
+            manager = core.active_manager(conn)
+            to = [manager] if manager else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                for p in to:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({stop_what}: "
+                               f"{msg}), and no fallback agent is available"
+                               + ("." if hit.get("refused") else " until it resets."),
+                               to=p, item_id=primary["id"])
+                core.sync_needs_you(conn)
+            out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "reason": "no fallback"})
+            continue
+        _fb_id, fb_label, _entry = fb  # dispatch_item picks the entry again (#6361): its model and effort run
+        # A session that never claimed its item did no work: the new one starts it as a plain Dispatch does.
+        cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at {stop_what}"
+                       f" ({msg}). Check git status and git diff in this folder and continue the "
+                       f"uncommitted work.") if claimed else None
+        try:
+            started = dispatch_item(conn, primary["id"], agent=fb_label, actor="maxpm",
+                                    prompt=cont_prompt, reuse_workspace_from=agent, auto_agent=True)
+        except RiverError as e:
+            manager = core.active_manager(conn)
+            to = [manager] if manager else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                for p in to:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({stop_what}), "
+                               f"but could not start fallback {fb_label}: {e}", to=p, item_id=primary["id"])
+                core.sync_needs_you(conn)
+            out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "error": str(e)})
+            continue
+        new_name = started.get("session_name") or started.get("pushed_to")
+        with core.tx(conn):
+            core._event(conn, primary["id"], "maxpm",
+                        f"started {new_name} ({fb_label}) to "
+                        + ("continue uncommitted work" if claimed else "take it") + f" after {agent} hit "
+                        f"{stop_what}")
+        out.append({"agent": agent, "item_id": primary["id"], "restarted": new_name, "fallback": fb_label})
+    return out
+
+
+def _unclaimed_work(conn, agent):
+    """The open items that a session has but did not claim yet (#6418): pushed to it (reserved_for), or a task of its
+    scope (tasks:<id>) that nobody holds and that is reserved for no other session. A session that stops at its usage
+    limit at its first prompt (agy) has such an item: serve started it for that item and it never ran maxpm go."""
+    rows = conn.execute("SELECT id, title, project_id, tier, model FROM items WHERE reserved_for=? AND status='open' "
+                        "ORDER BY id", (agent,)).fetchall()
+    out = {r["id"]: dict(r) for r in rows}
+    ids = [i for p in core.agent_scope(conn, agent) or [] if p["kind"] == "tasks" for i in p["value"]]
+    for i in ids:
+        r = conn.execute("SELECT id, title, project_id, tier, model FROM items WHERE id=? AND status='open' "
+                         "AND assignee IS NULL AND (reserved_for IS NULL OR reserved_for=?)", (i, agent)).fetchone()
+        if r:
+            out.setdefault(r["id"], dict(r))
+    return [out[k] for k in sorted(out)]
+
+
+# The agents whose usage maxpm serve reads with a probe (#6364). They write no limits to a log (Codex
+# does: record_log_limits reads it), so serve opens the agent in a hidden tmux pane, types its usage command, reads the
+# screen with the adapter's screen_limits, closes it with Esc (p137) and ends the pane. "args": the flags of that
+# start. Claude Code loads only the person's own settings (no project hooks) and no MCP servers; agy trusts the folder
+# for this start only (trust_workspace). Neither start installs anything in the agent's home (p140).
+USAGE_PROBES = {
+    "claude": {"args": ["--setting-sources", "user", "--strict-mcp-config"], "command": "/usage"},
+    "antigravity": {"args": [], "command": "/usage"},
+}
+PROBE_SESSION = "maxpm-usage"  # the tmux session of the probe panes: not the maxpm session, so no view or tidy sees them
+# Whether a probe thread runs now, when serve probed each agent last, the agent it reads now, and the error of each
+# agent's last probe (the page's usage panel shows the last two, #6387).
+PROBE = {"running": False, "at": {}, "now": None, "error": {}}
+PROBE_START_MAX = 60  # seconds for the agent's input line to show
+PROBE_READ_MAX = 30  # seconds for its usage screen to show the limits
+PROBE_POLL = 1.0  # seconds between two looks at the pane (tests: 0)
+PROBE_SYNC = False  # tests: run the probes in the pass, not in a thread
+PROBE_EXE = None  # tests: a function (exe) -> whether the agent CLI is installed
+
+
+def _probe_exe(exe):
+    """Whether the agent CLI is installed, on the PATH that the panes get (_tmux_env)."""
+    import shutil
+    if PROBE_EXE is not None:
+        return PROBE_EXE(exe)
+    return bool(exe) and shutil.which(exe, path=_tmux_env().get("PATH")) is not None
+
+
+def _probe_folder(conn, aid):
+    """The folder where the probe starts the agent: a project folder of this queue, by rank. Claude Code asks first
+    whether it may trust a folder, and the answer would go into its settings file: only a folder it trusts already
+    (claude_untrusted False). agy trusts the folder for this start only; with no project folder, the queue's own."""
+    for r in conn.execute("SELECT path FROM projects WHERE archived=0 AND path IS NOT NULL AND path != '' "
+                          "ORDER BY rank, id"):
+        p = Path(r["path"]).expanduser()
+        if p.is_dir() and (aid != "claude" or claude_untrusted(p) is False):
+            return p
+    return None if aid == "claude" else Path(core.river_dir())
+
+
+def usage_probes_due(conn, every=None):
+    """[(adapter id, folder)] of the agents that probe_usage reads now: a probe of USAGE_PROBES whose adapter reads
+    the screen, whose CLI is installed, and with no reading and no probe within usage_probe_every. Also while
+    sessions of the agent run (#6387): they record no reading unless a person types /usage, so with ten Claude Code
+    sessions at work the page said 'not known'; the probe is a start of its own and touches none of them."""
+    every = every or core.parse_duration(core.setting(conn, "usage_probe_every"))
+    t, out = core.now(), []
+    for aid in USAGE_PROBES:
+        ad = core._adapters().find(aid)
+        if ad is None or not ad.has("screen_limits"):
+            continue
+        last = PROBE["at"].get(aid)
+        if last and t - last < every:
+            continue
+        st = core.agent_limit_status(conn, aid)
+        try:
+            if st and st.get("updated_at") and t - core.parse_iso(st["updated_at"]) < every:
+                continue
+        except (ValueError, TypeError):
+            pass
+        if not _probe_exe(ad.describe.get("exe")):
+            continue
+        folder = _probe_folder(conn, aid)
+        if folder is not None:
+            out.append((aid, folder))
+    return out
+
+
+def probe_usage(conn):
+    """A pass of maxpm serve (#6364): read the usage of Claude Code and Antigravity at most once in usage_probe_every
+    (0s: never) for each. The probes run one after the other in a thread of their own, so the pass does not wait for
+    an agent to start. Returns the adapter ids it probes."""
+    every = core.parse_duration(core.setting(conn, "usage_probe_every"))
+    if not every.total_seconds() or PROBE["running"]:
+        return []
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        return []
+    if core.net_down(conn):  # offline: the usage screen cannot load
+        return []
+    due = usage_probes_due(conn, every)
+    if not due:
+        return []
+    _start_probes(due)
+    return [aid for aid, _ in due]
+
+
+def _start_probes(due):
+    """Run probe_one for each (adapter id, folder) of `due`, one after the other, in a thread (tests: PROBE_SYNC)."""
+    t = core.now()
+    for aid, _ in due:  # also a probe that fails waits usage_probe_every before the next
+        PROBE["at"][aid] = t
+    PROBE["running"], PROBE["now"] = True, due[0][0]
+
+    def run():
+        c = core.connect()
+        try:
+            for aid, folder in due:
+                PROBE["now"] = aid
+                try:
+                    got = probe_one(c, aid, folder)
+                except Exception as e:  # noqa: BLE001 - one agent's probe, not the loop
+                    got = {"error": f"{type(e).__name__}: {e}"}
+                if got.get("error"):
+                    PROBE["error"][aid] = got["error"]
+                    print(f"maxpm serve: usage of {aid}: {got['error']}", file=sys.stderr, flush=True)
+                else:
+                    PROBE["error"].pop(aid, None)
+        finally:
+            c.close()
+            PROBE["running"], PROBE["now"] = False, None
+
+    if PROBE_SYNC:
+        run()
+    else:
+        threading.Thread(target=run, name="maxpm-usage-probe", daemon=True).start()
+
+
+def usage_read_now(conn, agent_type):
+    """Read now in the usage panel of an agent (#6387): the probe of the agent at once, also within
+    usage_probe_every, in its thread (the page reads the result with its next refresh); for an agent that writes its
+    limits to a log (Codex), that log now. Returns {"agent_type", "reading": True} for a probe that started, or the
+    agent's usage."""
+    aid = core._limit_adapter_id(agent_type)
+    ad = core._adapters().find(aid)
+    if ad is None:
+        raise RiverError(f"unknown agent {agent_type!r}")
+    if aid not in USAGE_PROBES:
+        if ad.has("latest_limits"):
+            wins = ad.latest_limits()
+            if not wins:
+                raise RiverError(f"{ad.label} wrote no usage to its logs yet: it writes it after a model call")
+            full = [w for w in wins if (w.get("used_percent") or 0) >= 100]
+            core.record_agent_limit(conn, aid, limited=bool(full), windows=wins,
+                                    resets_at=full[0].get("resets_at") if full else None, source="log")
+            return core.agent_usage(conn, aid)
+        raise RiverError(f"MaximizePM cannot read the usage of {ad.label}: run its usage command in its terminal")
+    if PROBE["running"]:
+        if PROBE["now"] == aid:
+            return {"agent_type": aid, "reading": True}
+        raise RiverError("MaximizePM reads the usage of another agent now; try again in a minute")
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        raise RiverError("reading the usage needs tmux: install it (brew install tmux)")
+    if not _probe_exe(ad.describe.get("exe")):
+        raise RiverError(f"{ad.label} is not installed here ({ad.describe.get('exe')} is not on the PATH)")
+    folder = _probe_folder(conn, aid)
+    if folder is None:
+        raise RiverError(f"{ad.label} trusts no project folder of this queue yet: open it once in a project folder "
+                         f"and answer its trust question")
+    PROBE["error"].pop(aid, None)
+    _start_probes([(aid, folder)])
+    return {"agent_type": aid, "reading": PROBE["running"]}
+
+
+def agent_usage(conn, agent_type):
+    """GET api/agent-usage (#6387): core.agent_usage with the state of the probe: whether Read now can read the
+    agent, whether a reading runs now, and the error of its last probe."""
+    got = core.agent_usage(conn, agent_type)
+    aid = got["agent_type"]
+    ad = core._adapters().find(aid)
+    at = PROBE["at"].get(aid)
+    return {**got, "can_read": aid in USAGE_PROBES or bool(ad is not None and ad.has("latest_limits")),
+            "reading": PROBE["running"] and PROBE["now"] == aid, "probe_error": PROBE["error"].get(aid),
+            "probed_at": core.iso(at) if at else None}
+
+
+def _probe_lines(pane):
+    """The plain lines that the probe pane shows now, or None when it is gone."""
+    out = _tmux("capture-pane", "-p", "-t", pane, check=False)
+    return None if out is None else _plain(out).splitlines()
+
+
+def probe_one(conn, aid, folder):
+    """Open the agent `aid` in `folder` in a hidden pane, wait for its input line, type its usage command, read the
+    limits with screen_limits, close the screen with Esc, and end the pane. The pane runs with MAXPM_DB of this queue
+    and no MAXPM_AGENT, MAXPM_FOCUS or token, so no maxpm hook registers it. Records the reading (source 'probe').
+    Returns {"windows": [...]} or {"error": "<why>"}."""
+    import shlex
+    ad = core._adapters().find(aid)
+    spec = USAGE_PROBES[aid]
+    det = ad.detect or {}
+    idle_rx = re.compile(det["idle"]) if det.get("idle") else None
+    blocked = [re.compile(p) for p in det.get("blocked") or ()]
+    cmd = ad.trust_workspace(str(folder), shlex.join([ad.describe["exe"], *spec["args"]]), {})
+    line = (f"cd {shlex.quote(str(folder))} && env -u MAXPM_AGENT -u MAXPM_FOCUS -u {core.TOKEN_ENV} "
+            f"MAXPM_DB={shlex.quote(str(core.db_path()))} {cmd}")
+    new = ["-c", str(folder), "-P", "-F", "#{pane_id}"]
+    if _tmux("has-session", "-t", "=" + PROBE_SESSION, check=False) is None:
+        pane = _tmux("new-session", "-d", "-s", PROBE_SESSION, "-n", f"usage-{aid}", "-x", "200", "-y", "50", *new)
+    else:
+        pane = _tmux("new-window", "-d", "-t", f"={PROBE_SESSION}:", "-n", f"usage-{aid}", *new)
+    pane = (pane or "").strip()
+    if not pane:
+        return {"error": "tmux opened no pane"}
+    try:
+        _tmux("send-keys", "-t", pane, "-l", line)
+        _tmux("send-keys", "-t", pane, "Enter")
+        end = time.monotonic() + PROBE_START_MAX
+        while True:
+            if time.monotonic() > end:
+                return {"error": f"its input line did not show within {PROBE_START_MAX}s"}
+            time.sleep(PROBE_POLL)
+            lines = _probe_lines(pane)
+            if lines is None:
+                return {"error": "the pane closed"}
+            tail = [x for x in lines if x.strip()][-PROMPT_LINES:]
+            ask = next((x for x in tail if any(rx.search(x) for rx in blocked)), None)
+            if ask:  # a trust, sign-in or setup question: the probe answers nothing
+                return {"error": f"it asks first: {ask.strip()[:120]}"}
+            if idle_rx and any(idle_rx.search(x) for x in tail):
+                break
+        _tmux("send-keys", "-t", pane, "-l", spec["command"])
+        time.sleep(PROBE_POLL)
+        _tmux("send-keys", "-t", pane, "Enter")
+        end, prev, wins = time.monotonic() + PROBE_READ_MAX, None, None
+        while True:
+            if time.monotonic() > end:
+                return {"error": f"its usage screen showed no limits within {PROBE_READ_MAX}s"}
+            time.sleep(PROBE_POLL)
+            lines = _probe_lines(pane)
+            if lines is None:
+                return {"error": "the pane closed"}
+            wins = ad.screen_limits(lines)
+            # Two equal looks: the screen has loaded (Claude Code fills its sections after a moment). A relative reset
+            # time ('Refreshes in 2h 31m') moves between two looks, so it is no part of the comparison.
+            sig = wins and [(w.get("name"), w.get("used_percent")) for w in wins]
+            if sig and sig == prev:
+                break
+            prev = sig
+        _tmux("send-keys", "-t", pane, "Escape")  # close the usage screen with Esc (p137)
+    finally:
+        _tmux("kill-pane", "-t", pane, check=False)
+    at_lim = any((w.get("used_percent") or 0) >= 100 for w in wins)
+    core.record_agent_limit(conn, aid, limited=at_lim, windows=wins, source="probe")
+    return {"windows": wins}
 
 
 def _pane_session_id(conn, agent, pane, ad):
@@ -3298,6 +3816,135 @@ def watch_busy(conn):
     return core.keep_busy(conn, busy, waiting) if busy or waiting else []
 
 
+CMD_HANG = {}  # agent -> {pid, cmd, screen, quiet_since, warned_at, started} (#6497)
+
+
+def session_kill_command(conn, agent, pid=None, reason=None, actor=None, grace=5.0, sleep=None):
+    """End a running child command of an agent session (maxpm session kill-command, #6497).
+    Runs in maxpm serve, which started the session and owns its process tree."""
+    ag = core._agent(conn, agent)
+    pane = None if ag["pid"] else pane_process(conn, agent)
+    res = core.kill_session_command(conn, agent, pid=pid, actor=actor, reason=reason, grace=grace, sleep=sleep,
+                                    pane_pid=pane["pid"] if pane else None)
+    st = CMD_HANG.get(agent)
+    if st and st.get("pid") in set(res.get("killed_pids") or ()):
+        CMD_HANG.pop(agent, None)
+    return res
+
+
+def watch_commands(conn, grace=5.0, sleep=None, server_grace=None):
+    """One pass of maxpm serve (#6497): watch child commands running under each live session on this host.
+    When a child command runs with no new tmux pane output and no end for command_hang_after (20m), send the session
+    a note with the command and its time, and record it in meta (hanging_commands) so the manager's watch shows
+    'COMMAND HANGS <session> <command> <minutes>'. After command_hang_kill (5m) more with still no new pane output,
+    end that command's process tree (SIGTERM, then SIGKILL) and tell both the session and the manager."""
+    after_str = core.setting(conn, "command_hang_after")
+    after = core.parse_duration(after_str)
+    kill_str = core.setting(conn, "command_hang_kill")
+    kill_wait = core.parse_duration(kill_str)
+    if after.total_seconds() <= 0:
+        CMD_HANG.clear()
+        core.set_hanging_commands(conn, {})
+        return {"hanging": {}, "warned": [], "killed": []}
+    host = core.this_host()
+    rows = conn.execute("SELECT name, pid, host FROM agents WHERE kind='ai' AND stop_at IS NULL "
+                        "AND (pid IS NULL OR host=?) ORDER BY name", (host,)).fetchall()
+    terminals = agent_terminals(conn) if TMUX_RUNNER is not None or _tmux_cmd() else {}
+    pids = {}
+    for r in rows:
+        if r["pid"] and r["host"] == host:
+            pids[r["name"]] = r["pid"]
+        elif r["name"] in terminals:
+            p = pane_process(conn, r["name"])
+            if p and p.get("pid"):
+                pids[r["name"]] = p["pid"]
+    for a in [a for a in CMD_HANG if a not in pids]:
+        del CMD_HANG[a]
+    if not pids:
+        core.set_hanging_commands(conn, {})
+        return {"hanging": {}, "warned": [], "killed": []}
+    text = core._shell_list()
+    if not text:
+        return {"hanging": core.hanging_commands(conn), "warned": [], "killed": []}
+    t = core.now()
+    running = core.session_child_commands(text, pids, t, server_grace=server_grace)
+    for a in [a for a in CMD_HANG if a not in running or not running[a]]:
+        del CMD_HANG[a]
+    hanging_out, warned, killed = {}, [], []
+    for agent, cmds in sorted(running.items()):
+        if not cmds:
+            CMD_HANG.pop(agent, None)
+            continue
+        cmd = cmds[0]
+        pane = terminals.get(agent)
+        if pane:
+            try:
+                screen = _pane_screen(agent, pane)
+            except RiverError:
+                continue
+            if screen["ended"]:
+                CMD_HANG.pop(agent, None)
+                continue
+            pane_text = _plain(screen["text"])
+        else:
+            pane_text = ""
+        st = CMD_HANG.get(agent)
+        if not st or st["pid"] != cmd["pid"] or st["screen"] != pane_text:
+            CMD_HANG[agent] = {"pid": cmd["pid"], "cmd": cmd["label"], "screen": pane_text,
+                               "quiet_since": t, "warned_at": None, "started": cmd["started"]}
+            continue
+        quiet = t - st["quiet_since"]
+        if quiet < after:
+            continue
+        held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                            "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+        held_id = held["id"] if held else None
+        if st["warned_at"] is None:
+            st["warned_at"] = t
+            note = (f"Your command (PID {cmd['pid']}: {cmd['label']}) has produced no new output for "
+                    f"{core._short(quiet)} (started {st['started'][:16].replace('T', ' ')} UTC).")
+            if kill_wait.total_seconds() > 0:
+                note += (f" If it produces no new output in {kill_str} more, maxpm serve will end it "
+                         f"(SIGTERM, then SIGKILL).")
+            with core.tx(conn):
+                core._send(conn, "note", "maxpm", note, to=agent, item_id=held_id)
+            warned.append(agent)
+            hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                  "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+        elif kill_wait.total_seconds() > 0 and t - st["warned_at"] >= kill_wait:
+            why = f"hung with no new output for {core._short(quiet)}"
+            try:
+                core.kill_session_command(conn, agent, pid=cmd["pid"], reason=why, grace=grace, sleep=sleep,
+                                          by_serve=True, pane_pid=pids.get(agent), server_grace=server_grace)
+            except RiverError as e:
+                print(f"maxpm: could not end hanging command in {agent}: {e}", file=sys.stderr, flush=True)
+                hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                      "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+                continue
+            CMD_HANG.pop(agent, None)
+            manager = core.active_manager(conn)
+            to_mgr = [manager] if manager and manager != agent else [
+                r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+            with core.tx(conn):
+                core._send(conn, "note", "maxpm",
+                           f"maxpm serve ended your hanging command (PID {cmd['pid']}: {cmd['label']}) after "
+                           f"{core._short(quiet)} with no new output (SIGTERM, then SIGKILL). Give long tests "
+                           f"and commands a timeout.",
+                           to=agent, item_id=held_id)
+                for p in to_mgr:
+                    core._send(conn, "alert", "maxpm",
+                               f"maxpm serve ended a hanging command in {agent} (PID {cmd['pid']}: {cmd['label']}) "
+                               f"after {core._short(quiet)} with no new output.",
+                               to=p, item_id=held_id)
+                core.sync_needs_you(conn)
+            killed.append(agent)
+        else:
+            hanging_out[agent] = {"pid": cmd["pid"], "command": cmd["label"], "since": core.iso(st["quiet_since"]),
+                                  "warned_at": core.iso(st["warned_at"]), "started": st["started"]}
+    core.set_hanging_commands(conn, hanging_out)
+    return {"hanging": hanging_out, "warned": warned, "killed": killed}
+
+
 BACKGROUND = set()  # (agent, task id) that fresh_sessions wrote into the history: once for each task
 
 
@@ -3335,7 +3982,9 @@ def _chat_of(conn, agent):
         return None
     if not sid:
         return None
-    return {"agent": agent, "kind": kind, "path": path, "sid": sid, "cwd": cwd, "context": cs.get("context"),
+    # The path as text: end_for_answer stores the record as JSON, and a Path failed every pass of fresh_sessions while
+    # an agent that waited on an answer sat at its prompt (#6227).
+    return {"agent": agent, "kind": kind, "path": str(path), "sid": sid, "cwd": cwd, "context": cs.get("context"),
             "model": a["model"], "session": a["session"]}
 
 
@@ -3376,9 +4025,11 @@ def _resume_for_answer(conn, item_id, why, runner=None):
                  f"gives you #{item_id} again.")
         t = core.resume_command(conn, name, platform, c["sid"], r["project_id"], {"prompt": first, "model": c.get("model")},
                                 transcript=c["path"])
-        spec = {"command": t["command"], "path": c.get("cwd") or core._project(conn, r["project_id"])["path"],
+        folder = c.get("cwd") or core._project(conn, r["project_id"])["path"]
+        wt = _workspace_for(conn, name, folder)
+        spec = {"command": t["command"], "path": folder,
                 "project": name, "session_title": c.get("session") or name, "platform": t.get("platform"),
-                "first_prompt": t.get("first_prompt")}
+                "first_prompt": t.get("first_prompt"), **({"workspace": wt} if wt else {})}
         _open_terminal(spec, {**t["env"], "MAXPM_FOCUS": f"item:{item_id}"}, runner, conn)
     except Exception as e:  # noqa: BLE001 - the start is taken back; a fresh session starts instead
         try:
@@ -3401,11 +4052,16 @@ def start_fresh(conn, item_id, why, runner=None):
         return resumed
     it = core.annotate(conn)[item_id]
     p = core._project(conn, it["project"])
-    label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
-    opt = next((o for o in core.launch_options(conn) if o["label"] == label), None)
+    # The item's agent is a preference: a provider at its limit of sessions or usage gives the item to the next one of
+    # agent_order (#6361). With agent_order set, an item that names no agent of its own takes the list's first.
+    if it["agent"] and not core.default_gives_way(conn, it.get("agent_from"), p["id"]):
+        label = core.agent_for_type(conn, it["agent"], p["id"])
+    else:
+        label = None if core.provider_order_set(conn, p["id"]) else _agent_for(conn, it["model"])[0]
+    opt = next((o for o in core.launch_options(conn) if o["label"] == label), None) if label else None
     model = it["model"] if opt and any(x["name"] == it["model"] for x in opt["models"]) else None
     effort = it["effort"] if opt and it["effort"] in opt["efforts"] else None
-    t = core.launch_target(conn, agent=label, item=item_id, model=model, effort=effort)
+    t = core.launch_target(conn, agent=label, item=item_id, model=model, effort=effort, auto_agent=True)
     _can_open_terminal(runner, f"cd {t['path']} && MAXPM_FOCUS=item:{item_id} claude go")
     return _start_for_item(conn, t, runner, "maxpm", why, by="maxpm serve")
 
@@ -3609,7 +4265,6 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     """Start a deployer session for a target: river names it, gives it the target (the old owner is told), and
     opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy
     item's model and effort. Its maxpm go claims the deploy item when it is ready, else it waits for it."""
-    import secrets
     why = core.pause_refusal(conn) or core.net_refusal(conn)  # #5962, #6099
     if why:
         raise RiverError(why)
@@ -3623,11 +4278,11 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     # Each deployer gets a session name of its own (claude --name, --remote-control): the one it replaces may still
     # run, and #1010 saw both starts beside a live session of the same name end before they connected.
-    tag = secrets.token_hex(2)
+    name = core.new_agent_name(conn, f"deploy-{target}")  # never a stopped deployer's name (#6359)
+    tag = name.rsplit("-", 1)[1]
     title = f"{core._short_title(core.focus_title(conn, focus), 43)} {tag}"
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
          **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title)}
-    name = f"deploy-{target}-{tag}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
     _give_scope(conn, name, [f"target:{target}"], f"started to deploy {target}")
     with core.tx(conn):
@@ -3815,11 +4470,17 @@ def send_keys(pane, keys):
     return len(keys)
 
 
+# Set only inside prompt_approve (#6282): the active manager answers a session's prompt, so each typing step of
+# prompt_answer takes the manager as it takes a person. Nothing else lets an agent type into another agent's pane.
+_MANAGER_ANSWERS = contextvars.ContextVar("maxpm_manager_answers", default=False)
+
+
 def _typing_pane(conn, agent, who, shell=False, manager=False):
     """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane. shell: the pane
     may show only a shell (the Terminal tab, where a person types keys into the pane on purpose); the message box,
     the answer card and the settings never type into a shell (#5298). manager: the active manager may type too
     (maxpm interrupt, #5547)."""
+    manager = manager or _MANAGER_ANSWERS.get()
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
     if row and row["kind"] != "human" and not (manager and who == core.active_manager(conn)):
         raise RiverError("only a person or the manager types into an agent's terminal" if manager
@@ -4384,6 +5045,306 @@ def turn_started(conn, agent, text=None):
 
 PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)
 
+# Claude Code's question dialog (AskUserQuestion, #6234), read from its pane: Claude Code writes the question into its
+# transcript only after the answer (2.1.328). A tab line (DETECT['ask']), the question, the numbered options with a
+# description under each, the option to type an answer ('Type something.'), a rule, and 'Chat about this'. A question
+# with more answers has '[ ]' and '[✔]' boxes and a 'Next' line after its options ('Submit' on the last question);
+# a question with previews shows
+# the box of the marked option's preview beside the options (and no text option); the last tab ('Submit') lists the
+# answers ('● question', '→ answer') over 'Submit answers' and 'Cancel'.
+_ASK_TAB = re.compile(r"([☐☒✔])\s+(.+?)(?=\s{2,}[☐☒✔]|\s*$)")
+_ASK_OPT = re.compile(r"^(\s*)(❯\s*)?(\d+)\.\s+(.*)$")
+_ASK_PREVIEW = re.compile(r"\s{2,}([│┃┌└├].*)$")  # the preview box beside an option
+_ASK_BOX = re.compile(r"^[│┃┌└├]")
+_ASK_CHECK = re.compile(r"^\[([ ✔✓xX])\]\s*(.*)$")
+_ASK_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _ask_dialog(tail, layout):
+    """The question dialog of the CLI (DETECT['ask']) that a pane's last lines (and the lines above them) show, or
+    None: {"tabs": [{"header", "done", "submit"}], "question", "options": [{"n": its number or None, "label",
+    "detail", "checked": True/False for a box (None: no box), "chosen": answered before, "text": the option to type an
+    answer, "typed": the text in it, "chat": 'Chat about this', "stop": its place in the list the arrows move in}],
+    "multi", "submit_stop": the place of a 'Submit' line, "at": the place of the marker, "preview": the lines of the
+    marked option's preview, "review": [{"q", "a"}], "warn", "start": the tab line in rows, "rows"}."""
+    rx = layout.get("ask")
+    rows = list(getattr(tail, "above", ())) + list(tail)
+    t = next((n for n in range(len(rows) - 1, -1, -1) if rx and rx.match(rows[n])), None)
+    if t is None:
+        return None
+    tabs = [{"header": m.group(2).strip(), "done": m.group(1) == "☒", "submit": m.group(1) == "✔"}
+            for m in _ASK_TAB.finditer(rows[t].replace("←", " ").replace("→", " "))]
+    question, review, warn, stops, preview, after_rule = [], [], [], [], [], False
+    for x in rows[t + 1:]:
+        st = x.strip()
+        m = _ASK_OPT.match(x)
+        if not m and (layout["hint"].search(x) or st.startswith("Notes:")):
+            continue  # the key line (wrapped in a narrow pane: its rest too), and the notes line of a preview
+        if not m and layout["rule"].match(x):
+            after_rule = True
+            continue
+        if m:
+            label, box = m.group(4), _ASK_PREVIEW.search(m.group(4))
+            if box:
+                preview.append(box.group(1).rstrip())
+                label = label[:box.start()]
+            label, check = label.strip(), _ASK_CHECK.match(label.strip())
+            checked = None
+            if check:
+                checked, label = check.group(1) != " ", check.group(2).strip()
+            chosen = label.endswith(" ✔")
+            stops.append({"n": int(m.group(3)), "label": label[:-2].rstrip() if chosen else label, "detail": "",
+                          "checked": checked, "chosen": chosen, "chat": after_rule, "marked": bool(m.group(2))})
+            continue
+        if not stops:
+            if st.startswith("●"):
+                review.append({"q": st[1:].strip(), "a": ""})
+            elif st.startswith("→") and review:
+                review[-1]["a"] = st[1:].strip()
+            elif st.startswith("⚠"):
+                warn.append(st[1:].strip())
+            elif st.startswith("❯"):
+                return None  # the input box with the person's text: no dialog on the screen now
+            else:
+                question.append(re.sub(r"^[│┃]\s*", "", st))  # a question wrapped on more lines
+            continue
+        plain = st.lstrip("❯").strip()
+        if plain in ("Submit", "Next") and not after_rule:  # 'Next' while another question follows
+            stops.append({"submit": True, "marked": st.startswith("❯")})
+        elif after_rule and plain == "Chat about this":  # with no number (a question with previews)
+            stops.append({"n": None, "label": plain, "detail": "", "checked": None, "chosen": False, "chat": True,
+                          "marked": st.startswith("❯")})
+        elif after_rule:
+            return None  # the input box and the status line under it: a '☐' line in the chat, no dialog
+        elif _ASK_BOX.match(st):
+            preview.append(st)
+        elif st.startswith("❯"):
+            return None
+        elif not stops[-1].get("submit"):
+            stops[-1]["detail"] = (stops[-1]["detail"] + " " + st).strip()  # the option's description
+    opts = [dict(s, stop=i) for i, s in enumerate(stops) if not s.get("submit")]
+    if not any(o["n"] for o in opts):
+        return None
+    if after_rule and not preview:  # the last option before the rule takes a text
+        last = next((o for o in reversed(opts) if not o["chat"]), None)
+        if last:
+            last["text"] = True
+            last["typed"] = "" if last["label"].startswith("Type something") else last["label"]
+    for o in opts:
+        o.pop("marked", None)
+    return {"tabs": tabs, "question": " ".join(question), "options": opts,
+            "multi": any(o["checked"] is not None for o in opts),
+            "submit_stop": next((i for i, s in enumerate(stops) if s.get("submit")), None),
+            "at": next((i for i, s in enumerate(stops) if s["marked"]), None), "preview": preview,
+            "review": review, "warn": " ".join(warn), "start": t, "rows": rows}
+
+
+def _ask_current(raw, ask):
+    """The tab that the dialog shows now (its place in ask['tabs']), from the pane's text with its colours (raw):
+    Claude Code draws it on a background colour, and the plain text does not say which one it is. None when it cannot
+    tell."""
+    line = next((x for x in reversed((raw or "").splitlines()) if "☐" in x or "☒" in x), None)
+    if line is None:
+        return None
+    lit, on, at = [], False, 0
+    for m in _ASK_SGR.finditer(line + "\x1b[m"):
+        if on:
+            lit.append(line[at:m.start()])
+        codes = m.group(1).split(";") if m.group(1) else ["0"]
+        if "48" in codes or "7" in codes:
+            on = True
+        elif "49" in codes or "0" in codes or "27" in codes:
+            on = False
+        at = m.end()
+    words = re.sub(r"[☐☒✔]", "", "".join(lit)).strip()
+    if words:
+        n = next((i for i, x in enumerate(ask["tabs"]) if x["header"] == words), None)
+        if n is not None:
+            return n
+    if ask["review"] or ask["question"].startswith("Review your answers"):
+        return next((i for i, x in enumerate(ask["tabs"]) if x["submit"]), None)
+    return 0 if len(ask["tabs"]) == 1 else None
+
+
+def _ask_read(tail, layout):
+    """The question dialog of the CLI that a pane's last lines (and the lines above them) show, or None: Claude Code's
+    (_ask_dialog), or the form of river/ask_forms that the adapter names (DETECT['ask_form'], #6235)."""
+    form = ask_forms.FORMS.get(layout.get("ask_form"))
+    if form is None:
+        ask = _ask_dialog(tail, layout)
+    else:
+        rows = list(getattr(tail, "above", ())) + list(tail)
+        t = next((n for n in range(len(rows) - 1, -1, -1) if layout["ask"].match(rows[n])), None)
+        ask = form.read(rows, t) if t is not None else None
+    if ask:
+        ask["form"] = layout.get("ask_form") if form else "claude"
+    return ask
+
+
+def _ask_prompt(pane, ask):
+    """The prompt of pane_prompts for a question dialog (_ask_read): the fields of any prompt, and 'ask'. What only
+    the colours say (Claude Code's tab shown now, OpenCode's marked option) comes from one capture with colours."""
+    form = ask_forms.FORMS.get(ask["form"])
+    if form is None or ask["current"] is None or ask["at"] is None:
+        try:
+            raw = _tmux("capture-pane", "-p", "-e", "-t", pane, check=False)
+        except RiverError:
+            raw = None
+        if form is None:
+            ask["current"] = _ask_current(raw, ask)
+        else:
+            form.finish(ask, raw)
+    rows = ask.pop("rows")
+    lines = rows[ask.pop("start"):]
+    opts = ask["options"]
+    # The same question with the same answers keeps its sig while the marker moves; a typed text or a box changes it.
+    sig = "\x1f".join([lines[0], ask["question"],
+                       *(f"{o['label']}|{o['checked']}|{o['chosen']}|{o.get('typed', '')}" for o in opts),
+                       *(f"{r['q']}|{r['a']}" for r in ask["review"])])
+    marked = next((n for n, o in enumerate(opts) if o["stop"] == ask["at"]), 0)
+    return {"question": ask["question"], "options": [o["label"] for o in opts], "fixed": False, "selected": marked,
+            "tool": None, "command": None, "why": None, "lines": lines, "sig": sig,
+            "tell": next((n for n, o in enumerate(opts) if o.get("text")), None), "row": False, "keys": [], "ask": ask}
+
+
+def _ask_answer(conn, agent, pane, p, pick=None, other=None, picks=None, tab=None, who=None):
+    """An answer to a question dialog (_ask_dialog) from the page: the keys Claude Code takes. tab: show that tab
+    (Left, Right). pick: an option (the arrows to it, then Enter; a digit would choose at once in one dialog and only
+    move the marker in a dialog with previews). other: the text of its 'Type something' option. picks: the options
+    to tick in a question with boxes (Enter on an option turns its box on or off), then 'Submit' goes to the next tab.
+    The dialog of another CLI (river/ask_forms, #6235) takes its form's keys: _ask_form_answer."""
+    ask, opts = p["ask"], p["ask"]["options"]
+    form = ask_forms.FORMS.get(ask.get("form"))
+    if form is not None:
+        return _ask_form_answer(conn, agent, pane, form, ask, pick, other, picks, tab, who)
+
+    def move(a, b):
+        return [{"key": "Down" if b > a else "Up"}] * abs(b - a)
+
+    if tab is not None:
+        cur = ask.get("current")
+        if not isinstance(tab, int) or not 0 <= tab < len(ask["tabs"]):
+            raise RiverError("pick one of the dialog's tabs")
+        if cur is None:
+            raise RiverError(f"MaximizePM cannot tell which question the terminal of {agent} shows; use its terminal")
+        terminal_keys(conn, agent, [{"key": "Right" if tab > cur else "Left"}] * abs(tab - cur), who)
+        return {"agent": agent, "pane": pane, "picked": ask["tabs"][tab]["header"], "text": ""}
+    at = ask["at"]
+    if at is None:
+        raise RiverError(f"MaximizePM cannot see the marked option in the terminal of {agent}; answer it there")
+    text = " ".join(str(other or "").split())
+    if len(text) > 4000:
+        raise RiverError("text is at most 4000 characters")
+    box = next((o for o in opts if o.get("text")), None)
+    if text and box is None:
+        raise RiverError(f"this question of {agent} takes no text: pick one of its options, or 'Chat about this'")
+    chat = isinstance(pick, int) and 0 <= pick < len(opts) and opts[pick]["chat"]
+    if ask["multi"] and not chat:
+        want = {int(x) for x in (picks or []) if isinstance(x, int) or str(x).isdigit()}
+        keys, pos = [], at
+        for n, o in enumerate(opts):
+            if o["checked"] is not None and not o.get("text") and o["checked"] != (n in want):
+                keys += move(pos, o["stop"]) + [{"key": "Enter"}]
+                pos = o["stop"]
+        if text:
+            keys += move(pos, box["stop"])
+            pos = box["stop"]
+        if keys:
+            terminal_keys(conn, agent, keys, who)
+        if text:
+            time.sleep(PROMPT_PAUSE)
+            _agent_in_pane(agent, pane, "before the text")
+            terminal_keys(conn, agent, [{"text": text}], who)
+        end = ask["submit_stop"]
+        terminal_keys(conn, agent, move(pos, end) + [{"key": "Enter"}] if end is not None else [{"key": "Right"}], who)
+        picked = ", ".join([o["label"] for n, o in enumerate(opts) if n in want] + ([text] if text else []))
+        return {"agent": agent, "pane": pane, "picked": picked or "nothing", "text": text}
+    if text:
+        terminal_keys(conn, agent, move(at, box["stop"]), who)
+        time.sleep(PROMPT_PAUSE)
+        _agent_in_pane(agent, pane, "before the text")
+        terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        core.typed_to(conn, agent)
+        return {"agent": agent, "pane": pane, "picked": box["label"], "text": text}
+    if not isinstance(pick, int) or not 0 <= pick < len(opts):
+        raise RiverError("pick one of the question's options, or write your own answer")
+    o = opts[pick]
+    if o.get("text") and not o.get("typed"):
+        raise RiverError("write your own answer in the text box")
+    terminal_keys(conn, agent, move(at, o["stop"]) + [{"key": "Enter"}], who)
+    return {"agent": agent, "pane": pane, "picked": o.get("typed") or o["label"], "text": ""}
+
+
+def _ask_form_answer(conn, agent, pane, form, ask, pick, other, picks, tab, who):
+    """An answer to the question dialog of Codex, Copilot or OpenCode (river/ask_forms, #6235): the form's keys go
+    in; before each text the CLI gets PROMPT_PAUSE to draw its input box, and the text goes in only while the agent
+    still runs in the pane."""
+    if tab is not None:
+        if not isinstance(tab, int) or not 0 <= tab < len(ask["tabs"]):
+            raise RiverError("pick one of the dialog's tabs")
+        if ask.get("current") is None:
+            raise RiverError(f"MaximizePM cannot tell which question the terminal of {agent} shows; use its terminal")
+        terminal_keys(conn, agent, form.tab(ask, tab), who)
+        return {"agent": agent, "pane": pane, "picked": ask["tabs"][tab]["header"], "text": ""}
+    text = " ".join(str(other or "").split())
+    if len(text) > 4000:
+        raise RiverError("text is at most 4000 characters")
+    try:
+        steps, picked = form.answer(ask, pick, text, picks)
+    except RiverError as e:
+        raise RiverError(f"{e} ({agent})") from None
+    batch, sent = [], False
+    for s in steps:
+        if s.get("pause"):  # the CLI reads what came before it first (ask_forms._typed)
+            if batch:
+                terminal_keys(conn, agent, batch, who)
+            batch, sent = [], True
+            time.sleep(PROMPT_PAUSE)
+            continue
+        if "text" in s and (batch or sent):
+            if batch:
+                terminal_keys(conn, agent, batch, who)
+            batch, sent = [], True
+            time.sleep(PROMPT_PAUSE)
+            _agent_in_pane(agent, pane, "before the text")
+        batch.append(s)
+    if batch:
+        terminal_keys(conn, agent, batch, who)
+    if text and not ask["multi"]:
+        core.typed_to(conn, agent)
+    return {"agent": agent, "pane": pane, "picked": picked, "text": text}
+
+
+# The panes whose closed question (DETECT['ask_open']) MaximizePM opened: {pane: the line over the opener ('? 1
+# question', its time left out)}. Each closed question opens once: when the person goes back to the main prompt
+# in the terminal (Codex: shift+→), it stays closed there; the entry goes when the pane shows no question at all.
+_ASK_OPENED = {}
+ASK_OPEN_PAUSE = 0.5  # seconds for the CLI to draw the question after the keys that open it
+
+
+def _ask_opened(pane, tail, layout, ask):
+    """(tail, ask) of a pane, with its closed question opened (DETECT['ask_open'], #6258): Codex's Default mode asks
+    with request_user_input_async while its turn goes on and shows the question closed, '? 1 question · 12s' over
+    'shift+← to answer'. MaximizePM sends the keys that open it, once for each closed question, and reads the pane
+    again, so that the page shows the question's card. The keys only move the focus to the question: the text that
+    the person typed in the CLI's input box stays there."""
+    rx, keys = layout["ask_open"]
+    at = next((n for n, x in enumerate(tail) if rx.match(x)), None)
+    if at is None:
+        if ask is None:
+            _ASK_OPENED.pop(pane, None)
+        return tail, ask
+    if ask is not None:
+        return tail, ask
+    mark = re.sub(r"\s*·.*$", "", tail[at - 1]).strip() if at else ""
+    if _ASK_OPENED.get(pane) == mark:
+        return tail, ask
+    _ASK_OPENED[pane] = mark
+    _tmux("send-keys", "-t", pane, *keys, check=False)
+    time.sleep(ASK_OPEN_PAUSE)
+    tail = _prompt_tail(_plain(_pane_texts([pane]).get(pane) or ""))
+    return tail, _ask_read(tail, layout)
+
 
 def pane_prompts(conn, terminals):
     """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
@@ -4404,6 +5365,12 @@ def pane_prompts(conn, terminals):
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
         rx, layout, _ = _pane_rule(conn, agent, *procs.get(pane, (None, None)))
+        ask = _ask_read(tail, layout) if layout.get("ask") else None
+        if layout.get("ask_open"):
+            tail, ask = _ask_opened(pane, tail, layout, ask)
+        if ask:  # the CLI's own question dialog (#6234): its card shows each part and answers with its keys
+            out[agent] = _ask_prompt(pane, ask)
+            continue
         parts = _prompt_found(tail, rx, layout)
         if not parts:
             continue
@@ -4448,19 +5415,53 @@ def _menu_keys(at, n, row=False, key="Enter"):
     return [{"key": more if n > at else less}] * abs(n - at) + [last]
 
 
-def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
+def prompt_approve(conn, agent, option=None, text=None, who=None):
+    """maxpm approve <session> <option> [--text] (#6282, mark 2026-11-20: six 'Allow access to this file?' cards of
+    agy sessions reached him, 'the type of issue you should be able to resolve for me'): the active manager (or a
+    person) answers the prompt that a session's pane shows now, as the card on the page does. option: the number of
+    an option as the prompt lists it (1 is the first); text: what the agent does instead (the prompt's 'No, and tell
+    ... what to do differently'). Never the auto mode classifier's prompt (policy p3): that one needs the person."""
+    if not who or not (core._is_person(conn, who) or who == core.active_manager(conn)):
+        raise RiverError("only the active manager or a person answers a session's prompt")
+    if option is None and not (text or "").strip():
+        raise RiverError(f"name an option: maxpm approve {agent} <number>, or say what to do instead: --text \"...\"")
+    token = _MANAGER_ANSWERS.set(True)
+    try:
+        pane = _typing_pane(conn, agent, who)
+        p = pane_prompts(conn, {agent: pane}).get(agent)
+        if not p:
+            raise RiverError(f"{agent} waits at no prompt in its terminal now; nothing to answer")
+        if p.get("why"):
+            raise RiverError(f"{agent} waits at the auto mode classifier's prompt ({p['why'][:120]}): it needs the "
+                             f"person (policy p3); send it on: maxpm forward <the alert's id>")
+        pick = None
+        if option is not None:
+            if not isinstance(option, int) or not 1 <= option <= len(p["options"]):
+                raise RiverError(f"the prompt of {agent} has the options 1 to {len(p['options'])}: "
+                                 + "; ".join(f"{n} = {o}" for n, o in enumerate(p["options"], 1)))
+            pick = option - 1
+        res = prompt_answer(conn, agent, p["sig"], pick=pick, other=text, who=who)
+    finally:
+        _MANAGER_ANSWERS.reset(token)
+    return {**res, "question": p["question"]}
+
+
+def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None, picks=None, tab=None):
     """The prompt dialog of the Sessions tab (#4607): a person's answer to the prompt that the agent's tmux pane
     shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
     tell the agent what to do instead (the option of its adapter's DETECT['tell_instead'], "No, and tell ... what to
     do", else Escape), then Enter. key: the key that chooses the pick, one of the prompt's keys (hint_keys: 's' for
     this session only), else Enter. Refused when the pane shows another prompt than the one the person read (sig),
     when the question takes only one of its options (p['fixed']) and a text came, and when no agent runs in the pane:
-    a text is typed only while the agent runs there, never into a shell (#5904)."""
+    a text is typed only while the agent runs there, never into a shell (#5904). picks, tab: a question dialog
+    (_ask_answer, #6234)."""
     pane = _typing_pane(conn, agent, who)
     p = pane_prompts(conn, {agent: pane}).get(agent)
     if not p or p["sig"] != sig:
         raise RiverError(f"the prompt in the terminal of {agent} changed or is gone; look at it again")
     _agent_in_pane(agent, pane)  # the screen can still show the question after the agent ended
+    if p.get("ask"):
+        return _ask_answer(conn, agent, pane, p, pick, other, picks, tab, who)
     opts, at = p["options"], p["selected"]
     text = " ".join(str(other or "").split())
     if text:
@@ -4474,7 +5475,11 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
         # #5904: Esc or the pick can end the CLI (Claude Code's trust question: 'No, exit'); the text then went to the
         # shell. Look again before the text goes.
         _agent_in_pane(agent, pane, f"after {opts[n] if n is not None else 'Escape'}")
-        terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        # The Enter a moment after the text: Codex takes characters that come fast as a paste, and an Enter with them
+        # stayed in its input line (#6259, Codex 0.159.1: 'No, and tell Codex what to do differently').
+        terminal_keys(conn, agent, [{"text": text}], who)
+        time.sleep(PROMPT_PAUSE)
+        terminal_keys(conn, agent, [{"key": "Enter"}], who)
         core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):
@@ -4886,6 +5891,7 @@ def frame_check(url):
 PAGE_TOKEN = secrets.token_urlsafe(24)
 TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_send_now", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
+              "setup_agent_install", "setup_agent_signin",  # they run a command in a shell of that tab (#6239)
               "browser_input",  # the person's mouse and keys in a project's browser (#4631)
               "browser_hand",  # Hand to <session>: it types a line into that session's chat (#5616)
               "browser_steps",  # Record and Stop of the pane: Stop types the steps into the session's chat (#5707)
@@ -4951,8 +5957,13 @@ def restart_now(why="code changed"):
     """Replace this process with a new maxpm serve on the same port, which runs the code on disk. Python
     sockets are not inherited across exec, so the port is free for the new process."""
     print(f"{why}; restarting", flush=True)
+    drain_runners()  # finish running /api/run commands before exec (#6475)
     stop_loop_process()  # the new serve starts its own (#5569)
-    os.execv(sys.executable, _restart_argv())
+    try:
+        os.execv(sys.executable, _restart_argv())
+    finally:
+        with _RUN_COND:
+            _RUN_STATE["restarting"] = False
 
 
 def _restart_soon(why="updated"):
@@ -4973,10 +5984,15 @@ def _restart_into(root):
         time.sleep(0.8)
         _restart_wait("updated")
         print(f"updated; restarting from {root}", flush=True)
+        drain_runners()
         stop_loop_process()
         os.chdir(root)
-        os.execv(sys.executable, [sys.executable, str(Path(root) / "bin" / "maxpm")]
-                 + [a for a in sys.argv[1:] if a != "--open"])
+        try:
+            os.execv(sys.executable, [sys.executable, str(Path(root) / "bin" / "maxpm")]
+                     + [a for a in sys.argv[1:] if a != "--open"])
+        finally:
+            with _RUN_COND:
+                _RUN_STATE["restarting"] = False
     threading.Thread(target=go, daemon=True).start()
 
 
@@ -4984,6 +6000,15 @@ def release_status(conn):
     """The page's bar of a new version (#5601): release.status, read from the last check (no network)."""
     from . import release
     return release.status(conn)
+
+
+def _agent_update(conn, a, who):
+    """Update now of the dialog '<Agent> is out of date': one agent (agent), or each of agents (Update all)."""
+    from . import agentupdate
+    names = [a["agent"]] if a.get("agent") else list(a.get("agents") or [])
+    if not names:
+        raise RiverError("name the agent to update: {agent: <id>}")
+    return [agentupdate.request(conn, n, who) for n in names]
 
 
 def release_update(conn, restart=None):
@@ -5115,23 +6140,81 @@ def _block_state(path):
     return "current" if AGENT_SNIPPET in text else "old" if core.names_product(text) else "missing"
 
 
-def _empty_old_files(folder):
-    """The old instruction files of a folder (CLAUDE.md, agents.replaced_files) that hold no rules of their own: the
-    setup guide's Update deletes them (#6024)."""
-    from . import agents
-    from .cli import _old_rules
-    return [n for n, _ in agents.replaced_files() if Path(folder, n).is_file()
-            and not _old_rules(Path(folder, n).read_text(errors="replace", encoding="utf-8"))]
+def _setup_folder(path, projects, shared):
+    from .cli import instructions_layout, legacy_instructions
+    exists = Path(path).is_dir()
+    old = list(legacy_instructions(path)) if exists else []
+    return {"path": path, "projects": projects, "exists": exists,
+            "agents_md": _block_state(Path(path, shared)),
+            "empty_old": [p.name for p, _, rules in old if not rules],
+            "old_with_rules": [p.name for p, _, rules in old if rules],
+            "layout": instructions_layout(path) if exists else None}
+
+
+# Phone pairing codes (#6471): short-lived one-time codes shown in the QR of Settings > setup guide > Your phone.
+# Held in memory (no extra table): each code is valid for 10 minutes and consumed when the app POSTs /api/pair.
+PAIR_CODE_TTL = 600
+PAIR_CODES_MAX = 20
+_PAIR_LOCK = threading.Lock()
+PAIR_CODES = {}  # code -> monotonic expiry timestamp
+
+
+def issue_pair_code(now_mono=None):
+    """Mint a 10-minute pairing code for the setup guide's QR; returns (code, expires_iso)."""
+    t = time.monotonic() if now_mono is None else now_mono
+    code = secrets.token_urlsafe(18)  # 24 URL-safe chars (144 bits of entropy)
+    exp = t + PAIR_CODE_TTL
+    with _PAIR_LOCK:
+        for k in [k for k, v in PAIR_CODES.items() if v <= t]:
+            del PAIR_CODES[k]
+        while len(PAIR_CODES) >= PAIR_CODES_MAX:
+            oldest = min(PAIR_CODES, key=PAIR_CODES.get)
+            del PAIR_CODES[oldest]
+        PAIR_CODES[code] = exp
+    from datetime import timedelta
+    expires_iso = core.iso(core.now() + timedelta(seconds=PAIR_CODE_TTL))
+    return code, expires_iso
+
+
+def consume_pair_code(code, now_mono=None):
+    """Check and consume a pairing code in constant time; returns True iff it was valid and unexpired."""
+    if not isinstance(code, str) or not code:
+        return False
+    t = time.monotonic() if now_mono is None else now_mono
+    with _PAIR_LOCK:
+        for k in [k for k, v in PAIR_CODES.items() if v <= t]:
+            del PAIR_CODES[k]
+        matched = None
+        for k in PAIR_CODES:
+            if hmac.compare_digest(k, code):
+                matched = k
+        if matched is not None:
+            del PAIR_CODES[matched]
+            return True
+    return False
+
+
+def clear_pair_codes():
+    with _PAIR_LOCK:
+        PAIR_CODES.clear()
 
 
 def _tailnet_status(conn):
     """tailnet.status for the setup guide; a failure of the Tailscale CLI shows the step as not installed."""
     from . import tailnet
     try:
-        return tailnet.status(conn)
+        st = tailnet.status(conn)
     except Exception:  # the guide opens anyway
         return {"installed": False, "running": False, "serving": False, "url": None, "qr": None,
                 "command": tailnet.serve_command(core.serve_port_now(conn)), "logins": []}
+    if st.get("serving") and st.get("url"):
+        code, expires_at = issue_pair_code()
+        pair_url = f"{st['url'].rstrip('/')}/?pair={code}"
+        st["pair_code"] = code
+        st["pair_expires_at"] = expires_at
+        st["pair_url"] = pair_url
+        st["qr"] = tailnet.qr_svg(pair_url)
+    return st
 
 
 def tailnet_serve(conn, actor=None):
@@ -5154,6 +6237,9 @@ def host_setup_op(conn, args, who=None):
     res = host.setup(conn, str(args.get("target") or "").strip(), do_move=bool(args.get("move")))
     url = (res.get("phone") or {}).get("url")
     res["qr"] = tailnet.qr_svg(url) if url else None
+    # The agents that sign in there with no browser (#6255): the page draws a button for each one.
+    from . import agentlogin
+    res["signin"] = [{"agent": k, "name": v["name"]} for k, v in agentlogin.AGENTS.items()]
     return res
 
 
@@ -5164,13 +6250,38 @@ def host_signin_op(conn, args, who=None):
     return host.signin(str(args.get("target") or "").strip(), str(args.get("agent") or ""), args.get("code") or None)
 
 
+def _agent_cli(conn, label, exe, cmd, term, have, jobs):
+    """One agent of the setup guide's Choose an agent (#6239). signed_in: True or False from the CLI's own status
+    command, None when it has none."""
+    platform = cmd[1:] if cmd.startswith("@") else None
+    m = agentinstall.METHODS.get(platform) or {}
+    path = term.get(exe)
+    return {"label": label, "platform": platform, "found": bool(path), "path": path,
+            "added": label in have or exe in have, "command": _shown_cmd(conn, cmd),
+            "main": core._adapters().is_tier1(platform),  # the tier 1 agents come first; others under More agents
+            "install": {"command": agentinstall.install_command(platform)} if m.get("install") else None,
+            "signin": bool(m.get("signin")),
+            "signed_in": agentinstall.signed_in(platform, path) if path else None,
+            "jobs": jobs.get(platform) or {}}
+
+
+def setup_agent_install(conn, args, who):
+    """Install an agent CLI by its vendor's method, in a window of the Terminal tab (#6239)."""
+    return agentinstall.run(conn, str(args.get("platform") or ""), "install", who)
+
+
+def setup_agent_signin(conn, args, who):
+    """The CLI's own sign-in, in a window of the Terminal tab; the person signs in there (#6239)."""
+    return agentinstall.run(conn, str(args.get("platform") or ""), "signin", who)
+
+
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
     from .browser import chrome_path
     from . import notify
     from . import agents as adapters
-    from .cli import instructions_layout
+    from .cli import agy_instruction_warnings
     shared = adapters.SHARED_INSTRUCTIONS
     folders = {}
     for p in core.project_list(conn):
@@ -5184,25 +6295,35 @@ def setup_status(conn):
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
     # Agents start in a new tmux pane, whose login shell must find their programs.
     exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents})
-    term = _login_shell_which(exes)
+    # Also where the installers put programs (#6239): an app started from Finder has a short PATH, and a login shell
+    # that does not load a profile file misses ~/.local/bin and Homebrew's bin.
+    term = agentinstall.find(exes, _login_shell_which(exes))
+    try:
+        jobs = agentinstall.jobs()
+    except RiverError:
+        jobs = {}
     return {
         "done": core.setting(conn, "setup_done") == "on",
-        "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
-                     "agents_md": _block_state(Path(d, shared)),
-                     "empty_old": _empty_old_files(d) if Path(d).is_dir() else [],
-                     "layout": instructions_layout(d) if Path(d).is_dir() else None}
-                    for d, names in folders.items()],
+        "folders": [_setup_folder(d, names, shared) for d, names in folders.items()],
+        "agy_instruction_warnings": agy_instruction_warnings(d for d in folders if Path(d).is_dir()),
         "projects_without_folder": [p["name"] for p in core.project_list(conn) if not p["path"]],
         "people": [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")],
         "claude_home": Path("~/.claude").expanduser().is_dir(),
         "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-manager")},
+        # Desktop chat apps on this computer (#6477): the Claude and ChatGPT desktop apps reach MaximizePM through
+        # maxpm mcp once their config has it (maxpm setup-agent --claude-desktop|--chatgpt-desktop).
+        "desktop_apps": [{"agent": a.id, **d} for a in adapters.load().values() if (d := a.desktop_app())],
         "launch_agents": [label for label, _ in agents],
         "tmux": core.can_start_agents(),  # every agent starts in tmux
         "tmux_install": core.tmux_install(),
+        # Install tmux (#6237): one click on a Mac (Homebrew, or its installer first); on Linux the command to run.
+        "tmux_click": core.PLATFORM == "darwin",
+        "brew": bool(core.brew_path()),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
-        "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have or exe in have,
-                        "command": _shown_cmd(conn, cmd)} for label, exe, cmd in known],
+        # Each agent CLI (#6239): found by a real check, on the Start button or not, its install method, its sign-in,
+        # and the install or sign-in window that runs now. Claude Code and Codex first (main), the others under More.
+        "agent_clis": [_agent_cli(conn, label, exe, cmd, term, have, jobs) for label, exe, cmd in known],
         # The options of each launch profile the Start button uses, for toggles (Settings > Setup).
         "launch_profiles": core.launch_profiles(conn),
         "notify_channels": core._channels(core.setting(conn, "notify_channels")),
@@ -5221,7 +6342,7 @@ def setup_status(conn):
 
 def setup_block(conn, path, move=None):
     """Add or update the work queue block for every agent in a registered project folder (maxpm init):
-    AGENTS.md holds it; move=True first moves the rules in CLAUDE.md to AGENTS.md and deletes CLAUDE.md."""
+    AGENTS.md holds it; move=True first moves the rules from old instruction files and deletes those files."""
     from .cli import setup_instructions
     folder = Path(path).expanduser().resolve()
     if folder not in {Path(p["path"]).resolve() for p in core.project_list(conn) if p["path"]}:
@@ -5231,19 +6352,30 @@ def setup_block(conn, path, move=None):
     return setup_instructions(folder, move)
 
 
-def folder_add(conn, path, name=None, description="", move=None, actor=None):
+def folder_add(conn, path, name=None, description="", move=None, actor=None, create=False):
     """Add a project folder from the page: what maxpm init does in that folder, without a terminal. The
     project is created (default name: the folder's) or linked; a project linked to another folder that
     still exists is refused (only the user moves it: maxpm project path --move). Then the agent block
-    goes in AGENTS.md; move is the choice for the rules of an old CLAUDE.md (None: ask)."""
-    from .cli import link_folder, setup_instructions, instructions_layout, folder_project_name
+    goes in AGENTS.md; move is the choice for the rules in old instruction files (None: ask).
+    A folder that does not exist (#6236): without create, the answer is {missing: True, path} (no error), and the
+    form asks whether to make it; with create, MaximizePM makes it (mkdir -p), then adds it. A path that MaximizePM
+    may not make (a folder of the system, a parent this user cannot write) is refused before the question."""
+    from .cli import agy_instruction_warnings, link_folder, setup_instructions, instructions_layout
+    from .cli import folder_project_name, legacy_instructions
     if not (path or "").strip():
         raise RiverError("choose a folder")
     folder = Path(path.strip()).expanduser()
     if not folder.is_absolute():
         raise RiverError(f"{path} is not a full path; start it with / or ~")
-    if not folder.is_dir():
-        raise RiverError(f"{folder} is not a folder on this computer")
+    if folder.exists() and not folder.is_dir():
+        raise RiverError(f"{folder} is a file; pick a folder")
+    if not folder.exists():
+        why = core.folder_create_refusal(folder)
+        if why:
+            raise RiverError(why)
+        if not create:
+            return {"missing": True, "path": str(folder)}
+        core.make_folder(folder)
     folder = folder.resolve()
     name = (name or "").strip() or None
     if name:
@@ -5254,7 +6386,52 @@ def folder_add(conn, path, name=None, description="", move=None, actor=None):
     name, linked_here, lines = link_folder(conn, folder, name, description.strip(), actor)
     lines += setup_instructions(folder, move)
     return {"project": name or linked_here[0], "path": str(folder), "lines": lines,
+            "old_with_rules": [p.name for p, _, rules in legacy_instructions(folder) if rules],
+            "agy_instruction_warnings": agy_instruction_warnings([folder]),
             "layout": instructions_layout(folder), "default_name": folder_project_name(folder)}
+
+
+# Install tmux from the setup guide (#6237): tests set it to a function that gets the script instead of a Terminal window.
+INSTALL_RUNNER = None
+HOMEBREW_INSTALLER = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
+
+def install_tmux():
+    """Install tmux with one click, for an install without the app (the app carries its own tmux). On a Mac a Terminal
+    window runs brew install tmux; with no Homebrew it runs Homebrew's own installer first, and the person types their
+    password there. Linux: the command to run, since it needs sudo."""
+    import shlex
+    import subprocess
+    import tempfile
+    if core.tmux_path():
+        return {"note": "tmux is installed already"}
+    if core.PLATFORM != "darwin":
+        return {"command": core.tmux_install(), "note": f"Run in a terminal: {core.tmux_install()}"}
+    brew = core.brew_path()
+    lines = ["#!/bin/bash", 'rm -f "$0"', "echo 'MaximizePM installs tmux: every agent session runs in it.'"]
+    if brew:
+        lines.append(f"BREW={shlex.quote(brew)}")
+    else:
+        lines += ["echo 'First Homebrew, the installer of command line programs (brew.sh). It asks for your Mac password.'",
+                  f'/bin/bash -c "$(curl -fsSL {HOMEBREW_INSTALLER})" || exit 1',
+                  'for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$b" ] && BREW=$b; done']
+    lines += ['"$BREW" install tmux || exit 1',
+              "echo; echo 'tmux is installed. Go back to MaximizePM: the setup guide shows it.'"]
+    text = "\n".join(lines) + "\n"
+    if INSTALL_RUNNER:
+        INSTALL_RUNNER(text)
+    else:
+        fd, path = tempfile.mkstemp(prefix="maxpm-install-tmux-", suffix=".command")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(path, 0o700)
+        try:
+            subprocess.run(["open", "-a", "Terminal", path], check=True, capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as e:
+            os.unlink(path)
+            raise RiverError(f"MaximizePM could not open Terminal ({e}); run in a terminal: {core.tmux_install()}")
+    return {"opened": True, "homebrew_first": not brew,
+            "note": "A Terminal window installs tmux" + ("" if brew else ", after Homebrew (type your Mac password there)")}
 
 
 # The maxpm command for agents: a small launcher in ~/.local/bin that runs this MaximizePM with this Python, so an
@@ -5362,6 +6539,16 @@ def setup_skills():
     return install_skills(Path("~/.claude/skills").expanduser())
 
 
+def setup_desktop(agent):
+    """Add MaximizePM to the config of an agent's desktop chat app that is on this computer (#6477); what
+    maxpm setup-agent --claude-desktop or --chatgpt-desktop does. Returns its text: what changed, and the restart."""
+    from . import agents
+    a = agents.get(agent)
+    if not a.desktop_app():
+        raise RiverError(f"no desktop app of {a.id} on this computer")
+    return a.write_mcp_config()
+
+
 def setup_agent_add(conn, label, actor=None):
     """Add one of known_agents to launch_agents (the Start button's list), as its launch profile (@<platform>). An
     entry that starts the same program (one added before #5225 as 'pi=pi "run maxpm go ..."') stays, and no second
@@ -5375,7 +6562,7 @@ def setup_agent_add(conn, label, actor=None):
         # The first agent is the Start button's default: when its program is not on this computer (the
         # default Claude Code on a Mac that has only Codex), the agent added now becomes the default.
         first = core.entry_exe(agents[0][1]) if agents else None
-        missing = first and not _login_shell_which([first])[first]
+        missing = first and not agentinstall.find([first], _login_shell_which([first]))[first]
         agents = [(label, cmd)] + agents if missing else agents + [(label, cmd)]
         core.config_set(conn, "launch_agents", "; ".join(f"{a}={c}" for a, c in agents), actor=actor)
     return [a for a, _ in agents]
@@ -5421,6 +6608,8 @@ def canvas_open(conn, args, who):
     the asker's own session), and shows it when the Sessions tab shows that session; else it offers a button."""
     c = core.canvas_show(conn, args["name"], args.get("project"))
     session = (args.get("session") or who or "").strip()
+    if not args.get("session") and session and core._is_person(conn, session):
+        session = ""  # a person has no session of its own (#6221): the page opens it in the side panel it shows now
     if session and not conn.execute("SELECT 1 FROM agents WHERE name=?", (session,)).fetchone():
         raise RiverError(f"no agent {session}: name the session whose side panel shows the canvas (maxpm who)")
     with _canvas_open_lock:
@@ -5514,7 +6703,7 @@ OPS = {
     "claim": lambda c, a, who: core.claim(c, a["id"], who),
     "accept": lambda c, a, who: core.accept(c, a["id"], who),
     "decline": lambda c, a, who: core.decline(c, a["id"], a.get("note"), who),
-    "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who),
+    "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who, choice=a.get("choice")),
     "release": lambda c, a, who: core.release(c, a["id"], a.get("note"), who),
     "drop": lambda c, a, who: core.drop(c, a["id"], who),
     "reopen": lambda c, a, who: core.reopen(c, a["id"], who),
@@ -5529,9 +6718,15 @@ OPS = {
     "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
     "setup_block": lambda c, a, who: setup_block(c, a["path"], a.get("move")),
     "setup_maxpm_cmd": lambda c, a, who: install_command(),
-    "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who),
+    "setup_tmux": lambda c, a, who: install_tmux(),
+    "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who,
+                                                   bool(a.get("create"))),
     "setup_skills": lambda c, a, who: setup_skills(),
+    # Add MaximizePM to a desktop chat app's config (#6477): the person's click is the yes.
+    "setup_desktop": lambda c, a, who: setup_desktop(a["agent"]),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
+    "setup_agent_install": setup_agent_install,  # #6239: a window of the Terminal tab runs the vendor's install
+    "setup_agent_signin": setup_agent_signin,
     "setup_ntfy": lambda c, a, who: setup_ntfy(c, who, a.get("open")),
     # prompt: maxpm launch --prompt, which a command in a sandbox hands to maxpm serve. folder: the folder picked for
     # a project with none (#5894).
@@ -5592,10 +6787,23 @@ OPS = {
                                 relay_words(c, a["agent"], a.get("text") or "", a.get("person"), who))[1],
     "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
                                           session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
+    "session_kill_command": lambda c, a, who: (_same_queue(a.get("db")),
+                                               session_kill_command(c, a["agent"], pid=a.get("pid"),
+                                                                    reason=a.get("reason"), actor=who))[1],
+    "prompt_approve": lambda c, a, who: (_same_queue(a.get("db")),  # maxpm approve (#6282), as agent_interrupt
+                                         prompt_approve(c, a["agent"], a.get("option"), a.get("text"), who))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),
     "release_update": lambda c, a, who: release_update(c),  # the bar of a new version (#5601)
+    # The agent CLIs' versions (#6430): the dialog '<Agent> is out of date' and Settings > Agents.
+    "agent_update": lambda c, a, who: _agent_update(c, a, who),
+    "agent_update_cancel": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).cancel(c, a["agent"], who),
+    "agent_update_later": lambda c, a, who: [__import__("river.agentupdate", fromlist=["x"]).later(c, x, who)
+                                             for x in ([a["agent"]] if a.get("agent") else a.get("agents") or [])],
+    "agent_update_auto": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).set_auto(
+        c, a["agent"], bool(a.get("on")), who),
+    "agent_update_check": lambda c, a, who: __import__("river.agentupdate", fromlist=["x"]).check_soon(c),
     "release_download": lambda c, a, who: __import__("river.release", fromlist=["x"]).download_shell(c),
     "release_check": lambda c, a, who: (__import__("river.release", fromlist=["x"]).check(c, force=True),
                                         release_status(c))[1],
@@ -5693,6 +6901,31 @@ def state_changed():
     _state_gen[0] += 1
 
 
+_read_cache = {}  # key -> (time, _state_gen at its start, rows): the answers of shared_read
+
+
+def shared_read(key, compute):
+    """The answer of a read-only request that every open page asks on its own tick (#6406), as page_state does for the
+    state: computed once in STATE_TTL seconds, and again after an action through this server. Live, GET /api/sessions
+    (50 to 200 ms) and GET /api/artifacts (540 ms) each ran once for each page, inside read_memo, and a state request
+    that came meanwhile waited for the lock (wait_ms 226 to 314 with no build of its own). A request that comes while
+    the answer is computed waits for it and takes it."""
+    def hit():
+        h = _read_cache.get(key)
+        return h[2] if h and h[1] == _state_gen[0] and time.time() - h[0] < STATE_TTL else None
+    got = hit()
+    if got is not None:
+        return got
+    with read_memo():
+        got = hit()
+        if got is not None:
+            return got
+        gen = _state_gen[0]  # an action during the computation makes this answer old at once
+        rows = compute()
+        _read_cache[key] = (time.time(), gen, rows)
+        return rows
+
+
 def _state_hit(key):
     hit = _state_cache.get(key)
     if hit and hit[1] == _state_gen[0] and time.time() - hit[0] < STATE_TTL:
@@ -5733,8 +6966,9 @@ def page_state(closed, timing=None):
             timing["wait_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         if hit is not None:
             return hit
-        t1, c1 = time.perf_counter(), time.thread_time()
+        t1, c1, p1 = time.perf_counter(), time.thread_time(), time.process_time()
         g1, f1 = GC_SPENT["ms"], GC_SPENT["full"]
+        stall = _stall_watch(t1) if timing is not None else None
         prof = None
         if PROFILE_NEXT[0] and timing is not None:
             PROFILE_NEXT[0] = False
@@ -5799,6 +7033,13 @@ def page_state(closed, timing=None):
                 # The CPU time of this thread: much less than build_ms means the build waited (other threads of
                 # serve hold the interpreter lock, or the disk).
                 timing["cpu_ms"] = round((time.thread_time() - c1) * 1000, 1)
+                # The CPU time of every thread of serve during the build (#6394): near cpu_ms while build_ms is much
+                # more, the process waited (the disk, or macOS gave it no core); much more, other threads ran.
+                timing["proc_cpu_ms"] = round((time.process_time() - p1) * 1000, 1)
+                if stall is not None:
+                    _BUILDING.discard(stall)
+                    if stall.samples:
+                        timing["stall"] = stall.record()
                 timing["parts"] = parts
                 # The CPU time of each part (#5597): live, a build took 5 times the CPU of the same build on a copy
                 # of the queue; this says which part spends it.
@@ -5815,6 +7056,7 @@ def page_state(closed, timing=None):
                     pass
             return st
         finally:
+            _BUILDING.discard(stall)
             core.BUILD_MEMO.reset(memo)
             share.__exit__(None, None, None)
             conn.close()
@@ -5890,6 +7132,72 @@ class _BuildSampler:
                 "lines": [f"{n} {k}" for k, n in self.own.most_common(25)],
                 "functions": [f"{n} {k}" for k, n in self.within.most_common(30)],
                 "others": [f"{n} {k}" for k, n in self.others.most_common(20)]}
+
+
+class _Stall:
+    """Where each thread of serve is while a page state build runs longer than STALL_AFTER (#6394). Live, some builds
+    took 1.7 to 3.1 s with 7 ms of CPU, in different parts of the build: this says what the build waited on, in every
+    build, at little cost (a look every STALL_EVERY, only while a build runs late). late: how much later than asked
+    the watch itself woke; a late watch means that no thread of the process ran (macOS gave it no core) or that one
+    held the interpreter lock in C code."""
+
+    def __init__(self, t0):
+        import collections
+        self.tid, self.t0, self.samples, self.late = threading.get_ident(), t0, 0, 0.0
+        self.build, self.others = collections.Counter(), collections.Counter()
+
+    def look(self, frames, here, late):
+        self.samples += 1
+        self.late = max(self.late, late)
+        for tid, f in frames.items():
+            if tid == threading.get_ident():
+                continue
+            (self.build if tid == self.tid else self.others)[_frame_where(f, here)] += 1
+
+    def record(self):
+        return {"samples": self.samples, "every_ms": STALL_EVERY * 1000, "watch_late_ms": round(self.late * 1000),
+                "build": [f"{n} {k}" for k, n in self.build.most_common(6)],
+                "others": [f"{n} {k}" for k, n in self.others.most_common(10)]}
+
+
+STALL_AFTER, STALL_EVERY = 0.3, 0.05
+_BUILDING = set()  # the _Stall of each page state build that runs now
+_STALL_THREAD = [None]
+
+
+def _frame_where(f, here):
+    """A thread's innermost line (in any file: the call that waits), and its innermost line of MaximizePM's code."""
+    top = f"{os.path.basename(f.f_code.co_filename)}:{f.f_lineno} {f.f_code.co_name}"
+    while f is not None and not f.f_code.co_filename.startswith(here):
+        f = f.f_back
+    own = f"{os.path.basename(f.f_code.co_filename)}:{f.f_lineno} {f.f_code.co_name}" if f is not None else "-"
+    return top if own == top else f"{top} < {own}"
+
+
+def _stall_watch(t0):
+    """Register a page state build with the stall watch, and start the watch thread once."""
+    st = _Stall(t0)
+    _BUILDING.add(st)
+    if _STALL_THREAD[0] is None:
+        _STALL_THREAD[0] = threading.Thread(target=_stall_loop, daemon=True, name="maxpm-stall-watch")
+        _STALL_THREAD[0].start()
+    return st
+
+
+def _stall_loop():
+    here = os.path.dirname(os.path.abspath(__file__))
+    last = time.perf_counter()
+    while True:
+        time.sleep(STALL_EVERY)
+        t = time.perf_counter()
+        late, last = max(0.0, t - last - STALL_EVERY), t
+        for b in [b for b in list(_BUILDING) if t - b.t0 >= 120]:
+            _BUILDING.discard(b)  # a build that failed before its try (core.connect): nobody takes its record
+        builds = [b for b in list(_BUILDING) if t - b.t0 >= STALL_AFTER]
+        if builds:
+            frames = sys._current_frames()
+            for b in builds:
+                b.look(frames, here, late)
 
 
 def _gc_watch(phase, info):
@@ -6059,7 +7367,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
         if path == "/api/health":
-            # The Health view of Plan (#5356): core.health, the one behind maxpm health, with the goal split and a
+            # The Health section of the Cost page (#5356, #6217): core.health, the one behind maxpm health, with the goal split and a
             # row per day for the graphs.
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
@@ -6091,6 +7399,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/agents":  # each agent's describe part, the parts it supports, and its setup texts (#5184)
             from . import agents
             return self._send(200, agents.page_list())
+        if path == "/api/agent-versions":  # each agent CLI's installed and newest version, and its update (#6430)
+            from . import agentupdate
+            conn = core.connect()
+            try:
+                return self._send(200, agentupdate.status(conn))
+            finally:
+                conn.close()
         if path == "/api/setup":
             conn = core.connect()
             try:
@@ -6187,6 +7502,42 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         return self._send(status, answer)
 
+    def _pair_device(self):
+        """POST /api/pair (#6471): the phone app scans the setup guide's QR and POSTs the 10-minute pairing code,
+        its push_token, platform ('ios' or 'android'), encryption key, and optional device name."""
+        size = int(self.headers.get("Content-Length") or 0)
+        if size > 8192:
+            return self._send(413, {"error": "pairing request is too large"})
+        try:
+            body = json.loads(self.rfile.read(size) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "the body is not JSON"})
+        if not isinstance(body, dict):
+            return self._send(400, {"error": "the body must be a JSON object"})
+        code = body.get("code")
+        platform = (body.get("platform") or "").strip().lower() if isinstance(body.get("platform"), str) else ""
+        push_token = (body.get("push_token") or "").strip() if isinstance(body.get("push_token"), str) else ""
+        key = (body.get("key") or "").strip() if isinstance(body.get("key"), str) else ""
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        # Validate fields before consuming the one-time pairing code so a bad payload does not burn it.
+        if platform not in core.DEVICE_PLATFORMS:
+            return self._send(400, {"error": "platform must be 'ios' or 'android'"})
+        if not push_token or len(push_token) > 1024:
+            return self._send(400, {"error": "push_token is required (at most 1024 characters)"})
+        if not key or len(key) < 16 or len(key) > 512 or any(c.isspace() for c in key):
+            return self._send(400, {"error": "key is required (16 to 512 non-whitespace characters)"})
+        if not consume_pair_code(code):
+            return self._send(403, {"error": "pairing code is missing, invalid, or expired: scan a fresh code from "
+                                             "Settings > setup guide > Your phone"})
+        conn = core.connect()
+        try:
+            device = core.device_pair(conn, name, platform, push_token, key)
+        except RiverError as e:
+            return self._send(400, {"error": str(e)})
+        finally:
+            conn.close()
+        return self._send(200, {"ok": True, "device": device})
+
     def _mcp(self, method):
         """/mcp: river's MCP tools over Streamable HTTP, for this computer only (mcp.local_refusal). /mcp/plan: the
         planner tools only, for a chat app that plans with the person (#6190)."""
@@ -6237,14 +7588,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": str(e)})
         finally:
             conn.close()
-        ans = run_command(req)
-        if ans.get("busy"):
-            return self._send(503, {"error": "every runner is busy"})
-        if ans.get("refused"):
-            return self._send(409, {"error": ans["refused"]})
-        if ans.get("error"):
-            return self._send(500, ans)
-        return self._send(200, ans)
+        if not _enter_run():
+            return self._send(503, {"error": "restarting"})
+        try:
+            ans = run_command(req)
+            if ans.get("busy"):
+                return self._send(503, {"error": "restarting" if ans.get("restarting") else "every runner is busy"})
+            if ans.get("refused"):
+                return self._send(409, {"error": ans["refused"]})
+            if ans.get("error"):
+                return self._send(500, ans)
+            return self._send(200, ans)
+        finally:
+            _leave_run()
 
     def do_DELETE(self):
         if self.path.split("?")[0] in MCP_PATHS:
@@ -6282,19 +7638,26 @@ class Handler(BaseHTTPRequestHandler):
                     from . import peer
                     pid = peer.holder(self.client_address[1], srv[1], [req.get("pid"), req.get("ppid")])
                     req["chain"] = peer.chain(pid) if pid else None
+            if not _enter_run():
+                return self._send(503, {"error": "restarting"})
             try:
-                ans = run_command(req)
+                try:
+                    ans = run_command(req)
+                finally:
+                    CALLERS.pop(token, None)
+                if ans.get("busy"):
+                    return self._send(503, {"error": "restarting" if ans.get("restarting") else "every runner is busy"})
+                if ans.get("refused"):
+                    return self._send(409, {"error": ans["refused"]})
+                if ans.get("error"):
+                    return self._send(500, ans)
+                return self._send(200, ans)
             finally:
-                CALLERS.pop(token, None)
-            if ans.get("busy"):
-                return self._send(503, {"error": "every runner is busy"})
-            if ans.get("refused"):
-                return self._send(409, {"error": ans["refused"]})
-            if ans.get("error"):
-                return self._send(500, ans)
-            return self._send(200, ans)
+                _leave_run()
         if self.path == "/api/pipeline-events":  # #6163: events in from any system, with a token of the pipeline
             return self._pipeline_events()
+        if self.path == "/api/pair":  # #6471: phone app pairs with a 10-minute code from the setup guide's QR
+            return self._pair_device()
         if self.path != "/api/action":
             return self._send(404, {"error": "not found"})
         # Same-origin check: of the pages on this computer, only river's own acts (a river command sends no Origin).
@@ -6520,6 +7883,43 @@ RUNNERS = []
 # #5845: token -> the peer data of a caller's /api/run connection while a runner runs its command; the runner sends
 # the token with its own requests (X-Maxpm-Caller), and the session proof looks at the caller's connection.
 CALLERS = {}
+# #6475: count in-flight /api/run requests so restart_now drains them before exec instead of cutting them mid-write.
+_RUN_COND = threading.Condition()
+_RUN_STATE = {"restarting": False, "inflight": 0}
+
+
+def _enter_run():
+    with _RUN_COND:
+        if _RUN_STATE["restarting"]:
+            return False
+        _RUN_STATE["inflight"] += 1
+        return True
+
+
+def _leave_run():
+    with _RUN_COND:
+        _RUN_STATE["inflight"] = max(0, _RUN_STATE["inflight"] - 1)
+        if _RUN_STATE["inflight"] == 0:
+            _RUN_COND.notify_all()
+
+
+def drain_runners(timeout=5.0):
+    """Stop taking new /api/run commands, wait (at most timeout s) for running ones to finish and reply, and close
+    the runner processes cleanly so none hits BrokenPipeError during exec (#6475)."""
+    deadline = time.monotonic() + timeout
+    with _RUN_COND:
+        _RUN_STATE["restarting"] = True
+        while _RUN_STATE["inflight"] > 0:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            _RUN_COND.wait(rem)
+    for r in list(RUNNERS):
+        if r.lock.acquire(blocking=False):
+            try:
+                r.stop()
+            finally:
+                r.lock.release()
 
 
 class _Runner:
@@ -6560,6 +7960,8 @@ class _Runner:
 
 def run_command(req):
     """The answer of an idle runner to a command request; {"busy": True} when every runner is busy."""
+    if _RUN_STATE["restarting"]:
+        return {"busy": True, "restarting": True}
     for r in RUNNERS:
         if not r.lock.acquire(blocking=False):
             continue
@@ -6696,11 +8098,11 @@ def serve(port: int, open_browser=False, dev=False):
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
+    conn = core.connect()  # before the threads: a new queue file gets its schema and WAL mode once (#6243)
     # The listener for the sessions that serve brings messages into (Hermes, #5704): a thread of its own, since a pass
     # of the loop comes only every notify_interval.
     threading.Thread(target=wake_loop, args=(stop,), daemon=True, name="maxpm-wake").start()
     threading.Thread(target=shells_loop, args=(stop,), daemon=True, name="maxpm-shells").start()
-    conn = core.connect()
     try:
         runners = core.setting(conn, "serve_runners") == "on"
         child = core.setting(conn, "serve_loop_process") == "on"

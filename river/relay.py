@@ -59,6 +59,7 @@ PING_EVERY = 30
 APP_PING = '{"t":"ping"}'  # the text ping (#4860): exactly these bytes, which the River object answers by itself
 APP_PING_MIN, APP_PING_MAX = 5, 300  # the seconds of a welcome's limits.ping that river takes
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead
+IDLE_WAIT = 5  # seconds between checks for a new relay.json while disconnected
 BACKOFF_MAX = 60
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -532,10 +533,10 @@ class Link:
             self.awake.follow(bool(cfg) and cfg.get("token") != self.refused_token)
             if not cfg:
                 _set_state(state="off", error=None)
-                self.wait(5)
+                self.wait(IDLE_WAIT)
                 continue
             if cfg["token"] == self.refused_token:
-                self.wait(5)
+                self.wait(IDLE_WAIT)
                 continue
             try:
                 self.session(cfg)

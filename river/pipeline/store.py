@@ -524,8 +524,11 @@ def show(conn, name):
         d = dict(s)
         d["transition"] = transitions.describe(conn, s, p, cache)
         d["env"] = envs[s["env_id"]]["name"] if s["env_id"] in envs else None
+        # #6482: a run that GitHub held for an outside contributor's pull request (action_required) is not a run of
+        # the repository's own commits; #6473 reads no new ones, and the stored ones do not count as the stage's last.
         d["last_run"] = _run_dict(conn, conn.execute(
-            "SELECT * FROM stage_runs WHERE stage_id=? ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())
+            "SELECT * FROM stage_runs WHERE stage_id=? AND COALESCE(errors, '')<>'action_required' "
+            "ORDER BY id DESC LIMIT 1", (s["id"],)).fetchone())
         d["start"] = s["start"] or "auto"  # #6138: manual: a version that enters waits for Run
         d["prev"] = d["transition"].get("from") or []  # #6142: the stages it follows (branches, joins)
         d["override"] = _not_through(conn, p, s, cache)  # #6146

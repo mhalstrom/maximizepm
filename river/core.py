@@ -217,6 +217,10 @@ DEFAULT_SETTINGS = {
     # controller rule and the sandbox. A command instead of on starts another Playwright MCP (a pinned version):
     # npx -y @playwright/mcp@0.0.40. Off by default: each session then runs one more Node process.
     "browser_mcp": "off",
+    # Extra folders that every agent session of the project reads with no question for each file, writes nothing in,
+    # and never reads a secret file of (#6281): absolute paths, comma-separated (set it with --project). Each adapter
+    # turns them into its own form (agents.LAUNCH_KEYS read_dirs and secret_files); docs/agent-adapters.md, Tier 1.
+    "read_dirs": "",
     # How fast a session moves and types in the project's browser (#5616): watch, at a person's pace while the side
     # panel shows the browser (a click glides to its point in about half a second, a text goes in key by key, and the
     # panel shows both), at once while nobody watches; person, always at a person's pace; fast, always at once.
@@ -325,6 +329,12 @@ DEFAULT_SETTINGS = {
     # sign-in, an update, a question of a new CLI version): one alert with its last lines goes to the active manager
     # (else each person), as for a prompt with no question MaximizePM can read (#5908). 0s: never.
     "stuck_after": "3m",
+    # A child command of a session with no new pane output and no end for command_hang_after: maxpm serve sends the
+    # session a note with the command and its time, records it for the manager's watch (COMMAND HANGS), and after
+    # command_hang_kill more with still no new pane output ends that command's process tree (SIGTERM, then SIGKILL)
+    # and tells the session and the manager (#6497). 0s: off (command_hang_kill 0s: warn only).
+    "command_hang_after": "20m",
+    "command_hang_kill": "5m",
     # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report
     # each tool call, prompt, permission prompt and turn end to river (maxpm report --hook claude, #4288). A session that holds
     # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,
@@ -477,6 +487,18 @@ DEFAULT_SETTINGS = {
     # session has ended and its branch is merged or has no commit (workspace_sweep); else maxpm workspace list says why.
     "workspace": "shared",
     "workspace_setup": "",
+    # session_builds (#6398, mark 2026-11-20: 'builds are not allowed to be in the scratch folder'): each session that
+    # maxpm starts gets <session_builds>/<session>/ as MAXPM_BUILD_DIR, for a build outside the checkout's own target
+    # (a clean copy, an export). maxpm serve removes it, and the Cargo targets in the session's Claude Code
+    # scratchpad, once the session ended (river/scratch.py).
+    "session_builds": "~/Projects/.session-builds",
+    # Free space on the disk of the queue (#6506, river/diskguard.py): below disk_warn_free the manager (else the
+    # person) gets one alert; below disk_sweep_free maxpm serve removes the build folders of ended sessions and runs
+    # disk_sweep_cmd (a shell line of this computer that frees build output and caches), at most once an hour, and
+    # tells the free space before and after. A size such as 30GB, or off.
+    "disk_warn_free": "30GB",
+    "disk_sweep_free": "20GB",
+    "disk_sweep_cmd": "",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
@@ -525,6 +547,12 @@ DEFAULT_SETTINGS = {
     # maxpm serve asks GitHub for the latest MaximizePM release once a day (river/release.py): a newer version shows
     # a bar on the page and a line in the manager's briefing, with its notes and the Update button. off: no request.
     "update_check": "on",
+    # maxpm serve reads the installed and the newest version of each agent CLI when it starts and then once a day
+    # (river/agentupdate.py, #6430): a newer version opens the page's dialog '<Agent> is out of date'. off: no check.
+    "agent_update_check": "on",
+    # The agents that maxpm serve updates with no click when a newer version is out (all, or names: codex,claude-code),
+    # each when no session of it runs, with the smoke test after it. Empty (the default): only Update now updates.
+    "agent_auto_update": "",
     # While this computer is connected to the relay (maxpm connect), maxpm serve keeps it from idle sleep
     # (macOS caffeinate -i), so the tunnel answers while the person is away. The display still sleeps; the cost
     # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
@@ -659,8 +687,10 @@ DEFAULT_SETTINGS = {
     "max_sessions": "0",
     # The release gate of a deploy project (#5003, mark: 'This should be a project setting'): review (a release
     # goes out when its review passes; review is on for that project) or person (maxpm serve adds one item for a
-    # person to each ready release, and the deploy waits on that yes). Set it on the deploy project (deploy-<target>)
-    # or on a project of the target, from the project's needs: maxpm config set release_approval review|person
+    # person to each ready release, and the deploy waits on that yes) or draft (#6213: the deploy hook prepares the
+    # release, a draft, and exits HOOK_YES; maxpm adds the person's item with the draft; after the yes the hook runs
+    # again and publishes it). Set it on the deploy project (deploy-<target>)
+    # or on a project of the target, from the project's needs: maxpm config set release_approval review|person|draft
     # --project <name>. There is no global value: a target where none is set says so in maxpm target show.
     "release_approval": "",
     # Models, weakest to strongest, one list per family ("family: a, b, c", families separated by ";").
@@ -685,6 +715,19 @@ DEFAULT_SETTINGS = {
     # (--kind).
     "agent_rules": "",
     "default_agent": "",
+    # When no session of Claude Code or Antigravity runs, maxpm serve opens it in a hidden tmux pane, types /usage,
+    # reads the remaining usage, and closes it (#6364): at most once in usage_probe_every for each agent, and not while
+    # a reading is newer than that. 0s: never.
+    "usage_probe_every": "30m",
+    # The provider entries in the order a launch takes them (#6348, #6361): an agent with an optional model, effort and
+    # limit of active sessions, and an entry for each model group of an agent that has a usage window for each
+    # (agy's Gemini and Claude models): "antigravity model gemini-4-neon effort medium max 2, antigravity model
+    # claude-opus-5-5, claude-code model opus". A launch that names no agent takes the first entry with a free slot
+    # and usage left for its model, and runs that model and effort; an entry at its limit of sessions or of usage is
+    # skipped. A session that stops at its usage limit starts again on the next entry down. An explicit --agent still
+    # wins. Empty: the launch_agents entries in their order, with no limits, and default_agent picks first. With a list,
+    # a global default_agent gives way to it. An entry with no model runs the agent's own (agy_model, ...).
+    "agent_order": "",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
     # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
     # deployer a deploy item, an expert an expert-tier task; the manager has no item.
@@ -797,6 +840,8 @@ CREATE TABLE IF NOT EXISTS items (
   held_at           TEXT,
   held_for          TEXT,  -- a person item (doer human) held for the active manager (#5311); NULL: not looked at yet; '': the person has it
   held_until        TEXT,  -- then it goes to the person by itself (question_hold)
+  decision          TEXT,  -- JSON: the manager's question and options when it forwarded the item (#6413)
+  choice            TEXT,  -- the label of the option that the person chose when it closed the item (#6413)
   replan            INTEGER NOT NULL DEFAULT 0,
   late_prereqs      INTEGER NOT NULL DEFAULT 0,
   due               TEXT,
@@ -972,6 +1017,8 @@ CREATE TABLE IF NOT EXISTS agents (
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
   shells         TEXT,                       -- the shell commands that run in its session now, JSON (record_shells, #5830)
   shells_at      TEXT,                       -- when maxpm serve last read them
+  tasks          TEXT,                       -- the background tasks of its session, JSON (record_tasks, #6454)
+  tasks_at       TEXT,                       -- when maxpm serve last read them
   activity_at     TEXT,                      -- the last state report (maxpm report: its hooks or its pane)
   activity_event  TEXT,                      -- that state: report:working, report:idle, report:blocked, report:gone
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
@@ -1040,7 +1087,9 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered_via TEXT,  -- how: watch, wait, native, read (it was read before any delivery)
   shown_at      TEXT,  -- a blocked message to a manager: the last time a watch showed it (manage_rewake)
   answered_at   TEXT,  -- a blocked message: when the receiver answered it or acted on its item
-  session       TEXT   -- the agent CLI session of the command that sent it (RUN_SESSION, #5969)
+  session       TEXT,  -- the agent CLI session of the command that sent it (RUN_SESSION, #5969)
+  decision      TEXT,  -- a question: JSON, the manager's question and options when it forwarded it (#6413)
+  choice        TEXT   -- an answer: the label of the option that the person chose (#6413)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -1117,7 +1166,8 @@ CREATE TABLE IF NOT EXISTS close_checks (
 
 -- The git worktree of a session (setting workspace, #5856). Read by maxpm serve's workspace_sweep (it removes a worktree
 -- whose session ended and whose branch is merged) and by maxpm workspace list.
--- The review report of a release (#6003): the manager's paragraph (maxpm target summary); the rest comes from records.
+-- The review report of a release (#6003): its summary (maxpm target summary; the summary task writes it at the cut,
+-- #6493); the rest comes from records.
 CREATE TABLE IF NOT EXISTS release_reports (
   deploy_id   INTEGER PRIMARY KEY REFERENCES items(id),
   summary     TEXT NOT NULL,
@@ -1139,6 +1189,20 @@ CREATE TABLE IF NOT EXISTS workspaces (
   removed_at  TEXT
 );
 
+-- Per-agent-type remaining usage and limit state (#6348): one row per adapter id (antigravity, claude, codex, ...).
+CREATE TABLE IF NOT EXISTS agent_limits (
+  agent_type     TEXT PRIMARY KEY,
+  limited        INTEGER NOT NULL DEFAULT 0,
+  remaining_pct  REAL,
+  used_pct       REAL,
+  resets_at      TEXT,
+  resets_text    TEXT,
+  reason         TEXT,
+  windows_json   TEXT,
+  source         TEXT,
+  updated_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
   id          INTEGER PRIMARY KEY,
   event_id    INTEGER NOT NULL REFERENCES needs_you(id),
@@ -1149,6 +1213,19 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at  TEXT NOT NULL,
   sent_at     TEXT,
   UNIQUE (event_id, channel)
+);
+
+-- Paired phones (#6471, plan: canvas phone-app-plan): each device that scanned the setup guide's QR pairing code.
+-- push_token and key are used by the 'app' notice channel (#6469); dead_at marks a token the push Worker refused.
+CREATE TABLE IF NOT EXISTS devices (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  platform    TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+  push_token  TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  paired_at   TEXT NOT NULL,
+  last_seen   TEXT NOT NULL,
+  dead_at     TEXT
 );
 
 -- Who held which item when (#1102): the trigger below keeps it for every path that changes an item's
@@ -1309,6 +1386,24 @@ CREATE TABLE IF NOT EXISTS canvas_pages (
   responses_at   TEXT,                        -- the newest comment or vote already brought back (#5790)
   checked_at     TEXT                         -- the last read of the responses (#5790)
 );
+-- Artifact links (#6208): a task or a question that reviews or names an artifact (a canvas, a file, a local page, a
+-- claude.ai artifact), kept both ways. Made when an item or a question names it in its text, or by --artifact.
+-- A canvas's own item (canvases.item_id) is a link too, read from there. Readers: artifact_tasks (the canvas bar,
+-- maxpm canvas show, the Artifacts lists, maxpm artifacts) and artifacts_of (maxpm show, the go briefing, the item
+-- view, the Waits for you cards).
+CREATE TABLE IF NOT EXISTS artifact_links (
+  id          INTEGER PRIMARY KEY,
+  target      TEXT NOT NULL,                -- canvas:<id>, a full file path, a page or claude.ai address (artifact_key)
+  kind        TEXT NOT NULL,                -- canvas, file, page, artifact
+  item_id     INTEGER REFERENCES items(id),
+  message_id  INTEGER REFERENCES messages(id),
+  how         TEXT NOT NULL,                -- named (in its text), flag (--artifact)
+  actor       TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifact_links_target ON artifact_links(target);
+CREATE INDEX IF NOT EXISTS artifact_links_item ON artifact_links(item_id);
+CREATE INDEX IF NOT EXISTS artifact_links_message ON artifact_links(message_id);
 
 -- The names of the secrets that sessions saved (#5757, river/vault.py), never their values: those are in the macOS
 -- Keychain (or secrets/ beside the queue). Readers: maxpm secret list, and get (an unknown name is refused).
@@ -1798,7 +1893,10 @@ def iso(t: datetime) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+@functools.lru_cache(maxsize=8192)
 def parse_iso(s: str) -> datetime:
+    """A time as iso() writes it. Kept for the next call (#6394): strptime is slow, and a page state build read the
+    same times of about 1,000 agents and items each time (2 ms of a 45 ms build). A datetime does not change."""
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
@@ -2133,9 +2231,26 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return _setup(sqlite3.connect(p, timeout=10, isolation_level=None))
 
 
+def _wal(conn, tries=50):
+    """Set WAL mode, and try again when another connection sets it on the same new file at the same time (#6243).
+    On a file that is not in WAL mode yet, the change needs the exclusive lock while this connection holds a
+    read lock, so SQLite gives 'database is locked' at once and calls no busy handler: two connections
+    that both wait would wait for each other. serve's first start on a new queue opened several
+    connections in its threads at once, and the start stopped there. A file in WAL mode already returns at once."""
+    import time
+    for n in range(tries):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or n == tries - 1:
+                raise
+            time.sleep(0.02 * (n + 1) if n < 10 else 0.2)
+
+
 def _setup(conn):
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    _wal(conn)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=10000")
     _upgrade(conn)
@@ -2162,7 +2277,7 @@ def schema_print():
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
     for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts,
-              _migrate_report_cards, _pipeline_migrate):
+              _migrate_report_cards, _pipeline_migrate, _migrate_artifact_links):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -2180,13 +2295,29 @@ def _upgrade(conn):
     except sqlite3.OperationalError:
         pass  # a new database: no meta table yet
     try:
-        conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
+        # CREATE ... IF NOT EXISTS only, in one write transaction (executescript ends an open transaction itself, so
+        # the script begins its own). Without the write lock, connections that opened a new queue file at once ran
+        # SCHEMA at the same time, and one stopped with 'database schema has changed' (#6499: the release checks of
+        # v1.5.0 on GitHub; 5 of 2400 rounds of 4 threads here). BEGIN IMMEDIATE waits for the lock (busy_timeout),
+        # and as in tx it tries again LOCK_TRIES times in all; the script only creates what is missing, so a second
+        # run of it is safe.
+        for n in range(LOCK_TRIES):
+            try:
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
+                break
+            except BaseException as e:
+                if conn.in_transaction:
+                    conn.rollback()
+                if not (isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e)) \
+                        or n == LOCK_TRIES - 1:
+                    raise
         with tx(conn):
             _migrate(conn)
             _graph_triggers(conn)
         _migrate_launch_agents(conn)
         _migrate_levels(conn)
         _migrate_big_file_conflicts(conn)
+        _migrate_artifact_links(conn)
         _migrate_person_prompts(conn)
         _migrate_report_cards(conn)
         with tx(conn):
@@ -2277,6 +2408,17 @@ def graph_version(conn):
 def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     _pipeline_migrate(conn)  # the pipeline package's own tables (#6113)
+    # Paired phones (#6471, plan: canvas phone-app-plan).
+    conn.execute("""CREATE TABLE IF NOT EXISTS devices (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      platform    TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      push_token  TEXT NOT NULL,
+      key         TEXT NOT NULL,
+      paired_at   TEXT NOT NULL,
+      last_seen   TEXT NOT NULL,
+      dead_at     TEXT
+    )""")
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
     # The scope of a session (#5973).
@@ -2381,7 +2523,12 @@ def _migrate(conn):
                       ("items_project_status", "items(project_id, status, backlog_at)"),
                       ("events_actor", "events(actor, id)"),
                       # The item each running session finished last, for the name the Sessions tab shows (#5638).
-                      ("items_done_by", "items(assignee, closed_at) WHERE status='done'")):
+                      ("items_done_by", "items(assignee, closed_at) WHERE status='done'"),
+                      # Each page state build (#6394): the open takeovers (takeovers: 1.5 ms for a read of every
+                      # item), and the archive events of the archived projects (project_archived: 2 ms for a read of
+                      # every event of no item; it names this index, which SQLite would not pick by itself).
+                      ("items_takeover", "items(takeover_at) WHERE takeover_by IS NOT NULL"),
+                      ("events_global", "events(change, at) WHERE item_id IS NULL")):
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {sql}")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
@@ -2438,7 +2585,7 @@ def _migrate(conn):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at",
-                "shells", "shells_at"):
+                "shells", "shells_at", "tasks", "tasks_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "pid" not in acols:
@@ -2555,6 +2702,10 @@ def _migrate(conn):
         conn.execute("UPDATE items SET held_for='' WHERE doer='human'")
     if "held_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN held_at TEXT")
+    for t in ("items", "messages"):  # the options of an escalation, and the person's choice (#6413)
+        if "decision" not in {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}:
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN decision TEXT")
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN choice TEXT")
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='aliases'").fetchone():
         conn.execute("DROP TABLE aliases")  # the old names of renamed projects and targets are gone (#810)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_steps'").fetchone():
@@ -2685,6 +2836,16 @@ HTTP_CHAT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_ht
 PLANNER: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_planner", default=None)
 
 
+def planner_name(actor):
+    """The writer's name of a canvas version: <person>@<client> while a planner chat app writes it (#6221), so the
+    versions say which app wrote them and the overwrite guard counts the app apart from the person's own edits; else
+    the actor."""
+    via = EVENT_VIA.get()
+    if PLANNER.get() and via and actor and not actor.endswith(f"@{via}"):
+        return f"{actor}@{via}"
+    return actor
+
+
 def set_via(conn, name, via):
     """Record how a chat session reaches MaximizePM (HTTP_CHAT); the page and maxpm who show it."""
     with tx(conn):
@@ -2725,7 +2886,7 @@ _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")  # agents.SAF
 
 def run_session(env=None):
     """The id of the agent CLI session that this command runs in: the id that an agent adapter reads from the
-    environment (session_from_env: Claude Code's CLAUDE_CODE_SESSION_ID, Hermes, Gemini), else Codex's thread
+    environment (session_from_env: Claude Code's CLAUDE_CODE_SESSION_ID, Hermes, Antigravity CLI), else Codex's thread
     (CODEX_THREAD_ID); or None. A command over the local /mcp of maxpm serve has serve's environment, not the chat's:
     None. The session tokens of maxpm serve (#5972) take the first place here when they come."""
     if HTTP_CHAT.get():
@@ -2965,6 +3126,12 @@ TOKEN_ENV = "MAXPM_TOKEN"  # the variable of the pane that holds a session's tok
 TOKEN_PREFIX = "mxt_"  # so the run log's mask and a person who sees one know what it is
 # The agent of the token of the command that runs now (cli._run sets it): _session_self takes it first.
 TOKEN_AGENT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_token_agent", default=None)
+
+
+def as_cmd(name):
+    """The start of a command that a text tells agent name to run (#6423): plain maxpm when this command runs with
+    name's own session token, which names it (a --as there only prints 'not needed'); else maxpm --as <name>."""
+    return "maxpm" if name and TOKEN_AGENT.get() == name else f"maxpm --as {name}"
 # The processes above the caller of a command that a runner of serve runs (serve reads them from the kernel, as
 # vault._chain_now does): [(pid, ppid, comm, start)], or None. The runner sets it for each command.
 CALLER_CHAIN = None
@@ -3115,10 +3282,10 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days"):
+            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
-    elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
+    elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free"):
         from . import space
         space.parse_size(value)
     elif key == "fresh_min":
@@ -3162,6 +3329,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "browser_mcp":
         from .browser import mcp_command
         mcp_command(value)
+    elif key == "read_dirs" and value:
+        parse_read_dirs(value, strict=True)
     elif key == "browser_size":  # #5885
         from .browser import size_spec
         size_spec(value)
@@ -3181,10 +3350,14 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         parse_launch_agents(value)
     elif _platform_setting(key):
         _check_option(*_platform_setting(key), value)
+        if _platform_setting(key)[1] in ("model", "effort"):
+            check_agent_default(conn, *_platform_setting(key), value)
     elif key == "model_ladder":
         parse_ladder(value)
     elif key == "agent_rules":
         parse_agent_rules(value)
+    elif key == "agent_order":
+        parse_agent_order(value)
     elif key in ("default_agent",) + tuple(f"agent_for.{r}" for r in AGENT_ROLES) and value:
         _check_agent_type(conn, value)
     elif key == "native_message":
@@ -3201,8 +3374,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "model_min_version" and value and not re.match(r"^\d+(\.\d+)?$", value.strip()):
         raise RiverError("model_min_version is a version such as 5.5 (empty: no floor)")
     elif key == "release_approval" and value not in RELEASE_APPROVALS:
-        raise RiverError("release_approval is review (a release goes out when its review passes) or person (a "
-                         "person's yes for each release)")
+        raise RiverError("release_approval is review (a release goes out when its review passes), person (a "
+                         "person's yes for each release, before the deploy) or draft (the deploy hook makes a draft "
+                         "of the release, a person approves it, then the hook publishes it)")
     elif key in ("review", "auto_review") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "setup_done" and value not in ("on", "off"):
@@ -3225,7 +3399,12 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "cost_limit":
         from . import cost
         cost.parse_limit(value)
-    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
+    elif key == "agent_auto_update" and value.strip() != "all":
+        bad = [n for n in re.split(r"[,\s]+", value) if n and _adapters().find(n) is None]
+        if bad:
+            raise RiverError(f"agent_auto_update: no agent {', '.join(bad)}; all, or names of {', '.join(_adapters().ids())}")
+    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check",
+                 "agent_update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -3256,7 +3435,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
                          "--agent or --kind)")
     if key == "release_approval" and not sc.startswith("project:"):
         raise RiverError("release_approval is set for each project from its needs, never for all of them: "
-                         "maxpm config set release_approval review|person --project <name> (the deploy project "
+                         "maxpm config set release_approval review|person|draft --project <name> (the deploy project "
                          "deploy-<target>, or a project of the target)")
     also = None
     with tx(conn):
@@ -3434,6 +3613,813 @@ def _rule_agent(rules, it):
             elif re.search(r"\b" + re.escape(pat.lower()) + r"\b", title):
                 return platform
     return None
+
+
+# ---------------------------------------------------------------- agent usage limits & fallback (#6348)
+
+DEFAULT_LIMIT_COOLDOWN = timedelta(minutes=30)
+
+
+_ENTRY_KEYS = ("model", "effort", "max")
+
+
+def parse_providers(value):
+    """The agent_order setting (#6348, #6361): the provider entries in the order a launch takes them. An entry is an
+    agent, with an optional model (an agent can have one entry for each model group: mark 2026-11-20, agy's Claude
+    models have a 5-hour window of their own), effort, and limit of active sessions:
+    'antigravity model gemini-4-neon effort medium max 2, antigravity model claude-opus-5-5, claude-code model opus'
+    ('->' or ';' between entries works too, and 'max=2'). Returns [{"agent": adapter id, "model", "effort", "max": int
+    or None}]; [] when empty. A limit of 0 keeps the entry in the list and starts no session on it."""
+    out = []
+    for raw in re.split(r"\s*(?:,|->|;|\n)\s*", value or ""):
+        raw = raw.strip()
+        if not raw:
+            continue
+        words = re.sub(r"\s*=\s*", " ", raw).split()
+        i = next((k for k, w in enumerate(words) if w.lower() in _ENTRY_KEYS), len(words))
+        name, rest, entry = " ".join(words[:i]), words[i:], {"model": None, "effort": None, "max": None}
+        if len(rest) % 2:
+            raise RiverError(f"agent_order: {raw!r}: each of model, effort and max needs a value, as "
+                             f"\"antigravity model gemini-4-neon effort medium max 2\"")
+        for k, v in zip(rest[::2], rest[1::2]):
+            k = k.lower()
+            if k not in _ENTRY_KEYS:
+                raise RiverError(f"agent_order: {raw!r}: {k!r} is none of model, effort, max")
+            if k == "max":
+                if not re.fullmatch(r"\d{1,4}", v):
+                    raise RiverError(f"agent_order: {raw!r}: max is a whole number of sessions, as \"antigravity max 2\"")
+                v = int(v)
+            elif k == "model":
+                _check_model_name(v)
+            elif not re.match(r"^[a-z][a-z0-9_-]{0,31}$", v):
+                raise RiverError(f"agent_order: {raw!r}: effort {v!r}: a level such as low, medium, high")
+            entry[k] = v
+        ad = _adapters().find(name) or _adapters().find(name.replace(" ", "-"))  # 'Claude Code' too
+        if ad is None:
+            raise RiverError(f"agent_order: unknown agent {name!r}; known: {', '.join(agent_types())}")
+        if any(p["agent"] == ad.id and (p["model"] or "") == (entry["model"] or "") for p in out):
+            raise RiverError(f"agent_order: {ad.id}{' model ' + entry['model'] if entry['model'] else ''} is in the "
+                             f"list twice")
+        out.append({"agent": ad.id, **entry})
+    return out
+
+
+def providers_text(entries):
+    """agent_order's text of provider entries (parse_providers), as the page writes it."""
+    return ", ".join(" ".join([_platform_of(_adapters().find(p["agent"])) or p["agent"]]
+                              + [f"{k} {p[k]}" for k in _ENTRY_KEYS if p.get(k) is not None]) for p in entries)
+
+
+def parse_agent_order(value):
+    """The adapter ids of agent_order (parse_providers), in order."""
+    return [p["agent"] for p in parse_providers(value)]
+
+
+def _limit_adapter_id(agent_type):
+    ad = _adapters().find(agent_type)
+    return ad.id if ad is not None else (agent_type or "").strip().lower()
+
+
+_GROUP_WINDOW = re.compile(r"^\s*(.+?)\s+models\s*:", re.I)
+
+
+def _window_group(name):
+    """The model group a usage window covers, as a frozenset of provider words, or None for a window of every model
+    (#6370). agy has one window per group and limit: 'Gemini models: 5-hour' -> {'gemini'}, 'Claude and GPT models:
+    weekly' -> {'claude', 'gpt'}."""
+    m = _GROUP_WINDOW.match(name or "")
+    if not m:
+        return None
+    words = {w for w in re.split(r"\s*(?:,|\band\b|&|/)\s*", m.group(1).lower()) if w.strip()}
+    return frozenset(w.strip() for w in words) or None
+
+
+def _model_words(conn, model):
+    """The words of a model that name its provider (#6370): the parts of its id (claude-opus-5-5-high -> claude), and
+    for a model_ladder name its family (opus -> claude)."""
+    m = (model or "").strip().lower()
+    words = {x for x in re.split(r"[^a-z0-9]+", m) if x}
+    fam, _ = _family(parse_ladder(setting(conn, "model_ladder")), m)
+    if fam:
+        words.add(fam.lower())
+    return words
+
+
+def _full_group_windows(windows, read_at=None, cur_now=None):
+    """The windows of a model group that are at 0% left (#6370). A window that names no reset time counts for
+    DEFAULT_LIMIT_COOLDOWN after its reading (`read_at`), as a whole-agent limit does."""
+    cur_now = cur_now or now()
+    out = []
+    for w in windows or ():
+        if _window_group(w.get("name")) is None or (w.get("used_percent") or 0) < 100:
+            continue
+        if not w.get("resets_at") and read_at:
+            try:
+                if parse_iso(read_at) + DEFAULT_LIMIT_COOLDOWN <= cur_now:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        out.append(w)
+    return out
+
+
+def _limit_group(conn, aid, model):
+    """The quota group of `model` in agent `aid` (#6382): the group of a window the agent showed before whose
+    provider words the model has ('Claude and GPT models' for opus), else the adapter's model_group; None when the
+    agent counts no groups or the model is of none."""
+    words = _model_words(conn, model)
+    r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    try:
+        prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
+    except ValueError:
+        prev = []
+    for w in prev:
+        g = _window_group(w.get("name"))
+        if g and g & words:
+            return w["name"].split(":", 1)[0].strip()
+    ad = _adapters().find(aid)
+    return ad.model_group(model) if ad is not None else None
+
+
+def _prev_windows(conn, aid):
+    """The windows recorded before for agent `aid`, each with the time and source of its own reading (#6414): a limit
+    stop keeps them but writes its own time and source on the row, and the panel then shows the windows as read
+    before the stop, not as read at the stop."""
+    r = conn.execute("SELECT windows_json, source, updated_at FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    try:
+        prev = json.loads(r["windows_json"]) if r and r["windows_json"] else []
+    except ValueError:
+        return []
+    for w in prev:
+        if not w.get("at"):  # a limit stop has its own time
+            w.setdefault("read_at", r["updated_at"])
+            w.setdefault("source", r["source"])
+    return prev
+
+
+# #6429: how long a launch skips a provider entry whose model (or account) the agent refused at a session's turn.
+# Four Codex launches in a row ran a model that its CLI refused, and each one sat dead. A newer CLI, or another model
+# in agent_order, can fix it; the manager hears of it, and after this time a launch tries the entry again.
+MODEL_REFUSED_HOLD = timedelta(hours=1)
+
+
+def record_model_refused(conn, agent_type, model, message, session=None):
+    """Record that `agent_type` refused `model` (None: the account, every model of the agent) at a turn of
+    `session` (#6429). Returns True when it is new: no record of it within MODEL_REFUSED_HOLD."""
+    aid = _limit_adapter_id(agent_type) or agent_type
+    key = f"model_refused:{aid}:{(model or '').lower()}"
+    with tx(conn):
+        old = model_refusal(conn, aid, model)
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (key, json.dumps({"at": iso(now()), "message": message, "session": session, "model": model})))
+    return old is None
+
+
+def model_refusals(conn):
+    """{(adapter id, model lower case or ''): record} of the refusals within MODEL_REFUSED_HOLD (#6429)."""
+    out, edge = {}, now() - MODEL_REFUSED_HOLD
+    for r in conn.execute("SELECT key, value FROM meta WHERE key LIKE 'model_refused:%'"):
+        try:
+            rec = json.loads(r["value"])
+            if parse_iso(rec["at"]) < edge:
+                continue
+        except (ValueError, TypeError, KeyError):
+            continue
+        _, aid, model = r["key"].split(":", 2)
+        out[(aid, model)] = rec
+    return out
+
+
+def model_refusal(conn, agent_type, model, refusals=None, project_id=None):
+    """The refusal record that covers a launch of `agent_type` with `model` (a ladder name or a CLI id), or None: one
+    of the account (every model), or one of the model's id or name."""
+    aid = _limit_adapter_id(agent_type) or agent_type
+    got = model_refusals(conn) if refusals is None else refusals
+    if not got:
+        return None
+    names = {""}
+    if model:
+        names |= {model.lower(), str(model_id(conn, _platform_of(_adapters().find(aid)), model, project_id)
+                                     or model).lower()}
+    return next((got[(aid, n)] for n in names if (aid, n) in got), None)
+
+
+def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
+                       reason=None, source="screen", model=None, session=None):
+    """Record an agent type's remaining usage or limit-stop state (#6348).
+    When `limited` is True and `resets_at` is None, sets a default cooldown (DEFAULT_LIMIT_COOLDOWN) so launches
+    avoid the exhausted agent until it resets.
+    A window of one model group at 0% left (agy's 'Gemini models: 5-hour') does not limit the whole agent while
+    another group has quota left (#6370): agent_is_limited with the launch's model checks those windows.
+    `model`: the model of a session that stopped at its limit (#6382). When the agent counts its quota per model group
+    (_limit_group), the stop adds a full window '<group>: limit stop' to the windows read before, and limits the whole
+    agent only when they show every group full.
+    `session`: the session that stopped (#6387): the reason names it, and the page's usage panel shows it."""
+    aid = _limit_adapter_id(agent_type)
+    if not aid:
+        return None
+    t = now()
+    message = reason  # the agent's own words, before the session's name: the panel shows them as details (#6414)
+    if session and reason:
+        reason = f"{reason} (session {session})"
+    group_stop = None
+    if limited and model and not windows:
+        group_stop = _limit_group(conn, aid, model)
+    if group_stop:
+        prev = _prev_windows(conn, aid)
+        for w in prev:
+            try:
+                gone = bool(w.get("resets_at")) and parse_iso(w["resets_at"]) <= t
+            except (ValueError, TypeError):
+                gone = False
+            if gone and w.get("used_percent") is not None:
+                # A window whose reset passed started again: it does not count as full (as in _format_limit_row).
+                w.update(used_percent=0.0, remaining_percent=100.0, resets_at=None, resets_text=None)
+        stop_w = {"name": f"{group_stop}: limit stop", "used_percent": 100.0, "remaining_percent": 0.0,
+                  "resets_at": resets_at or iso(t + DEFAULT_LIMIT_COOLDOWN),
+                  "resets_text": resets_text or (None if resets_at else "in 30m"), "at": iso(t)}
+        if session:
+            stop_w["session"] = session
+        if message:
+            stop_w["message"] = message
+        windows = [w for w in prev if w.get("name") != stop_w["name"]] + [stop_w]
+        reason = f"{group_stop}: {reason}" if reason else None
+        resets_at = resets_text = None  # the reset of the group's window; the row's comes from the windows
+    win_list = list(windows) if windows else None
+    if win_list:
+        full =[w for w in win_list if (w.get("used_percent") or 0) >= 100]
+        full_groups = {_window_group(w.get("name")) for w in full}
+        if limited and full and None not in full_groups:
+            # Only model groups are full: their windows hold the limit, each with its own reset, and
+            # _format_limit_row limits the whole agent while every group is full (#6441: a Gemini stop that ended in
+            # 26s kept all of agy limited until the Claude and GPT 5-hour reset, 2h 24m later).
+            limited = False
+    rem_pct = used_pct = None
+    if win_list:
+        pcts = [float(w["remaining_percent"]) for w in win_list if w.get("remaining_percent") is not None]
+        if not pcts:
+            pcts = [round(max(0.0, 100.0 - float(w["used_percent"])), 1)
+                    for w in win_list if w.get("used_percent") is not None]
+        if pcts:
+            rem_pct = round(min(pcts), 1)
+            used_pct = round(max(0.0, 100.0 - rem_pct), 1)
+        if resets_at is None:
+            # Prefer the reset time of the most-used (lowest remaining) window.
+            ordered = sorted((w for w in win_list if w.get("resets_at")),
+                             key=lambda w: w.get("remaining_percent") if w.get("remaining_percent") is not None else 100.0)
+            if ordered:
+                resets_at = ordered[0]["resets_at"]
+                resets_text = resets_text or ordered[0].get("resets_text")
+    if limited:
+        if reason is None and win_list:
+            full = [w for w in win_list if (w.get("used_percent") or 0) >= 100]
+            reason = f"{full[0]['name']} at 0% left" if full else None
+        if rem_pct is None:
+            rem_pct, used_pct = 0.0, 100.0
+        if resets_at is None:
+            resets_at = iso(t + DEFAULT_LIMIT_COOLDOWN)
+            resets_text = resets_text or "in 30m"
+    wjson = json.dumps(win_list) if win_list is not None else None
+    with tx(conn):
+        if win_list is None:
+            prev = _prev_windows(conn, aid)
+            if prev:
+                wjson = json.dumps(prev)
+        conn.execute(
+            "INSERT INTO agent_limits (agent_type, limited, remaining_pct, used_pct, resets_at, resets_text, reason, "
+            "windows_json, source, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(agent_type) DO UPDATE SET limited=excluded.limited, remaining_pct=excluded.remaining_pct, "
+            "used_pct=excluded.used_pct, resets_at=excluded.resets_at, resets_text=excluded.resets_text, "
+            "reason=excluded.reason, windows_json=excluded.windows_json, source=excluded.source, "
+            "updated_at=excluded.updated_at",
+            (aid, 1 if limited else 0, rem_pct, used_pct, resets_at, resets_text, reason, wjson, source, iso(t)),
+        )
+    return agent_limit_status(conn, aid)
+
+
+def _format_limit_row(row, cur_now=None):
+    """Turn an agent_limits DB row into a public dict, clearing `limited` once `resets_at` has passed."""
+    cur_now = cur_now or now()
+    ad = _adapters().find(row["agent_type"])
+    resets_at = row["resets_at"]
+    expired = False
+    if resets_at:
+        try:
+            expired = parse_iso(resets_at) <= cur_now
+        except (ValueError, TypeError):
+            expired = False
+    active_limited = bool(row["limited"]) and not expired
+    try:
+        windows = json.loads(row["windows_json"]) if row["windows_json"] else []
+    except ValueError:
+        windows = []
+    rem, used = (None, None) if (row["limited"] and expired) else (row["remaining_pct"], row["used_pct"])
+    if windows:
+        # A window whose reset time passed since the reading starts again at 0% used.
+        for w in windows:
+            try:
+                gone = bool(w.get("resets_at")) and parse_iso(w["resets_at"]) <= cur_now
+            except (ValueError, TypeError):
+                gone = False
+            if gone and w.get("used_percent") is not None:
+                w.update(used_percent=0.0, remaining_percent=100.0, resets_at=None, resets_text=None, reset_since=True)
+        pcts = [float(w["remaining_percent"]) for w in windows if w.get("remaining_percent") is not None]
+        if pcts:
+            rem = round(min(pcts), 1)
+            used = round(100.0 - rem, 1)
+    groups = _limit_groups(windows, row["updated_at"], cur_now)
+    resets_at, resets_text = (None, None) if expired else (resets_at, row["resets_text"])
+    reason = row["reason"] if active_limited else None
+    if not active_limited and len(groups) >= 2 and all(g["full"] for g in groups):
+        # Every model group is full now (#6441): the whole agent waits for the first group that resets.
+        def _at(g):
+            try:
+                return parse_iso(g["resets_at"])
+            except (ValueError, TypeError):
+                return cur_now + DEFAULT_LIMIT_COOLDOWN
+        first = min(groups, key=_at)
+        active_limited = True
+        resets_at, resets_text = first["resets_at"], first["resets_text"]
+        reason = "every model group at its limit: " + ", ".join(g["name"] for g in groups)
+    return {
+        "agent_type": row["agent_type"],
+        "label": ad.label if ad is not None else row["agent_type"],
+        "known": True,
+        "limited": active_limited,
+        "remaining_pct": 0.0 if active_limited else rem,
+        "used_pct": 100.0 if active_limited else used,
+        "resets_at": resets_at,
+        "resets_text": resets_text,
+        "reason": reason,
+        "windows": windows,
+        "groups": groups,
+        "source": row["source"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _limit_groups(windows, read_at=None, cur_now=None):
+    """The model groups of an agent's usage windows (#6387: agy's 'Gemini models' and 'Claude and GPT models'), in the
+    order of the windows: [{"name", "remaining_pct" (the least of its windows), "full" (a window at 0% left, as
+    agent_is_limited counts it), "resets_at", "resets_text" (of its full window, else of its least window)}]. [] for
+    an agent whose windows count every model."""
+    full = {id(w) for w in _full_group_windows(windows, read_at, cur_now)}
+    out = {}
+    for w in windows or ():
+        if _window_group(w.get("name")) is None:
+            continue
+        g = out.setdefault(w["name"].split(":", 1)[0].strip(), {"full": False, "remaining_pct": None, "_w": None})
+        rem = w.get("remaining_percent")
+        if rem is None and w.get("used_percent") is not None:
+            rem = max(0.0, 100.0 - float(w["used_percent"]))
+        if rem is not None and (g["remaining_pct"] is None or rem < g["remaining_pct"]):
+            g["remaining_pct"] = round(float(rem), 1)
+            if not g["full"]:
+                g["_w"] = w
+        if id(w) in full and not g["full"]:
+            g["full"], g["_w"] = True, w
+    return [{"name": name, "full": g["full"], "remaining_pct": 0.0 if g["full"] else g["remaining_pct"],
+             "resets_at": (g["_w"] or {}).get("resets_at"), "resets_text": (g["_w"] or {}).get("resets_text")}
+            for name, g in out.items()]
+
+
+# How the page names where a reading came from (#6387).
+LIMIT_SOURCES = {
+    "probe": "/usage, read by maxpm serve in a hidden window",
+    "screen": "the screen of a session",
+    "limit_stop": "a session that stopped at its usage limit",
+    "log": "its newest log",
+    "chat": "the chat log of a session",
+}
+
+
+def agent_usage(conn, agent_type):
+    """The usage panel of one agent type (#6387): its row of agent_limits_list (every window, the model groups, the
+    reason of a limit, the source and time of the reading) and the sessions of the agent that run now, each with its
+    model and the items it holds."""
+    aid = _limit_adapter_id(agent_type)
+    row = next((r for r in agent_limits_list(conn) if r["agent_type"] == aid), None)
+    if row is None:
+        ad = _adapters().find(aid)
+        if ad is None:
+            raise RiverError(f"unknown agent {agent_type!r}; known: {', '.join(agent_types())}")
+        row = {"agent_type": aid, "label": ad.label, "known": False, "limited": False, "remaining_pct": None,
+               "used_pct": None, "resets_at": None, "resets_text": None, "reason": None, "windows": [], "groups": [],
+               "source": None, "updated_at": None}
+    sessions = []
+    for a in conn.execute("SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL ORDER BY name"):
+        if _limit_adapter_id(a["agent_type"]) != aid:
+            continue
+        state = _agent_state(conn, a)
+        if state in ("gone", "stopped"):
+            continue
+        held = [dict(r) for r in conn.execute(
+            "SELECT id, title, short FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+            (a["name"],))]
+        sessions.append({"name": a["name"], "model": a["model"], "role": a["role"], "state": state, "items": held})
+    return {**row, **_usage_view(row), "source_text": LIMIT_SOURCES.get(row["source"] or "", row["source"]),
+            "sessions": sessions}
+
+
+_STOP_SUFFIX = ": limit stop"
+_SESSION_TAIL = re.compile(r"^(.*?)\s*\(session ([^)\s]+)\)\s*$", re.S)
+
+
+def _stop_message(reason, group=None):
+    """(message, session) of a limit's reason: the agent's own words without the group and the session that
+    record_agent_limit put around them."""
+    m = _SESSION_TAIL.match(reason or "")
+    text, session = (m.group(1), m.group(2)) if m else (reason, None)
+    if text and group and text.startswith(f"{group}: "):
+        text = text[len(group) + 2:]
+    return text or None, session
+
+
+def _usage_view(row):
+    """What the usage panel shows (#6414, mark 2026-11-20: 'this is a confusing look'): the header, the reason, the
+    windows and the reading must agree.
+    - lines: one status per model group (one for an agent whose windows count every model): {"name", "limited",
+      "resets_at", "resets_text", "remaining_pct", "stop"}. stop: the session stop that limits it, else None.
+    - usage_windows: the windows of the readings, without the stops (a stop is no usage window), each with its
+      read_at and source, and older=True when a stop of its group came after its reading: then the stop, not the
+      window, says what holds now.
+    - read: {"at", "source", "source_text"} of the newest reading of the windows, else None.
+    A stop: {"group", "at", "session", "resets_at", "resets_text", "message" (the agent's own words), "source"}."""
+    if not row.get("known"):
+        return {"lines": [], "usage_windows": [], "read": None}
+    wins = row.get("windows") or []
+    stops = {}
+    for w in wins:
+        name = w.get("name") or ""
+        if name.endswith(_STOP_SUFFIX) and not w.get("reset_since") and (w.get("used_percent") or 0) >= 100:
+            group = name[:-len(_STOP_SUFFIX)].strip()
+            msg, sess = (w.get("message"), None) if w.get("message") else _stop_message(row.get("reason"), group)
+            stops[group] = {"group": group, "at": w.get("at"), "session": w.get("session") or sess,
+                            "resets_at": w.get("resets_at"), "resets_text": w.get("resets_text"), "message": msg,
+                            "source": "limit_stop"}
+    real = [w for w in wins if not (w.get("name") or "").endswith(_STOP_SUFFIX)]
+    whole = None
+    if (row["limited"] and not stops and (row.get("source") or "") not in ("probe", "log")
+            and not any((w.get("used_percent") or 0) >= 100 for w in real)):
+        # The limit came from a session (its stop or its screen), not from the windows.
+        msg, sess = _stop_message(row.get("reason"))
+        whole = {"group": None, "at": row["updated_at"], "session": sess, "resets_at": row["resets_at"],
+                 "resets_text": row["resets_text"], "message": msg, "source": row.get("source")}
+    out_w = []
+    for w in real:
+        w = dict(w)
+        w.setdefault("read_at", row["updated_at"])
+        w.setdefault("source", row.get("source"))
+        stop = (stops.get((w.get("name") or "").split(":", 1)[0].strip()) if _window_group(w.get("name")) else None) \
+            or whole
+        w["older"] = bool(stop and stop["at"] and w["read_at"] and stop["at"] > w["read_at"])
+        out_w.append(w)
+    read = None
+    dated = [w for w in out_w if w.get("read_at")]
+    if dated:
+        last = max(dated, key=lambda w: w["read_at"])
+        read = {"at": last["read_at"], "source": last["source"],
+                "source_text": LIMIT_SOURCES.get(last["source"] or "", last["source"])}
+    if row.get("groups"):
+        lines = []
+        for g in row["groups"]:
+            stop = stops.get(g["name"]) or whole
+            full = g["full"] or bool(whole)
+            src = g if g["full"] else (whole or g)
+            lines.append({"name": g["name"], "limited": full, "resets_at": src.get("resets_at"),
+                          "resets_text": src.get("resets_text"), "remaining_pct": 0.0 if full else g["remaining_pct"],
+                          "stop": stop if full else None})
+    else:
+        lines = [{"name": row["label"], "limited": row["limited"], "resets_at": row["resets_at"],
+                  "resets_text": row["resets_text"], "remaining_pct": row["remaining_pct"], "stop": whole}]
+    return {"lines": lines, "usage_windows": out_w, "read": read}
+
+
+def agent_limit_status(conn, agent_type):
+    """Current recorded usage/limit dict for `agent_type`, or None."""
+    aid = _limit_adapter_id(agent_type)
+    r = conn.execute("SELECT * FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+    return _format_limit_row(r) if r else None
+
+
+def agent_is_limited(conn, agent_type, model=None, project_id=None):
+    """Return the limit status dict if `agent_type` is currently at its usage limit (before reset), else None.
+    `model`: the model of the launch (a CLI id or a model_ladder name; None: the agent's own default setting). A
+    window of one model group at 0% left limits only a launch of a model of that group (#6370: agy with Gemini at 0%
+    still runs Claude and GPT models); with no model known, only a limit of the whole agent counts."""
+    st = agent_limit_status(conn, agent_type)
+    if not st:
+        return None
+    if st["limited"]:
+        return st
+    full = _full_group_windows(st["windows"], st["updated_at"])
+    if not full:
+        return None
+    if not model:
+        ad = _adapters().find(agent_type)
+        model = (agent_default(conn, ad, "model", project_id) or ad.describe.get("default_model")) if ad else None
+    words = _model_words(conn, model) if model else set()
+    hit = next((w for w in full if _window_group(w["name"]) & words), None)
+    if hit is None:
+        return None
+    return {**st, "limited": True, "remaining_pct": 0.0, "used_pct": 100.0, "resets_at": hit.get("resets_at"),
+            "resets_text": hit.get("resets_text"), "reason": f"{hit['name']} at 0% left", "model": model}
+
+
+def agent_limits_list(conn):
+    """The usage of each agent type (#6348), in adapter registry order: every recorded row, and a row with known
+    False for Claude Code, Codex and Antigravity when nothing is recorded for them (mark 2026-11-20: the page shows
+    them also when no session of the agent runs)."""
+    cur = now()
+    order = {aid: i for i, aid in enumerate(_adapters().ids())}
+    rows = [_format_limit_row(r, cur) for r in conn.execute("SELECT * FROM agent_limits").fetchall()]
+    have = {r["agent_type"] for r in rows}
+    for aid in _adapters().TIER1:
+        ad = _adapters().find(aid)
+        if aid not in have and ad is not None:
+            rows.append({"agent_type": aid, "label": ad.label, "known": False, "limited": False,
+                         "remaining_pct": None, "used_pct": None, "resets_at": None, "resets_text": None,
+                         "reason": None, "windows": [], "groups": [], "source": None, "updated_at": None})
+    rows.sort(key=lambda r: (order.get(r["agent_type"], 999), r["agent_type"]))
+    return rows
+
+
+def record_log_limits(conn):
+    """A pass of maxpm serve (#6348): the plan limits that agents wrote to their newest log (Codex), recorded when
+    they changed, so the page shows them also when no session of the agent runs."""
+    out = {}
+    for aid in _adapters().ids():
+        ad = _adapters().find(aid)
+        if ad is None or not ad.has("latest_limits"):
+            continue
+        wins = ad.latest_limits()
+        if not wins:
+            continue
+        r = conn.execute("SELECT windows_json FROM agent_limits WHERE agent_type=?", (aid,)).fetchone()
+        if r and r["windows_json"] == json.dumps(wins):
+            continue
+        full = [w for w in wins if (w.get("used_percent") or 0) >= 100]
+        record_agent_limit(conn, aid, limited=bool(full), windows=wins,
+                           resets_at=full[0].get("resets_at") if full else None, source="log")
+        out[aid] = wins
+    return out
+
+
+def provider_sessions(conn):
+    """The live agent sessions (#6361): [(adapter id, model or None)] of the sessions that max_sessions counts
+    (live_sessions: not gone or stopped; no assistant or plain session), whose agent type is known."""
+    if BUILD_MEMO.get() is not None:  # a page state build has every agent's state already (#6394: 4 ms again)
+        return [(_limit_adapter_id(a["agent_type"]), a["model"])
+                for a in _memo("agent_statuses", lambda: _agent_statuses(conn)).values()
+                if a["kind"] == "ai" and a["agent_type"] and (a["role"] or "") not in ("assistant", "plain")
+                and a["state"] not in ("gone", "stopped")]
+    return [(_limit_adapter_id(r["agent_type"]), r["model"]) for r in conn.execute(
+        "SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL AND agent_type != '' "
+        "AND COALESCE(role, '') NOT IN ('assistant', 'plain')") if _agent_state(conn, r) not in ("gone", "stopped")]
+
+
+def _model_key(conn, model, ladder=None):
+    """The provider word of a model, which matches a session to a provider entry (#6361): its model_ladder family
+    (opus: claude), else its first word (gemini-4-neon: gemini; claude-opus-5-5-medium: claude). None for no model."""
+    m = (model or "").strip().lower()
+    if not m:
+        return None
+    fam, _ = _family(ladder if ladder is not None else parse_ladder(setting(conn, "model_ladder")), m)
+    if fam:
+        return fam.lower()
+    w = re.findall(r"[a-z]+", m)
+    return w[0] if w else m
+
+
+def _entry_usage(conn, st, model):
+    """The usage left for a model of an agent (#6361, #6370): the least remaining_percent of the windows that cover
+    it (a window of its model group, or of every model); the agent's own number when no window names a group."""
+    if not st:
+        return None
+    wins = [w for w in st.get("windows") or () if w.get("remaining_percent") is not None]
+    if model and any(_window_group(w.get("name")) for w in wins):
+        words = _model_words(conn, model)
+        cover = [w["remaining_percent"] for w in wins
+                 if _window_group(w.get("name")) is None or _window_group(w.get("name")) & words]
+        if cover:
+            return round(min(float(x) for x in cover), 1)
+    return st["remaining_pct"]
+
+
+def provider_order_set(conn, project_id=None):
+    """Whether agent_order names providers for this project (or every project): then the list picks the agent of a
+    launch that names none, before a global default_agent (#6361)."""
+    return bool((setting(conn, "agent_order", project_id=project_id) or "").strip())
+
+
+def default_gives_way(conn, source, project_id=None):
+    """Whether an item's or role's agent from `source` gives way to the provider list (#6361): a global default_agent
+    does when agent_order is set; an item's own --agent, agent_rules, agent_for.<role> and a default_agent of a
+    project, kind or item stay the first choice, and the list is their fallback."""
+    return source == "global" and provider_order_set(conn, project_id)
+
+
+def agent_providers(conn, project_id=None, model=None):
+    """The provider entries in launch order (#6361): agent_order, else the agent types of the launch_agents entries
+    (no model, no limit). Each: its place (pos), adapter id, platform, label, name (the label and its model), its own
+    model and effort (None: the agent's own settings, agy_model and the like) and the model a launch runs (run_model),
+    its limit (max: None for no limit), the live sessions it counts (used: a session of the agent counts for the first
+    entry of the agent whose model has the session's provider word, else for the first entry of the agent with no model
+    of its own), full (used >= max), and its usage for that model (limited, until, remaining_pct; #6370 counts a model
+    group's window only for its models). set: the list comes from agent_order. model: the launch's model, for an
+    entry that names none."""
+    text = setting(conn, "agent_order", project_id=project_id) or ""
+    lst = parse_providers(text)
+    if not lst:
+        seen = []
+        for _, cmd in parse_launch_agents(setting(conn, "launch_agents", project_id=project_id)):
+            prof = parse_profile(cmd)
+            plat = prof[0] if prof else _exe_platform(entry_exe(cmd))
+            aid = _limit_adapter_id(plat) if plat else None
+            if aid and aid not in seen and _adapters().find(aid) is not None:
+                seen.append(aid)
+        lst = [{"agent": a, "model": None, "effort": None, "max": None} for a in seen]
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    runs, keys, stats = [], [], {}
+    for p in lst:
+        ad = _adapters().find(p["agent"])
+        runs.append(p["model"] or (agent_default(conn, ad, "model", project_id) if ad else None) or model
+                    or (ad.describe.get("default_model") if ad else None) or None)
+        keys.append(_model_key(conn, runs[-1], ladder))
+        if p["agent"] not in stats:
+            stats[p["agent"]] = agent_limit_status(conn, p["agent"])
+    used = [0] * len(lst)
+    for aid, smodel in provider_sessions(conn):
+        mine = [i for i, p in enumerate(lst) if p["agent"] == aid]
+        if not mine:
+            continue
+        key = _model_key(conn, smodel, ladder)
+        i = next((i for i in mine if key and keys[i] == key), None)
+        i = i if i is not None else next((i for i in mine if not lst[i]["model"]), mine[0])
+        used[i] += 1
+    out, refusals = [], model_refusals(conn)
+    for i, p in enumerate(lst):
+        ad = _adapters().find(p["agent"])
+        lim = agent_is_limited(conn, p["agent"], model=runs[i], project_id=project_id)
+        ref = model_refusal(conn, p["agent"], runs[i], refusals, project_id) if refusals else None
+        label = ad.label if ad else p["agent"]
+        out.append({
+            "pos": i + 1, "agent": p["agent"], "platform": _platform_of(ad), "label": label,
+            "name": f"{label} ({p['model']})" if p["model"] else label,
+            "model": p["model"], "effort": p["effort"], "run_model": runs[i],
+            "run_effort": p["effort"] or (agent_default(conn, ad, "effort", project_id) if ad else None),
+            "max": p["max"], "used": used[i], "full": p["max"] is not None and used[i] >= p["max"],
+            "limited": bool(lim), "until": _until_text(lim).strip() if lim else "",
+            # The reset of this entry's own limit (#6441): its model group's window, not the agent row's reset.
+            "resets_at": lim.get("resets_at") if lim else None, "resets_text": lim.get("resets_text") if lim else None,
+            "limit_reason": lim["reason"] if lim and lim.get("model") else None,  # a model group's window (#6370)
+            "remaining_pct": 0.0 if lim else _entry_usage(conn, stats[p["agent"]], runs[i]),
+            # #6429: the agent refused this entry's model (or the account) at a session's turn, within the hold.
+            "refused": (f"{label} refused {'model ' + ref['model'] if ref.get('model') else 'the account'} at "
+                        f"{ref['at']}") if ref else None,
+            "set": bool(text.strip()),
+        })
+    return out
+
+
+def _slots_text(p):
+    return f"{p['used']} of {p['max']} session{'s' if p['max'] != 1 else ''}"
+
+
+def _entry_for(conn, provs, aid, model):
+    """The provider entry of an agent and a model (#6361): the first entry of the agent whose model has the model's
+    provider word, else its first entry with no model of its own, else its first entry; None when the list has none."""
+    mine = [p for p in provs if p["agent"] == aid]
+    key = _model_key(conn, model)
+    return (next((p for p in mine if key and _model_key(conn, p["run_model"]) == key), None)
+            or next((p for p in mine if not p["model"]), None) or (mine[0] if mine else None))
+
+
+def fallback_agent(conn, agent_type, project_id=None, model=None, slots=True):
+    """The provider entry that takes over from `agent_type` running `model` at its usage limit (#6348, #6361): the
+    first entry of the list (agent_providers) other than that one, with usage left for its model (#6370), a free slot
+    (slots), and a launch entry: another model group of the same agent counts (agy's Claude models when its Gemini
+    window is empty). Returns (adapter_id, launch_label, entry), or None when the list names no such entry."""
+    aid = _limit_adapter_id(agent_type) if agent_type else None
+    provs = agent_providers(conn, project_id, model=model)
+    stopped = _entry_for(conn, provs, aid, model) if aid else None
+    for p in provs:
+        if p is stopped or p["limited"] or p["refused"] or (slots and p["full"]):
+            continue
+        lbl = agent_for_type(conn, p["platform"], project_id)
+        if lbl:
+            return p["agent"], lbl, p
+    return None
+
+
+def _until_text(lim):
+    if lim.get("resets_at"):
+        return f" until {lim['resets_at']}"
+    if lim.get("resets_text"):
+        return f" (resets {lim['resets_text']})"
+    return ""
+
+
+def _limit_what(lim):
+    # A model group at its limit (#6370): name the group, so the person can pick a model of another group.
+    return f"{lim['label']} ({lim['reason']})" if lim.get("model") else lim["label"]
+
+
+def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, model=None, fits=None):
+    """The launch entry and provider entry a new session starts (#6348, #6361, #6370). `agent`: a launch_agents
+    label, or None. `model`: the launch's model when it is known (a model group at its limit counts only for a model
+    of that group). fits(model, platform): whether an entry's model fits the item's limits; an entry that does not
+    is skipped.
+    - explicit (--agent, the dialog's choice): that agent; refused only when it is at its usage limit.
+    - None, and agent_order is set: the first entry of the list with a free slot and usage left for its model.
+    - None with no agent_order (the first launch entry), or a preference (the item's agent, a role's): that agent's
+      entry, unless it is at its usage limit or (slots) has no free slot; then the first such entry of the list.
+    slots: count the limits of active sessions (a work launch); the manager, an expert and a deployer start anyway.
+    Returns {"label" (None: the first launch entry), "model" and "effort" (the entry's own, else None), "pos" (the
+    entry's place, or None), "note" (why it is not the first choice, or None)}. Raises RiverError when no entry is
+    free."""
+    entries = launch_entries(conn, project_id)
+    provs = agent_providers(conn, project_id, model=model)
+    none = {"model": None, "effort": None, "pos": None, "note": None}
+    skip = None
+    from . import agentupdate  # an agent whose update is queued or runs takes no new session (#6430)
+    if agent is None and provs and provs[0]["set"]:
+        why = None
+    else:
+        pick = launch_entry(entries, agent)
+        if pick is None:
+            return {**none, "label": agent}
+        agent = pick[0] if agent is not None else None  # an id or alias ('codex') becomes its entry's label (#6421)
+        prof = parse_profile(pick[1])
+        plat = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
+        keep = pick[0] if agent is not None else agent
+        if not plat:
+            return {**none, "label": keep}
+        aid = _limit_adapter_id(plat)
+        held = agentupdate.hold(conn, plat)  # its update is queued or runs (#6430)
+        if explicit and held:
+            raise RiverError(f"{held}: pick another agent, or start it again when Settings > Agents shows the update done")
+        if explicit:
+            lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
+            if lim:
+                raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
+                                 + (" or model" if lim.get("model") else "") + " or wait until it resets")
+            # #6429: with no model named, the agent's entry in agent_order gives its model and effort, as when the
+            # list picks the agent: two Dispatches of Codex ran gpt-6.2-sol (the list's pick) and GPT-6.1 Terra
+            # (Codex was named, so Codex's own default ran).
+            # A model of another family (the item's opus on Codex) does not run there, so it counts as none.
+            fam = platform_spec(plat).get("family")
+            mfam = _family(parse_ladder(setting(conn, "model_ladder")), model)[0] if model else None
+            none_named = not model or bool(fam and mfam and mfam != fam)
+            ent = _entry_for(conn, provs, aid, None) if none_named and provs and provs[0]["set"] else None
+            if ent and ent["model"]:
+                return {**none, "label": agent, "model": ent["model"], "effort": ent["effort"], "pos": ent["pos"]}
+            return {**none, "label": agent}
+        skip = _entry_for(conn, provs, aid, model)
+        run = model or (skip["run_model"] if skip else None)
+        lim = agent_is_limited(conn, plat, model=run, project_id=project_id)
+        full = slots and skip is not None and skip["full"]
+        refused = skip["refused"] if skip is not None else None
+        if not lim and not full and not refused and not held:
+            got = skip if skip is not None and not model else None
+            return {**none, "label": keep, **({"model": got["model"], "effort": got["effort"], "pos": got["pos"]}
+                                              if got else {})}
+        why = (held if held else f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
+               else refused if refused else f"{skip['name']} has {_slots_text(skip)}")
+    skipped = []
+    for p in provs:
+        if p is skip:
+            continue
+        if p["refused"]:
+            skipped.append(p["refused"])
+            continue
+        held_p = agentupdate.hold(conn, p["platform"])
+        if held_p:
+            skipped.append(held_p)
+            continue
+        if p["limited"] or (slots and p["full"]):
+            why_lim = f" ({p['limit_reason']})" if p.get("limit_reason") else ""
+            skipped.append(f"{p['name']}{why_lim} " + (f"is at its usage limit{(' ' + p['until']) if p['until'] else ''}"
+                                                       if p["limited"] else f"has {_slots_text(p)}"))
+            continue
+        if fits and p["model"] and not fits(p["model"], p["platform"]):
+            skipped.append(f"{p['name']} is outside the item's model limits")
+            continue
+        lbl = agent_for_type(conn, p["platform"], project_id)
+        if lbl:
+            note = "; ".join(([why] if why else []) + skipped)
+            return {"label": lbl, "model": p["model"], "effort": p["effort"], "pos": p["pos"],
+                    "note": f"{note}; using {p['name']}" if note else None}
+    allw = "; ".join(([why] if why else []) + skipped) or "agent_order names no provider with a launch entry"
+    raise RiverError(f"{allw}, and no fallback agent is available: the work starts when a session ends or a limit "
+                     f"resets (maxpm status shows the providers; maxpm config set agent_order \"<agent> max <n>, ...\" "
+                     f"changes a limit)")
+
+
+def pick_available_agent(conn, agent, project_id=None, explicit=False, slots=True, model=None):
+    """pick_provider's launch label and note: (label or None for the first launch entry, note or None)."""
+    got = pick_provider(conn, agent, project_id, explicit=explicit, slots=slots, model=model)
+    return got["label"], got["note"]
 
 
 def _levels(value):
@@ -3904,8 +4890,14 @@ def project_archived(conn):
     out = []
     projects = conn.execute("SELECT id, name, notes, path FROM projects WHERE archived=1").fetchall()
     # One read of the archive events for all of them (#5524: one read for each project took 5 ms).
-    events = conn.execute("SELECT change, at FROM events WHERE item_id IS NULL AND change LIKE 'project % archived%'"
-                          ).fetchall() if projects else []
+    events = []
+    if projects:
+        sql = ("SELECT change, at FROM events {} WHERE item_id IS NULL AND change >= 'project ' AND change < 'project!' "
+               "AND change LIKE 'project % archived%'")
+        try:
+            events = conn.execute(sql.format("INDEXED BY events_global")).fetchall()
+        except sqlite3.OperationalError:  # a process that cannot write the queue has not made the index yet (#5975)
+            events = conn.execute(sql.format("")).fetchall()
     for r in projects:
         word, more = f"project {r['name']} archived", f"project {r['name']} archived ("
         at = max((e["at"] for e in events if e["change"] == word or e["change"].startswith(more)), default=None)
@@ -3930,6 +4922,48 @@ def project_path(conn, name, path, actor=None, move=False):
     return dict(_project(conn, name))
 
 
+# Folders of the system: MaximizePM makes no project folder in them, even when this user may write there (#6236).
+SYSTEM_FOLDERS = ("/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/private/var/db", "/dev",
+                  "/cores", "/Applications", "/proc", "/sys", "/boot", "/lib", "/lib64", "/snap", "/run")
+
+
+def folder_create_refusal(folder):
+    """Why MaximizePM does not make the folder (a full path that does not exist), or None when it may (#6236): a
+    path in a folder of the system, a file in the way, or a nearest existing folder that this user cannot write."""
+    full = Path(folder).expanduser()
+    for p in {str(full), str(full.resolve())}:
+        for s in SYSTEM_FOLDERS:
+            if p == s or p.startswith(s + "/"):
+                return f"{full} is in {s}, a folder of the system. Pick a folder in your home folder, such as ~/Projects/{full.name}"
+    if full.parent == full:
+        return f"{full} is not a folder that MaximizePM can make"
+    up = full.parent
+    while not up.exists():
+        up = up.parent
+    if not up.is_dir():
+        return f"{up} is a file, so {full} cannot be a folder. Pick another path"
+    if not os.access(up, os.W_OK | os.X_OK):
+        return f"you cannot write in {up}, so MaximizePM cannot make {full}. Pick a folder in your home folder"
+    return None
+
+
+def make_folder(folder):
+    """Make the folder and its missing parents (mkdir -p) after folder_create_refusal; return its full path (#6236)."""
+    full = Path(folder).expanduser()
+    if full.is_dir():
+        return str(full.resolve())
+    if full.exists():
+        raise RiverError(f"{full} is a file; pick a folder")
+    why = folder_create_refusal(full)
+    if why:
+        raise RiverError(why)
+    try:
+        full.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RiverError(f"MaximizePM could not make {full}: {e.strerror or e}")
+    return str(full.resolve())
+
+
 def start_folder(conn, p, folder=None, actor=None):
     """The project p, with the folder a new session opens in (#5894). A project with no folder gets the folder the
     person picked at the start (Start's Folder field, --folder of launch and expert start): MaximizePM makes it, when
@@ -3944,10 +4978,7 @@ def start_folder(conn, p, folder=None, actor=None):
     if not full:
         raise RiverError(f"project {p['name']} has no folder yet. Pick the folder its sessions work in: --folder "
                          f"<folder>, or the Folder field of Start on the page. It becomes the project's folder")
-    if Path(full).exists() and not Path(full).is_dir():
-        raise RiverError(f"{full} is a file; pick a folder")
-    Path(full).mkdir(parents=True, exist_ok=True)
-    return project_path(conn, p["name"], full, actor)
+    return project_path(conn, p["name"], make_folder(full), actor)
 
 
 def project_target(conn, name, target, actor=None):
@@ -4355,7 +5386,24 @@ def goal_show(conn, name):
     d["items"] = [{k: v for k, v in ann[i].items() if k != "sort_key"}
                   for i in sorted(d["items_open"] + d["items_backlog"] + d["items_done"] + d["items_dropped"],
                                   key=lambda i: (ann[i]["status"] in CLOSED_STATES, ann[i]["sort_key"]))]
+    d["docs"] = goal_docs(conn, g, d["items_open"] + d["items_backlog"] + d["items_done"] + d["items_dropped"])
     return d
+
+
+def goal_doc_name(goal):
+    """The canvas that holds the design document of a goal (#6221): a canvas row has an item, not a goal, so a goal's
+    doc is the canvas of this name in the goal's project."""
+    return ("goal-" + re.sub(r"[^a-z0-9._-]", "-", str(goal).lower()))[:64].rstrip("-.")
+
+
+def goal_docs(conn, g, item_ids=()):
+    """The canvases of a goal (#6221): its design document (goal_doc_name) and the canvases of its tasks."""
+    ids = [int(i) for i in item_ids]
+    rows = conn.execute(f"SELECT * FROM canvases WHERE deleted_at IS NULL AND project_id=? AND (name=? OR item_id IN "
+                        f"({','.join('?' * len(ids)) or 'NULL'})) ORDER BY updated_at DESC, id DESC",
+                        [g["project_id"], goal_doc_name(g["name"])] + ids).fetchall()
+    return [{k: x[k] for k in ("name", "title", "kind", "item_id", "agent", "version", "open_comments", "updated_at")}
+            for x in (_canvas_info(conn, c) for c in rows)]
 
 
 def goal_rank(conn, name, rank, actor=None):
@@ -4564,6 +5612,8 @@ def target_add(conn, name, description="", actor=None):
     with tx(conn):
         if conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
             raise RiverError(f"target {name!r} exists")
+        if conn.execute("SELECT 1 FROM pipelines WHERE name=?", (name,)).fetchone():
+            raise RiverError(f"a pipeline named {name} exists already; choose another name for the deploy target")
         conn.execute("INSERT INTO targets(name,description,created_at) VALUES (?,?,?)", (name, description, iso(now())))
         _event(conn, None, actor, f"target {name} added")
     return target_show(conn, name)
@@ -4587,12 +5637,24 @@ HOOK_EVENTS = {
     "deploy": "the release command: maxpm serve runs it when the deploy item is ready (with review on: when the review "
               "passed), and no session takes the deploy item. Exit 0 closes the deploy item; a failure keeps it open, "
               "adds a fix item, and the release starts again: a new cut, a new review, then this hook again",
+    "merged": "an item of a project of the target is done, so its commits are on main: maxpm serve runs the hook about "
+              "two minutes later, in the item's project folder (#6401: the builds that only the item used can go)",
 }
+# The events that a push target has too (#6401): a push target has no release, but its items still merge into main.
+PUSH_HOOK_EVENTS = ("merged",)
+# queued_by of a run that no command waits for: maxpm serve runs it as it runs the hooks of a command that ended
+# early (HOOK_ORPHAN_AFTER). A done answers at once (p147), and a build sweep can take minutes.
+HOOK_SERVE = "serve"
 HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook whose command did not (it ended early)
 # A hook that exits HOOK_BUSY says 'busy, run me again later' (#5605; the exit code of the gate's busy refusals, #5387):
 # maxpm queues it again, maxpm serve runs it after HOOK_ORPHAN_AFTER, and so on until hook_timeout from its first run.
 # build-sweep.sh mark refused at 5 of 37 cuts because a check ran in the tree, and nothing ran it again.
 HOOK_BUSY = 75
+# A deploy hook that exits HOOK_YES says 'the release is prepared; the rest waits for a person's yes' (#6213, mark
+# 2026-11-19: 'the tag to be a final step with a manual approval'): maximizepm-github pushes main and builds the
+# downloads as a draft, then the person approves the draft, then the hook runs again (MAXPM_APPROVED) and tags and
+# publishes it. MaximizePM adds the person's approval item with the hook's last lines (the draft's link, its files).
+HOOK_YES = 76
 HOOK_AGAIN = "again:"  # queued_by of a run that a busy run queued: again:<the id of the first run>
 HOOK_TAIL = 15  # the lines of a hook's output that the command prints and the run keeps
 HOOK_RUNNER = None  # a test hook: (command, folder, limit, renew, env) -> a result like _run_command's
@@ -4632,7 +5694,7 @@ def may_set_hook(conn, actor):
     if r is None or r["kind"] == "human" or r["role"] == "manager":
         return None
     return (f"{actor} is an agent; only a person or the manager sets, changes, or removes a hook, because maxpm "
-            f"serve runs it outside the sandbox. Ask the manager: maxpm --as {actor} ask manager \"<the hook and why>\"")
+            f"serve runs it outside the sandbox. Ask the manager: {as_cmd(actor)} ask manager \"<the hook and why>\"")
 
 
 def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
@@ -4653,7 +5715,7 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
                 why = may_set_hook(conn, actor) or _fault_refusal(conn, actor, "change a hook")
                 if why:
                     raise RiverError(why)
-                if t["mode"] == "push" and command is not None:  # #5968, #6043
+                if t["mode"] == "push" and command is not None and event not in PUSH_HOOK_EVENTS:  # #5968, #6043
                     raise RiverError(f"target {name} releases by a push (mode push: the session that made the change pushes to main when its tests pass): it "
                                      f"has no hooks; to give it hooks: maxpm target mode {name} deploy")
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
@@ -4773,13 +5835,13 @@ def may_set_check(conn, actor, check):
     if check.get("repair") and check["scope_kind"] == "target" and not person:
         return (f"{actor} is {'the manager' if r['role'] == 'manager' else 'an agent'}; only a person sets, changes, "
                 f"or removes a check with a repair on the deploy target {check['scope']}, because a repair there "
-                f"changes production. Ask the person: maxpm --as {actor} ask <person> \"<the check and why>\"")
+                f"changes production. Ask the person: {as_cmd(actor)} ask <person> \"<the check and why>\"")
     if person or r["role"] == "manager" or (check["form"] not in OPS_COMMAND_FORMS and not check.get("repair")):
         return None
     what = "a repair command" if check.get("repair") else f"a {check['form']} check"
     return (f"{actor} is an agent; only a person or the manager sets, changes, or removes {what}, because maxpm "
             f"serve runs it outside the sandbox. An agent may add a url or a beat check. Ask the manager: "
-            f"maxpm --as {actor} ask manager \"<the check and why>\"")
+            f"{as_cmd(actor)} ask manager \"<the check and why>\"")
 
 
 def _ops_statuses(text):
@@ -5252,9 +6314,11 @@ OPS_PROBES = {
              "probe reports that)",
     "notices": "a notice channel whose newest attempt failed (a subject for each channel)",
     "page-speed": "the p90 of the last 50 page builds of maxpm serve (GET /api/state-timing): a warning over 100 ms, "
-                  "critical over 200 ms",
+                  "critical over 200 ms. A command to run by hand: no check runs it (#6505); the budget is the local "
+                  "test tests/test_page_speed.py",
 }
-PAGE_BUILD_WARN, PAGE_BUILD_CRIT, PAGE_BUILDS = 100, 200, 50  # the page-speed probe (#5638; policy p147)
+# The page-speed probe (#5638; policy p147) and the budget of tests/test_page_speed.py (#6505).
+PAGE_BUILD_WARN, PAGE_BUILD_CRIT, PAGE_BUILDS = 100, 200, 50
 
 
 def _item_loops(conn, where, setting_key):
@@ -5738,6 +6802,7 @@ def _ops_verify(conn, run, watch, state):
             out.append({"item": x["id"], "verified": True})
             continue
         reopen(conn, x["id"], actor="maxpm")
+        _ops_leave_releases(conn, x["id"], f"its check {c['key']} failed after release #{watch['deploy']}")
         tail = "\n".join((last["output"] or "").splitlines()[-10:]) if last else ""
         with tx(conn):
             _event(conn, x["id"], "maxpm", f"verification failed, open again: {what}; last run "
@@ -6856,6 +7921,7 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
     within = parse_duration(setting(conn, "ops_reopen_within"))
     if old and old["closed_at"] and at - parse_iso(old["closed_at"]) < within:
         reopen(conn, old["id"], actor="maxpm")
+        _ops_leave_releases(conn, old["id"], f"its check {key} failed again")
         _ops_note(conn, old["id"], f"ops fault again at {show_time(iso(at))}: {summary}", at, force=True)
         with tx(conn):
             _event(conn, old["id"], "maxpm", f"ops kind: {kind['kind']} (rule {kind['rule']}: {kind['why']})")
@@ -6915,24 +7981,46 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
     return {"key": key, "item": r["id"], "action": "opened"}
 
 
+def _ops_leave_releases(conn, item_id, why):
+    """#6505 (mark 2026-11-20: 'these types of issues should not block deployment'): an item that a check opened again
+    (a fault item, or a fix that failed its check after its release) leaves each open release that ships it, so no
+    check holds a release. Its next close ships it again (done --ship). Returns the ids of the releases it left."""
+    with tx(conn):
+        rels = [r["id"] for r in conn.execute(
+            f"SELECT i.id FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy' AND "
+            f"i.status IN {OPEN_STATES} ORDER BY i.id", (item_id,))]
+        for rid in rels:
+            conn.execute("DELETE FROM deps WHERE item_id=? AND blocked_by=?", (rid, item_id))
+            _event(conn, rid, "maxpm", f"#{item_id} left this release: {why}; a check never holds a release")
+            _event(conn, item_id, "maxpm", f"left release #{rid}: {why}; it ships again when it is done (--ship)")
+    return rels
+
+
 def _ops_rollback_step(conn, fault_id, c, release_id, summary):
     """A release regression (#5515): the fault item names the last good release and the rollback command of the
     project's system description (infra.rollback) at once, and a step for a person, which the manager sees first,
     starts the rollback; the fault item waits on it, then the code fix follows through normal review. No session
-    runs the rollback (on production only a person sets its command). Returns the person's item."""
+    runs the rollback (on production only a person sets its command). Returns the person's item, or None: a project
+    with no rollback command gets no rollback step (#6505, mark 2026-11-20: a check never holds or rolls back a
+    release; for maxpm, a release is a version on GitHub), and its fault goes to an agent as a fix."""
     rel = _item(conn, release_id)
+    project = _ops_project(conn, c)
+    cmd = (_ops_system_part(conn, project, "infra").get("rollback") or "").strip()
+    if not cmd:
+        with tx(conn):
+            _event(conn, fault_id, "maxpm", f"no rollback step: the fault came right after release #{release_id} to "
+                                            f"{rel['target']}, and the project has no rollback command "
+                                            f"(infra.rollback); the fix goes out with a later release")
+        return None
     good = conn.execute("SELECT id, closed_at, cut_rev FROM items WHERE kind='deploy' AND target=? AND status='done' AND "
                         "closed_at<? ORDER BY closed_at DESC, id DESC LIMIT 1", (rel["target"], rel["closed_at"])
                         ).fetchone()
-    project = _ops_project(conn, c)
-    cmd = (_ops_system_part(conn, project, "infra").get("rollback") or "").strip()
     good_text = (f"release #{good['id']} (done {show_time(good['closed_at'])}"
                  + (f", commit {good['cut_rev'][:12]}" if good["cut_rev"] else "") + ")") if good else \
         "none: this is the first release of the target"
     line = (f"ROLLBACK FIRST: the fault came right after release #{release_id} to {rel['target']}. The last good release: "
             f"{good_text}. The rollback command (the system description of {project}, infra.rollback): "
-            + (cmd if cmd else "none set; a person sets it: maxpm ops system edit " + project
-               + " --set infra.rollback=\"<command>\"") + ". A person or the manager starts the rollback (the "
+            f"{cmd}. A person or the manager starts the rollback (the "
             f"item this one waits on); then fix the code through normal review, with a test that fails before the fix.\n")
     with tx(conn):
         it = _item(conn, fault_id)
@@ -6944,8 +8032,7 @@ def _ops_rollback_step(conn, fault_id, c, release_id, summary):
                  short=f"Roll back {rel['target']}"[:60],
                  context=f"The check {c['scope']}/{c['name']} fails since release #{release_id} to {rel['target']}: "
                          f"{summary}. The last good release: {good_text}. The rollback command: "
-                         + (cmd if cmd else "none set (set it: maxpm ops system edit " + project
-                            + " --set infra.rollback=\"<command>\")") + f". Run it, check that {c['scope']}/{c['name']} "
+                         f"{cmd}. Run it, check that {c['scope']}/{c['name']} "
                          f"passes (maxpm ops run {c['scope']} {c['name']}), then mark this item done: the fault "
                          f"#{fault_id} then goes to an agent, which fixes the code through normal review. If a rollback "
                          f"is not wanted, drop this item with the reason.")
@@ -8380,7 +9467,7 @@ def _ops_rollback_guard(conn, pr, old, new, actor, proposed=False):
     target = conn.execute("SELECT target FROM projects WHERE id=?", (pr["id"],)).fetchone()["target"]
     if target and actor and not _is_person(conn, actor):
         raise RiverError(f"refused: {pr['name']} releases to {target}, and on production only a person sets the "
-                         f"rollback command (infra.rollback). Ask the person: maxpm --as {actor} ask <person> "
+                         f"rollback command (infra.rollback). Ask the person: {as_cmd(actor)} ask <person> "
                          f"\"<the rollback command of {pr['name']}, and why>\"")
 
 
@@ -8518,7 +9605,8 @@ def _hook_folder(conn, target, deploy_id=None):
 def _hook(conn, event, target, item_id, actor, deploy_id=None, token=None):
     """An event of a target occurred: when the target has a hook for it, queue one run. Inside the tx of the
     event, so an event that did not occur queues nothing. The command that caused the event runs the hook after
-    that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue."""
+    that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue.
+    A merged hook only maxpm serve runs (HOOK_SERVE), so that done answers at once."""
     _hook_event(event)
     h = conn.execute("SELECT h.command FROM hooks h JOIN targets t ON t.id=h.target_id WHERE t.name=? AND h.event=?",
                      (target, event)).fetchone() if target else None
@@ -8528,7 +9616,8 @@ def _hook(conn, event, target, item_id, actor, deploy_id=None, token=None):
     rev = conn.execute("SELECT cut_rev FROM items WHERE id=?", (deploy_id,)).fetchone()
     conn.execute("INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (target, event, h["command"], item_id, deploy_id,
-                                                rev["cut_rev"] if rev else None, actor, iso(now()), token or hook_token()))
+                                                rev["cut_rev"] if rev else None, actor, iso(now()),
+                                                HOOK_SERVE if event == "merged" else token or hook_token()))
 
 
 def _review_deploy(conn, review_id):
@@ -8623,10 +9712,16 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     limit_text = setting(conn, limit_key, item_id=run["deploy_id"])
     limit = parse_duration(limit_text).total_seconds()
     folder = _hook_folder(conn, target, run["deploy_id"])
+    if event == "merged":  # the folder of the item's own project, whose build folder the item used (#6401)
+        p = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+                         (run["item_id"],)).fetchone()
+        folder = p["path"] if p and p["path"] else folder
     where = os.path.expanduser(folder) if folder else cwd
     env = {**os.environ, "MAXPM_EVENT": event, "MAXPM_TARGET": target, "MAXPM_REV": run["rev"] or "",
            "MAXPM_ITEM": str(run["item_id"] or ""), "MAXPM_DEPLOY": str(run["deploy_id"] or ""),
-           "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", "")}
+           "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", ""),
+           # #6213: the person's yes on the prepared release (a draft): the deploy hook now finishes it
+           "MAXPM_APPROVED": str(run["item_id"]) if _run_approved(run) else ""}
 
     def renew():  # a long hook keeps the leases of the agent whose command runs it
         if actor:
@@ -8669,6 +9764,8 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     took = f"{secs:.0f}s" if secs < 90 else _short(timedelta(seconds=secs))
     ok = code == 0 and not timed_out
     result = (f"stopped at {limit_key} ({limit_text}) after {took}" if timed_out
+              else f"prepared, waits for a person's yes (exit {code}), {took}"
+              if event == "deploy" and code == HOOK_YES and not _run_approved(run)
               else f"exit {code}, {took}" if code is not None else "not started")
     again = None
     if code == HOOK_BUSY and not timed_out and event != "deploy":
@@ -8709,7 +9806,7 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
                 out["alerted"] = to
         conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     if event == "deploy" and run["deploy_id"]:
-        out.update(_deploy_hook_end(conn, run, ok, result, tail, where))
+        out.update(_deploy_hook_end(conn, run, ok, result, tail, where, None if timed_out else code))
         with tx(conn):
             conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     return out
@@ -8730,7 +9827,22 @@ def deploy_hook(conn, target):
     return r["command"] if r else None
 
 
-RELEASE_APPROVALS = ("review", "person")
+def _run_approved(run):
+    """True when this run of a deploy hook comes after the person's yes on the prepared release (#6213): deploy_hook_start
+    queues it with the yes item as its item (MAXPM_APPROVED)."""
+    return (run.get("event") == "deploy" and bool(run.get("item_id")) and bool(run.get("deploy_id"))
+            and run["item_id"] != run["deploy_id"])
+
+
+def _person_yes(conn, dep_id):
+    """The id of a person's done approval item of this release (only a person's done is a yes, #6039), or None."""
+    for a in _approvals(conn, dep_id):
+        if a["status"] == "done" and _is_person(conn, _done_by(conn, a["id"])):
+            return a["id"]
+    return None
+
+
+RELEASE_APPROVALS =("review", "person", "draft")
 APPROVE_TITLE = "Approve release"
 # The start of the Read card of a release report (report.summary_set): a low alert to each person about the deploy item.
 REPORT_CARD = "Read the report of the release of"
@@ -8797,7 +9909,7 @@ def approval_refusal(conn, item):
     if item["kind"] != "deploy" or release_approval(conn, item["target"])["approval"] != "person":
         return None
     # Only a person's done is a yes (#6039, mark 2026-11-16): a session or the manager that closed it gives none.
-    if any(a["status"] == "done" and _is_person(conn, _done_by(conn, a["id"])) for a in _approvals(conn, item["id"])):
+    if _person_yes(conn, item["id"]):
         return None
     return (f"target {item['target']} takes a person's yes for each release (release_approval person): maxpm serve "
             f"asks for it when deploy #{item['id']} is ready, and the deploy waits on it")
@@ -8873,32 +9985,65 @@ def release_yes(conn, dep_id, actor="maxpm"):
             return None
         if any(a["status"] != "dropped" for a in _approvals(conn, dep_id)):
             return None  # asked already: an open item waits for the person
-        rows = conn.execute("SELECT i.id, i.title, i.kind, i.status FROM deps d JOIN items i ON i.id=d.blocked_by "
-                            "WHERE d.item_id=? AND i.kind<>'deploy' ORDER BY i.id", (dep_id,)).fetchall()
-        ships = [r for r in rows if r["kind"] != "review" and r["status"] != "dropped"]
-        reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
         gate = release_approval(conn, dep["target"])
-        lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
-        rv = conn.execute("SELECT id, output FROM items WHERE id=?", (reviews[-1]["id"],)).fetchone() if reviews else None
-        context = (f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your sign-off: the "
-                   f"project {gate['project']} says release_approval person.\n"
-                   + (f"Its review #{rv['id']} passed ({_done_by(conn, rv['id']) or 'a reviewer'}): "
-                      f"{(rv['output'] or 'no output')[:400]}\n" if rv else "")
-                   + f"Read its review report: maxpm target report {dep_id}.\nIt ships:\n{lines}\n"
-                   + f"Approve: maxpm done <this id> (only a person); the release then goes out (maxpm serve runs its "
-                   f"deploy hook, or the deployer takes deploy #{dep_id}). Request changes: on its card, or maxpm "
-                   f"release-changes <this id> \"<what must change>\": the review runs again after the fix.")
-        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
-        cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
-                           "VALUES (?,?,?,?,'human',?,'work',?,?)",
-                           (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
-                            dep["priority"], top + 1, context, dep["target"], iso(now())))
-        yes = cur.lastrowid
-        # An approval (#5957): only a person's done closes it, so neither the manager nor a session signs off (#6039).
-        conn.execute("INSERT OR IGNORE INTO approvals(item_id) VALUES (?)", (yes,))
-        _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} (release_approval person)")
-        _dep_add(conn, dep_id, yes, actor, alert=False)
-        _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release (release_approval person)")
+        yes = _add_release_yes(
+            conn, dep, f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your sign-off: "
+                       f"the project {gate['project']} says release_approval person.\n",
+            f"the release then goes out (maxpm serve runs its deploy hook, or the deployer takes deploy #{dep_id})",
+            "release_approval person", actor)
+    sync_needs_you(conn)
+    return yes
+
+
+def _add_release_yes(conn, dep, head, then, why, actor):
+    """Inside a tx: one item for a person, the yes on the release of deploy item dep, which dep waits on. head opens
+    its context; then says what the yes starts. Returns its id."""
+    dep_id = dep["id"]
+    rows = conn.execute("SELECT i.id, i.title, i.kind, i.status FROM deps d JOIN items i ON i.id=d.blocked_by "
+                        "WHERE d.item_id=? AND i.kind<>'deploy' ORDER BY i.id", (dep_id,)).fetchall()
+    ships = [r for r in rows if r["kind"] != "review" and r["status"] != "dropped"]
+    reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
+    lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
+    rv = conn.execute("SELECT id, output FROM items WHERE id=?", (reviews[-1]["id"],)).fetchone() if reviews else None
+    context = (head
+               + (f"Its review #{rv['id']} passed ({_done_by(conn, rv['id']) or 'a reviewer'}): "
+                  f"{(rv['output'] or 'no output')[:400]}\n" if rv else "")
+               + f"Read its review report: maxpm target report {dep_id}.\nIt ships:\n{lines}\n"
+               + f"Approve: maxpm done <this id> (only a person); {then}. Request changes: on its card, or maxpm "
+               f"release-changes <this id> \"<what must change>\": the review runs again after the fix.")
+    top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
+    cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
+                       "VALUES (?,?,?,?,'human',?,'work',?,?)",
+                       (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
+                        dep["priority"], top + 1, context, dep["target"], iso(now())))
+    yes = cur.lastrowid
+    # An approval (#5957): only a person's done closes it, so neither the manager nor a session signs off (#6039).
+    conn.execute("INSERT OR IGNORE INTO approvals(item_id) VALUES (?)", (yes,))
+    _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} ({why})")
+    _dep_add(conn, dep_id, yes, actor, alert=False)
+    _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release ({why})")
+    return yes
+
+
+def _draft_yes(conn, dep_id, tail, actor="maxpm"):
+    """The deploy hook prepared the release and exited HOOK_YES (#6213): one item for a person with what it prepared
+    (the hook's last lines: the draft's link, its files, its notes), which the deploy item waits on. An open yes of
+    this release is kept (no second item). Returns the item's id."""
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        open_yes = [a["id"] for a in _approvals(conn, dep_id) if a["status"] not in CLOSED_STATES]
+        if open_yes:
+            return open_yes[0]
+        said = [x for x in (tail or "").splitlines() if x.strip() and not x.startswith("::step")]
+        yes = _add_release_yes(
+            conn, dep, f"The deploy hook of target {dep['target']} prepared the release of deploy #{dep_id} and waits "
+                       f"for your sign-off before it publishes it (release_approval draft). What it prepared:\n"
+                       + "\n".join(f"  {x}" for x in said[-12:]) + "\n",
+            f"maxpm serve then runs the deploy hook again, which publishes the release ({deploy_hook(conn, dep['target'])})",
+            "the deploy hook prepared it", actor)
+        _event(conn, dep_id, actor, f"deploy hook: the release is prepared; it waits on the person's yes #{yes}")
+        _wake_manager(conn, actor, f"the deploy hook of target {dep['target']} prepared the release of deploy "
+                                   f"#{dep_id}; it waits on the person's yes #{yes}", dep_id, level="low")
     sync_needs_you(conn)
     return yes
 
@@ -8956,11 +10101,20 @@ def deploy_hook_start(conn, dep_id, token=None):
         if token:  # the release-cut hook of that cut runs first, in the same thread as the deploy
             conn.execute("UPDATE hook_runs SET queued_by=? WHERE queued_by=? AND started_at IS NULL AND deploy_id=?",
                          (token, hook_token(), dep["id"]))
-        _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}")
+        # #6213: after the person's yes on the prepared release, the run's item is that yes (MAXPM_APPROVED)
+        # The release is prepared when the gate says draft, or when this release's last deploy run asked for the yes
+        # (exit HOOK_YES), so a missing setting never asks for the yes again after each yes.
+        last = conn.execute("SELECT * FROM hook_runs WHERE deploy_id=? AND event='deploy' AND ended_at IS NOT NULL "
+                            "ORDER BY id DESC LIMIT 1", (dep["id"],)).fetchone()
+        prepared = bool(last) and last["exit_code"] == HOOK_YES and not _run_approved(dict(last))
+        yes = (_person_yes(conn, dep["id"])
+               if prepared or release_approval(conn, dep["target"])["approval"] == "draft" else None)
+        _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}"
+               + (f" (after the person's yes #{yes})" if yes else ""))
         # The manager's watch prints the start with its next wake, at the latest with the end of the deploy (#5382).
         _wake_manager(conn, "maxpm", f"the deploy hook of target {dep['target']} started for deploy #{dep['id']}: {cmd}",
                       dep["id"], level="low")
-        _hook(conn, "deploy", dep["target"], dep["id"], None, token=token)
+        _hook(conn, "deploy", dep["target"], yes or dep["id"], None, deploy_id=dep["id"], token=token)
         run = conn.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=? AND event='deploy'", (dep["id"],)).fetchone()[0]
     return run
 
@@ -9134,9 +10288,11 @@ def hook_runs_cut(conn, serve=None, boot=None):
     return out
 
 
-def _deploy_hook_end(conn, run, ok, result, tail, folder):
+def _deploy_hook_end(conn, run, ok, result, tail, folder, code=None):
     """The deploy hook ended. Exit 0: the deploy item is done (the deployed hook runs).
-    Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
+    Exit HOOK_YES before the person's yes (#6213): the release is prepared; the deploy item stays open and cut, and
+    waits on one item for a person with the hook's last lines (_draft_yes); after the yes maxpm serve runs the hook
+    again with MAXPM_APPROVED. Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
     that it waits on holds the failure, a new review covers the fix (with review on), and when that review passes
     maxpm serve runs the hook again. Nobody runs the command again by hand or repairs production by hand."""
     dep_id, target, cmd = run["deploy_id"], run["target"], run["command"]
@@ -9146,6 +10302,10 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
                      "WHERE id=? AND blocked_set_by=?", (dep_id, DEPLOY_HOOK_BY))
         if dep["status"] != "open":
             return {"deploy_end": f"#{dep_id} is {dep['status']}: nothing to do"}
+    if code == HOOK_YES and not ok:
+        if not _run_approved(run):
+            return {"deploy_end": "waits for a person's yes", "yes": _draft_yes(conn, dep_id, tail)}
+        result = f"asked for a person's yes again after the yes #{run['item_id']} (exit {code})"
     last = (tail or "").strip().splitlines()[-1:] if tail else []
     if ok:
         done(conn, dep_id, f"deploy hook: {result}: {cmd}" + (f" ({last[0][:200]})" if last else ""), "maxpm")
@@ -9271,9 +10431,11 @@ def target_mode(conn, name, mode, actor=None):
         t = _target(conn, name)
         name = t["name"]
         if mode == "push":
-            hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))]
+            hooks = [r["event"] for r in conn.execute("SELECT event FROM hooks WHERE target_id=?", (t["id"],))
+                     if r["event"] not in PUSH_HOOK_EVENTS]
             if hooks:
-                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push target has none: "
+                raise RiverError(f"target {name} has hooks ({', '.join(hooks)}); a push target has only "
+                                 f"{', '.join(PUSH_HOOK_EVENTS)}: "
                                  f"maxpm target hook {name} <event> --clear")
             dep = conn.execute(f"SELECT id FROM items WHERE kind='deploy' AND target=? AND status IN {OPEN_STATES} "
                                "ORDER BY id LIMIT 1", (name,)).fetchone()
@@ -9491,13 +10653,11 @@ def _release_cut(conn, dep_id, actor, why, rev=None):
         _add_note(conn, dep_id, f"[maxpm] release cut at {iso(now())}: {rev}")
     _review_wait(conn, dep_id)
     _hook(conn, "release-cut", dep["target"], dep_id, actor)
-    # The manager offers the review report of the release (#6003): it reads it and writes its summary, which sends the
-    # person a Read card.
+    # A fresh session writes the summary of the release's report (#6493): no wait for the manager, which wrote it
+    # before (#6003). The summary sends the person a Read card.
     if n:
-        _wake_manager(conn, actor, f"release #{dep_id} of {dep['target']} is cut with {n} task{'' if n == 1 else 's'}: "
-                                   f"read its report (maxpm target report {dep_id}) and write its summary, risks first "
-                                   f"(maxpm target summary {dep_id} \"<one paragraph>\"): the person then gets it as "
-                                   f"a Read card", dep_id, level="low")
+        from . import report
+        report.summary_task(conn, dep_id, n)
     return True
 
 
@@ -10191,8 +11351,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
              kind=None, short=None, start=None, start_check=False, approve_once=False, approve_on=None,
-             thing_type=None):
-    """Add an item. `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
+             thing_type=None, artifacts=()):
+    """Add an item. `artifacts` (maxpm add --artifact): the canvases, files or pages it reviews (artifact_ref);
+    the ones its title, context or notes name are linked too (#6208). `approve_once`, `approve_on` (maxpm add --once, --on <date>; a person's item only): the person's
     yes counts for one action, and/or only on that day (approvals, #5957). `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `start` (maxpm add --start, the forms of parse_when): the item waits until then, set in the same tx as the add
     (a timed outside blocker that the sweep ends); 'now' says that it can start now. `start_check` (maxpm add):
@@ -10281,6 +11442,10 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             _earlier_store(conn, "item", iid, earlier)
         if doer == "human":  # the page, picture or commit it names goes on its card (#5956)
             _exhibits_store(conn, "item", iid, exhibit_sources(f"{title}\n{context or ''}\n{notes or ''}", p["path"]))
+        _link_artifacts(conn, [artifact_ref(conn, x, p["id"]) for x in artifacts or ()], item_id=iid, how="flag",
+                        actor=actor)
+        _link_artifacts(conn, artifact_refs(conn, f"{title}\n{context or ''}\n{notes or ''}", p["id"]), item_id=iid,
+                        actor=actor)
         if approve_once or approve_on:
             conn.execute("INSERT INTO approvals(item_id, once, on_day) VALUES (?,?,?)", (iid, int(bool(approve_once)), day))
             _event(conn, iid, actor, "approval: " + ", ".join(
@@ -10534,7 +11699,7 @@ def _changed(col, old):
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, models=None,
-              tier=None, kind=None, short=None, changed=None):
+              tier=None, kind=None, short=None, changed=None, artifacts=()):
     tier = _check_tier(tier)
     kind = _check_kind(kind)
     short = check_short(short) if short is not None else None
@@ -10595,6 +11760,14 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
                 _event(conn, it["id"], actor, _changed(col, it[col]) if col in ("context", "check") else f"{col} changed")
                 if col == "touches":
                     _sync_conflicts(conn, it["id"], actor)
+        # #6208: the artifacts named by --artifact, and the ones a changed text names (old links stay).
+        pid = conn.execute("SELECT project_id FROM items WHERE id=?", (it["id"],)).fetchone()[0]
+        _link_artifacts(conn, [artifact_ref(conn, x, pid) for x in artifacts or ()], item_id=it["id"], how="flag",
+                        actor=actor)
+        texts = [v for v, old in ((title, it["title"]), (notes, it["notes"]), (context, it["context"]))
+                 if v is not None and v != old]
+        if texts:
+            _link_artifacts(conn, artifact_refs(conn, "\n".join(texts), pid), item_id=it["id"], actor=actor)
     return item_show(conn, item_id)
 
 
@@ -10908,6 +12081,11 @@ QUESTION_BY = "maxpm question"
 # The kinds of item that a fresh session takes when an answer comes (_want_fresh). A deploy item stays with its
 # target owner, and a review starts in a session that MaximizePM picks for it.
 ANSWER_KINDS = ("work", "fixes")
+# #6422: go's IDLE reason when the session's item waits on its own question. Pi, Goose and Amp read 'tell the user'
+# and 'the manager widens your scope' as the end of their task: they ended their turn after the first wait, and serve
+# ended them as idle; the answer then started a fresh session with a cold start.
+ANSWER_IN_WAIT = (": the answer gives #{item} back to you in maxpm wait. Run the wait below now, and run it again "
+                  "after each 'No work yet'")
 
 
 def _person_question(conn, item_id, agent):
@@ -10915,6 +12093,28 @@ def _person_question(conn, item_id, agent):
     return conn.execute("SELECT m.* FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
                         "WHERE m.kind='question' AND m.state='open' AND m.item_id=? AND m.from_agent=? "
                         "ORDER BY m.id DESC LIMIT 1", (item_id, agent)).fetchone()
+
+
+def _own_question_wait(conn, item_id, agent):
+    """The open question to a person that agent asked about item_id, when the item waits on its answer
+    (_wait_on_question); else None. The answer gives the item back to the agent while it waits in maxpm wait
+    (_want_fresh), so the agent waits there, not at its prompt (#6422)."""
+    it = conn.execute("SELECT blocked_set_by FROM items WHERE id=?", (item_id,)).fetchone()
+    if not it or it["blocked_set_by"] != QUESTION_BY:
+        return None
+    return _person_question(conn, item_id, agent)
+
+
+def _waiting_asker(conn, item_id):
+    """The agent that last claimed item_id, when it still waits for work in maxpm wait (registered, not stopped, not
+    an expert); else None. An answer for the item goes back to it, with its context, not to a fresh session (#6422)."""
+    r = conn.execute("SELECT actor FROM events WHERE item_id=? AND change LIKE 'claimed%' ORDER BY at DESC, rowid DESC "
+                     "LIMIT 1", (item_id,)).fetchone()
+    if not r or not r["actor"]:
+        return None
+    a = conn.execute("SELECT name FROM agents WHERE name=? AND kind='ai' AND waiting_since IS NOT NULL AND wait_token "
+                     "IS NOT NULL AND stop_at IS NULL AND COALESCE(role, '')<>'expert'", (r["actor"],)).fetchone()
+    return a["name"] if a else None
 
 
 def _wait_on_question(conn, it, holder):
@@ -10930,7 +12130,8 @@ def _wait_on_question(conn, it, holder):
     conn.execute("UPDATE items SET blocked_reason=?, blocked_until=NULL, blocked_set_by=?, blocked_at=? WHERE id=?",
                  (f"waits on {q['to_agent']}'s answer to question #{q['id']}", QUESTION_BY, iso(now()), it["id"]))
     _event(conn, it["id"], "maxpm", f"waits on {q['to_agent']}'s answer to question #{q['id']} of {holder}; "
-           f"the answer starts a fresh session (fresh_sessions)")
+           f"the answer gives it back to {holder} while it waits in maxpm wait, else starts a fresh session "
+           f"(fresh_sessions)")
     return q["id"]
 
 
@@ -11259,9 +12460,9 @@ def _holder_of(conn, item_id):
 
 
 def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd=None, actor=None, goal=None,
-            level=None, blocked=False):
+            level=None, blocked=False, artifacts=()):
     """The shortcuts maxpm alert / ask / note (design 7.4): to an agent, to the holder of an item, or
-    (questions) to every agent whose held items touch a file. Returns the messages sent."""
+    (questions) to every agent whose held items touch a file. Returns the messages sent. artifacts: send's."""
     if sum(x is not None for x in (to, holder_of, file, goal)) > 1:
         raise RiverError("give one of: an agent name, --holder-of <id>, --goal <name>, or --file <path>")
     if goal is not None:
@@ -11272,14 +12473,14 @@ def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd
         targets = [a["name"] for a in who(conn, file=file, cwd=cwd) if a["name"] != actor]
         if not targets:
             raise RiverError(f"no agent holds an item that touches {file} (maxpm who --file {file})")
-        return [send(conn, kind, body, t, item, None, actor, level, blocked) for t in targets]
+        return [send(conn, kind, body, t, item, None, actor, level, blocked, artifacts) for t in targets]
     if holder_of is not None:
         to = _holder_of(conn, holder_of)
         if item is None:
             item = holder_of
     if to is None and item is None:
         raise RiverError("say who gets it: an agent name, --holder-of <id>, or --item <id> (its holder)")
-    return [send(conn, kind, body, to, item, None, actor, level, blocked)]
+    return [send(conn, kind, body, to, item, None, actor, level, blocked, artifacts)]
 
 
 def decline_message(conn, msg_id, note=None, actor=None):
@@ -11369,7 +12570,11 @@ def block(conn, item_id, reason=None, actor=None, until=None):
     """Record a blocker that is not an item in the queue ("waiting on Stripe review").
 
     With `until` (see parse_when) the blocker ends by itself at that time: the
-    sweep clears it, and the item is ready again."""
+    sweep clears it, and the item is ready again. When the holder (or an unnamed
+    caller) blocks an item in progress or held, it releases the item in the same
+    transaction with the reason as the note so `go` can take new work and `next`
+    skips it (#6451). A block by another agent or a person leaves a held item
+    with its holder so push_guard can still stop a push (#5381)."""
     if not reason and not until:
         raise RiverError("say what the item waits on: --reason \"<what>\", --until <time>, or both")
     with tx(conn):
@@ -11383,7 +12588,10 @@ def block(conn, item_id, reason=None, actor=None, until=None):
                      "blocked_at=COALESCE(CASE WHEN blocked_reason IS NOT NULL THEN blocked_at END, ?) WHERE id=?",
                      (reason, t, actor, iso(now()), it["id"]))
         _event(conn, it["id"], actor, f"blocked: {reason}" + (f" (until {show_time(t, zone)})" if t else ""))
-        _raise_blocked(conn, actor, "item", it["id"])  # what it just told the manager about this item (#1608)
+        if it["status"] in ("in_progress", "held") and (not actor or it["assignee"] == actor):
+            _unhold(conn, it["id"], actor, f"released: {reason}")
+        else:
+            _raise_blocked(conn, actor, "item", it["id"])  # what it just told the manager about this item (#1608)
     return item_show(conn, item_id)
 
 
@@ -12029,6 +13237,216 @@ def exhibits_for(conn, kind, ref_ids):
         out.setdefault(r["ref_id"], []).append({"id": r["id"], "what": r["what"], "source": r["source"],
                                                 "ready": bool(r["path"] or r["has_body"]), "error": r["error"]})
     return out
+
+
+# Artifact links (#6208, mark 2026-11-19: 'when we get a task that is linked to an artifact review we need to link
+# back to the task from the artifact in maxpm'). Before, an item or a question named its canvas or file only in its
+# text (question #17840: "canvas planner-readme v2, file /private/tmp/.../planner-readme.md"), and the canvas did not
+# show the task that reviewed it.
+_CANVAS_REF = re.compile(r"\bcanvas(?:es)?[ :]+[\"'`]?(c?\d+|[a-z0-9][\w.-]*)", re.I)
+# Words after "canvas" that are its commands or plain words, never a name to look up.
+CANVAS_WORDS = {"put", "show", "list", "open", "comments", "comment", "section", "design", "save", "publish", "reply",
+                "resolve", "accept", "reject", "edit", "view", "bar", "tab", "page", "the", "a", "and", "or", "of", "is",
+                "that", "with", "for", "in", "on", "to", "notes", "version", "versions", "answer", "send"}
+ART_LINK_MESSAGES = ("question", "alert")  # the kinds of message whose text links an artifact by itself
+
+
+def _canvas_named(conn, name, project_id=None):
+    """The id of the canvas that a text names (a name, c12, or 12 after 'canvas:'): the one of project_id first,
+    else the only one of that name. None when there is none or the name is in two other projects."""
+    if re.fullmatch(r"c?\d+", name):
+        r = conn.execute("SELECT id FROM canvases WHERE id=? AND deleted_at IS NULL", (int(name.lstrip("c")),)).fetchone()
+        return r["id"] if r else None
+    rows = conn.execute("SELECT id, project_id FROM canvases WHERE name=? AND deleted_at IS NULL", (name.lower(),)).fetchall()
+    mine = [r for r in rows if project_id is not None and r["project_id"] == project_id]
+    return (mine or rows)[0]["id"] if len(mine or rows) == 1 else None
+
+
+def artifact_refs(conn, text, project_id=None):
+    """[(kind, target)] of the artifacts a text names: a canvas ('canvas planner-readme', 'canvas:12'), a full file
+    path of a page, picture or Markdown file, a local page address, a claude.ai artifact address (the same forms
+    as the Artifacts tab, sessions._hits_in)."""
+    from . import sessions
+    out = []
+    for m in _CANVAS_REF.finditer(text or ""):
+        name = m.group(1).rstrip(".-")
+        if name.lower() in CANVAS_WORDS:
+            continue
+        cid = _canvas_named(conn, name, project_id)
+        if cid is not None:
+            out.append(("canvas", f"canvas:{cid}"))
+    out += [(h["kind"], h["target"]) for h in sessions._hits_in(text or "", None, "named")]
+    return list(dict.fromkeys(out))
+
+
+def artifact_ref(conn, ref, project_id=None):
+    """(kind, target) of one artifact that a person or a session names with --artifact: a canvas (its name, c12 or
+    canvas:12), a full file path, or a web address. RiverError when it names none."""
+    from . import sessions
+    ref = (ref or "").strip()
+    if not ref:
+        raise RiverError("--artifact needs a canvas name, a full file path, or an address")
+    if re.match(r"https?://", ref, re.I):
+        key = sessions.artifact_key(ref)
+        return ("artifact" if key.lower().startswith("https://claude.ai/") else "page"), key
+    if ref.startswith(("/", "~")):
+        f = Path(ref).expanduser()
+        if not f.exists():
+            raise RiverError(f"--artifact {ref}: no such file")
+        return "file", str(f.resolve())
+    name = ref.split(":", 1)[1] if ref.lower().startswith("canvas:") else ref
+    cid = _canvas_named(conn, name, project_id)
+    if cid is None:
+        raise RiverError(f"--artifact {ref}: no canvas of that name (maxpm canvas list); a file needs its full path, "
+                         "a page its address (http...)")
+    return "canvas", f"canvas:{cid}"
+
+
+def _link_artifacts(conn, refs, item_id=None, message_id=None, how="named", actor=None, event=True):
+    """Inside a tx: keep each (kind, target) as a link of the item or the message, once. The item's history says
+    which artifacts it reviews or names (event False: the one-time fill writes no history). Returns the new links."""
+    new = []
+    for kind, target in refs:
+        if conn.execute("SELECT 1 FROM artifact_links WHERE target=? AND item_id IS ? AND message_id IS ?",
+                        (target, item_id, message_id)).fetchone():
+            continue
+        conn.execute("INSERT INTO artifact_links(target, kind, item_id, message_id, how, actor, created_at) "
+                     "VALUES (?,?,?,?,?,?,?)", (target, kind, item_id, message_id, how, actor, iso(now())))
+        new.append((kind, target))
+        if event and item_id is not None and message_id is None:
+            _event(conn, item_id, actor, f"artifact linked: {target}")
+    return new
+
+
+def _task_state(status=None, mkind=None, mstate=None):
+    """The state word of a linked task or question."""
+    if mkind:
+        if mstate in ("answered", "accepted", "declined"):
+            return mstate
+        return "waits for an answer" if mkind == "question" else "open"
+    return {"in_progress": "in progress"}.get(status, status or "gone")
+
+
+def artifact_tasks(conn, targets):
+    """{target: [{item, short, title, status, doer, state, how, message, message_kind, to}]}: the tasks and questions
+    that review or name each artifact (#6208), oldest link first; a canvas's own item first (how 'made for')."""
+    targets = list(dict.fromkeys(t for t in targets if t))
+    out = {t: [] for t in targets}
+    if not targets:
+        return out
+    marks = ",".join("?" * len(targets))
+    cids = [int(t.split(":", 1)[1]) for t in targets if t.startswith("canvas:") and t.split(":", 1)[1].isdigit()]
+    if cids:
+        for r in conn.execute(f"SELECT c.id, i.id item, i.title, i.short, i.status, i.doer FROM canvases c "
+                              f"JOIN items i ON i.id=c.item_id WHERE c.id IN ({','.join('?' * len(cids))})", cids):
+            out[f"canvas:{r['id']}"].append({"item": r["item"], "short": r["short"], "title": r["title"],
+                                             "status": r["status"], "doer": r["doer"], "state": _task_state(r["status"]),
+                                             "how": "made for", "message": None, "message_kind": None, "to": None})
+    for r in conn.execute(
+            f"SELECT l.target, l.item_id, l.message_id, l.how, i.title, i.short, i.status, i.doer, m.kind mkind, "
+            f"m.state mstate, m.to_agent, m.answered_at FROM artifact_links l LEFT JOIN items i ON i.id=l.item_id "
+            f"LEFT JOIN messages m ON m.id=l.message_id WHERE l.target IN ({marks}) ORDER BY l.id", targets):
+        rows = out[r["target"]]
+        if r["message_id"] is None and any(x["item"] == r["item_id"] and x["message"] is None for x in rows):
+            continue  # the canvas's own item, named in its text too
+        mstate = "answered" if r["mkind"] and r["answered_at"] and r["mstate"] not in ("accepted", "declined") else r["mstate"]
+        rows.append({"item": r["item_id"], "short": r["short"], "title": r["title"], "status": r["status"],
+                     "doer": r["doer"], "state": _task_state(r["status"], r["mkind"], mstate), "how": r["how"],
+                     "message": r["message_id"], "message_kind": r["mkind"], "to": r["to_agent"]})
+    return out
+
+
+def _artifact_label(conn, kind, target, canvases):
+    if kind == "canvas":
+        c = canvases.get(target)
+        return c["title"] or c["name"] if c else target
+    if kind == "file":
+        return Path(target).name
+    return re.sub(r"^https?://", "", target)
+
+
+def artifacts_of(conn, item_ids=(), message_ids=()):
+    """({item_id: [link]}, {message_id: [link]}): the artifacts that each item or question reviews or names (#6208),
+    with the canvases that belong to an item. A link: {kind, target, label, how, canvas (name, project, version) for
+    a canvas}. A question's own links come with its item's, the same artifact once."""
+    items = [int(x) for x in item_ids if x is not None]
+    msgs = [int(x) for x in message_ids if x is not None]
+    by_item, by_msg = {i: [] for i in items}, {m: [] for m in msgs}
+    if not items and not msgs:
+        return by_item, by_msg
+    rows = []
+    if items:
+        q = ",".join("?" * len(items))
+        rows += [("item", r["item_id"], "canvas", f"canvas:{r['id']}", "made for") for r in conn.execute(
+            f"SELECT id, item_id FROM canvases WHERE deleted_at IS NULL AND item_id IN ({q}) ORDER BY id", items)]
+        rows += [("item", r["item_id"], r["kind"], r["target"], r["how"]) for r in conn.execute(
+            f"SELECT item_id, kind, target, how FROM artifact_links WHERE item_id IN ({q}) AND message_id IS NULL "
+            f"ORDER BY id", items)]
+    if msgs:
+        q = ",".join("?" * len(msgs))
+        rows += [("message", r["message_id"], r["kind"], r["target"], r["how"]) for r in conn.execute(
+            f"SELECT message_id, kind, target, how FROM artifact_links WHERE message_id IN ({q}) ORDER BY id", msgs)]
+    cids = sorted({int(t.split(":", 1)[1]) for _w, _r, k, t, _h in rows if k == "canvas"})
+    canvases = {}
+    if cids:
+        for c in conn.execute(f"SELECT c.id, c.name, c.title, c.deleted_at, p.name project, (SELECT MAX(version) FROM "
+                              f"canvas_versions v WHERE v.canvas_id=c.id) version FROM canvases c JOIN projects p "
+                              f"ON p.id=c.project_id WHERE c.id IN ({','.join('?' * len(cids))})", cids):
+            canvases[f"canvas:{c['id']}"] = dict(c)
+    for where, ref, kind, target, how in rows:
+        if kind == "canvas" and (target not in canvases or canvases[target]["deleted_at"]):
+            continue
+        dest = (by_item if where == "item" else by_msg)[ref]
+        if any(x["target"] == target for x in dest):
+            continue
+        link = {"kind": kind, "target": target, "label": _artifact_label(conn, kind, target, canvases), "how": how}
+        if kind == "canvas":
+            c = canvases[target]
+            link["canvas"] = {"name": c["name"], "project": c["project"], "version": c["version"]}
+        dest.append(link)
+    return by_item, by_msg
+
+
+def message_artifacts(conn, message_ids):
+    """{message_id: [link]}: a question's links, then the links of its item, the same artifact once (#6208)."""
+    ids = [int(x) for x in message_ids if x is not None]
+    if not ids:
+        return {}
+    about = {r["id"]: r["item_id"] for r in conn.execute(
+        f"SELECT id, item_id FROM messages WHERE id IN ({','.join('?' * len(ids))})", ids)}
+    by_item, by_msg = artifacts_of(conn, [i for i in about.values() if i is not None], ids)
+    out = {}
+    for m in ids:
+        links = list(by_msg.get(m, []))
+        for x in by_item.get(about.get(m), []):
+            if not any(y["target"] == x["target"] for y in links):
+                links.append(x)
+        out[m] = links
+    return out
+
+
+def _migrate_artifact_links(conn):
+    """Once (#6208): the links of the open items, the items closed in the last 30 days, and the questions and alerts
+    of the last 30 days, from their texts."""
+    if conn.execute("SELECT 1 FROM meta WHERE key='artifact_links'").fetchone():
+        return
+    since = iso(now() - timedelta(days=30))
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='artifact_links'").fetchone():
+            return
+        conn.execute("INSERT INTO meta(key, value) VALUES ('artifact_links', ?)", (iso(now()),))
+        for r in conn.execute("SELECT id, project_id, title, notes, context FROM items WHERE status IN "
+                              "('open','in_progress','held') OR closed_at>=?", (since,)).fetchall():
+            refs = artifact_refs(conn, f"{r['title']}\n{r['context'] or ''}\n{r['notes'] or ''}", r["project_id"])
+            if refs:
+                _link_artifacts(conn, refs, item_id=r["id"], actor="maxpm", event=False)
+        for r in conn.execute(
+                f"SELECT m.id, m.item_id, m.body, i.project_id FROM messages m LEFT JOIN items i ON i.id=m.item_id "
+                f"WHERE m.kind IN ({','.join('?' * len(ART_LINK_MESSAGES))}) AND m.from_agent<>'maxpm' AND m.created_at>=?",
+                (*ART_LINK_MESSAGES, since)).fetchall():
+            refs = artifact_refs(conn, r["body"], r["project_id"])
+            if refs:
+                _link_artifacts(conn, refs, item_id=r["item_id"], message_id=r["id"], actor="maxpm", event=False)
 
 
 def exhibits_pending(conn, limit=4):
@@ -13933,8 +15351,8 @@ def _stop_text(conn, agent, sender, reason):
     ends it. A Codex session that got only 'inbox; go' answered in words and kept its item."""
     held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                           "ORDER BY id", (agent,))]
-    me = f"maxpm --as {agent}"
-    steps = "".join(f" For #{i}: {me} done {i} --output \"<what changed, commit>\" when it is finished, else {me} "
+    me = as_cmd(agent)
+    steps ="".join(f" For #{i}: {me} done {i} --output \"<what changed, commit>\" when it is finished, else {me} "
                     f"release {i} --note \"<what is done, what is left>\"." for i in held)
     return (f"[maxpm stop request from {sender}] {reason} Commit the work that is finished.{steps} Then run {me} go "
             f"once more: with nothing held it ends this session. Answering in words does not end it.")
@@ -14737,6 +16155,262 @@ def _shells_of(a):
         return None
 
 
+HANGING_KEY = "hanging_commands"  # meta key: {agent: {pid, command, since, warned_at, started}} (#6497)
+
+
+def hanging_commands(conn):
+    """The hanging child commands that maxpm serve recorded ({agent: {pid, command, since, warned_at, started}})."""
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (HANGING_KEY,)).fetchone()
+    if not r or not r["value"]:
+        return {}
+    try:
+        data = json.loads(r["value"])
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def set_hanging_commands(conn, data):
+    """Store the hanging child commands in meta (only writes when changed)."""
+    cur = hanging_commands(conn)
+    if cur == data:
+        return False
+    with tx(conn):
+        if data:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (HANGING_KEY, json.dumps(data)))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (HANGING_KEY,))
+    return True
+
+
+def _parse_ps_tree(text, t=None):
+    """Parse 'ps -A -ww -o pid=,ppid=,etime=,command=' into (children, info).
+    children: {ppid: [pid, ...]}; info: {pid: {pid, ppid, age, started, cmd}}."""
+    t = t or now()
+    children, info = {}, {}
+    for line in (text or "").splitlines():
+        f = line.split(None, 3)
+        try:
+            pid, ppid, age = int(f[0]), int(f[1]), _elapsed(f[2])
+        except (IndexError, ValueError):
+            continue
+        cmd = f[3].strip() if len(f) > 3 else ""
+        children.setdefault(ppid, []).append(pid)
+        info[pid] = {"pid": pid, "ppid": ppid, "age": age, "started": t - timedelta(seconds=age), "cmd": cmd}
+    return children, info
+
+
+def _is_ignored_command(cmd):
+    """True for processes under an agent CLI that are never hanging user/agent commands: MaximizePM waits,
+    hooks/wake listeners, and macOS caffeinate."""
+    if not cmd:
+        return True
+    parts = cmd.split()
+    prog = os.path.basename(parts[0]).lstrip("-")
+    if prog == "caffeinate":
+        return True
+    padded = " " + cmd + " "
+    if " report --wake " in padded or " report --hook " in padded:
+        return True
+    if _bg_wait(cmd):
+        return True
+    return False
+
+
+def _is_wrapper_proc(cmd):
+    """True for a wrapper process (bare shell without -c, sandbox-exec) whose children may be commands."""
+    parts = (cmd or "").split()
+    if not parts:
+        return False
+    prog = os.path.basename(parts[0]).lstrip("-")
+    if prog == "sandbox-exec":
+        return True
+    if prog in SHELL_NAMES and _shell_label(cmd) is None:
+        return True
+    return False
+
+
+def session_child_commands(text, pids, t=None, server_grace=None):
+    """{agent: [{"pid", "label", "cmd", "started", "age"}]} from one ps listing: running child commands under each
+    agent CLI process (works for Claude Code, Codex, agy, and direct child processes, #6497).
+    Skips the agent CLI itself, MaximizePM waits/hooks, caffeinate, and helper/MCP servers started within
+    server_grace of the agent CLI (while still descending through helpers/wrappers like agy's language_server or
+    sandbox-exec to find commands spawned under them). Oldest first."""
+    t = t or now()
+    grace_s = (CLI_SERVERS_GRACE if server_grace is None else server_grace).total_seconds()
+    children, info = _parse_ps_tree(text, t)
+    out = {}
+    for name, root_pid in pids.items():
+        if root_pid not in info:
+            continue
+        root_age = info[root_pid]["age"]
+        found, seen = [], {root_pid}
+        stack = list(reversed(children.get(root_pid, ())))
+        while stack:
+            pid = stack.pop()
+            if pid in seen or pid not in info:
+                continue
+            seen.add(pid)
+            rec = info[pid]
+            cmd = rec["cmd"]
+            if _is_ignored_command(cmd):
+                continue
+            slabel = _shell_label(cmd)
+            if slabel is not None:
+                if not _is_ignored_command(slabel):
+                    found.append({"pid": pid, "label": slabel, "cmd": cmd, "started": iso(rec["started"]),
+                                  "age": rec["age"]})
+                continue  # this shell is the command root; do not report its children separately
+            if _is_wrapper_proc(cmd):
+                stack.extend(reversed(children.get(pid, ())))
+                continue
+            # A non-shell process started right after the agent CLI (MCP server, agy language_server): not a command
+            # itself, but descend into its children so commands spawned under it are found.
+            if grace_s > 0 and (root_age - rec["age"]) <= grace_s:
+                stack.extend(reversed(children.get(pid, ())))
+                continue
+            label = cmd if len(cmd) <= SHELL_LABEL else cmd[:SHELL_LABEL - 1] + "…"
+            found.append({"pid": pid, "label": label, "cmd": cmd, "started": iso(rec["started"]), "age": rec["age"]})
+        out[name] = sorted(found, key=lambda s: (s["started"], s["pid"]))
+    return out
+
+
+def descendant_pids(children, root_pid):
+    """Every PID strictly below root_pid (never root_pid itself)."""
+    desc, stack = set(), list(children.get(root_pid, ()))
+    while stack:
+        pid = stack.pop()
+        if pid == root_pid or pid in desc:
+            continue
+        desc.add(pid)
+        stack.extend(children.get(pid, ()))
+    return desc
+
+
+def subtree_pids(children, pid):
+    """All PIDs in the subtree rooted at pid (children before parent, so killing bottom-up avoids orphans)."""
+    order, seen = [], set()
+
+    def walk(p):
+        if p in seen:
+            return
+        seen.add(p)
+        for ch in children.get(p, ()):
+            walk(ch)
+        order.append(p)
+
+    walk(pid)
+    return order
+
+
+def _terminate_tree(pids, grace=5.0, sleep=None):
+    """End a command's process tree: SIGTERM to all, wait up to grace, then SIGKILL to any still alive.
+    Never signals PID <= 1 or os.getpid(). Returns (signaled, force_killed)."""
+    import signal
+    import time
+    sleep = sleep or time.sleep
+    me = os.getpid()
+    targets = [int(p) for p in pids if int(p) > 1 and int(p) != me]
+    signaled = []
+    for p in targets:
+        try:
+            os.kill(p, signal.SIGTERM)
+            signaled.append(p)
+        except (ProcessLookupError, PermissionError):
+            pass
+    waited = 0.0
+    while waited < grace:
+        alive = []
+        for p in signaled:
+            try:
+                os.waitpid(p, os.WNOHANG)  # reap if a child of this process (tests)
+            except (ChildProcessError, OSError):
+                pass
+            if pid_alive(p):
+                alive.append(p)
+        if not alive:
+            break
+        sleep(0.2)
+        waited += 0.2
+    forced = []
+    for p in signaled:
+        try:
+            os.waitpid(p, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        if pid_alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+                forced.append(p)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return signaled, forced
+
+
+def kill_session_command(conn, agent, pid=None, actor=None, reason=None, grace=5.0, sleep=None, by_serve=False,
+                         pane_pid=None, server_grace=None):
+    """End a running child command of an agent session without ending the session itself (#6497).
+    Refuses any PID that is not strictly under the session's agent process (including the agent process itself).
+    When pid is None, ends the hanging command (if recorded) or the oldest running child command."""
+    why = None if by_serve else may_change_queue(conn, actor, agent)
+    if why:
+        raise RiverError(f"refused: a person or a manager ends a session's command ({why})")
+    ag = _agent(conn, agent)
+    root_pid = ag["pid"] or pane_pid
+    if not root_pid:
+        raise RiverError(f"{agent} has no recorded process on this host")
+    if ag["pid"] and ag["host"] != this_host():
+        raise RiverError(f"{agent} runs on {ag['host']}, not on this host ({this_host()})")
+    text = _shell_list()
+    if not text:
+        raise RiverError("cannot read the process list on this host")
+    children, info = _parse_ps_tree(text)
+    if root_pid not in info:
+        raise RiverError(f"{agent}'s process (PID {root_pid}) is not running")
+    desc = descendant_pids(children, root_pid)
+    if pid is not None:
+        pid = int(pid)
+        if pid == root_pid:
+            raise RiverError(f"refused: PID {pid} is {agent}'s own agent process, not a child command; "
+                             f"use maxpm stop {agent} --kill to end the session")
+        if pid not in desc:
+            raise RiverError(f"refused: PID {pid} is not under {agent}'s process (PID {root_pid}); nothing was killed")
+        target_pid = pid
+        raw_cmd = info[pid]["cmd"]
+        label = _shell_label(raw_cmd) or (raw_cmd if len(raw_cmd) <= SHELL_LABEL else raw_cmd[:SHELL_LABEL - 1] + "…")
+    else:
+        hc = hanging_commands(conn).get(agent)
+        if hc and hc.get("pid") in desc:
+            target_pid = int(hc["pid"])
+            label = hc.get("command") or info[target_pid]["cmd"][:SHELL_LABEL]
+        else:
+            cmds = session_child_commands(text, {agent: root_pid}, server_grace=server_grace).get(agent, [])
+            if not cmds:
+                raise RiverError(f"{agent} has no running child command to end")
+            target_pid = cmds[0]["pid"]
+            label = cmds[0]["label"]
+    tree = [p for p in subtree_pids(children, target_pid) if p in desc]
+    signaled, forced = _terminate_tree(tree, grace=grace, sleep=sleep)
+    hc_all = hanging_commands(conn)
+    if agent in hc_all and hc_all[agent].get("pid") in set(tree):
+        hc_all.pop(agent, None)
+        set_hanging_commands(conn, hc_all)
+    who = "maxpm" if by_serve else (actor or "?")
+    held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                        "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+    held_id = held["id"] if held else None
+    why_part = f" ({reason})" if reason else ""
+    with tx(conn):
+        _event(conn, held_id, who,
+               f"ended child command PID {target_pid} ({label}) of {agent}{why_part}")
+        if not by_serve:
+            _send(conn, "note", who,
+                  f"{who} ended your child command (PID {target_pid}: {label}){why_part}.",
+                  to=agent, item_id=held_id)
+    return {"agent": agent, "root_pid": root_pid, "pid": target_pid, "command": label,
+            "killed_pids": signaled, "force_killed": forced, "reason": reason}
+
+
 def _lease_lost(conn):
     """{item: (agent row, when)} for the open items whose lease ran out and that nobody claimed since, when the
     agent is registered on this computer and is not asked to stop."""
@@ -15039,7 +16713,8 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     if sync:
         sync_needs_you_now(conn)
     sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body, "
-           "m.level message_level, m.blocked message_blocked "  # the card's level (#6002)
+           "m.level message_level, m.blocked message_blocked, "  # the card's level (#6002)
+           "CASE WHEN n.kind='item' THEN i.decision ELSE m.decision END decision "  # its options (#6413)
            "FROM needs_you n LEFT JOIN items i ON i.id=n.item_id LEFT JOIN projects p ON p.id=i.project_id "
            "LEFT JOIN messages m ON m.id=n.message_id WHERE 1=1")
     args = []
@@ -15048,7 +16723,7 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     if human is not None:
         sql += " AND (n.human IS NULL OR n.human=?)"
         args.append(human)
-    rows = [dict(r) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
+    rows = [dict(r, decision=decision_of(r)) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
     sets = _action_types(conn)
     for r in rows:  # its type (#5998); atype keeps one type
         r["type"] = (item_action_type(conn, r["item_id"], r["item_title"], r["project"], sets) if r["kind"] == "item"
@@ -15076,10 +16751,13 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
              "message": earlier_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
     shown = {"item": exhibits_for(conn, "item", [r["item_id"] for r in rows if r["kind"] == "item"]),
              "message": exhibits_for(conn, "message", [r["message_id"] for r in rows if r["kind"] == "message"])}
+    arts = {"item": artifacts_of(conn, [r["item_id"] for r in rows if r["kind"] == "item"])[0],
+            "message": message_artifacts(conn, [r["message_id"] for r in rows if r["kind"] == "message"])}
     for r in rows:
         ref = r["item_id"] if r["kind"] == "item" else r["message_id"]
         r["earlier"] = early[r["kind"]].get(ref, [])
         r["exhibits"] = shown[r["kind"]].get(ref, [])  # #5956
+        r["artifact_links"] = arts[r["kind"]].get(ref, [])  # what it reviews or names (#6208)
         del r["_key"]
         r["notifications"] = [dict(x) for x in conn.execute(
             "SELECT channel, state, attempts, last_error, sent_at FROM notifications WHERE event_id=? ORDER BY channel",
@@ -15112,6 +16790,20 @@ def outbox_mark(conn, notification_id, ok, error=None):
             conn.execute("UPDATE notifications SET state='failed', attempts=attempts+1, last_error=? WHERE id=?",
                          (str(error or "unknown error")[:500], notification_id))
     return dict(conn.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone())
+
+
+def new_agent_name(conn, base):
+    """A name '<base>-<4 hex>' for a new session that no agent had: none in agents and none in gone_agents. A stop
+    request lives on the agents row of a name, and register keeps that row: a new session that drew the name of a
+    stopped or killed one read its stop at its first maxpm go and ended with no work (#6359). With 65,536 names a
+    base, a long-lived queue meets a used one; after 50 tries the name takes 6 hex digits."""
+    import secrets
+    for n in range(80):
+        name = f"{base}-{secrets.token_hex(2 if n < 50 else 3)}"
+        if not conn.execute("SELECT 1 FROM agents WHERE name=? UNION ALL SELECT 1 FROM gone_agents WHERE name=?",
+                            (name, name)).fetchone():
+            return name
+    raise RiverError(f"no free session name for {base}: 80 names were all taken")
 
 
 def register(conn, name, human=False, note="", session=None):
@@ -15269,6 +16961,14 @@ def agent_status(conn, name):
     return dict(a)  # a field a caller sets stays its own; the lists are only read (state, capacity, sessions.running)
 
 
+def agent_statuses(conn, kind=None):
+    """The agent_status of every agent (of kind, when given), in name order, for a caller that only reads them. Inside a
+    page state build they are the build's own, not copies: state, capacity and sessions.running each copied all 962
+    agents of the live queue (#6394: 3 ms of each build). Outside a build, four queries for all of them."""
+    got = _memo("agent_statuses", lambda: _agent_statuses(conn))
+    return [got[n] for n in sorted(got) if kind is None or got[n]["kind"] == kind]
+
+
 def _agent_statuses(conn):
     """{name: agent_status} of every agent."""
     holds, owns, pins = {}, {}, {}
@@ -15296,6 +16996,7 @@ def _agent_status(conn, a, holds, owns, pins):
     a["owns"] = [{k: r[k] for k in r.keys() if k != "owner"} for r in owns]
     a["pinned_by"] = [r["person"] for r in pins]
     a["shells"] = _shells_of(a) if a.get("kind") == "ai" else None
+    a["tasks"] = _tasks_of(a) if a.get("kind") == "ai" else None
     return a
 
 
@@ -15387,11 +17088,11 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: {actor} is an assistant session: it goes through what waits on "
                          f"{ag['assistant_for'] or 'the person'}, with them, and takes no queue work. Add the work "
                          f"(maxpm add \"<title>\" --found-during <id>): a worker session takes it. A person's item that "
-                         f"you do yourself, with their yes: maxpm --as {actor} takeover <id> --note \"<how>\"")
+                         f"you do yourself, with their yes: {as_cmd(actor)} takeover <id> --note \"<how>\"")
     if ag["role"] in ("planner", "manager") and not (ag["role"] == "manager" and it0["kind"] == "deploy"
                                                      and manager_releases(conn, it0["target"])):  # #6048
         raise RiverError(f"refused: {actor} is a {ag['role']} session; it changes the plan and does not take work. "
-                         f"To work instead, run: maxpm --as {actor} go" + (
+                         f"To work instead, run: {as_cmd(actor)} go" + (
                              f". #{item_id} is reserved for you: start a session for it (maxpm launch --item {item_id}), "
                              f"or open it to every agent (maxpm edit {item_id} --unreserve)"
                              if it0["reserved_for"] == actor and it0["status"] == "open" else ""))
@@ -15851,6 +17552,11 @@ def scope_state(conn, agent, parts, ann):
                 return {"state": "waits", "item": b, "holder": who,
                         "why": f"your scope ({scope_text(parts)}) waits on #{b} {ann[b]['title']}"
                                + (f" (held by {who})" if who else "")}
+        q = _own_question_wait(conn, a["id"], agent) if a["blocked_reason"] else None
+        if q:  # #6422: its own question; the answer comes back to it in maxpm wait
+            return {"state": "answer", "item": a["id"], "holder": None, "question": q["id"],
+                    "why": f"your scope ({scope_text(parts)}) waits on #{a['id']}: {q['to_agent']}'s answer to your "
+                           f"question #{q['id']}"}
         if a["blocked_reason"]:
             return {"state": "waits", "item": a["id"], "holder": None,
                     "why": f"your scope ({scope_text(parts)}) waits on #{a['id']}: {a['blocked_reason']}"}
@@ -15995,14 +17701,35 @@ def claim(conn, item_id, actor=None):
     return item_show(conn, item_id)
 
 
-def _close(conn, item_id, status, actor, output=None, note=None, force=None):
+def _already_closed(conn, it):
+    """Why done or drop refuses an item that is closed already (#6277): names its status, who closed it and when."""
+    st = it["status"]
+    ev = conn.execute("SELECT actor, at FROM events WHERE item_id=? AND change LIKE ? ORDER BY id DESC LIMIT 1",
+                      (it["id"], st + "%")).fetchone()
+    who = ev["actor"] if ev and ev["actor"] else None
+    at = it["closed_at"] or (ev["at"] if ev else None)
+    when = show_time(at, setting(conn, "timezone")) if at else ""
+    if st == "done" and approval(conn, it["id"]) is not None and who and _is_person(conn, who):
+        verb = "approved it"
+    elif st == "dropped":
+        verb = "dropped it"
+    else:
+        verb = "closed it"
+    detail = f"{who} {verb}" if who else ("dropped" if st == "dropped" else "closed")
+    if when:
+        detail += f" at {when}"
+    return f"#{it['id']} is {st} already: {detail}" if (who or when) else f"#{it['id']} is {st} already"
+
+
+def _close(conn, item_id, status, actor, output=None, note=None, force=None, choice=None):
+    # choice: the option of the item's decision that the person chose (#6413); the notices say it as a field.
     # The close check (_close_check) weighs words by the queue's word table. It is read here, before the write lock:
     # after an edit of a title it counts the words of every work item again, 0.27 s on 5,600 items (#5419).
     _df(conn)
     with tx(conn):
         it = _item(conn, item_id)
         if it["status"] in CLOSED_STATES:
-            raise RiverError(f"item {item_id} is already {it['status']}")
+            raise RiverError(_already_closed(conn, it))
         # Done means everything it waits on is done: a deploy never goes out past an open review or
         # an unfinished item it ships. Other items can be closed anyway with a reason (--force).
         waits = _open_prereqs(conn, it["id"]) if status == "done" else []
@@ -16015,7 +17742,9 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
                 raise RiverError(f"refused: #{item_id} still waits on {ids} (maxpm blockers {item_id}). Finish those "
                                  f"first, or close it anyway with a reason: maxpm done {item_id} --force \"<why>\"")
             _event(conn, it["id"], actor, f"done while {ids} still open: {force.strip()}")
-        if it["doer"] == "human" and _is_ai(conn, actor):
+        # The needs-you session and the one-item helper record what the person said in their chat (#6442): no
+        # takeover. An approval stays the person's own (_approval_close_refusal, before this).
+        if it["doer"] == "human" and _is_ai(conn, actor) and not helper_person(conn, actor):
             if not (note or "").strip():
                 raise RiverError(f"#{item_id} is for a person; to mark it {status} as an agent, say why the user "
                                  f"no longer needs to do it: maxpm {'done' if status == 'done' else 'drop'} {item_id} "
@@ -16026,6 +17755,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
                      "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
                      "WHERE id=?", (status, iso(now()), output, it["id"]))
+        if choice is not None:
+            conn.execute("UPDATE items SET choice=? WHERE id=?", (choice, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
         unneeded = _close_check(conn, it, status, output, note) if it["kind"] == "work" else []
         if it["kind"] == "deploy":
@@ -16034,6 +17765,9 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
             _hook(conn, "deployed", it["target"], it["id"], actor)
         elif status == "done" and it["kind"] == "review":
             _hook(conn, "review-passed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
+        elif status == "done" and it["doer"] != "human":  # #6401: its commits are on main
+            p = conn.execute("SELECT target FROM projects WHERE id=?", (it["project_id"],)).fetchone()
+            _hook(conn, "merged", p["target"] if p else None, it["id"], actor)
         goal_checks = _ask_done_when(conn, conn.execute(
             "SELECT g.* FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? ORDER BY g.rank, g.id",
             (it["id"],)).fetchall(), actor, f"#{it['id']} {it['title']}", send=False)
@@ -16063,10 +17797,12 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
                 if it["doer"] == "human":
                     for d in newly:
                         _want_fresh(conn, d, f"[#{it['id']} {it['title']}: {status} by {actor or 'a person'}]"
-                                    + (f" {output}" if output else "") + (f" ({note})" if note else ""))
+                                    + (f" {output}" if output else "") + (f" ({note})" if note else "")
+                                    + (f"\n[choice] {choice}" if choice else ""))
                 for d in held:
                     left_ = ann[d]["open_blockers"]
                     _send(conn, "notice", "maxpm", f"#{it['id']} {it['title']} is {status}"
+                          + (f" (choice: {choice})" if choice else "")
                           + (f" (output: {output})" if output else "") + f"; your #{d} waits on it. "
                           + (f"Still open before #{d}: " + ", ".join(f"#{x}" for x in left_) if left_
                              else (f"Nothing is left before #{d}; it is in progress again" if d in resumed
@@ -16082,6 +17818,13 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         res["shared_handoffs"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "
             "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],))]
+    if it["doer"] == "human" and status in CLOSED_STATES:
+        said = output or note  # with a choice, the output starts with its label (decision_choice)
+        _tell_asker(conn, it, f"{actor or 'The person'} answered #{it['id']} {it['title']} ({status})"
+                    + (f": {said}" if said else "") + (f" [choice: {choice}]" if choice else "")
+                    + ". It is closed; record nothing. Go on to the next one.", it["id"], actor)
+        if status == "done":
+            res["acts_on_answer"] = _act_on_answer(conn, it, actor, said, choice)
     return res
 
 
@@ -16323,7 +18066,8 @@ def _proof_shots(conn, item_id, shots):
             raise RiverError(f"--shot {s} has {size} bytes; at most {PROOF_SHOT_MAX} (a short video, or a screenshot)")
         dest = db_path().expanduser().parent / "proof" / str(int(item_id)) / Path(s).name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(p, dest)
+        if not (dest.exists() and os.path.samefile(p, dest)):  # #6285: keep a shot already in the proof folder
+            shutil.copyfile(p, dest)
         out.append({"file": str(dest), "name": Path(s).name, "bytes": size})
     return out
 
@@ -16371,23 +18115,32 @@ def done_proof(conn, item_id, actor, commits=None, tests=None, result=None, shot
     return (keep or None), (missing if mode != "off" else [])
 
 
-def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None, proof=None):
+def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force=None, changed=None, proof=None,
+         choice=None):
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
     checked before the close. proof: the arguments of done_proof (#5988; the CLI passes them, a person's page
-    close does not)."""
+    close does not). choice (#6413): a person's item with a decision (maxpm forward --item --option): the label
+    the person picked; output is then the person's added words, or empty."""
+    it = _item(conn, item_id)
+    if it["status"] in CLOSED_STATES:
+        raise RiverError(_already_closed(conn, it))
+    if choice is not None:
+        if it["doer"] != "human":
+            raise RiverError(f"#{item_id} is no person's item; --choice is a person's pick of its options")
+        choice, output = decision_choice(decision_of(it), choice, output)
     changed = check_changed(changed) if changed else None
     proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
         try:
-            _ship_check(conn, _item(conn, item_id))
+            _ship_check(conn, it)
         except RiverError as e:
             raise RiverError(f"{e}; #{item_id} stays open (close it without --ship when it does not ship)") from None
-    why = _approval_close_refusal(conn, _item(conn, item_id), actor)  # #5957: only the person's yes, on its day
+    why = _approval_close_refusal(conn, it, actor)  # #5957: only the person's yes, on its day
     if why:
         raise RiverError(why)
-    pick = _tries_choice(conn, _item(conn, item_id), output)  # a Look card of tries names the one to keep (#5996)
-    res = _close(conn, item_id, "done", actor, output, note, force)
+    pick = _tries_choice(conn, it, output)  # a Look card of tries names the one to keep (#5996)
+    res = _close(conn, item_id, "done", actor, output, note, force, choice)
     if pick:
         res["merge_task"] = _tries_picked(conn, res, *pick, actor)
     if changed:
@@ -16467,13 +18220,17 @@ def ship(conn, item_id, actor=None):
         if it["status"] == "dropped":
             raise RiverError(f"#{item_id} is dropped; there is nothing to ship")
         tg = _target(conn, _ship_check(conn, it))
+        if it["status"] in OPEN_STATES:  # #6452: deploy and review would wait on an open item
+            raise RiverError(
+                f"#{item_id} is {it['status'].replace('_', ' ')}; close it first: maxpm done {item_id} --ship; "
+                f"a pushed part of an open item goes out with the next release by itself"
+            )
         # A fix that a review of a cut release waits on is part of that release.
         dep = conn.execute(
             "SELECT d.* FROM items d JOIN deps dr ON dr.item_id=d.id JOIN items r ON r.id=dr.blocked_by "
             "JOIN deps rf ON rf.item_id=r.id WHERE d.kind='deploy' AND d.target=? AND d.status='open' AND d.cut_at "
             f"IS NOT NULL AND r.kind='review' AND r.status IN {OPEN_STATES} AND rf.blocked_by=? ORDER BY d.id LIMIT 1",
             (tg["name"], it["id"])).fetchone()
-        fix_of_cut = dep is not None  # the review of the cut release waits on it anyway: no warning below
         if dep is None:
             dep = conn.execute("SELECT * FROM items WHERE kind='deploy' AND target=? AND status='open' AND cut_at IS NULL "
                                "ORDER BY id LIMIT 1", (tg["name"],)).fetchone()
@@ -16514,18 +18271,7 @@ def ship(conn, item_id, actor=None):
                               f"{tg['name']}", dep["id"])
         _cadence_sync(conn)  # a new release waits (a cut release, the cadence) from its first ship request
     # release: when this release can start, for the worker that asked; in_cut: the item joined a cut release.
-    res = dict(item_show(conn, dep["id"]), release=dict(release_plan(conn, tg["name"]), in_cut=bool(dep["cut_at"])))
-    if it["status"] in OPEN_STATES and not fix_of_cut:
-        # An item that stays open after this release (a walk item, part 1 of a split build) holds the deploy and
-        # its review until it is done (#5386; 2026-10-15 #2123 and 2026-11-03 #4201 held releases so).
-        waits = f"deploy #{dep['id']}" + (f" and review #{rv['id']}" if rv is not None else "")
-        undo = f"maxpm undep {dep['id']} --on {it['id']}" + (f"; maxpm undep {rv['id']} --on {it['id']}"
-                                                             if rv is not None else "")
-        res["ship_warning"] = (f"#{it['id']} is {it['status'].replace('_', ' ')}: {waits} now wait on it until it is "
-                               f"done. Ship when the item is done (maxpm done {it['id']} --ship). It stays open after "
-                               f"this release (a part of it went out): undo with {undo}, and tell the target owner "
-                               f"what goes out")
-    return res
+    return dict(item_show(conn, dep["id"]), release=dict(release_plan(conn, tg["name"]), in_cut=bool(dep["cut_at"])))
 
 
 def _release_review(conn, dep, tg, actor, force=False):
@@ -17250,25 +18996,14 @@ def session_from_env(env=None):
     (CHAT['ref'] 'session'), when the id matches its IDENTITY['id_pattern'] (else agents.SAFE_ID); or None. Claude
     Code: CLAUDE_CODE_SESSION_ID; Hermes: HERMES_SESSION_ID. Codex's thread id goes to native_address instead (its
     CHAT['ref'] is 'address'). The order of agents.from_env: every other agent first, then codex, then claude: an
-    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID. Source 'log' (Gemini, #5819): inside the
-    agent (IDENTITY['inside_env']), the module's session_from_log(folder, env) reads the id from its chat logs."""
+    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID; Antigravity CLI:
+    ANTIGRAVITY_CONVERSATION_ID."""
     from . import agents
     env = os.environ if env is None else env
     got = agents.load()
     for m in agents.env_order():
         ad, ident = got[m], got[m].identity or {}
         if ad.chat_ref() != "session":
-            continue
-        if ident.get("source") == "log":
-            read = getattr(ad.module, "session_from_log", None)
-            if not read or not any(env.get(k) for k in ident.get("inside_env") or ()):
-                continue
-            try:
-                sid = str(read(os.getcwd(), env) or "").strip()
-            except OSError:
-                continue
-            if sid and re.fullmatch(ident.get("id_pattern") or agents.SAFE_ID, sid):
-                return sid
             continue
         if ident.get("source") != "env" or not ident.get("env"):
             continue
@@ -17305,10 +19040,95 @@ def hook_file(adapter):
     return adapter.install_hooks(None, report_command())[-1]
 
 
+def settings_file(adapter, opts):
+    """The settings file that a start passes (LAUNCH['hooks_file']): the hook file, which holds the queue guard too,
+    when the agent's activity_hooks setting is on; else the queue guard alone (#6412: no session writes the queue
+    file), or None."""
+    if not adapter.launch.get("hooks_file"):
+        return None
+    if opts.get("activity_hooks") == "on":
+        return hook_file(adapter)
+    if not QUEUE_GUARD:
+        return None
+    words = adapter.install_guard()
+    return words[-1] if words else None
+
+
 def activity_hook_file():
     """Claude Code's hook file (hook_file of the claude adapter)."""
     from . import agents
     return hook_file(agents.get("claude"))
+
+
+def project_hooks(conn, platform, folder, project=None):
+    """Put MaximizePM's hooks into the project hook file of a CLI that loads hooks only from the project (agy's
+    .agents/hooks.json, #6351), or take them out, as the agent's setting <prefix>activity_hooks of the project says
+    (project: its name; else the project of the folder). Each start of such an agent runs it in its start folder, and
+    maxpm init in the folder. Returns {"file", "on"}, or None for an agent with no project hooks."""
+    from . import agents
+    ad = agents.find(platform) if platform else None
+    if ad is None or not ad.has("project_hooks") or not folder:
+        return None
+    pid = None
+    names = [project] if isinstance(project, str) and project else projects_for_dir(conn, folder)
+    if names and names[0]:
+        r = conn.execute("SELECT id FROM projects WHERE name=?", (names[0],)).fetchone()
+        pid = r["id"] if r else None
+    key = ad.config_key("activity_hooks")
+    on = setting(conn, key, project_id=pid) == "on"
+    try:
+        path = ad.project_hooks(folder, report_command(), on)
+    except OSError as e:
+        raise RiverError(f"cannot write {ad.label}'s hook file in {folder}: {e}; turn the hooks off: "
+                         f"maxpm config set {key} off")
+    if path:
+        _git_exclude(folder, path)
+    return {"file": path, "on": on}
+
+
+def _git_exclude(folder, path, note="MaximizePM's hook file (#6351)"):
+    """Add a file that MaximizePM writes into a repository's folder (agy's hook file, #6351; Cursor's permissions,
+    #6439) to the repository's info/exclude, so a session's commit of every new file does not take it. The repository
+    of a worktree: its commondir. Nothing outside a repository, and nothing on an error."""
+    try:
+        root = Path(folder)
+        dot = root / ".git"
+        if dot.is_file():  # a worktree: 'gitdir: <its folder in the main repository>'
+            gd = Path(dot.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+            gd = gd if gd.is_absolute() else (root / gd)
+            common = gd / (gd / "commondir").read_text(encoding="utf-8").strip() if (gd / "commondir").exists() else gd
+        elif dot.is_dir():
+            common = dot
+        else:
+            return
+        rel = "/" + Path(path).resolve().relative_to(root.resolve()).as_posix()
+        ex = common.resolve() / "info" / "exclude"
+        lines = ex.read_text(encoding="utf-8").splitlines() if ex.exists() else []
+        if rel not in lines:
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            with ex.open("a", encoding="utf-8") as fh:
+                fh.write(("\n" if lines and lines[-1] else "") + f"# {note}\n{rel}\n")
+    except (OSError, ValueError, IndexError):
+        return
+
+
+def turn_end_messages(conn, agent, limit=5):
+    """The messages that wait for an agent's session at the end of its turn (#6351, agy's Stop hook): unread messages
+    to it (or to the holder of its items) that no native delivery brought, as idle_news picks them, each as the text
+    of a native delivery. They count as delivered now (native_status 'sent'), so the next turn end and serve's idle
+    watch do not bring them again; they stay unread until the session reads its inbox."""
+    if not agent:
+        return []
+    with tx(conn):
+        rows = conn.execute(
+            f"SELECT m.id, m.kind, m.from_agent, m.body FROM messages m WHERE {_TO_ME} AND m.from_agent<>? "
+            "AND m.read_at IS NULL AND (m.native_status IS NULL OR m.native_status<>'sent') "
+            "AND (m.from_agent<>'maxpm' OR m.item_id IN (SELECT id FROM items WHERE assignee=? OR reserved_for=?)) "
+            "ORDER BY m.id LIMIT ?", (agent, agent, agent, agent, agent, limit)).fetchall()
+        for r in rows:
+            conn.execute("UPDATE messages SET native_status='sent' WHERE id=?", (r["id"],))
+        _mark_delivered(conn, [r["id"] for r in rows], "native")
+    return [_native_text(r["kind"], r["from_agent"], " ".join(r["body"].split())[:2000]) for r in rows]
 
 
 def activity_agent(conn, sid=None, env=None):
@@ -17391,7 +19211,7 @@ def hook_report(conn, agent_id, payload, env=None):
     if rep and rep["run"] is not None:
         # A hook before a shell command: a check only, nothing recorded (it runs before every Bash call).
         return {"agent": agent, "event": rep["event"], "state": None, "prompt": False, "alert": None, "answered": [],
-                "remind": None, "deny": push_guard(conn, agent, rep["run"]) if agent else None}
+                "remind": None, "deny": tmux_guard(rep["run"]) or (push_guard(conn, agent, rep["run"]) if agent else None)}
     if not agent or not rep:
         return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
                 "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
@@ -17457,6 +19277,58 @@ def hook_report(conn, agent_id, payload, env=None):
             "answered": answered, "remind": remind}
 
 
+# The words that may come before the program of a shell command: env and its options, VAR=value, and wrappers.
+_RUN_WRAPPERS = {"env", "command", "exec", "nohup", "sudo", "time", "builtin"}
+
+
+def _shell_commands(command):
+    """The simple commands of a shell line as lists of words, in a quick parse: shell quotes hold, and ; & | ( ) and
+    a newline end a command. An unclosed quote reads each line as words."""
+    import shlex
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        words = command.replace("\n", " ; ").split()
+    out, cur = [], []
+    for w in words:
+        if w and set(w) <= set("();<>|&\n"):
+            if cur:
+                out.append(cur)
+            cur = []
+        else:
+            cur.append(w)
+    return out + ([cur] if cur else [])
+
+
+def tmux_guard(command):
+    """Why MaximizePM refuses this shell command, or None (#6246): a tmux kill-server that names no server of its own
+    (-L name or -S path), or names MaximizePM's (-L maximizepm). Every agent session runs in a pane of that server,
+    and in a pane the variable TMUX names it: tmux then goes to it whatever TMUX_TMPDIR says. On 2026-11-19 two
+    workers ended a test server with 'TMUX_TMPDIR=<their folder> tmux kill-server' and ended the manager, the
+    workers and the expert twice (16:57:21 and 16:59:43 PST)."""
+    if "kill-server" not in (command or ""):
+        return None
+    for words in _shell_commands(command):
+        i = 0
+        while i < len(words) and (words[i] in _RUN_WRAPPERS or words[i].startswith("-")
+                                  or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[i])):
+            i += 2 if words[i] == "-u" else 1  # env -u NAME
+        if i >= len(words) or os.path.basename(words[i]) != "tmux" or "kill-server" not in words[i + 1:]:
+            continue
+        opts = words[i + 1:words.index("kill-server", i + 1)]
+        own = next((w[2:] or (opts[j + 1] if j + 1 < len(opts) else "") for j, w in enumerate(opts)
+                    if w[:2] in ("-L", "-S")), None)
+        if not own or own == TMUX_SOCKET:
+            return ("MaximizePM refuses this command: tmux kill-server with no server of its own ends the tmux server "
+                    "of every agent session, this one too. In a tmux pane the variable TMUX names that server, and "
+                    "TMUX_TMPDIR does not change it. Name your own server on every tmux command of the test: "
+                    "tmux -L <name> ... and tmux -L <name> kill-server (or -S <socket path>).")
+    return None
+
+
 def push_guard(conn, agent, command):
     """Why MaximizePM refuses this shell command of the agent now, or None (#5381). A command that matches the setting
     push_guard (a push, gh pr merge, a launch) waits while the agent has an unread alert (it may say 'stop', 'do not
@@ -17483,8 +19355,8 @@ def push_guard(conn, agent, command):
     why += [f"#{b['id']} is blocked: {' '.join(b['blocked_reason'].split())[:120]}" for b in blocked[:2]]
     more = len(alerts) + len(blocked) - len(why)
     return ("MaximizePM holds this command (push_guard): " + "; ".join(why) + (f"; and {more} more" if more > 0 else "")
-            + f". Read it first: maxpm --as {agent} inbox"
-            + (f" (and maxpm --as {agent} show {blocked[0]['id']})" if blocked else "")
+            + f". Read it first: {as_cmd(agent)} inbox"
+            + (f" (and {as_cmd(agent)} show {blocked[0]['id']})" if blocked else "")
             + ". Then do what it says, and run the command again only when it still applies.")
 
 
@@ -17655,7 +19527,7 @@ def session_move(conn, sid, to, actor=None):
     by = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
     if actor and not (by and (by["kind"] == "human" or by["role"] == "manager")):
         raise RiverError(f"refused: only a person or the manager moves a session to another agent; ask the manager: "
-                         f"maxpm --as {actor} alert {active_manager(conn) or '<manager>'} \"session {sid} is {to}'s\"")
+                         f"{as_cmd(actor)} alert {active_manager(conn) or '<manager>'} \"session {sid} is {to}'s\"")
     if not to or not (conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (to,)).fetchone()
                       or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (to,)).fetchone()):
         raise RiverError(f"{to or '--to'} is no agent: maxpm session --move <session id> --to <agent>")
@@ -17693,75 +19565,47 @@ def _ts(s):
 # prompt: no river command, a quiet screen, and no process newer than its last river command (or no process at
 # all for a sandboxed session, which cannot run ps). The transcript has the start of each task (the tool result)
 # and its end (a task notification with a status, or TaskStop), so serve reads it there (#1611).
-_BG_STARTS = (("command", re.compile(r"Command running in background with ID: (\w+)")),
-              ("command", re.compile(r"Command [^\n]{0,200}?moved to the background \(ID: (\w+)\)")),
-              ("subagent", re.compile(r"Async agent launched successfully.*?agentId: (\w+)", re.S)))
-_BG_NOTE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 _BG_RIVER_WAIT = re.compile(r"\bmaxpm\b[^\n;|&]*\s(wait|--wait|--watch)\b")
-_BG_CACHE = {}  # transcript path -> (size, mtime, tasks): a session that waits writes nothing
+# Chat log path -> [inode, byte read up to, the reader's state]: each read folds in only the lines written since the
+# last one (#6454: a first read of a transcript of 280 MB takes about a second, a refresh of the page cannot).
+_BG_CACHE = {}
+_BG_LOCK = None
+# The ended tasks that a session's list keeps (record_tasks), newest first.
+TASKS_ENDED = 10
 
 
-def _result_text(content):
-    if isinstance(content, str):
-        return content
-    return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") == "text")
+def _bg_wait(command):
+    """True for a river wait (maxpm wait, inbox --wait, manage --watch) and a loop that only renews the lease: these
+    are waits, not work."""
+    return bool(_BG_RIVER_WAIT.search(command) or ("maxpm" in command and "heartbeat" in command
+                                                   and "sleep" in command))
 
 
-def _background_tasks(path):
-    """The background tasks of one transcript that have a start and no end: [{id, kind (command or subagent),
-    at, what, command}]. A start counts only as the first words of a tool result, so text that quotes one (a
-    grep of another transcript) starts nothing."""
-    started, ended = {}, set()
-    with open(path, errors="replace", encoding="utf-8") as f:
-        for line in f:
-            if "<task-notification>" in line and "<status>" in line:
-                for body in _BG_NOTE.findall(line):
-                    m = re.search(r"<task-id>(\w+)</task-id>", body)
-                    if m and "<status>" in body:
-                        ended.add(m.group(1))
-            start = '"tool_result"' in line and ("background" in line or "Async agent launched" in line)
-            stop = '"TaskStop"' in line or '"KillShell"' in line
-            if not (start or stop):
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
-            parts = msg.get("content") if isinstance(msg.get("content"), list) else []
-            t = _ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
-            for x in parts:
-                if not isinstance(x, dict):
-                    continue
-                if x.get("type") == "tool_use" and x.get("name") in ("TaskStop", "KillShell"):
-                    inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                    ended.add(str(inp.get("task_id") or inp.get("shell_id") or ""))
-                elif x.get("type") == "tool_result" and d.get("type") == "user" and t is not None:
-                    text = _result_text(x.get("content")).lstrip()
-                    for kind, rx in _BG_STARTS:
-                        m = rx.match(text)
-                        if m:
-                            started[m.group(1)] = {"id": m.group(1), "kind": kind, "at": t, "use": x.get("tool_use_id"),
-                                                   "what": "", "command": ""}
-    tasks = [v for k, v in started.items() if k not in ended]
-    uses = {v["use"]: v for v in tasks if v["use"]}
-    if uses:  # what each one is: the description and the command of its tool call
-        with open(path, errors="replace", encoding="utf-8") as f:
-            for line in f:
-                if '"tool_use"' not in line or not any(u in line for u in uses):
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
-                for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
-                    if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") in uses:
-                        inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                        v = uses[x["id"]]
-                        v["command"] = str(inp.get("command") or "")
-                        v["what"] = " ".join(str(inp.get("description") or v["command"]).split())[:80]
-    return tasks
+def session_tasks(ad, path):
+    """Every background task of one chat log that the adapter's background_scan reads (agents.background_scan):
+    [{id, kind, at, what, command, end, status}], oldest first; None when the adapter has no reader (Codex: no
+    background commands) or the log cannot be read. Only the lines written since the last read are read again."""
+    global _BG_LOCK
+    if ad is None or not path:
+        return None
+    if _BG_LOCK is None:
+        import threading
+        _BG_LOCK = threading.Lock()
+    with _BG_LOCK:
+        try:
+            st = os.stat(path)
+            got = _BG_CACHE.get(str(path))
+            if not got or got[0] != st.st_ino or st.st_size < got[1]:
+                got = [st.st_ino, 0, {}]
+            if st.st_size > got[1]:
+                end = ad.background_scan(path, got[1], got[2])
+                if end is None:
+                    return None
+                got[1] = end
+            _BG_CACHE[str(path)] = got
+        except OSError:
+            return None
+        return sorted((dict(v) for v in got[2].get("tasks", {}).values()), key=lambda v: v["at"])
 
 
 def background_work(conn, agent, root=None):
@@ -17779,22 +19623,72 @@ def background_work(conn, agent, root=None):
                      (agent,)).fetchone()
     if not r or not limit.total_seconds():
         return []
+    from . import agents
+    claude = agents.load().get("claude")
     out, t = [], now()
     for path in sorted(Path(root or transcripts_root()).glob(f"*/{r['session_id']}.jsonl")):
-        try:
-            st = path.stat()
-            got = _BG_CACHE.get(str(path))
-            if not got or got[:2] != (st.st_size, st.st_mtime_ns):
-                got = _BG_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, _background_tasks(path))
-        except OSError:
-            continue
-        for task in got[2]:
-            cmd = task["command"]
-            if t - task["at"] >= limit or _BG_RIVER_WAIT.search(cmd) or ("maxpm" in cmd and "heartbeat" in cmd
-                                                                          and "sleep" in cmd):
+        for task in session_tasks(claude, path) or ():
+            if task["end"] or t - task["at"] >= limit or _bg_wait(task["command"]):
                 continue
             out.append({"id": task["id"], "kind": task["kind"], "what": task["what"], "at": iso(task["at"])})
     return out
+
+
+def task_rows(tasks, t, limit):
+    """The list of a session's background tasks that maxpm who and the Sessions tab show (#6454): the ones that run
+    (oldest first; a river wait among them with wait true), then the last TASKS_ENDED that ended (newest first; no
+    wait: the manager's watch ends every few minutes). A task with no end after busy_max (limit) is left out: its end
+    can be lost."""
+    row = lambda x: {"id": x["id"], "kind": x["kind"], "what": x["what"], "command": x["command"][:300],  # noqa: E731
+                     "at": iso(x["at"]), "end": iso(x["end"]) if x["end"] else None, "status": x.get("status"),
+                     "wait": _bg_wait(x["command"])}
+    run = [row(x) for x in tasks if not x["end"] and t - x["at"] < limit]
+    ended = [row(x) for x in sorted((x for x in tasks if x["end"]), key=lambda x: x["end"], reverse=True)
+             if not _bg_wait(x["command"])][:TASKS_ENDED]
+    return run + ended
+
+
+def record_tasks(conn):
+    """maxpm serve, with record_shells every shells_every (#6454): store the background tasks of each session on this
+    computer (task_rows of its last session's chat log) in agents.tasks, so maxpm who and the Sessions tab read them
+    with no log of their own. NULL for an agent whose CLI has no reader of them (Codex: no background commands; an
+    agent of an unknown type): the page shows no count, not 0. A row is written when its list changes, and at least
+    each half of SHELLS_FRESH. Returns {agent: rows or None}."""
+    rows = conn.execute("SELECT name, tasks, tasks_at FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
+                        (this_host(),)).fetchall()
+    t, out = now(), {}
+    limit = parse_duration(setting(conn, "busy_max")) if rows else None
+    for r in rows:
+        ad, new = state_adapter(conn, r["name"]), None
+        s = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC "
+                         "LIMIT 1", (r["name"],)).fetchone()
+        if ad is not None and s and ad.launch.get("background"):
+            try:
+                tasks = session_tasks(ad, ad.chat_path(s["session_id"]))
+            except Exception:  # noqa: BLE001 - an adapter's reader (a user module too) never stops the loop
+                tasks = None
+            new = task_rows(tasks, t, limit) if tasks is not None else None
+        out[r["name"]] = new
+        if new is None and r["tasks"] is None:
+            continue
+        text = json.dumps(new) if new is not None else None
+        if text == r["tasks"] and r["tasks_at"] and t - parse_iso(r["tasks_at"]) < SHELLS_FRESH / 2:
+            continue
+        with tx(conn):
+            conn.execute("UPDATE agents SET tasks=?, tasks_at=? WHERE name=?", (text, iso(t), r["name"]))
+    return out
+
+
+def _tasks_of(a):
+    """The background tasks of an agent row (record_tasks): a list, or None when its CLI has no reader of them or
+    maxpm serve has not read them lately."""
+    at = a.get("tasks_at")
+    if not at or a.get("tasks") is None or now() - parse_iso(at) >= SHELLS_FRESH:
+        return None
+    try:
+        return json.loads(a["tasks"])
+    except ValueError:
+        return None
 
 
 def _session_requests(sid, root=None):
@@ -17939,6 +19833,8 @@ def item_show(conn, item_id, ann=None):
     if a["doer"] == "human":
         a["earlier"] = earlier_for(conn, "item", [iid]).get(iid, [])
         a["type"] = item_action_type(conn, iid, a["title"], a["project"])  # the card's tag (#5998, #6002)
+        row = conn.execute("SELECT decision, choice FROM items WHERE id=?", (iid,)).fetchone()
+        a["decision"], a["choice"] = decision_of(row), row["choice"]  # the manager's options (#6413)
         if TRIES_LOOK in (a["title"] or ""):  # the tries side by side on the card (#5996)
             a["tries"] = [{"k": k, **t, "canvases": try_canvases(conn, t)}
                           for k, t in sorted(tries_of(conn, iid).items())]
@@ -17946,6 +19842,7 @@ def item_show(conn, item_id, ann=None):
         a["release_yes"] = release_yes_of(conn, iid)  # a sign-off on a release: its card shows the report (#6039)
         a["exhibits"] = exhibits_for(conn, "item", [iid]).get(iid, [])  # #5956
     a["plan"] = plan_links(conn, iid)  # the design documents whose plan made it (#5989)
+    a["artifact_links"] = artifacts_of(conn, [iid])[0].get(iid, [])  # what it reviews or names (#6208)
     return a
 
 
@@ -18027,6 +19924,8 @@ def _msg_dict(r):
     m["level_set"] = bool(m.get("level"))  # the sender gave it
     m["level"] = m.get("level") or DEFAULT_LEVEL
     m["delivery"] = delivery_text(m)  # for the sender: delivered, read, answered (#5685); the page shows it
+    if "decision" in m:
+        m["decision"] = decision_of(r)  # the manager's options for the person (#6413)
     return m
 
 
@@ -18036,6 +19935,17 @@ def _is_manager(conn, name):
 
 def _is_person(conn, name):
     return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (name,)).fetchone())
+
+
+def helper_person(conn, name):
+    """The person whose items session name goes through with them (#6442): the needs-you session (role assistant)
+    or the one-item helper (role helper), from its assistant_for, else the first person. None for any other agent."""
+    r = conn.execute("SELECT role, assistant_for FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone() \
+        if name else None
+    if not r or r["role"] not in ("assistant", "helper"):
+        return None
+    person = r["assistant_for"] or _person(conn)
+    return person if _is_person(conn, person) else None
 
 
 def _item_stands(conn, sender, item_id):
@@ -18109,10 +20019,11 @@ def escalate_by_state(conn):
     return out
 
 
-def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False):
+def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False, artifacts=()):
     """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. For a message to
     the manager, level (high, low) says how long it waits before it wakes the manager's watch, and blocked says
-    that the sender's item cannot move until the answer: the watch returns for it at once."""
+    that the sender's item cannot move until the answer: the watch returns for it at once. artifacts (--artifact):
+    the canvases, files or pages it is about; a question or an alert links the ones its text names too (#6208)."""
     if not actor:
         raise RiverError("sending needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if kind not in SEND_KINDS:
@@ -18162,6 +20073,11 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             root = conn.execute("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
                                 (item,)).fetchone() if item is not None else None
             _exhibits_store(conn, "message", mid, exhibit_sources(body, root["path"] if root else None))
+        pid = conn.execute("SELECT project_id FROM items WHERE id=?", (item,)).fetchone()[0] if item is not None else None
+        _link_artifacts(conn, [artifact_ref(conn, x, pid) for x in artifacts or ()], item_id=item, message_id=mid,
+                        how="flag", actor=actor)
+        if kind in ART_LINK_MESSAGES and actor != "maxpm":
+            _link_artifacts(conn, artifact_refs(conn, body, pid), item_id=item, message_id=mid, actor=actor)
         held = _hold_question(conn, mid) if kind in ("question", "alert") else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
@@ -18208,7 +20124,9 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                                f"\"<what is done, what is left, where>\" --item {item}). Then wait at your prompt: an "
                                f"answer within {end} comes to you here, and the wait costs nothing. After {end} maxpm "
                                f"serve ends this session; a later answer continues this chat when its context is small "
-                               f"(fresh_min), else a fresh session starts with the question, the answer and your notes")
+                               f"(fresh_min), else a fresh session starts with the question, the answer and your notes. "
+                               f"If you release #{item} instead, run maxpm go and then maxpm wait: the answer gives "
+                               f"#{item} back to you there")
             else:
                 res["then"] = "wait at your prompt for the answer (question_wait_end is 0s: maxpm serve ends no session)"
     if manager and not res["blocked"] and not _is_person(conn, actor):
@@ -18235,7 +20153,15 @@ def _hold_question(conn, mid):
     person, about = q["to_agent"], (f" about #{q['item_id']}" if q["item_id"] is not None else "")
     conn.execute("UPDATE messages SET held_for=?, held_until=? WHERE id=?",
                  (boss, iso(now() + parse_duration(hold)), mid))
-    if q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
+    if q["kind"] == "alert" and q["body"].startswith(PROMPT_NOTE):  # a prompt in a session's pane (#6282)
+        body = (f"{q['from_agent']} waits at a prompt in its terminal (alert #{mid}{about}): {full_text(q['body'])}. "
+                f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: maxpm "
+                f"approve {q['from_agent']} <option number> (or --text \"<what to do instead>\"). Approve a read of a "
+                f"file that is no secret in the project's folders or in a folder the task names, and an edit or a "
+                f"command that the task needs. Send on to {person} a secret, a deletion, a push, a payment, a sign-in "
+                f"to an account, or what you cannot judge: maxpm forward {mid} [--note \"<what you add>\"]. With neither "
+                f"within {hold} (question_hold), {person} gets it.")
+    elif q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
         body = (f"{q['from_agent']} alerts {person} (alert #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Do what it asks when {person} is not needed, "
                 f"then close it: maxpm forward {mid} --drop --note \"<what you did>\". Else send it on to {person}: "
@@ -18244,13 +20170,44 @@ def _hold_question(conn, mid):
     else:
         body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {full_text(q['body'])}. "
                 f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
-                f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
+                f"maxpm answer {mid} \"...\". Else send it on to {person} with 2 to 4 options, your pick first: "
+                f"maxpm forward {mid} --question \"<one short sentence>\" --option \"<label>: <one line>\" --option ... "
+                f"--recommend <label> [--note \"<what you add>\"]. "
                 f"With neither within {hold} (question_hold), {person} gets it.")
     body += _earlier_note(conn, "message", mid)
     alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
     if q["item_id"] is not None:
         _event(conn, q["item_id"], "maxpm", f"{q['kind']} #{mid} to {person} held for the manager {boss} ({hold})")
     return {"manager": boss, "alert": alert, "body": body, "hold": hold}
+
+
+def prompt_hold_manager(conn, agent):
+    """The active manager that a prompt in agent's pane goes to first (#6282), or None: the person gets it at once (no
+    active manager, question_hold 0s, the agent is the manager, or an expert, whose person talks with it)."""
+    hold = setting(conn, "question_hold", agent=agent)
+    if parse_duration(hold).total_seconds() <= 0:
+        return None
+    boss = active_manager(conn)
+    if not boss or boss == agent:
+        return None
+    r = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
+    return None if r and r["role"] in ("manager", "expert") else boss
+
+
+def prompt_held(conn, agent, prompt=None):
+    """The manager that the prompt in agent's pane waits for now (#6282), or None: the person sees its card. Held:
+    the pane watcher's alert about it is held for the manager (held_for), or there is no alert yet (prompt_wait) and
+    a new one would be held. Not held: the CLI's own question to the person (prompt['ask']), the auto mode
+    classifier's prompt (prompt['why'], policy p3), and a prompt whose alert went to the person (forwarded, or its
+    question_hold ended)."""
+    if prompt and (prompt.get("ask") or prompt.get("why") or prompt.get("elsewhere")):
+        return None
+    rows = conn.execute("SELECT held_for FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+                        "WHERE m.kind='alert' AND m.from_agent=? AND m.read_at IS NULL AND m.body LIKE ?",
+                        (agent, PROMPT_NOTE + "%")).fetchall()
+    if rows:
+        return rows[0]["held_for"] if all(r["held_for"] for r in rows) else None
+    return prompt_hold_manager(conn, agent)
 
 
 def _unhold_question(conn, q, why=None):
@@ -18293,23 +20250,214 @@ def _release_held(conn):
             _unhold_item(conn, it, why)
 
 
-def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
+# The options of an escalation (#6413, mark 2026-11-20: 'a dialog modal with selectable options with a final text
+# area option ... the dialog is when the manager escalates the question to me'). The manager forwards a question or a
+# person item with its own short question and 2 to 4 options; the page opens them as a dialog, and the person's
+# choice comes back as a field (messages.choice of the answer, items.choice), not as text to parse.
+DECISION_OPTIONS = (2, 4)
+DECISION_LABEL_MAX, DECISION_DETAIL_MAX, DECISION_QUESTION_MAX = 60, 200, 300
+DECISION_HELP = ("--option \"<label>: <one line: what happens>\" (2 to 4 times) --recommend <label> "
+                 "[--question \"<your short question>\"]")
+
+
+def decision_parse(options=(), recommend=None, question=None):
+    """The decision of an escalation from the manager's words -> {"question", "options": [{label, detail,
+    recommended}]} with the recommended option first, or None when there are no options and no question. options:
+    "<label>: <one line>" strings (the CLI) or {label, detail} dicts (MCP, the page). recommend: a label or its
+    number (1-based)."""
+    question = " ".join((question or "").split()) or None
+    if question and len(question) > DECISION_QUESTION_MAX:
+        raise RiverError(f"the question is at most {DECISION_QUESTION_MAX} characters: one short sentence; the asker's "
+                         f"own words stay on the card")
+    opts = []
+    for o in options or ():
+        if isinstance(o, dict):
+            label, detail = str(o.get("label") or "").strip(), " ".join(str(o.get("detail") or "").split())
+        else:
+            label, _, detail = str(o).partition(":")
+            label, detail = label.strip(), " ".join(detail.split())
+        if not label or not detail:
+            raise RiverError(f"each option is a short label and one line on what it does: {DECISION_HELP}")
+        if len(label) > DECISION_LABEL_MAX or len(detail) > DECISION_DETAIL_MAX:
+            raise RiverError(f"an option's label is at most {DECISION_LABEL_MAX} characters and its line at most "
+                             f"{DECISION_DETAIL_MAX}: {label[:40]!r}")
+        if any(x["label"].lower() == label.lower() for x in opts):
+            raise RiverError(f"two options have the label {label!r}; give each its own")
+        opts.append({"label": label, "detail": detail, "recommended": False})
+    if not opts:
+        if recommend is not None:
+            raise RiverError(f"--recommend names one of the options: {DECISION_HELP}")
+        return {"question": question, "options": []} if question else None
+    lo, hi = DECISION_OPTIONS
+    if not lo <= len(opts) <= hi:
+        raise RiverError(f"give {lo} to {hi} options, not {len(opts)}; with none, the person writes the answer: "
+                         f"{DECISION_HELP}")
+    if recommend is None or not str(recommend).strip():
+        raise RiverError(f"name the option you recommend: --recommend <label> ({DECISION_HELP})")
+    r = str(recommend).strip()
+    pick = opts[int(r) - 1] if r.isdigit() and 1 <= int(r) <= len(opts) else next(
+        (x for x in opts if x["label"].lower() == r.lower()), None)
+    if pick is None:
+        raise RiverError(f"--recommend {r!r} is no option; the labels: {', '.join(x['label'] for x in opts)}")
+    pick["recommended"] = True
+    opts.remove(pick)
+    return {"question": question, "options": [pick] + opts}
+
+
+def decision_of(row):
+    """The decision stored on a message or an item row (decision_parse's form), or None."""
+    raw = row["decision"] if row is not None and "decision" in row.keys() else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def decision_choice(decision, choice, text=None):
+    """The person's answer to a decision: (the chosen label as stored, the answer text). choice: a label of its
+    options (any case) or None; text: the person's own words. The text says the choice first, so a reader of the
+    plain text has it too; the label is the field (#6413)."""
+    text = (text or "").strip()
+    if choice is None or not str(choice).strip():
+        if not text:
+            raise RiverError("pick an option or write your answer")
+        return None, text
+    labels = [o["label"] for o in (decision or {}).get("options") or []]
+    got = next((x for x in labels if x.lower() == str(choice).strip().lower()), None)
+    if got is None:
+        raise RiverError(f"{choice!r} is no option of this decision" + (f"; the options: {', '.join(labels)}"
+                                                                         if labels else "; it has no options"))
+    return got, f"{got}: {text}" if text else got
+
+
+def _tell_asker(conn, row, text, item_id=None, actor=None):
+    """After the commit (#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to
+    use the question asking modal'): the person answered, in the page's dialog, a decision that a session put for
+    them (decision_of(row)["by"], maxpm forward in that session, #6442): that session gets a notice, into its chat
+    when its platform has native_message, so it goes on to the next one. Not when that session recorded the answer
+    itself (its token, or actor: its own name)."""
+    by = (decision_of(row) or {}).get("by")
+    if not by or by in (TOKEN_AGENT.get(), actor):
+        return
+    a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (by,)).fetchone()
+    if not a or a["role"] == "manager" or _agent_state(conn, a) in ("stopped", "gone"):
+        return
+    with tx(conn):
+        mid = _send(conn, "notice", "maxpm", text, to=by, item_id=item_id)
+    st = deliver_native(conn, by, _native_text("notice", "maxpm", text))
+    with tx(conn):
+        conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+        if st == "sent":
+            _mark_delivered(conn, [mid], "native")
+
+
+def _act_on_answer(conn, it, actor, said, choice=None):
+    """After the commit: a person answered (done) a Decide or Approve item that no open item waits on (#6484). Its
+    answer reached nobody: the session that added #6478 had ended, and the manager that added #6491 gets no notice of
+    its own items (_tell_asker); mark had to ask twice (2026-11-20). An agent session that added it: a task acts on the
+    answer. The manager added it or forwarded it with a decision: the active manager gets a blocked alert with the
+    answer, and acts on it (a task when no manager is active). Not for an item that a person or maxpm added, or an
+    approval that a session uses itself (maxpm approval use, a goal's yes). Returns {"task": id} or {"alert": name}."""
+    if it["doer"] != "human" or it["kind"] != "work":
+        return None
+    if _is_ai(conn, actor) and not helper_person(conn, actor):
+        return None  # an agent took it over: it does what follows itself
+    if item_action_type(conn, it["id"], it["title"], _project_name(conn, it["project_id"])) not in ("decide", "approve") \
+            and not decision_of(it):
+        return None
+    if conn.execute("SELECT 1 FROM approvals WHERE item_id=?", (it["id"],)).fetchone() or _waiting_on(conn, it["id"]):
+        return None
+    first = conn.execute("SELECT actor FROM events WHERE item_id=? ORDER BY id LIMIT 1", (it["id"],)).fetchone()
+    adder = first["actor"] if first else None
+    if not adder or adder == "maxpm" or not _is_ai(conn, adder):
+        return None
+    person = helper_person(conn, actor) or actor or "the person"
+    answer = " ".join((said or "").split()) or "done, with no words"
+    if choice and not answer.lower().startswith(str(choice).lower()):
+        answer = f"{choice}: {answer}"
+    by = (decision_of(it) or {}).get("by")
+    boss = active_manager(conn)
+    if boss and (_is_manager(conn, adder) or _is_manager(conn, by)):
+        how = "added" if _is_manager(conn, adder) else "forwarded"
+        with tx(conn):
+            _send(conn, "alert", "maxpm", f"{person} answered #{it['id']} {it['title']}: {answer}. You {how} it, and no "
+                  f"open item waits on it: act on the answer now; nobody else does.", to=boss, item_id=it["id"],
+                  blocked="sender")
+            _event(conn, it["id"], "maxpm", f"the manager {boss} acts on the answer (no open item waits on it)")
+        return {"alert": boss}
+    task = item_add(conn, _project_name(conn, it["project_id"]), f"Act on {person}'s answer to #{it['id']}: {it['title']}",
+                    priority=it["priority"], actor="maxpm", goals=[], found_during=it["id"],
+                    context=f"{person} answered #{it['id']} ({iso(now())[:16]}Z): {answer}. {adder} added #{it['id']}"
+                            + (f" during #{it['found_during']}" if it["found_during"] else "")
+                            + f", and no open item waits on it, so nobody else acts on the answer. Read maxpm show "
+                            f"{it['id']} for the full question, then do what the answer says. When it asks for nothing, "
+                            f"close this task with a note.")
+    with tx(conn):
+        _event(conn, it["id"], "maxpm", f"#{task['id']} acts on the answer (no open item waits on it)")
+    return {"task": task["id"]}
+
+
+def _set_decision(conn, table, row_id, decision, actor):
+    """Inside a tx: store the manager's decision on a question or an item, and say so in the item's history."""
+    conn.execute(f"UPDATE {table} SET decision=? WHERE id=?", (json.dumps(decision), row_id))
+    item = row_id if table == "items" else conn.execute("SELECT item_id FROM messages WHERE id=?",
+                                                        (row_id,)).fetchone()[0]
+    if item is not None:
+        opts = decision["options"]
+        _event(conn, item, actor, f"decision for the person{f' on question #{row_id}' if table == 'messages' else ''}"
+               + (f": {decision['question']}" if decision.get("question") else "")
+               + (f" (options: {', '.join(o['label'] for o in opts)}; recommended {opts[0]['label']})" if opts else ""))
+
+
+def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, options=(), recommend=None,
+            question=None):
     """maxpm forward <id> [--note] | forward --item <id>: the manager sends a question or alert that it held (#5307,
     #5311), or a person item that it held, on to the person, who then sees it (Waits for you, needs-you, phone).
     note: what the manager adds for the person, a note in the thread. drop: an alert that the manager dealt with
-    itself is closed, and the person never sees it."""
+    itself is closed, and the person never sees it. options, recommend, question (#6413): the decision the person
+    makes, which the page opens as a dialog (decision_parse); on a question or item that is with the person
+    already, they only set the decision."""
     if not actor:
         raise RiverError("forward needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if (msg_id is None) == (item is None):
         raise RiverError("name what to forward: a held message (maxpm forward <message-id>) or a held person item "
                          "(maxpm forward --item <item-id>)")
+    helper = None
     if not (_is_manager(conn, actor) or _is_person(conn, actor)):
-        raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
+        # The needs-you session and the one-item helper act for their person (#6442: plain maxpm forward was refused
+        # there, and the session asked in the chat instead of the dialog).
+        person = helper_person(conn, actor)
+        if not person:
+            raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
+        helper, actor = actor, person
     note = note.strip() if note and note.strip() else None
+    decision = decision_parse(options, recommend, question)
+    own = helper or TOKEN_AGENT.get()
+    if decision:
+        if own and own != actor and _is_person(conn, actor):
+            # A session that goes through the list with the person (#6436: the needs-you session, or the one-item helper)
+            # puts each decision as the person; the person's answer on the card then comes back to it (_tell_asker).
+            decision["by"] = own
+        elif _is_manager(conn, actor):
+            # The manager forwards a decision (#6472): the page shows it in the manager session's panel (#sessAsk)
+            # with the ! badge on the manager row, and in Your action items.
+            decision["by"] = actor
+    if decision and drop:
+        raise RiverError("--drop closes the alert; options are for what the person decides")
     with tx(conn):
         if item is not None:
             it = _item(conn, item)
+            if decision:
+                if it["doer"] != "human" or it["status"] not in OPEN_STATES:
+                    raise RiverError(f"#{item} is no open person item; options are for a person's decision")
+                _set_decision(conn, "items", it["id"], decision, actor)
             if not it["held_for"]:
+                if decision:
+                    if note:
+                        _event(conn, item, actor, f"note for the person: {note}")
+                    return item_show(conn, item)
                 raise RiverError(f"#{item} is with the person already; nothing to forward")
             if drop:
                 raise RiverError(f"close #{item} with: maxpm done {item} --note \"<what you did>\" (or drop)")
@@ -18320,7 +20468,15 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
         q = _message(conn, msg_id)
         if q["kind"] not in ("question", "alert") or (q["kind"] == "question" and q["state"] != "open"):
             raise RiverError(f"message {msg_id} is no open question or alert; see: maxpm thread {msg_id}")
+        if decision:
+            if q["kind"] != "question":
+                raise RiverError(f"message {msg_id} is an alert; options are for a question to a person")
+            _set_decision(conn, "messages", q["id"], decision, actor)
         if not q["held_for"]:
+            if decision:
+                if note:
+                    _send(conn, "note", actor, note, to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+                return message_show(conn, msg_id)
             raise RiverError(f"{q['kind']} {msg_id} is with {q['to_agent'] or 'its holder'} already; nothing to forward")
         if drop:
             if q["kind"] != "alert":
@@ -18380,16 +20536,21 @@ def _hold_items(conn, ann):
         body = (f"Person item #{a['id']} [{a['project']}] {a['title']} is ready; it waits on a person. It comes to you "
                 f"first; the person does not see it yet. Do it when the person is not needed: maxpm done {a['id']} "
                 f"--note \"<what you did>\" (or drop). Else send it on: maxpm forward --item {a['id']} "
-                f"[--note \"<what you add>\"]. With neither within {hold} (question_hold), the person gets it.")
+                f"[--note \"<what you add>\"]; a decision with 2 to 4 options, your pick first: --question \"<one "
+                f"short sentence>\" --option \"<label>: <one line>\" --option ... --recommend <label>. With neither "
+                f"within {hold} (question_hold), the person gets it.")
         body += _earlier_note(conn, "item", a["id"])
         _send(conn, "alert", "maxpm", body, to=boss, item_id=a["id"], blocked="sender")
         _event(conn, a["id"], "maxpm", f"held for the manager {boss} ({hold}): it does the item or forwards it")
 
 
-def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
+def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False, choice=None):
     """Answer a question: the answer goes to the asker and the question closes. in_chat (#4995) or self_answer
     (#5001): the asker records the answer that it has from its own chat or from any other channel; the answer is in
-    the name of the person asked, and is not delivered again (the asker has it)."""
+    the name of the person asked, and is not delivered again (the asker has it). choice (#6413): the label of an
+    option of the question's decision (maxpm forward --option); body is then the person's added words, or empty."""
+    if choice is not None and (in_chat or self_answer):
+        raise RiverError("--choice is the person's pick in the dialog; with --self or --in-chat write their words")
     if in_chat or self_answer:
         if not actor:
             raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
@@ -18406,10 +20567,11 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         return message_show(conn, mid)
     if not actor:
         raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
-    if not body or not body.strip():
+    if choice is None and (not body or not body.strip()):
         raise RiverError("an answer needs text")
     with tx(conn):
         q = _message(conn, msg_id)
+        choice, body = decision_choice(decision_of(q), choice, body) if choice is not None else (None, body)
         if q["kind"] != "question":
             raise RiverError(f"message {msg_id} is {'an' if q['kind'][0] in 'aeiou' else 'a'} {q['kind']}, not a question; "
                              f"reply with: maxpm send note --reply {msg_id} \"...\"")
@@ -18425,6 +20587,8 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         for_person = answered_for(conn, q, actor)
         _unhold_question(conn, q)
         mid = _send(conn, "answer", actor, body.strip(), to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
+        if choice is not None:
+            conn.execute("UPDATE messages SET choice=? WHERE id=?", (choice, mid))
         conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?), "
                      "to_agent=COALESCE(to_agent, ?) WHERE id=?", (t, t, actor, q["id"]))
         if q["item_id"] is not None:
@@ -18437,9 +20601,12 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
             # leaves a held item alone.
             _answer_unblocks(conn, q)
             _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
-                        f"[answer from {actor}] {body.strip()}")
+                        f"[answer from {actor}] {body.strip()}" + (f"\n[choice] {choice}" if choice else ""))
     if waits:
-        _deliver_answer(conn, q, mid, actor, body.strip(), for_person)
+        _deliver_answer(conn, q, mid, actor, body.strip(), for_person, choice)
+    if q["from_agent"] != (decision_of(q) or {}).get("by"):  # an asker that put it gets the answer itself
+        _tell_asker(conn, q, f"{actor} answered question #{q['id']} from {q['from_agent']}: {body.strip()}. It is "
+                    f"closed and the asker has the answer; record nothing. Go on to the next one.", q["item_id"], actor)
     return message_show(conn, mid)
 
 
@@ -18454,24 +20621,25 @@ def answered_for(conn, q, sender):
     return to if to and to != sender and _is_person(conn, to) and not _is_person(conn, sender) else None
 
 
-def answer_text(q, sender, body, for_person=None):
+def answer_text(q, sender, body, for_person=None, choice=None):
     """The answer as the asker reads it in its session (#5303): it starts with '[maxpm ', so the asker's prompt hook
     (_talk) does not take it for a person's answer to its other open questions. for_person: the manager answered a
-    question to that person (#5307)."""
+    question to that person (#5307). choice: the option the person picked in the dialog (#6413), as its own line."""
     item = f" (#{q['item_id']})" if q["item_id"] is not None else ""
     by = f"{sender} for {for_person}" if for_person else sender
     return (f"[maxpm answer from {by} to your question #{q['id']}{item}] {body}\n"
-            f"Your question was: {' '.join(q['body'].split())[:300]}")
+            + (f"choice: {choice}\n" if choice else "")
+            + f"Your question was: {' '.join(q['body'].split())[:300]}")
 
 
-def _deliver_answer(conn, q, mid, sender, body, for_person=None):
+def _deliver_answer(conn, q, mid, sender, body, for_person=None, choice=None):
     """An answer to a question whose asker waits at its prompt (waits_on_person) goes into its session, as an alert
     does (#5303): the asker ran maxpm ask and ended its turn, so no maxpm command of its own reads the answer. The
     manager answered markhalstrom-site-3a49's question with maxpm answer, and the session sat at its prompt for an
     hour until the manager typed the answer into its tmux pane by hand. Through the platform's native_message when
     the asker has one; else maxpm serve types it into the asker's tmux pane when its idle prompt shows
     (server.paste_answers). An asker in no pane gets it in a fresh session (fresh_sessions), as other news."""
-    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person))
+    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person, choice))
     how = "sent into its session" if st == "sent" else (
         ("" if st.startswith("no native channel") else f"native {st}; ") + "maxpm serve types it into its pane")
     sent = st == "sent"
@@ -18571,7 +20739,7 @@ def asked_line(agent, qs):
     # what it was. The reminder carries each question whole, and says to quote it, never the number alone.
     each = "; ".join(f"#{q['id']} to {q['to_agent']}: \"{full_text(q.get('body'))}\"" for q in qs)
     return (f"you have {len(qs)} open question(s) to {who} ({each}): close each that is answered, from any channel: "
-            f"maxpm --as {agent} answer <id> --self \"<the answer>\"; or that is moot: maxpm --as {agent} withdraw <id> "
+            f"{as_cmd(agent)} answer <id> --self \"<the answer>\"; or that is moot: {as_cmd(agent)} withdraw <id> "
             f"--note \"<why>\". When you tell the person that one still waits, give its whole text, not only its "
             f"number")
 
@@ -18671,7 +20839,7 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
     _agent(conn, actor)
     if active_manager(conn) == actor:  # a second watcher woke the manager twice for each message (#1312)
         raise RiverError(f"{actor} is the active manager, and maxpm manage --watch is its only watcher: it returns "
-                         f"for messages too. Run maxpm --as {actor} manage --watch instead of inbox --wait")
+                         f"for messages too. Run {as_cmd(actor)} manage --watch instead of inbox --wait")
     state = _poll_state()  # #6008: a wait that the caller repeats, one poll at a time
     state.setdefault("since", iso(now()))
     deadline = parse_iso(state["since"]) + parse_duration(timeout or INBOX_WAIT)
@@ -18999,6 +21167,7 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
     if body is None or not str(body).strip():
         raise RiverError("the canvas is empty: put the page's text (a file, stdin, or --text)")
     body = str(body)
+    author = planner_name(actor)
     with tx(conn):
         it = _item(conn, item) if item is not None else None
         if it is not None:
@@ -19032,12 +21201,12 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
         if c is None:
             cid = conn.execute("INSERT INTO canvases (project_id, name, title, kind, item_id, agent, created_at, "
                                "updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                               (pid, name, title, kind, it["id"] if it else None, actor, t, t)).lastrowid
+                               (pid, name, title, kind, it["id"] if it else None, author, t, t)).lastrowid
         else:
             cid = c["id"]
             last = _canvas_latest(conn, cid)
             if guard and not c["deleted_at"]:
-                _canvas_guard(conn, c, actor, base)
+                _canvas_guard(conn, c, author, base)
             if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
                 if item is not None and it["id"] != c["item_id"]:
                     # The same text for another item: no new version, but the canvas moves to it (#4841).
@@ -19045,14 +21214,14 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
                     _event(conn, it["id"], actor, f"canvas {name} moved here from "
                            f"{'#' + str(c['item_id']) if c['item_id'] else 'no item'}")
                 return dict(canvas_show(conn, cid), unchanged=True)
-            writer = c["agent"] if _is_person(conn, actor) and c["agent"] else actor  # a person's edit (#4769)
+            writer = c["agent"] if author == actor and _is_person(conn, actor) and c["agent"] else author  # #4769
             conn.execute("UPDATE canvases SET title=COALESCE(?, title), kind=?, item_id=?, agent=?, updated_at=?, "
                          "deleted_at=NULL WHERE id=?", (title, kind, it["id"] if it else c["item_id"], writer, t, cid))
         n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM canvas_versions WHERE canvas_id=?", (cid,)).fetchone()[0]
         conn.execute("INSERT INTO canvas_versions (canvas_id, version, body, author, note, created_at) VALUES (?,?,?,?,?,?)",
-                     (cid, n, body, actor, (note or "").strip() or None, t))
+                     (cid, n, body, author, (note or "").strip() or None, t))
         if guard:  # a whole page: its writer knows this version (#5986). A section merge does not tell it the page.
-            canvas_seen(conn, cid, actor, n)
+            canvas_seen(conn, cid, author, n)
         keep = int(setting(conn, "canvas_versions", project_id=pid))
         conn.execute("DELETE FROM canvas_versions WHERE canvas_id=? AND version>1 AND version<=? ",
                      (cid, n - max(keep, 2) + 1))
@@ -19143,6 +21312,7 @@ def canvas_show(conn, ref, project=None, version=None):
         "SELECT version, author, note, created_at, LENGTH(body) chars FROM canvas_versions WHERE canvas_id=? "
         "ORDER BY version", (c["id"],))]
     d["comments"] = _canvas_threads(conn, c["id"])
+    d["tasks"] = artifact_tasks(conn, [f"canvas:{c['id']}"])[f"canvas:{c['id']}"]  # who reviews or names it (#6208)
     return d
 
 
@@ -19237,6 +21407,17 @@ def _canvas_writer(conn, c):
     return who if r and r["kind"] == "ai" else None
 
 
+def _canvas_planner(conn, c):
+    """The planner chat app (<person>@<client>, planner_name) that wrote the newest version of a canvas, not counting
+    a person's own edits; else None (a session wrote it)."""
+    r = conn.execute("SELECT author FROM canvas_versions WHERE canvas_id=? AND author NOT IN "
+                     "(SELECT name FROM agents WHERE kind='human') ORDER BY version DESC LIMIT 1", (c["id"],)).fetchone()
+    who = r["author"] if r else None
+    if not who or "@" not in who or conn.execute("SELECT 1 FROM agents WHERE name=?", (who,)).fetchone():
+        return None
+    return who if _is_person(conn, who.split("@", 1)[0]) else None
+
+
 def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
     """Send the drafts of a canvas (all of the actor's, or the ones named) as one message to the session that
     wrote it, or to the holder (or next holder) of its item. The message names the canvas, the version, each
@@ -19254,6 +21435,14 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
                             "AND author=? ORDER BY id", (c["id"], actor)).fetchall()
     if not rows:
         raise RiverError(f"no draft comments on canvas {c['name']} to send; write one on the page first")
+    app = _canvas_planner(conn, c)
+    if app:  # a planner chat app wrote it last (#6221): it reads them with doc_comments; no session gets a message
+        with tx(conn):
+            t = iso(now())
+            for r in rows:
+                conn.execute("UPDATE canvas_comments SET state='sent', sent_at=? WHERE id=?", (t, r["id"]))
+        return {"canvas": c["name"], "sent": [r["id"] for r in rows], "message": None, "item": c["item_id"],
+                "to": f"the chat app {app} (it reads them in the talk)"}
     to = _canvas_writer(conn, c)
     if to is None and not c["item_id"]:
         raise RiverError(f"the session that wrote canvas {c['name']} has ended and the canvas has no item, so nobody "
@@ -19658,7 +21847,7 @@ def canvas_section(conn, ref, heading, body=None, actor=None, project=None, note
     res = canvas_put(conn, c["name"], "\n".join(new).rstrip("\n") + "\n", actor,
                      project=_project_name(conn, c["project_id"]), item=c["item_id"],
                      note=note or (f"section {heading}" + (" (pending)" if pending is not None else "")))
-    if _is_person(conn, actor) and not res.get("unchanged"):
+    if _is_person(conn, actor) and not PLANNER.get() and not res.get("unchanged"):  # a planner writes its own doc
         to = _canvas_writer(conn, c)
         if to or c["item_id"]:
             send(conn, "note", f"{actor} changed the section '{heading}' of doc {c['name']} in the page: version "
@@ -20626,7 +22815,7 @@ def _goal_split(conn, t0, t1, pid):
 
 
 def _health_days(conn, t0, t1, pid, minutes, pminutes=0):
-    """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health view (#5356): done
+    """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health section (#5356): done
     items, rework (reopens, lost claims, review fixes), needs-you rows opened, person minutes per done item, the
     idle share of the sampled session time, and the median cost of the items done that day."""
     a, b = iso(t0), iso(t1)
@@ -20734,7 +22923,7 @@ def capacity(conn, ann=None):
             runnable += 1
             taken.add(a["id"])
     ready_human = [a for a in ready if a["doer"] == "human"]
-    agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents")]
+    agents = agent_statuses(conn)
     # Planner sessions change the plan and take no work, so they are not slots.
     ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active"
                  and a.get("role") not in ("planner", "expert", "assistant", "plain")]  # no queue work (#4955, #5110, #5851)
@@ -20871,6 +23060,8 @@ def status(conn, recent=10):
         "spare_slots": cap["spare_slots"],
         "excess_sessions": cap["excess_sessions"],
         "advice": cap["advice"],
+        "agent_limits": agent_limits_list(conn),
+        "providers": agent_providers(conn),
     }
 
 
@@ -20893,8 +23084,8 @@ def _item_prompt_section(conn, a, ann, person, n=None):
         if text.strip():
             lines.append(f"   {label}: {text.strip()}")
     cd = f"cd {p['path']} && " if p["path"] else ""
-    lines.append(f"   Read it first: {cd}maxpm --as {person} show {a['id']}")
-    lines.append(f"   Record the result: maxpm --as {person} done {a['id']} --output \"<what was decided or done>\"")
+    lines.append(f"   Read it first: {cd}maxpm show {a['id']}")
+    lines.append(f"   Record the result: maxpm done {a['id']} --output \"<what was decided or done>\"")
     return "\n".join(lines)
 
 
@@ -20913,14 +23104,32 @@ DECISION_FORMAT = """Put each decision to the person in this form, one decision 
 Then stop and wait for the answer before you show the next decision. Do not squeeze several decisions
 into one table. If they ask what something means, explain it, then ask the same decision again."""
 
+# The decision goes into the page's dialog (#6436, mark 2026-11-20: 'the needs you agent that helps go through action
+# items also needs to use the question asking modal'): maxpm forward puts the options on the item or question, the
+# page opens its card with them, and the person's answer there closes it and comes back to the session (_tell_asker).
+DIALOG_STEPS = """Put the decision itself in the Waits for you card above {person}'s message box in this session, not in the chat
+   (run maxpm with no --as: your session acts for {person}; run it even when the item already has options, so the card
+   shows in this session):
+     maxpm forward --item <id> --question "<one short sentence>" \\
+       --option "<label>: <one line: what happens>" --option "<label>: ..." --recommend <label>
+   2 to 4 options, your recommendation among them; a label of at most 60 characters, a line of at most 200.
+   A question (not an item): maxpm forward <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
+   --question "<what to do>"; the card then shows a text box. Point {person} to the card below the chat, not "a dialog".
+   Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
+   background command). The answer on the card closes the item or question, and MaximizePM sends you a
+   notice with the choice and the person's words; record nothing for it. When the page is not open (they
+   talk with you in a terminal only), ask in the chat in the form below instead, and record the answer
+   yourself with the "record the result" command (add --choice <label> when they picked an option):
+"""
+
 PROMPT_STEPS = """How to help:
 1. Run the "read it first" command. Read the files or links it names.
-2. Explain to {person} in plain words what is needed and why.
-""" + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
-3. Answer their questions. Help them do it: draft the text, check the setting, walk through the steps.
+2. Explain to {person} in the chat, in plain words, what is needed and why, and what each choice changes.
+3. """ + DIALOG_STEPS + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
+4. Answer their questions. Help them do it: draft the text, check the setting, walk through the steps.
    Ask before anything that uses their accounts, money, or sends something in their name.
-4. When it is decided or done, record it with the "record the result" command, in their words.
-   If you can do the step yourself without them, say so; with their yes, take it over instead:
+5. When the answer asks for a change, add the work: maxpm add "<title>" --found-during <id> --context "<what they
+   said>". If you can do the step yourself without them, say so; with their yes, take it over instead:
    maxpm register <your-agent-name>, then maxpm --as <your-agent-name> takeover <id> --note "<how>".
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""
 
@@ -20930,18 +23139,18 @@ If the maxpm command is not found, ask {person} where MaximizePM is installed.""
 LIST_STEPS = """How to go through the list with {person}:
 1. Take the first one. Before you write to {person}, run its "read it first" command and read the files, links and
    pictures it names.
-2. Write one short message about this one only: what it is, in a few plain lines; the options, each with what it
-   changes; your recommendation and why. A decision takes the form below. Show a picture or a page in the chat (in
-   Claude Code: SendUserFile). Use plain words, not the queue's own words (lease, claim, reserved, annotate), and
-   say what a thing is, not only its number.
-""" + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
-3. Wait for the answer. Then record it at once, in their words: the "record the result" command (done with the
-   answer as its note), or drop it with the reason. When the answer asks for a change, add the work
-   (maxpm add "<title>" --found-during <id> --context "<what they said>") and close this one.
+2. Write one short message in the chat about this one only: what it is, in a few plain lines; what each choice
+   changes; your recommendation and why. Show a picture or a page in the chat (in Claude Code: SendUserFile). Use
+   plain words, not the queue's own words (lease, claim, reserved, annotate), and say what a thing is, not only its
+   number.
+3. """ + DIALOG_STEPS + "\n".join(
+    "   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
+4. When the answer asks for a change, add the work (maxpm add "<title>" --found-during <id> --context "<what they
+   said>"); an answer on the card closed this one already. When they want it dropped, drop it with the reason.
    If you can do the step yourself without them, say so; with their yes, take it over:
    maxpm --as <your-agent-name> takeover <id> --note "<how>".
-4. Then the next one. Never two in one message. When they want to skip one, leave it open and go on; when they
-   want to stop, say in one line what is left.
+5. Then the next one, as soon as the answer comes. Never two in one card or message. When they want to skip one,
+   leave it open and go on; when they want to stop, say in one line what is left.
 Ask before anything that uses their accounts, money, or sends something in their name.
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""
 
@@ -20976,7 +23185,7 @@ def prompt_for_all(conn, person=None):
     parts += [_item_prompt_section(conn, a, ann, person, n) for n, a in enumerate(items, 1)]
     for n, q in enumerate(qs, len(items) + 1):
         parts.append(f"{n}. Question #{q['id']} from {q['from_agent']}" + (f" about #{q['item_id']}" if q["item_id"] else "")
-                     + f": {q['body']}\n   Answer it: maxpm --as {person} answer {q['id']} \"<answer>\"")
+                     + f": {q['body']}\n   Answer it: maxpm answer {q['id']} \"<answer>\"")
     parts.append(LIST_STEPS.format(person=person))
     return "\n\n".join(parts)
 
@@ -21098,20 +23307,44 @@ def model_id(conn, platform, model, project_id=None, inline=None):
 
 def platform_models(conn, platform, project_id=None, inline=None):
     """The models a platform's sessions run, for the launch dialog and a session's Settings dialog (#4633), one
-    source for both: the model_ladder names of its family, each with its note and the id its CLI gets."""
+    source for both: the model_ladder names of its family, each with its note and the id its CLI gets. In the one
+    order of agents.order_models (#6256: newest and strongest first). A model whose effort levels the adapter knows
+    (read_effort_levels, or the facts of read_models) has them in "efforts" (MaximizePM names, low to high; [] when it
+    takes none); "label" is the name people read, when the adapter gives one."""
     fam = launch_platforms().get(platform, {}).get("family")
     ladder = parse_ladder(setting(conn, "model_ladder"))
+    a = _adapters().find(platform)
     if fam and fam not in ladder:
         # A family with no ladder (a "multi" agent's provider/model texts, #5169): the adapter's own model list.
-        # The adapter's own models (DESCRIBE['models']) come first, marked pick: the launch dialog offers them
-        # and finds the rest of a long list by typing (#5238; OpenCode knows about 500).
-        a = _adapters().find(platform)
+        # The adapter's own models (DESCRIBE['models']) are marked pick: the launch dialog offers them and finds the
+        # rest of a long list by typing (#5238; OpenCode knows about 800).
         picks = list(a.describe["models"]) if a else []
-        names = list(dict.fromkeys(picks + (a.read_models() if a else [])))
-        return [{"name": m, "note": "", "family": fam, "id": a.describe["model_ids"].get(m, m), "pick": m in picks}
-                for m in names]
-    return [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam, "id": model_id(conn, platform, m, project_id, inline)}
-            for m in ladder.get(fam, [])]
+        facts = {}
+        for m in picks + (a.read_models() if a else []):
+            row = dict(m) if isinstance(m, dict) else {"name": m}
+            facts[row["name"]] = {**facts.get(row["name"], {}), **row}
+        rows = [{"note": "", "family": fam, "id": a.describe["model_ids"].get(n, n), "pick": n in picks, **f}
+                for n, f in facts.items()]
+    else:
+        rows = [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam,
+                 "id": model_id(conn, platform, m, project_id, inline)} for m in ladder.get(fam, [])]
+        # The models the CLI itself lists now (#6257: Codex's cache has GPT-6.2 Sol and Astra, newer than the ids of
+        # the ladder names): a ladder name whose id it lists gets the CLI's name and levels; each other one is a
+        # model of its own, with no ladder name (an item's limits do not apply to it).
+        by_id = {str(r["id"]).lower(): r for r in rows}
+        for f in ((a.read_models() if a and a.has("read_models") else None) or ()):
+            f = dict(f) if isinstance(f, dict) else {"name": f}
+            hit = by_id.get(str(f["name"]).lower())
+            if hit is not None:
+                hit.update({k: v for k, v in f.items() if k in ("label", "efforts")})
+            elif f["name"] not in ladder.get(fam, []):
+                rows.append({"note": "", "family": fam, "id": f["name"], **f})
+    for r in rows:
+        levels = r.pop("efforts", None)
+        got = a.model_efforts(r["id"], levels) if a else None
+        if got is not None:
+            r["efforts"] = got
+    return _agents_pkg.order_models(rows, (a.describe.get("tiers") or ()) if a else ())
 
 
 def model_name_of(models, value):
@@ -21128,11 +23361,34 @@ def model_name_of(models, value):
 PLATFORM = sys.platform
 
 
+# The tmux server of the app's own tmux (tmux -L): its sessions stay apart from the person's own tmux, and a tmux of
+# another version (Homebrew's) never talks to its server (#6237).
+TMUX_SOCKET = "maximizepm"
+
+
+def bundled_tmux():
+    """The tmux that the desktop app carries (river-app/tmux/bin/tmux, desktop/scripts/build-tmux.js), or None (#6237).
+    The app names its folder (MAXPM_APP_BUNDLE); the maxpm launcher runs the app's Python (river-app/python/bin), also
+    for a newer version of the code in the app's folder; a copy of the code in the bundle has it beside river/."""
+    roots = [Path(os.environ["MAXPM_APP_BUNDLE"])] if os.environ.get("MAXPM_APP_BUNDLE") else []
+    exe = Path(sys.executable)
+    if exe.parent.name == "bin" and exe.parent.parent.name == "python":
+        roots.append(exe.parent.parent.parent)
+    roots.append(Path(__file__).resolve().parent.parent)
+    return next((str(p) for p in (r / "tmux" / "bin" / "tmux" for r in roots) if os.access(p, os.X_OK)), None)
+
+
 def tmux_path():
-    """The tmux program, or None when it is not installed: on PATH, else where Homebrew or MacPorts put it
-    (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
-    return shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux",
-                                                     "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+    """The tmux program, or None when it is not installed: the app's own tmux first, then on PATH, else where
+    Homebrew or MacPorts put it (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
+    return bundled_tmux() or shutil.which("tmux") or next(
+        (p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+
+
+def brew_path():
+    """Homebrew's brew, or None: where its installer puts it (the app's PATH is short)."""
+    return shutil.which("brew") or next((p for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+                                         if os.access(p, os.X_OK)), None)
 
 
 def is_wsl():
@@ -21219,6 +23475,74 @@ def river_dir():
     if d is None:
         d = _RIVER_DIRS[p] = str(Path(p).resolve().parent)
     return d
+
+
+QUEUE_GUARD = True  # tests/__init__.py turns it off: the tests of exact start commands predate the guard
+
+
+def queue_files():
+    """The queue file and its -wal and -shm files, as real paths (#6412): each session that MaximizePM starts gets a
+    sandbox rule that denies writes to them, so only maxpm serve writes the queue. A process that cannot write them
+    still reads the queue (SQLite opens it read-only), and a write ends in READONLY_REFUSAL. [] when QUEUE_GUARD is
+    off."""
+    if not QUEUE_GUARD:
+        return []
+    name = db_path().expanduser().name
+    return [os.path.join(river_dir(), name + end) for end in ("", "-wal", "-shm")]
+
+
+def parse_read_dirs(value, strict=False):
+    """The folders of the read_dirs setting (#6281): absolute real paths, in order, each once. strict (config set):
+    RiverError for a path that is not absolute or not a folder; else such a path is left out (it may be gone)."""
+    out = []
+    for raw in (value or "").split(","):
+        p = raw.strip()
+        if not p:
+            continue
+        path = os.path.expanduser(p)
+        if not os.path.isabs(path) or not os.path.isdir(path):
+            if strict:
+                raise RiverError(f"read_dirs: {p!r} is not an absolute path of a folder; read_dirs is folders, "
+                                 "comma-separated, such as ~/Projects/core,~/Projects/docs")
+            continue
+        real = os.path.realpath(path)
+        if real not in out:
+            out.append(real)
+    return out
+
+
+# The secret files of a read folder (#6281, mark's list): .env, .env.*, .envrc, *.secret, *.secrets, and each file in
+# a folder named secrets. The folders below are not searched: they are large and hold no secret of the project's own.
+SECRET_FILE = re.compile(r"^(\.env(\..+)?|\.envrc|.+\.secrets?)$")
+_SECRET_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", "dist", "build", ".next", ".cache"}
+# Entries looked at in one read folder; a larger folder stops the search there, and a secret file after that point is
+# not in the list. ~/Projects/toolscaledcore: 105,169 entries, 0.32 s, 66 files (2026-11-20).
+SECRET_SCAN_MAX = 200000
+
+
+def secret_files(dirs):
+    """The secret files in the read folders, absolute paths, for an agent whose rules name files, not patterns
+    (Antigravity CLI's deny read_file, #6281). A file that comes after the start is not in the list."""
+    out = []
+    for top in dirs:
+        seen = 0
+        for root, folders, files in os.walk(top):
+            folders[:] = sorted(f for f in folders if f not in _SECRET_SKIP)  # sorted: the same list each start
+            seen += len(folders) + len(files)
+            secret_dir = os.path.basename(root) == "secrets"
+            out += [os.path.join(root, f) for f in sorted(files) if secret_dir or SECRET_FILE.match(f)]
+            if seen > SECRET_SCAN_MAX:
+                break
+    return out
+
+
+def read_dir_keys(conn, project_id, adapter):
+    """The launch keys read_dirs and secret_files for a start of a project's session, when the adapter takes them
+    (LAUNCH read_dirs) and the project names read folders; else {}."""
+    if project_id is None or not (adapter.launch or {}).get("read_dirs"):
+        return {}
+    dirs = parse_read_dirs(setting(conn, "read_dirs", project_id=project_id))
+    return {"read_dirs": dirs, "secret_files": secret_files(dirs)} if dirs else {}
 
 
 def profile_options(conn, platform, inline=None, project_id=None, chosen=None):
@@ -21337,12 +23661,12 @@ def shell_command(words):
 
 
 def hook_words(ad, folder=None):
-    """The words that load an adapter's state hook or plugin (its install_hooks, which also writes the hook's files
-    beside the queue), for an agent whose STATE['state'] is 'hook': without them its session reports no state at all
-    (#5214, Grok: --agent <file>). [] for an agent whose state comes from the screen (DETECT), and for one that
-    takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']: Claude Code's --settings, behind its
-    activity_hooks setting)."""
-    if (ad.state or {}).get("state") != "hook" or ad.launch.get("hooks_file"):
+    """The words that load an adapter's hooks or plugin (its install_hooks, which also writes the hook's files beside
+    the queue): an agent whose STATE['state'] is 'hook' reports no state at all without them (#5214, Grok: --agent
+    <file>); Codex, whose state comes from the screen, gets only its guard before a shell command (#6254). [] for an
+    agent with no install_hooks, and for one that takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']:
+    Claude Code's --settings, behind its activity_hooks setting)."""
+    if not ad.has("install_hooks") or ad.launch.get("hooks_file"):
         return []
     return [str(w) for w in ad.install_hooks(folder, report_command()) or ()]
 
@@ -21940,7 +24264,7 @@ def project_sessions(conn, ann=None):
 
 
 def launch_target(conn, project=None, agent=None, item=None, model=None, effort=None, spread=False,
-                  options=None, actor=None, prompt=None, folder=None, preview=False):
+                  options=None, actor=None, prompt=None, folder=None, preview=False, auto_agent=False):
     """Where and how a new agent session should start: the folder of the project that holds the most
     important ready item an agent can take (or of the project named, or of the one item named), and the
     command of the chosen launch_agents entry (the first when none is named). Refuses when nothing is ready there.
@@ -21998,23 +24322,54 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not p["path"] and top["kind"] == "review":
         # A deploy project has no folder: the reviewer starts in a folder of the release.
         p = _review_folder(conn, top) or p
-    if agent is None and top["agent"]:
+    # auto_agent (maxpm serve's starts): the agent passed is a preference, which the provider list replaces when it is
+    # full or at its usage limit (#6361); a person's --agent or the dialog's choice is explicit and wins.
+    explicit_agent = agent is not None and not auto_agent
+    if agent is None and top["agent"] and not default_gives_way(conn, top.get("agent_from"), p["id"]):
         agent = agent_for_type(conn, top["agent"], p["id"])
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
                              f"maxpm config set launch_agents \"...; {platform_spec(top['agent'])['label']}=@{top['agent']}\"")
-    if preview and not p["path"] and not folder:  # Start names this work; its dialog asks for the folder (#5894)
-        return {"project": p["name"], "path": None, "item": {"id": top["id"], "title": top["title"],
-                                                             "agent": top["agent"]}, "ready": len(pool), "why": why}
+    if preview:  # the page's Next line: the item and project only, never builds the command or walks read_dirs (#6342)
+        return {"project": p["name"], "path": p["path"] or None,
+                "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
+                "ready": len(pool), "why": why}
+    # The provider entry (#6361): a person's --model, or the item's own model, is the launch's model; else the entry's
+    # model and effort run (agent_order: 'antigravity model claude-opus-5-5 effort medium'). An entry whose model is
+    # outside the item's limits is skipped.
+    model_explicit = model is not None and not auto_agent
+    own_model = top.get("model") if top.get("model_from") == "item" else None
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+
+    def fits(m, plat_):
+        return model_check(ladder, m, top["min_model"], top["max_model"],
+                           platform_spec(plat_)["family"] if plat_ else None)[0]
+    preferred = agent
+    got = pick_provider(conn, agent, project_id=p["id"], explicit=explicit_agent,
+                        model=model if model_explicit else own_model, fits=fits)
+    agent, fallback_why = got["label"], got["note"]
+    if auto_agent and preferred is not None and agent != preferred:
+        model = effort = None  # chosen for the preferred agent: the new one takes the item's own or its default
+    # An item's own model of another family (opus on Codex) does not run: the entry's model runs instead (#6429).
+    own_fam = _family(ladder, own_model)[0] if own_model else None
+    if own_fam and got["model"]:
+        plat_fam = (platform_spec(_launch_platform(conn, p["id"], agent)) or {}).get("family")
+        if plat_fam and plat_fam != own_fam:
+            own_model = None
+    entry_model = got["model"] if got["model"] and not model_explicit and not own_model else None
+    if entry_model:
+        model = entry_model
+    if got["effort"] and (effort is None or auto_agent) and top.get("effort_from") != "item":
+        effort = got["effort"]
     p = start_folder(conn, p, folder, actor)
-    plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
+    plat = _launch_platform(conn, p["id"], agent)
     if model:
         # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
-        ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"],
+        ok, why = model_check(ladder, model, top["min_model"], top["max_model"],
                               platform_spec(plat)["family"] if plat else None)
         if not ok:
             raise RiverError(f"#{top['id']} {why}; pick another model")
-        model_why = "chosen for this launch"
+        model_why = f"provider {got['pos']} of agent_order" if entry_model else "chosen for this launch"
     else:
         # No model named: the item's own (#4961), else the default_model setting (#5346: the manager launched seven
         # items with default_model opus and each pane ran Sonnet, the CLI's own default), of the agent's family, so
@@ -22039,7 +24394,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if not model and cmd["adapter_default"]:  # #5284: the adapter names a default model; the item names none
         model, model_why = cmd["model"], f"#{top['id']} names no model: the default model of {platform_spec(plat)['label']}"
     return {"project": p["name"], "path": p["path"], "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
-            "ready": len(pool), "why": why, "session_title": name, **cmd, "model_why": model_why}
+            "ready": len(pool), "why": why, "session_title": name, **cmd, "model_why": model_why,
+            **({"fallback_why": fallback_why} if fallback_why else {})}
 
 
 def agent_for_type(conn, agent_type, project_id=None):
@@ -22050,6 +24406,33 @@ def agent_for_type(conn, agent_type, project_id=None):
         if (prof[0] if prof else _exe_platform(cmd)) == agent_type:
             return label
     return None
+
+
+def keep_dispatched_agent(conn, item_id, label, project_id=None, actor=None):
+    """A person or the manager started a session for this item on a named agent (Dispatch, maxpm launch --item
+    --agent): that agent becomes the item's own (#6419), so the fresh session that continues the item (an answer
+    came, or its session idled) starts on it, not on the default agent. A Dispatch with Pi went on in Claude Code,
+    which stopped at its trust question. It stays a preference: a provider at its limit gives the item to the next
+    one of agent_order (#6361). Not recorded: an entry whose agent type is not known (a custom command), or an agent
+    whose models do not fit the item's own model and limits. Returns the agent type recorded, or None."""
+    cmd = next((c for lbl, c in launch_entries(conn, project_id) if lbl == label), None)
+    if cmd is None:
+        return None
+    prof = parse_profile(cmd)
+    plat = prof[0] if prof else _exe_platform(entry_exe(cmd))
+    if not plat or plat not in agent_types():
+        return None
+    with tx(conn):
+        it = _item(conn, item_id)
+        if it["agent"] == plat:
+            return None
+        try:
+            _set_models(conn, it, {"agent": plat}, actor or "maxpm")
+        except RiverError as e:
+            _event(conn, item_id, actor or "maxpm", f"started on {label}, not kept as the item's agent: {e}")
+            return None
+        _event(conn, item_id, actor or "maxpm", f"started on {label}: a fresh session for it starts on {label} too")
+    return plat
 
 
 def launch_entries(conn, project_id=None):
@@ -22067,6 +24450,29 @@ def launch_entries(conn, project_id=None):
     return out
 
 
+def launch_entry(entries, agent):
+    """The launch entry (label, command) that `agent` names, or None: the first entry for None; else a label as
+    written, then a label in any case, then the first entry that runs the agent type an id, alias or platform name
+    names ('codex', 'claude-code', 'claude'), as every other command takes it (#6421: launch --agent codex was
+    refused while the entry's label is Codex)."""
+    if agent is None:
+        return entries[0] if entries else None
+    name = agent.strip()
+    got = next((e for e in entries if e[0] == name), None) or next(
+        (e for e in entries if e[0].lower() == name.lower()), None)
+    if got:
+        return got
+    plat = _agent_platform(name)
+    if plat is None:
+        return None
+    return next((e for e in entries if (parse_profile(e[1]) or (_exe_platform(e[1]),))[0] == plat), None)
+
+
+def _no_launch_entry(agent, entries):
+    return RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in entries)} "
+                      f"(or an agent id or alias: {', '.join(agent_types())})")
+
+
 def role_agent(conn, role, project_id=None, item_id=None):
     """The launch entry label that a session of this role starts (#5168): for an item, its effective agent
     (_item_models: its own --agent, agent_rules, agent_for.<role>, default_agent); else agent_for.<role>, then
@@ -22080,15 +24486,17 @@ def role_agent(conn, role, project_id=None, item_id=None):
         if role != item_role(it):  # the item is taken in another role (an expert for a work item): that role's agent
             it = {**dict(it), "kind": {"reviewer": "review", "deployer": "deploy"}.get(role, "work"),
                   "tier": "expert" if role == "expert" else None}
-        t = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn),
-                         setting(conn, "model_ladder"))["agent"]
+        m = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn),
+                         setting(conn, "model_ladder"))
         project_id = it["project_id"] if project_id is None else project_id
+        t = None if default_gives_way(conn, m["agent_from"], project_id) else m["agent"]  # #6361: the provider list
     else:  # the most specific scope wins: a project's default_agent comes before a global agent_for.<role>
         scopes = ([f"project:{_project_name(conn, project_id)}"] if project_id is not None else []) + ["global"]
         for sc in scopes:
             rows = {r["key"]: r["value"] for r in conn.execute(
                 "SELECT key, value FROM settings WHERE scope=? AND key IN (?, 'default_agent')", (sc, f"agent_for.{role}"))}
-            t = rows.get(f"agent_for.{role}") or rows.get("default_agent")
+            t = rows.get(f"agent_for.{role}") or (
+                None if default_gives_way(conn, sc, project_id) else rows.get("default_agent"))
             if t:
                 break
     if not t:
@@ -22098,6 +24506,9 @@ def role_agent(conn, role, project_id=None, item_id=None):
     if label is None:
         raise RiverError(f"the {role} runs {t}, and no launch entry runs it; add one: maxpm config set launch_agents "
                          f"\"...; {platform_spec(t)['label']}=@{t}\"")
+    # A worker's or reviewer's start counts the limits of sessions (#6361); a manager, an expert or a deployer starts.
+    label, _ = pick_available_agent(conn, label, project_id=project_id, explicit=False,
+                                    slots=role in ("worker", "reviewer"))
     return label
 
 
@@ -22111,6 +24522,16 @@ def _start_next(conn):
     return {**t["item"], "project": t["project"], "why": t["why"]}
 
 
+def _launch_platform(conn, project_id, agent):
+    """The adapter id of the chosen launch_agents entry (None for a custom command)."""
+    agents = launch_entries(conn, project_id)
+    pick = launch_entry(agents, agent)
+    if pick is None:
+        raise _no_launch_entry(agent, agents)
+    prof = parse_profile(pick[1])
+    return prof[0] if prof else None
+
+
 def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,
                       autocompact=None, plain=False):
     """The chosen launch_agents entry as a command: a profile builds it from its options (options: the
@@ -22119,10 +24540,16 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
     manager_autocompact): claude --autocompact, unless the profile's args already name one."""
     agents = launch_entries(conn, project_id)
-    pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
+    # The caller chose the agent (launch_target counted the slots of a work launch); with none, the provider list picks
+    # an entry with usage left, also when its slots are full: a manager or an expert starts anyway (#6361). The entry's
+    # model and effort run when the caller names none.
+    got = pick_provider(conn, agent, project_id=project_id, explicit=agent is not None, slots=False, model=model)
+    agent = got["label"]
+    model, effort = model or got["model"], effort or got["effort"]
+    pick = launch_entry(agents, agent)
     if pick is None:
-        raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
-    model, first = _check_model_name(model) if model else None, None
+        raise _no_launch_entry(agent, agents)
+    model, first =_check_model_name(model) if model else None, None
     if effort and not re.match(r"^[a-z][a-z0-9_-]{0,31}$", effort):
         raise RiverError(f"effort {effort!r}: a level such as low, medium, high")
     prof = parse_profile(pick[1])
@@ -22131,14 +24558,26 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     # No model named: the adapter's own default (DESCRIBE['default_model'], #5284: OpenCode runs on its free model,
     # not on whatever model its TUI remembers); "" lets the agent pick. The default_model setting is not forced on
     # the CLI (#4961).
+    # Before it, the agent's own setting (#6264: agy_model, agy_effort): the order is the dialog's choice or
+    # --model/--effort (or the item's, which the caller passes), then the agent's setting, then its own default.
     adapter_default = None
-    if not model and platform:
-        a = _adapters().find(platform)
-        adapter_default = (a.describe.get("default_model") or None) if a else None
+    a = _adapters().find(platform) if platform else None
+    if not model and a:
+        adapter_default = agent_default(conn, a, "model", project_id) or a.describe.get("default_model") or None
         model = _check_model_name(adapter_default) if adapter_default else None
+    default_effort = None
+    if not effort and a and a.effort:
+        effort = default_effort = agent_default(conn, a, "effort", project_id)
     mid = model_id(conn, platform, model, project_id, prof[1] if prof else None)
     if effort and platform:
-        _check_agent_effort(_adapters().get(platform), mid, effort)
+        try:
+            _check_agent_effort(_adapters().get(platform), mid, effort)
+        except RiverError:
+            if not default_effort:
+                raise
+            effort = None  # the agent's default effort, which this model does not take: its own default runs
+        if default_effort and a.model_efforts(mid) == []:
+            effort = None  # a model with no effort (agy's Orchestrators) gets none
     prompt = custom_prompt(prompt) if prompt is not None else None
     if prof:
         opts = profile_options(conn, prof[0], prof[1], project_id, options)
@@ -22154,13 +24593,15 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         caps, built = _adapters().get(prof[0]).launch, dict(opts)
         if caps.get("system_prompt_file") and opts.get("skill_prompt") == "on":
             built["system_prompt_file"] = True
-        if caps.get("hooks_file") and opts.get("activity_hooks") == "on":
-            built["hooks_file"] = hook_file(_adapters().get(prof[0]))
+        sfile = settings_file(_adapters().get(prof[0]), opts)
+        if sfile:
+            built["hooks_file"] = sfile
         if caps.get("mcp_config") and name and project_id is not None:
             from .browser import mcp_config_file  # browser_mcp on: Playwright MCP on the project's browser (#5405)
             path = mcp_config_file(conn, project_id, name)
             if path:
                 built["mcp_config"] = path
+        built.update(read_dir_keys(conn, project_id, _adapters().get(prof[0])))  # the project's read_dirs (#6281)
         if autocompact and caps.get("autocompact") and "--autocompact" not in opts.get("args", ""):
             built["autocompact"] = autocompact
         else:
@@ -22275,7 +24716,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     if not mid:
         raise RiverError(f"MaximizePM does not know the model {agent} ran on (not in the queue, its command line or "
                          f"its transcript), and a resume with no model takes the CLI's default: nothing resumed. "
-                         f"The session records it with maxpm --as {agent} go --model <model>; or pick the model in "
+                         f"The session records it with {as_cmd(agent)} go --model <model>; or pick the model in "
                          f"its Settings on the Sessions tab")
     opts = {**profile_options(conn, prof[0], prof[1], project_id, None),
             "prompt": ov.get("prompt") or ADOPT_PROMPT.format(agent=agent), **(ov.get("opts") or {})}
@@ -22286,8 +24727,10 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     m = re.search(ad.effort["read"], a["pid_cmd"] or "") if (ad.effort or {}).get("read") else None
     effort = ov.get("effort") or (m.group(1) if m else None)
     settings = {**opts, "noflags": list(ov.get("noflags") or ())}
-    if ad.launch.get("hooks_file") and opts.get("activity_hooks") == "on":
-        settings["hooks_file"] = hook_file(ad)
+    sfile = settings_file(ad, opts)
+    if sfile:
+        settings["hooks_file"] = sfile
+    settings.update(read_dir_keys(conn, project_id, ad))  # the project's read_dirs (#6281)
     tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
     if tokens and ad.launch.get("autocompact"):
         settings["autocompact"] = tokens
@@ -22301,6 +24744,35 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
             "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 
+def agent_default(conn, ad, key, project_id=None):
+    """The agent's default model or effort (#6264): its setting <prefix>model or <prefix>effort, the most specific
+    scope first; None when it is empty or the agent has no such setting."""
+    if not ad.describe.get("prefix") or key not in ad.options():
+        return None
+    return setting(conn, ad.config_key(key), project_id=project_id) or None
+
+
+def check_agent_default(conn, platform, key, value):
+    """Refuse a default model that the agent does not list, or an effort that the agent (or its default model) does
+    not take (#6264). An agent whose list is empty (Amp) or still being read refuses no model."""
+    ad = _adapters().find(platform)
+    if ad is None or not value:
+        return
+    if key == "model":
+        names = [m["name"] for m in platform_models(conn, platform)]
+        if names and value not in names:
+            raise RiverError(f"{ad.label} has no model {value!r}; it lists {', '.join(names[:12])}"
+                             f"{' and more' if len(names) > 12 else ''} (the Start an agent dialog shows them all)")
+    elif key == "effort":
+        model = setting(conn, ad.config_key("model")) or None
+        mid = model_id(conn, platform, model) if model else None
+        levels = (ad.model_efforts(mid) if mid else None)
+        levels = ad.effort_choices() if levels is None else levels
+        if value not in levels:
+            raise RiverError(f"{ad.label}{' ' + model if model else ''} takes effort "
+                             f"{', '.join(levels) or 'none'}, not {value}")
+
+
 def _check_agent_effort(ad, mid, effort):
     """Refuse an effort that an agent with a per-model reader of its levels (EFFORT and read_effort_levels: Codex)
     does not take: for the model, when the reader lists it, else the adapter's EFFORT levels. An agent with no such
@@ -22308,8 +24780,11 @@ def _check_agent_effort(ad, mid, effort):
     read = getattr(ad.module, "read_effort_levels", None)
     if not read or not ad.effort:
         return
-    levels = read(mid) or ad.effort.get("levels") or []
-    if effort not in levels:
+    levels = read(mid) if mid else None
+    if levels == []:
+        return  # the model takes no effort (an Orchestrator of agy): the adapter starts it with none (#6256)
+    levels = levels or ad.effort.get("levels") or []
+    if ad.effort_name(effort) not in levels:
         raise RiverError(f"{ad.label}{' ' + mid if mid else ''} takes effort {', '.join(levels)}, not {effort}; "
                          f"pick one of them")
 
@@ -22401,25 +24876,43 @@ def launch_options(conn):
     levels = _levels(setting(conn, "effort_levels"))
     out = []
     for label, cmd in launch_entries(conn):
-        prof = parse_profile(cmd)
-        ad = _adapters().find(prof[0]) if prof else None
-        # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
-        by_exe = None if prof else _adapters().by_exe(entry_exe(cmd))
-        fam = platform_spec(prof[0])["family"] if prof else by_exe and by_exe.describe["family"]
-        fam = fam if fam in ladder else None
-        out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
-                    "agent_type": prof[0] if prof else _exe_platform(cmd),
-                    "models": (platform_models(conn, prof[0], inline=prof[1]) if prof else
-                               [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
-                                for f, ms in ladder.items() if fam in (None, f) for m in ms]),
-                    # A profile offers the efforts of its adapter (#5169); none when the agent has no effort.
-                    "efforts": ad.effort_choices() if ad else (
-                        list((by_exe.effort or {}).get("levels") or levels) if fam and by_exe else levels),
-                    "takes_model": bool(prof) or "{model}" in cmd,
-                    "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
-                    # The options the dialog can change for one launch, preset from the entry and the settings.
-                    "options": profile_option_list(conn, prof[0], prof[1], kinds=("toggle", "choice")) if prof else []})
+        out.append(_launch_option(conn, label, cmd, ladder, levels))
     return out
+
+
+def _efforts_of(models, agent_levels):
+    """The Effort list for "the agent's default" model (#6257): when every model knows its own levels, the levels that
+    any of them takes (Antigravity: low to xhigh, no max); else the agent's."""
+    if models and all(isinstance(m.get("efforts"), list) for m in models):
+        got = {lv for m in models for lv in m["efforts"]}
+        return [lv for lv in agent_levels if lv in got]
+    return agent_levels
+
+
+def _launch_option(conn, label, cmd, ladder, levels):
+    """One entry of launch_options."""
+    prof = parse_profile(cmd)
+    ad = _adapters().find(prof[0]) if prof else None
+    # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
+    by_exe = None if prof else _adapters().by_exe(entry_exe(cmd))
+    fam = platform_spec(prof[0])["family"] if prof else by_exe and by_exe.describe["family"]
+    fam = fam if fam in ladder else None
+    models = (platform_models(conn, prof[0], inline=prof[1]) if prof else
+              _agents_pkg.order_models([{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
+                                        for f, ms in ladder.items() if fam in (None, f) for m in ms]))
+    # A profile offers the efforts of its adapter (#5169); none when the agent has no effort. Each model with its own
+    # levels has them in its "efforts" (#6256); these are the levels for the agent's default model.
+    efforts = ad.effort_choices() if ad else (by_exe.effort_choices() if fam and by_exe and by_exe.effort else levels)
+    return {"label": label, "family": fam, "platform": prof[0] if prof else None,
+            "agent_type": prof[0] if prof else _exe_platform(cmd),
+            "models": models, "efforts": _efforts_of(models, efforts),
+            # The agent's default model and effort (#6264): the dialog preselects them when the item names none.
+            "default_model": agent_default(conn, ad, "model") if ad else None,
+            "default_effort": agent_default(conn, ad, "effort") if ad else None,
+            "takes_model": bool(prof) or "{model}" in cmd,
+            "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
+            # The options the dialog can change for one launch, preset from the entry and the settings.
+            "options": profile_option_list(conn, prof[0], prof[1], kinds=("toggle", "choice")) if prof else []}
 
 
 def profile_option_list(conn, platform, inline=None, project_id=None, kinds=("toggle", "choice", "text")):
@@ -22497,7 +24990,7 @@ def state(conn, closed=True):
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
         "items": _state_rows(shown, closed),
         "closed_counts": closed_counts,
-        "agents": [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")],
+        "agents": agent_statuses(conn),  # the callers only read the state
         "capacity": capacity(conn, ann),
         "targets": targets_view(conn, ann),
         "hook_events": dict(HOOK_EVENTS),  # the Targets tab offers a hook for each event
@@ -22521,7 +25014,82 @@ def state(conn, closed=True):
         "needs_you": [dict(r) for r in conn.execute(
             "SELECT id, kind, item_id, message_id, human, summary, opened_at FROM needs_you "
             "WHERE closed_at IS NULL ORDER BY id DESC")],
+        "agent_limits": agent_limits_list(conn),
+        "providers": agent_providers(conn),
+        "devices": device_list(conn),
     }
+
+
+# ---------------------------------------------------------------- paired phones (#6471)
+DEVICE_PLATFORMS = ("ios", "android")
+
+
+def _device_public(r):
+    return {"id": r["id"], "name": r["name"], "platform": r["platform"],
+            "paired_at": r["paired_at"], "last_seen": r["last_seen"], "dead_at": r["dead_at"]}
+
+
+def device_pair(conn, name, platform, push_token, key):
+    """Store a paired phone after its QR pairing code checked out (#6471). Re-pairing a device with the same
+    platform and push_token updates its name, key and timestamps and clears dead_at."""
+    plat = (platform or "").strip().lower()
+    if plat not in DEVICE_PLATFORMS:
+        raise RiverError("platform must be 'ios' or 'android'")
+    token = (push_token or "").strip() if isinstance(push_token, str) else ""
+    if not token or len(token) > 1024:
+        raise RiverError("push_token is required (at most 1024 characters)")
+    k = (key or "").strip() if isinstance(key, str) else ""
+    if not k or len(k) < 16 or len(k) > 512 or any(c.isspace() for c in k):
+        raise RiverError("key is required (16 to 512 non-whitespace characters)")
+    label = (name or "").strip() if isinstance(name, str) else ""
+    if not label:
+        label = "iPhone" if plat == "ios" else "Android"
+    label = label[:120]
+    ts = iso(now())
+    with tx(conn):
+        existing = conn.execute("SELECT id FROM devices WHERE platform=? AND push_token=?", (plat, token)).fetchone()
+        if existing:
+            conn.execute("UPDATE devices SET name=?, key=?, paired_at=?, last_seen=?, dead_at=NULL WHERE id=?",
+                         (label, k, ts, ts, existing["id"]))
+            did = existing["id"]
+        else:
+            did = conn.execute(
+                "INSERT INTO devices (name, platform, push_token, key, paired_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+                (label, plat, token, k, ts, ts)).lastrowid
+        row = conn.execute("SELECT id, name, platform, paired_at, last_seen, dead_at FROM devices WHERE id=?",
+                           (did,)).fetchone()
+    return _device_public(row)
+
+
+def device_list(conn, include_secrets=False):
+    """Every paired phone, oldest first. include_secrets adds push_token and key for the app notice channel (#6469)."""
+    cols = "id, name, platform, push_token, key, paired_at, last_seen, dead_at" if include_secrets \
+        else "id, name, platform, paired_at, last_seen, dead_at"
+    return [dict(r) for r in conn.execute(f"SELECT {cols} FROM devices ORDER BY id")]
+
+
+def device_remove(conn, device_id):
+    """Delete a paired phone by id (Remove in Settings, #6471)."""
+    with tx(conn):
+        row = conn.execute("SELECT id, name, platform FROM devices WHERE id=?", (device_id,)).fetchone()
+        if not row:
+            raise RiverError(f"no paired device #{device_id}")
+        conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+    return {"id": row["id"], "name": row["name"], "platform": row["platform"], "removed": True}
+
+
+def device_touch(conn, device_id):
+    """Record that a paired phone was seen now."""
+    ts = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE devices SET last_seen=?, dead_at=NULL WHERE id=?", (ts, device_id))
+
+
+def device_mark_dead(conn, device_id):
+    """Mark a paired phone's push token dead when the push Worker reports it (#6469)."""
+    ts = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE devices SET dead_at=? WHERE id=?", (ts, device_id))
 
 
 # ---------------------------------------------------------------- policies (#5308)
@@ -23006,8 +25574,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             register(conn, actor, note=f"started with maxpm go in {area}")
             new_name = True
     else:
-        import secrets
-        actor = f"{'chat' if chat and not project else names[0]}-{secrets.token_hex(2)}"
+        actor = new_agent_name(conn, 'chat' if chat and not project else names[0])
         register(conn, actor, note=f"started with maxpm go in {area}" + (" (chat, no folder)" if chat else ""))
         new_name = True
     activity(conn, actor)
@@ -23047,6 +25614,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
              "chat": chat}
 
     brief["workspace"] = workspace_of(conn, actor)  # its own git worktree (#5856), or None
+    from . import scratch
+    bd = scratch.build_dir(conn, actor)
+    brief["build_dir"] = str(bd) if bd is not None and bd.is_dir() else None  # #6398: made when maxpm started it
     stop = stop_request(conn, actor)
     if stop:
         holds = [item_show(conn, r["id"]) for r in conn.execute(
@@ -23172,7 +25742,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         person = _person(conn, person or None)
         brief.update(role="helper", item=None, help_prompt=prompt_for_all(conn, person),
                      why=f"the page opened this session to work through what waits on {person}, with them")
-        _set_role_note(conn, actor, "helper", None)
+        _set_role_note(conn, actor, "helper", None, person)
         return brief
     if role is None and fid.isdigit() and int(fid) in annotate(conn, closed=False):
         f = item_show(conn, int(fid))
@@ -23180,15 +25750,19 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             person = _person(conn, person or None)
             brief.update(role="helper", item=None, help_prompt=prompt_for(conn, f["id"], person),
                          why=f"the page opened this session to do #{f['id']} together with {person}")
-            _set_role_note(conn, actor, "helper", f["id"])
+            _set_role_note(conn, actor, "helper", f["id"], person)
             return brief
         # Start or Dispatch opened this session for one item: claim it, or say why not.
         if kind == "item" and f["status"] in OPEN_STATES and f["assignee"] != actor:
             try:
                 item = claim(conn, f["id"], actor)
             except RiverError as e:
-                brief["focus_note"] = (f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
-                                       f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
+                q = _own_question_wait(conn, f["id"], actor)
+                brief["focus_note"] = (
+                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}. It waits on {q['to_agent']}'s answer "
+                    f"to your question #{q['id']}" + ANSWER_IN_WAIT.format(item=f["id"]) + "." if q else
+                    f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
+                    f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
             else:
                 r = "reviewer" if item["kind"] == "review" else "worker"
                 brief.update(role=r, item=item, why=f"runner {os.environ['MAXPM_RUNNER']} started this session for "
@@ -23348,9 +25922,11 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         # A scoped session takes nothing outside its scope (#5973): it says why its scope cannot move, and the
         # manager hears it once.
         st = scope_state(conn, actor, scope, annotate(conn, closed=False))
-        _tell_scope_state(conn, actor, st)
+        if st["state"] != "answer":  # the question reaches the manager or the person already
+            _tell_scope_state(conn, actor, st)
         brief.update(role="idle", item=None, held_by_others=[], scope_state=st["state"],
                      why=st["why"] + (": the manager gives you a new scope" if st["state"] == "empty"
+                                      else ANSWER_IN_WAIT.format(item=st["item"]) if st["state"] == "answer"
                                       else ": the manager widens your scope or gives the task to another session"))
         _set_role_note(conn, actor, "idle", None)
         return brief
@@ -23440,9 +26016,13 @@ def _deploy_brief(conn, item):
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
 
 
-def _set_role_note(conn, actor, role, item_id):
+def _set_role_note(conn, actor, role, item_id, person=None):
+    """person: a helper's person (#6442), whom its maxpm forward acts for (helper_person)."""
     note = f"role: {role}" + (f" on #{item_id}" if item_id else "")
     with tx(conn):
+        if person:
+            conn.execute("UPDATE agents SET assistant_for=? WHERE name=? AND COALESCE(role, '') NOT IN "
+                         "('expert', 'assistant', 'plain')", (person, actor))
         # A role with work ends a wait; idle keeps the wait clock, so wait_max counts from the first wait.
         keep = role in ("idle", "waiting")
         # An expert stays an expert when a person has it claim an item (#4955), and an assistant an assistant (#5110);
@@ -23613,7 +26193,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         raise RiverError("waiting needs an agent name: pass --as <name>")
     if _agent(conn, actor)["role"] == "expert":
         raise RiverError(f"{actor} is an expert session: it waits at its prompt for the person, not in maxpm wait, "
-                         f"and MaximizePM never ends it for that. Answer the person; maxpm --as {actor} go shows your "
+                         f"and MaximizePM never ends it for that. Answer the person; {as_cmd(actor)} go shows your "
                          f"news")
     names = _names(conn, project) if project else projects_for_dir(conn, cwd)
     scope = agent_scope(conn, actor)
@@ -23637,7 +26217,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
                                 (actor,)).fetchall()
             if held:
                 raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; finish or release "
-                                 f"it before you wait: maxpm --as {actor} go")
+                                 f"it before you wait: {as_cmd(actor)} go")
             conn.execute("UPDATE agents SET waiting_since=COALESCE(waiting_since, ?), role='waiting', waiting_in=?, "
                          "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
                                                  f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
@@ -23785,12 +26365,22 @@ def _add_note(conn, item_id, text):
 def _want_fresh(conn, item_id, note):
     """An answer came for an agent item that an agent worked on before and nobody holds now (the agent filed a
     person's item and ended, or asked a question and ended): put the answer in the item's notes, and mark it
-    for maxpm serve, which starts a fresh session for it (fresh_sessions). Inside a tx."""
+    for maxpm serve, which starts a fresh session for it (fresh_sessions). When the agent that last claimed it still
+    waits for work in maxpm wait (_waiting_asker), the item is pushed back to it instead (#6422). Inside a tx."""
     it = _item(conn, item_id)
     if (it["status"] != "open" or it["doer"] == "human" or it["kind"] not in ANSWER_KINDS or it["reserved_for"]
             or not conn.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'claimed%'", (item_id,)).fetchone()):
         return False
     _add_note(conn, item_id, note)
+    asker = _waiting_asker(conn, item_id)
+    if asker:
+        # #6422: the session that worked on it waits for work in maxpm wait: the item goes back to it (a push, so its
+        # wait says WORK and its go takes it, with the answer in the notes), not to a fresh session with a cold start.
+        ttl = parse_duration(setting(conn, "reserve_ttl", item_id=item_id, agent=asker))
+        conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
+                     (asker, iso(now() + ttl), "maxpm", item_id))
+        _event(conn, item_id, "maxpm", f"an answer came: it goes back to {asker}, which waits for work (maxpm wait)")
+        return True
     if setting(conn, "fresh_sessions", item_id=item_id) != "on":
         return False  # the answer is in the notes; whoever runs go next takes the item
     conn.execute("UPDATE items SET fresh_start=? WHERE id=?", (iso(now()), item_id))
@@ -23999,6 +26589,18 @@ def workspace_of(conn, agent):
     r = conn.execute("SELECT * FROM workspaces WHERE agent=? AND removed_at IS NULL ORDER BY id DESC LIMIT 1",
                      (agent,)).fetchone()
     return dict(r) if r else None
+
+
+def workspace_reassign(conn, old_agent, new_agent):
+    """Hand an active worktree from `old_agent` to `new_agent` (#6348: fallback session continues uncommitted work
+    in the same worktree). Returns the reassigned workspace row, or None if `old_agent` had none."""
+    w = workspace_of(conn, old_agent)
+    if not w:
+        return None
+    with tx(conn):
+        conn.execute("UPDATE workspaces SET agent=? WHERE id=?", (new_agent, w["id"]))
+        _event(conn, None, "maxpm", f"{new_agent} continues in worktree {w['path']} from {old_agent}")
+    return workspace_of(conn, new_agent)
 
 
 def workspace_list(conn, removed=False):
@@ -24508,9 +27110,18 @@ def manager_findings(conn):
                             "done_when": g["done_when"], "outcome": g["outcome"], "backlog": backlog,
                             "last": dict(last) if last else None, "question": _done_when_question(g, backlog)})
     waits = release_waits(conn)
+    live_names = {a["name"] for a in agents if a["state"] != "stopped"}
+    hanging = []
+    for ag_name, h in sorted(hanging_commands(conn).items()):
+        if ag_name not in live_names:
+            continue
+        since_dt = parse_iso(h["since"]) if h.get("since") else t
+        mins = max(1, int((t - since_dt).total_seconds() // 60))
+        hanging.append({"agent": ag_name, "pid": h["pid"], "command": h["command"],
+                        "since": h["since"], "minutes": mins})
     return {"stuck": stuck, "ends": ends, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
             "unneeded": unneeded, "goal_checks": goal_checks, "unpushed": waits["unpushed"],
-            "untagged": waits["untagged"],
+            "untagged": waits["untagged"], "hanging_commands": hanging,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "net_down": [net] if net else [],
             "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
@@ -24650,6 +27261,7 @@ def _finding_keys(f):
                   | {f"rule:{x['key']}" for x in f.get("broken_rules", [])}
                   | {f"unpushed:{x['target']}" for x in f.get("unpushed", [])}
                   | {f"untagged:{x['id']}" for x in f.get("untagged", [])}
+                  | {f"hanging:{x['agent']}:{x['pid']}" for x in f.get("hanging_commands", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 
@@ -24699,8 +27311,7 @@ def manage(conn, cwd, actor=None, takeover=None):
     (launch, queues, messages, stop, launch settings, target give) and takes no work itself."""
     new_name = False
     if not actor:
-        import secrets
-        actor = f"manager-{secrets.token_hex(2)}"
+        actor = new_agent_name(conn, "manager")
     if not conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
         register(conn, actor, note="role: manager")
         new_name = True
@@ -24956,8 +27567,8 @@ def tell_watch_late(conn):
                 body = (f"{WATCH_WAKE} {_short(gap)} ago and {len(due)} message{'s' if len(due) != 1 else ''} "
                         f"wait{'' if len(due) != 1 else 's'} for you"
                         + (f", {blocked} blocked (the sender stands still)" if blocked else "")
-                        + f". Read them now (maxpm --as {name} inbox), then start the watch again in the background: "
-                          f"maxpm --as {name} manage --watch")
+                        + f". Read them now ({as_cmd(name)} inbox), then start the watch again in the background: "
+                          f"{as_cmd(name)} manage --watch")
                 wakes[name] = {"id": _send(conn, "alert", "maxpm", body, to=name), "created_at": iso(now()), "body": body}
         for name in wake_now:  # outside the tx: a platform's command may take seconds
             w = wakes[name]

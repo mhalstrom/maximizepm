@@ -22,7 +22,7 @@ DESCRIBE = {
 
 from pathlib import Path  # noqa: E402
 
-from . import Raw  # noqa: E402
+from . import Raw, parse_reset_time  # noqa: E402
 
 EFFORT = {
     "levels": ["low", "medium", "high", "xhigh", "max"],
@@ -33,9 +33,28 @@ EFFORT = {
 }
 
 LAUNCH = {"session_name": True, "system_prompt_file": True, "hooks_file": True, "fork": True, "resume": True,
-          "autocompact": True, "background": True, "mcp_config": True}
+          "autocompact": True, "background": True, "mcp_config": True, "read_dirs": True}
 
-IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "log_glob": None, "pane": None, "url": None,
+# What a session may not do in a read folder (#6281): change a file, or read a secret file (mark's list: .env, .env.*,
+# .envrc, *.secret, *.secrets, a secrets folder). Claude Code's permission rules: '//' starts an absolute path, and
+# '**' is any depth, as in .gitignore. Edit covers every file change (Claude Code 2.1.329: 'Deny rule Write(...) never
+# matches · use Edit(...)'). Measured 2026-11-20: a session read a read folder's Cargo.toml with no question and was
+# refused its .env ('denied by your permission settings'). Claude Code asks once per start whether to add a folder
+# that it was never started in ('Adding a new directory'); a folder it was started in and trusted, it adds at once.
+READ_DIR_DENY = ("Edit({d}/**)", "Read({d}/**/.env)", "Read({d}/**/.env.*)", "Read({d}/**/.envrc)",
+                 "Read({d}/**/*.secret)", "Read({d}/**/*.secrets)", "Read({d}/**/secrets/**)")
+
+
+def read_dir_words(dirs):
+    """--add-dir for each read folder (Claude Code reads there with no question), then --disallowedTools with
+    READ_DIR_DENY for each. Both flags take several values, so they go after the prompt: a word after them that is
+    no flag would be taken as one more value."""
+    if not dirs:
+        return []
+    rules = [r.format(d="/" + d) for d in dirs for r in READ_DIR_DENY]
+    return [w for d in dirs for w in ("--add-dir", d)] + ["--disallowedTools", *rules]
+
+IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "pane": None, "url": None,
             "inside_env": ["CLAUDECODE"],
             # its session ids are UUIDs (core._SESSION_ID_RE): the name of its transcript, <id>.jsonl
             "id_pattern": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
@@ -73,6 +92,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     words += ["--permission-mode", s["permission_mode"]] if s.get("permission_mode") else []
     words += [Raw(args.strip())] if args.strip() else []
     words.append(prompt)
+    words += read_dir_words(s.get("read_dirs") or ())  # #6281
     words += ["--remote-control"] + ([name] if name else []) if s.get("remote_control") == "on" else []
     return words
 
@@ -131,9 +151,60 @@ DETECT = {
     "idle": r"^\s*❯(\s|$)",  # the marker of its input box, under a rule
     "working": r"(?i)\besc to interrupt\b",
     "blocked": BLOCKED,
+    # Limit-stop text (#6348): Claude Code's plan/session/weekly usage limit messages.
+    "limit": [
+        r"(?i)you've\s+hit\s+your\s+limit",
+        r"(?i)claude\s+ai\s+usage\s+limit\s+reached",
+        r"(?i)\b(?:5-hour|session|weekly|usage|rate)\s+limit\s+reached\b",
+        r"(?i)\bout\s+of\s+extra\s+usage\b",
+    ],
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Claude what to do differently"
     "image_paste": "[Image #{n}]",  # an image path pasted alone becomes this in its prompt (#4618)
+    # The tab line of the AskUserQuestion dialog (#6234): one tab for each question (☐ open, ☒ answered), then
+    # '✔ Submit' between arrows; one question has its tab alone (" ☐ Pet").
+    "ask": r"^\s*(?:←\s+)?[☐☒]\s+\S.*?(?:\s+✔\s+Submit\s+→)?\s*$",
 }
+
+
+def screen_limits(lines, now=None):
+    """Read plan usage limits from Claude Code's `/usage` screen (#6348): sections such as 'Current session',
+    'Current week (all models)', 'Current week (Sonnet only)' with '% used' / '% left' and 'Resets ...'."""
+    seq = [str(ln) for ln in (lines or ())]
+    if not any(_re.search(r"(?i)\b(?:current\s+session|current\s+week|extra\s+usage|plan\s+usage)\b", ln) for ln in seq):
+        return None
+    out, i = [], 0
+    heading_rx = _re.compile(r"^\s*(Current\s+(?:session|week(?:\s*\([^)]+\))?)|Extra\s+usage)\s*$", _re.I)
+    pct_rx = _re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%\s*(used|left|remaining)\b", _re.I)
+    inline_rx = _re.compile(
+        r"^\s*(Current\s+(?:session|week(?:\s*\([^)]+\))?)|Extra\s+usage)\s*[:·-]?\s*"
+        r"(?:[█▓▒░▇▆▅▄▃▂▁━─=\[\]#-]{2,}\s+)?(\d{1,3}(?:\.\d+)?)\s*%\s*(used|left|remaining)\b",
+        _re.I,
+    )
+    while i < len(seq):
+        line = seq[i].strip()
+        im = inline_rx.match(line)
+        if im:
+            name, pct, kind = im.group(1).strip(), float(im.group(2)), im.group(3).lower()
+            used = round(max(0.0, min(100.0, pct)), 1) if kind == "used" else round(max(0.0, 100.0 - pct), 1)
+            chunk = " ".join(seq[i:min(len(seq), i + 2)])
+            resets_at, resets_text = parse_reset_time(chunk, now=now)
+            out.append({"name": name, "used_percent": used, "remaining_percent": round(100.0 - used, 1),
+                        "resets_at": resets_at, "resets_text": resets_text})
+            i += 1
+            continue
+        hm = heading_rx.match(line)
+        if hm:
+            name = hm.group(1).strip()
+            block = seq[i + 1:min(len(seq), i + 5)]
+            pm = next((pct_rx.search(b) for b in block if pct_rx.search(b)), None)
+            if pm:
+                pct, kind = float(pm.group(1)), pm.group(2).lower()
+                used = round(max(0.0, min(100.0, pct)), 1) if kind == "used" else round(max(0.0, 100.0 - pct), 1)
+                resets_at, resets_text = parse_reset_time(" ".join(block), now=now)
+                out.append({"name": name, "used_percent": used, "remaining_percent": round(100.0 - used, 1),
+                            "resets_at": resets_at, "resets_text": resets_text})
+        i += 1
+    return out or None
 
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'); the session keeps its context.
 # Messages reach it through MaximizePM's listener hook (core.native_message 'wake', #5686).
@@ -147,33 +218,105 @@ WAKE_EVENTS = ("UserPromptSubmit", "Stop")
 WAKE_TIMEOUT = 86400
 
 
+GUARD_FILE = "claude-guard.json"  # beside the queue: the guard alone, for a start with the activity hooks off
+
+
+def guard_settings():
+    """The Claude Code settings that deny writes to the queue file and its -wal and -shm files (#6412): only maxpm
+    serve writes the queue. sandbox.filesystem.denyWrite holds for the sandbox's Bash commands (sqlite3 too), and the
+    Edit(//<path>) deny rules for the Edit and Write tools. Claude Code 2.1.329 describes denyWrite as 'Additional
+    paths to deny writing within the sandbox. Merged with paths from Edit(...) deny permission rules'; a --settings
+    file merges these lists with the person's own."""
+    from ..core import queue_files
+    files = queue_files()
+    if not files:
+        return {}
+    return {"permissions": {"deny": [f"Edit(/{f})" for f in files]}, "sandbox": {"filesystem": {"denyWrite": files}}}
+
+
 def hook_settings(report):
     """The Claude Code settings (claude --settings) with MaximizePM's hooks: each event runs `report --hook claude`,
     which reads the hook's JSON on stdin, and WAKE_EVENTS also start the listener `report --wake claude`. report: the
-    maxpm report command (argv words)."""
+    maxpm report command (argv words). The queue guard (guard_settings) goes in the same file."""
     import shlex
     run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
             "timeout": 10}]
     wake = {"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--wake", "claude"]),
             "asyncRewake": True, "timeout": WAKE_TIMEOUT}
-    return {"hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
+    return {**guard_settings(),
+            "hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
                       else [{"hooks": run + [wake] if ev in WAKE_EVENTS else run}] for ev in HOOK_EVENTS}}
 
 
-def install_hooks(folder, report):
-    """Write the hook file beside the queue when its text changes; the start adds --settings <file>."""
+def _write_settings(name, data, fix):
+    """Write a settings file beside the queue when its text changes; the words that pass it to claude."""
     import json
     from pathlib import Path
     from ..core import RiverError, river_dir
-    f = Path(river_dir()) / HOOK_FILE
-    text = json.dumps(hook_settings(report), indent=2) + "\n"
+    f = Path(river_dir()) / name
+    text = json.dumps(data, indent=2) + "\n"
     try:
         if not f.exists() or f.read_text(encoding="utf-8") != text:
             f.write_text(text, encoding="utf-8")
     except OSError as e:
-        raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: "
-                         f"maxpm config set claude_activity_hooks off")
+        raise RiverError(f"cannot write {f}: {e}; {fix}")
     return ["--settings", str(f)]
+
+
+def install_hooks(folder, report):
+    """Write the hook file beside the queue when its text changes; the start adds --settings <file>."""
+    return _write_settings(HOOK_FILE, hook_settings(report),
+                           "turn the hooks off: maxpm config set claude_activity_hooks off")
+
+
+def install_guard(folder):
+    """Write the guard file (guard_settings alone) beside the queue, for a start with the activity hooks off."""
+    return _write_settings(GUARD_FILE, guard_settings(), "check that the queue folder can be written")
+
+
+def write_guard(path=None, remove=False):
+    """Add (or remove) the queue guard in Claude Code's user settings (maxpm setup-agent --guard), for the sessions
+    that a person starts by hand: the sessions that MaximizePM starts get it with each start. The person's own rules
+    stay; the old file is kept as <name>.bak when it changes."""
+    import json
+    from pathlib import Path
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else _config_dir() / "settings.json"
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError as e:
+        raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it")
+    if not isinstance(data, dict):
+        raise RiverError(f"{f}: expected a JSON object; fix it first")
+    guard = guard_settings()
+    lists = ((("permissions", "deny"), guard["permissions"]["deny"]),
+             (("sandbox", "filesystem", "denyWrite"), guard["sandbox"]["filesystem"]["denyWrite"]))
+    changed = False
+    for keys, values in lists:
+        d = data
+        for k in keys[:-1]:
+            if not isinstance(d.setdefault(k, {}), dict):
+                raise RiverError(f"{f}: {'.'.join(keys[:-1])} is not an object; fix it first")
+            d = d[k]
+        have = d.setdefault(keys[-1], [])
+        if not isinstance(have, list):
+            raise RiverError(f"{f}: {'.'.join(keys)} is not a list; fix it first")
+        new = [v for v in have if v not in values] if remove else have + [v for v in values if v not in have]
+        changed = changed or new != have
+        d[keys[-1]] = new
+    if not changed:
+        return f"{f} {'has no' if remove else 'already has the'} queue guard; nothing changed"
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    bak = f" (the old file: {f.name}.bak)" if old else ""
+    if remove:
+        return f"took the queue guard out of {f}{bak}. New Claude Code sessions may write the queue file again."
+    return (f"added the queue guard to {f}{bak}: Claude Code sessions that you start by hand cannot write the queue "
+            f"file ({guard['sandbox']['filesystem']['denyWrite'][0]}) or its -wal and -shm files; their maxpm commands "
+            f"go through maxpm serve. It applies to new sessions.")
 
 
 _TASK_ENDED = {"completed", "failed", "killed", "stopped", "cancelled", "canceled", "done", "error"}
@@ -258,6 +401,104 @@ FORK_SLACK = 30
 def chat_path(session_ref, folder=None, root=None):
     """The newest transcript of the session id in the transcripts folder (core.transcripts_root), or None."""
     return _s().newest(Path(root or _core.transcripts_root()).glob(f"*/{session_ref}.jsonl"))
+
+
+# Background tasks (#1611, #6454): the harness answers a Bash call with run_in_background, or one that ran into its
+# time limit, and an Agent call that runs on its own, with one of these texts at the start of the tool result. A
+# <task-notification> (a user line, an attachment, or a queue line) ends a task, and so do TaskStop and KillShell.
+_BG_STARTS = (("command", _re.compile(r"Command running in background with ID: (\w+)")),
+              ("command", _re.compile(r"Command [^\n]{0,200}?moved to the background \(ID: (\w+)\)")),
+              ("subagent", _re.compile(r"Async agent launched successfully.*?agentId: (\w+)", _re.S)))
+_BG_NOTE = _re.compile(r"<task-notification>(.*?)</task-notification>", _re.S)
+_BG_USE = _re.compile(r'"id":\s*"(toolu_\w+)"')
+_BG_TIME = _re.compile(r'"timestamp":\s*"([^"]+)"')
+# The tool calls whose input names a task: where each one's line starts, for the last ones only (a call that ran
+# into its time limit gets its result within 10 minutes). A task keeps its start and end after it ends, for the
+# list of the Sessions tab; the oldest ended ones go.
+_BG_USES_MAX = 500
+_BG_TASKS_MAX = 200
+
+
+def _bg_result_text(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") == "text")
+
+
+def _bg_end(tasks, task_id, at, status):
+    task = tasks.get(task_id)
+    if task and task["end"] is None:
+        task["end"], task["status"] = at or _core.now(), status
+
+
+def _bg_input(path, offset, use):
+    """The input of tool call `use` from its line at byte offset of the transcript, {} when it is not there."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            d = _json.loads(f.readline())
+    except (OSError, ValueError):
+        return {}
+    msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+    for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+        if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") == use:
+            return x.get("input") if isinstance(x.get("input"), dict) else {}
+    return {}
+
+
+def background_scan(path, start, st):
+    """Fold the new lines of a transcript into st (agents.background_scan): each background command and subagent,
+    its start, what it is (the description and command of its tool call) and its end. A start counts only as the
+    first words of a tool result, so text that quotes one (a grep of another transcript) starts nothing."""
+    from . import new_lines
+    tasks, uses = st.setdefault("tasks", {}), st.setdefault("uses", {})
+    end = start
+    for pos, end, line in new_lines(path, start):
+        if '"tool_use"' in line and ('"Bash"' in line or '"Agent"' in line or '"Task"' in line):
+            for u in _BG_USE.findall(line):
+                uses.pop(u, None)
+                uses[u] = pos
+            for u in list(uses)[:max(0, len(uses) - _BG_USES_MAX)]:
+                del uses[u]
+        if "<task-notification>" in line and "<status>" in line:
+            m = _BG_TIME.search(line)
+            at = _core._ts(m.group(1)) if m else None
+            for body in _BG_NOTE.findall(line):
+                tid, status = _re.search(r"<task-id>(\w+)</task-id>", body), _re.search(r"<status>(\w+)</status>", body)
+                if tid and status:
+                    _bg_end(tasks, tid.group(1), at, status.group(1))
+        begin = '"tool_result"' in line and ("background" in line or "Async agent launched" in line)
+        if not (begin or '"TaskStop"' in line or '"KillShell"' in line):
+            continue
+        try:
+            d = _json.loads(line)
+        except ValueError:
+            continue
+        msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+        t = _core._ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
+        for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+            if not isinstance(x, dict):
+                continue
+            if x.get("type") == "tool_use" and x.get("name") in ("TaskStop", "KillShell"):
+                inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                _bg_end(tasks, str(inp.get("task_id") or inp.get("shell_id") or ""), t, "stopped")
+            elif x.get("type") == "tool_result" and d.get("type") == "user" and t is not None:
+                text = _bg_result_text(x.get("content")).lstrip()
+                for kind, rx in _BG_STARTS:
+                    m = rx.match(text)
+                    if not m:
+                        continue
+                    use = x.get("tool_use_id")
+                    inp = _bg_input(path, uses.pop(use), use) if use in uses else {}
+                    command = str(inp.get("command") or "")
+                    tasks[m.group(1)] = {"id": m.group(1), "kind": kind, "at": t, "command": command,
+                                         "what": " ".join(str(inp.get("description") or command).split())[:80],
+                                         "end": None, "status": None}
+                    break
+    old = sorted((v for v in tasks.values() if v["end"]), key=lambda v: v["end"])
+    for v in old[:max(0, len(tasks) - _BG_TASKS_MAX)]:
+        del tasks[v["id"]]
+    return end
 
 
 def parse_chat_line(d):
@@ -402,6 +643,27 @@ def chat_settings(lines):
             if isinstance(d.get("effort"), str):
                 got["effort"] = d["effort"]
     return got
+
+
+def config_settings():
+    """What a Claude Code session takes from settings.json when its command line names nothing (#6280): "model"
+    (claude-opus-5-5 on 2026-11-20), "effortLevel" (the model's own entry under modelSettings first), and
+    permissions.defaultMode; Claude Code's own defaults where it names none (permission mode default)."""
+    try:
+        d = _json.loads((_config_dir() / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    d = d if isinstance(d, dict) else {}
+    model = d.get("model") if isinstance(d.get("model"), str) else None
+    per = ((d.get("modelSettings") or {}).get(model) or {}) if model and isinstance(d.get("modelSettings"), dict) else {}
+    perm = (d.get("permissions") or {}).get("defaultMode") if isinstance(d.get("permissions"), dict) else None
+    return {"model": model, "effort": per.get("effortLevel") or d.get("effortLevel"),
+            "permission_mode": perm or "default"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): the transcript names the model and
+# effort on each reply; before the first reply, settings.json.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config"), "permission_mode": ("chat", "config")}
 
 
 def chat_cache_line(raw, st):
@@ -768,7 +1030,6 @@ SETUP = {
     # Claude Code reads AGENTS.md of the folder (checked in Claude Code 2.1.325), so a folder keeps its rules in that
     # one file for every agent; maxpm init moves the rules of an old CLAUDE.md into it and deletes it (#6024).
     "instructions": "AGENTS.md",
-    "import": None,
     "replaces": "CLAUDE.md",
     "skills_dir": "~/.claude/skills",
     # Voice (#4626): Claude Code records the microphone of the computer it runs on and takes no audio from outside
@@ -780,6 +1041,11 @@ SETUP = {
     "no_link": "This session has no Remote Control link and runs in no tmux pane here",
 }
 
+# 12. Update (#6430): the native build installs a given version (claude install <version>); npm publishes the same
+# versions. claude -p answers one request and exits.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "self": ["install", "{version}"],
+          "npm": "@anthropic-ai/claude-code"}
+
 
 def desktop_config_path():
     """Where the Claude desktop app keeps its MCP servers."""
@@ -788,6 +1054,25 @@ def desktop_config_path():
     if sys.platform == "darwin":
         return Path("~/Library/Application Support/Claude/claude_desktop_config.json").expanduser()
     return Path("~/.config/Claude/claude_desktop_config.json").expanduser()
+
+
+DESKTOP_APPS = ("/Applications/Claude.app", "~/Applications/Claude.app")  # tests replace it
+
+
+def desktop_app():
+    """The Claude desktop app on this computer, for the setup guide (#6477): its app or its config folder is there.
+    added: its config has MaximizePM's server. None without the app."""
+    import json
+    from pathlib import Path
+    f = desktop_config_path()
+    if not (f.parent.is_dir() or any(Path(p).expanduser().exists() for p in DESKTOP_APPS)):
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        added = isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and "maxpm" in data["mcpServers"]
+    except (OSError, ValueError):
+        added = False
+    return {"name": "Claude desktop app", "added": added, "path": str(f)}
 
 
 def write_mcp_config(path=None, remove=False):

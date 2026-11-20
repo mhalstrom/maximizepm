@@ -1,0 +1,13 @@
+name = "maximizepm-push"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# Stateless push relay: no KV, no D1, no R2, no Durable Objects.
+# Provider keys live only in Cloudflare Worker secrets (wrangler secret put):
+#   APNS_PRIVATE_KEY, APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID
+#   FCM_PRIVATE_KEY, FCM_CLIENT_EMAIL, FCM_PROJECT_ID
+
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }

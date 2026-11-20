@@ -126,7 +126,7 @@ class LastCall(unittest.TestCase):
 
 
 class Group2(unittest.TestCase):
-    """#5290: Hermes, Gemini CLI and Cursor CLI."""
+    """#5290: Hermes and Cursor CLI; #6248: Antigravity CLI."""
 
     def marks(self, aid):
         a = agents.get(aid)
@@ -140,9 +140,9 @@ class Group2(unittest.TestCase):
         settings, usage, runs = self.marks("hermes")
         self.assertEqual((settings, usage), ({"model": "model", "reasoning": "effort"}, ["context", "status", "usage"]))
         self.assertEqual((runs["sessions"], runs["compress"]), ("terminal", "now"))
-        settings, usage, runs = self.marks("gemini")
-        self.assertEqual((settings, usage), ({"model": "model"}, ["stats"]))
-        self.assertEqual((runs["settings"], runs["compress"]), ("terminal", "now"))
+        settings, usage, runs = self.marks("antigravity")
+        self.assertEqual((settings, usage), ({"model": "model", "effort": "effort"}, ["context", "usage"]))
+        self.assertEqual((runs["config"], runs["compact"]), ("terminal", "now"))
         settings, usage, runs = self.marks("cursor")
         self.assertEqual((settings, usage), ({"model": "model", "sandbox": "sandbox"}, []))
         self.assertEqual((runs["config"], runs["resume"], runs["summarize"]), ("terminal", "terminal", "now"))
@@ -160,12 +160,14 @@ class Group2(unittest.TestCase):
             self.assertEqual((h.context_window("gpt-6.1-terra"), h.context_window("reflection/beam-1.0:free"),
                               h.context_window("gpt-6.1-sol"), h.context_window("nope")), (500000, 262144, None, None))
 
-    def test_gemini_window_and_last_call(self):
-        g = agents.get("gemini")
-        self.assertEqual((g.context_window("gemini-3.8-flash"), g.context_window("pro"), g.context_window("gpt-6")),
-                         (1_048_576, 1_048_576, None))
-        st = fold(g, FIX / "gemini" / "session-2026-11-11T07-55-5d0c1b2a.jsonl")
-        self.assertEqual(st["model"], "gemini-3.8-flash")
+    def test_antigravity_last_call(self):
+        g = agents.get("antigravity")
+        # As agy's /context showed them (agy 1.5.13): Gemini 1.0M, Claude 1M, GPT-OSS 131.1k tokens.
+        self.assertEqual([g.context_window(m) for m in ("gemini-3.8-flash-low", "claude-opus-5-5-high",
+                                                        "gpt-oss-120b-medium", "other")],
+                         [1_048_576, 1_000_000, 131_072, None])
+        st = fold(g, FIX / "agy" / "transcript_full.jsonl")
+        self.assertEqual(st["model"], "gemini-3.8-flash-low")
         self.assertGreater(st["last"]["context"], 0)
 
 

@@ -93,7 +93,6 @@ SESSION_ID = r"ses_[A-Za-z0-9]{8,64}"
 IDENTITY = {
     "source": "hook",  # the plugin reports the session that the pane shows, with --session-id
     "env": None,
-    "log_glob": None,
     "pane": None,
     "url": None,
     "inside_env": ["OPENCODE_SESSION_ID"],  # its shell tool sets it for each command
@@ -126,6 +125,10 @@ DETECT = {
     # confirm' (with mono output 'left/right select'). Left, Right and Tab move the selection, which wraps; each new
     # request starts at 'Allow once' (OpenCode 2.2.7, #5281). Always allow asks again: Confirm   Cancel.
     "row": r"^\s*(\S.*?)\s{3,}(?:ctrl\+f fullscreen\s+)?(?:⇆|left/right) select\s+enter confirm",
+    # The question tool's dialog under its title 'Questions' (#6235): tabs, numbered options with descriptions,
+    # 'Type your own answer', and a Submit tab; read and answered by river/ask_forms.
+    "ask": r"^\s*┃\s+Questions\s*$",
+    "ask_form": "opencode",
 }
 
 # Stop on the Sessions tab (#5547): the first Esc shows 'esc again to interrupt'; the second ends the turn.
@@ -189,6 +192,12 @@ SETUP = {
     "voice": None,
     "open_link": None,
 }
+
+# 12. Update (#6430): opencode run answers one request and exits; opencode upgrade [version] updates its own install.
+# The shared service that a TUI without --standalone starts (`opencode serve --service`, above) is no session: an
+# update does not wait for it, and stops it after the update (#6461).
+UPDATE = {"smoke": ["run", "--model", "{model}", "Reply OK"], "self": ["upgrade", "{version}"],
+          "service": r"\bserve\b.*--service\b"}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -881,6 +890,11 @@ def chat_settings(lines):
         if isinstance(m, dict) and m.get("id"):
             return {"model": f"{m.get('providerID')}/{m['id']}" if m.get("providerID") else m["id"]}
     return {}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): the model of its last reply (none
+# before the first one: #6280's fix item).
+SETTINGS_READ = {"model": ("chat",)}
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -38,6 +38,18 @@ if [ "$SKILLS" = 1 ] && [ -d "$HOME/.claude" ]; then
   fi
 fi
 
+# A desktop chat app here (#6477, GitHub #8): a hint only. The install does not change the app's config.
+CLAUDE_DESKTOP="$HOME/Library/Application Support/Claude"
+[ -d "$CLAUDE_DESKTOP" ] || CLAUDE_DESKTOP="$HOME/.config/Claude"
+if [ -d "$CLAUDE_DESKTOP" ] && ! grep -qs '"maxpm"' "$CLAUDE_DESKTOP/claude_desktop_config.json"; then
+  echo "Optional: to use MaximizePM in the Claude desktop app, run: maxpm setup-agent --claude-desktop"
+fi
+if [ -d /Applications/ChatGPT.app ] || [ -d "$HOME/Applications/ChatGPT.app" ]; then
+  if ! grep -qs '^\[mcp_servers\.maxpm\]' "${CODEX_HOME:-$HOME/.codex}/config.toml"; then
+    echo "Optional: to use MaximizePM in the ChatGPT desktop app, run: maxpm setup-agent --chatgpt-desktop"
+  fi
+fi
+
 cat <<'NEXT'
 
 Next, in each project folder:

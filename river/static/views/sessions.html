@@ -40,6 +40,8 @@
       <div class="sess-tp hidden" data-tp="arts" role="tabpanel" aria-label="Artifacts"><div id="sessArtRows" class="slist-tab"></div></div>
       <!-- Browsers (#5879): every browser that runs now; a row opens its session with the Browser beside the chat. -->
       <div class="sess-tp hidden" data-tp="browsers" role="tabpanel" aria-label="Browsers"><div id="sessBrwRows" class="slist-tab"></div></div>
+      <!-- Agent usage (#6348): remaining usage and reset time per agent when known; a row opens its usage (#6387). -->
+      <div id="sessLimits" class="sess-limits hidden" aria-label="Agent usage"></div>
       <!-- The foot: Cost (#5857), what the sessions used; it opens the Cost view. The ⚙ opens the settings of these lists. -->
       <div class="sess-bottom">
         <div id="sessCostRow" class="slist-cost" aria-label="Cost"><div class="srow srow-cost" data-cost="1">
@@ -55,6 +57,13 @@
       <div class="sess-head">
         <button class="btn" type="button" id="sessBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
         <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id"></span></h2>
+        <span id="sessBadge" class="sess-badge"></span>
+        <!-- Its background tasks (#6454): a clock with the count of the ones that run; a click shows the list under it
+             (components/bgTasks.js). Hidden when its agent CLI has no reader of them. -->
+        <span id="sessTasks" class="sess-tasks hidden">
+          <button class="iconbtn sess-tbtn" type="button" id="sessTasksBtn" aria-expanded="false" aria-controls="sessTasksCard" title="Background tasks" aria-label="Background tasks"></button>
+          <div id="sessTasksCard" class="sess-tcard" aria-label="Background tasks"></div>
+        </span>
         <span id="sessState" class="sess-st"></span>
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>
@@ -75,6 +84,13 @@
       </div>
       <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div><div id="sessPend" class="chat-col sess-pend" aria-label="Messages waiting their turn"></div></div>
       <div class="chat-col chat-foot">
+        <!-- What waits for the person in this session (#6438): its questions and prompts show here, in its own view,
+             never over the page (components/waitDialog.js openWaiting with dock). -->
+        <section id="sessAsk" class="sess-ask hidden" aria-labelledby="sessAskTitle">
+          <div class="sess-ask-h"><h3 id="sessAskTitle" class="sess-ask-t">Waits for you</h3>
+            <button class="iconbtn" type="button" id="sessAskClose" title="Hide" aria-label="Hide the questions">✕</button></div>
+          <div id="sessAskList"></div>
+        </section>
         <div id="sessWait" class="sess-wait hidden"></div>
         <div id="sessBarWhy" class="muted sess-why hidden"></div>
         <div id="sessFiles" class="sess-files hidden" aria-label="Attached files"></div>

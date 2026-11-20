@@ -64,19 +64,55 @@ export function pickModel(opt, it, ladder, last, ids) {
   if (rec && ok(rec)) return rec;
   const mine = (lim) => String(lim || "").split(",").map(x => x.trim()).find(x => opt.models.some(m => m.name === x));
   if (it && mine(it.min_model)) {
-    const first = opt.models.find(x => ok(x.name));
-    if (first) return first.name;
+    // The list is strongest first (#6256): the weakest allowed model is the lowest on its ladder.
+    const rank = (m) => { const f = Object.values(ladder || {}).find(l => l.includes(m)); return f ? f.indexOf(m) : Infinity; };
+    const allowed = opt.models.filter(x => ok(x.name));
+    if (allowed.length) return allowed.reduce((a, x) => rank(x.name) < rank(a.name) ? x : a).name;
   } else if (it && ok(mine(it.max_model))) return mine(it.max_model);
+  // The agent's default model (#6264: agy_model) before the last choice in this browser.
+  if (opt.default_model && ok(opt.default_model)) return opt.default_model;
   return last && ok(last) ? last : "";
 }
 
-// The effort to preselect: the item's recommendation when the agent's CLI takes it ("max" becomes the
-// CLI's highest level), else the last choice here, else the agent's default ("").
-export function pickEffort(opt, it, last) {
+// The effort levels the Effort list offers for a model (#6256), low to high: the model's own levels when the
+// server knows them (Antigravity: Gemini 4 Carbon takes low, medium, high; an Orchestrator none), else the agent's.
+export function effortsFor(opt, model) {
+  const m = ((opt && opt.models) || []).find(x => x.name === model);
+  return m && Array.isArray(m.efforts) ? m.efforts : ((opt && opt.efforts) || []);
+}
+
+// The effort to preselect: the item's recommendation when the agent's CLI takes it for the model ("max" becomes
+// the CLI's highest level), else the last choice here, else the agent's default ("").
+export function pickEffort(opt, it, last, model) {
+  const efforts = effortsFor(opt, model);
   const e = it && it.effort;
-  if (e && opt.efforts.includes(e)) return e;
-  if (e === "max" && opt.efforts.length) return opt.efforts[opt.efforts.length - 1];
-  return last && opt.efforts.includes(last) ? last : "";
+  if (e && efforts.includes(e)) return e;
+  if (e === "max" && efforts.length) return efforts[efforts.length - 1];
+  if (opt.default_effort && efforts.includes(opt.default_effort)) return opt.default_effort;  // #6264: agy_effort
+  return last && efforts.includes(last) ? last : "";
+}
+
+// The lines on an item's recommendation and limits, in the chosen agent's terms (#6257): a model name shows only
+// when this agent has that model (a Claude 'opus' says nothing to Antigravity CLI), an effort only when the agent
+// takes it. {rec, limits}: "" for a line with nothing left.
+export function itemNotes(opt, it, ids) {
+  if (!it) return { rec: "", limits: "" };
+  const has = (m) => !!m && (opt.models || []).some(x => x.name === m || x.name === ladderName(ids, m));
+  const label = (m) => { const x = (opt.models || []).find(y => y.name === m || y.name === ladderName(ids, m)); return (x && x.label) || m; };
+  const efforts = (opt.efforts || []).concat(...(opt.models || []).map(m => m.efforts || []));
+  const own = (lim) => String(lim || "").split(",").map(x => x.trim()).find(has);
+  const parts = [has(it.model) && label(it.model), it.effort && efforts.includes(it.effort) && it.effort + " effort"].filter(Boolean);
+  const lo = own(it.min_model), hi = own(it.max_model);
+  return {
+    rec: parts.length ? `#${it.id} recommends ${parts.join(", ")}.` : "",
+    limits: lo || hi ? `#${it.id} allows ${[lo && "at least " + label(lo), hi && "at most " + label(hi)].filter(Boolean).join(" and ")}.` : "",
+  };
+}
+
+// The Effort field for a model: none when the model takes no effort.
+function effortField(opt, model, effort) {
+  const efforts = effortsFor(opt, model);
+  return efforts.length ? field("Effort", select({ id: "lEffort" }, [["", "the agent's default"], ...efforts.map(e => [e, e])], effort)) : "";
 }
 
 let dlg = null, resolve = null, ctx = null, S = null;
@@ -117,6 +153,13 @@ function el() {
       // "Other model…": the field that finds any model of a long list by typing (#5238).
       const other = $("#lModelOther");
       if (other) { other.classList.toggle("hidden", e.target.value !== OTHER); if (e.target.value === OTHER) other.focus(); }
+      // The Effort list follows the model: only the levels it takes (#6256).
+      const opt = (S.launch_options || []).find(o => o.label === values().agent);
+      const slot = $("#lEffortSlot");
+      if (opt && slot && e.target.value !== OTHER) {
+        const was = values().effort;
+        slot.innerHTML = effortField(opt, e.target.value, effortsFor(opt, e.target.value).includes(was) ? was : "");
+      }
     }
     else if (e.target.id === "lWork") draw({ ...values(), agent: null });  // the new work's agent type picks again
     else if (e.target.id === "lFolder") {
@@ -170,12 +213,11 @@ function draw(prev) {
   const ladder = S.model_ladder || {};
   const models = opt.models.filter(m => !it || modelAllowed(ladder, m.name, it.min_model, it.max_model));
   const model = pickModel(opt, it, ladder, store("river.launch.model." + fam), S.model_ids);
-  const effort = pickEffort(opt, it, store("river.launch.effort." + fam));
+  const effort = pickEffort(opt, it, store("river.launch.effort." + fam), model);
   const rows = startable(S), projects = [...new Set(rows.map(i => i.project))];
-  const limits = it && (it.min_model || it.max_model) ? `#${it.id} allows ${[it.min_model && "at least " + it.min_model, it.max_model && "at most " + it.max_model].filter(Boolean).join(" and ")}.` : "";
   const other = it && it.agent && opt.agent_type && opt.agent_type !== it.agent
     ? `#${it.id} is for ${it.agent}; ${agent} runs ${opt.agent_type}, and you start it anyway.` : "";
-  const rec = it && (it.model || it.effort) ? `#${it.id} recommends ${[it.model, it.effort && it.effort + " effort"].filter(Boolean).join(", ")}.` : "";
+  const { rec, limits } = itemNotes(opt, it, S.model_ids);
   const noPlace = placeholderNote(agent, opt);
   const note = [other, rec, limits, noPlace].filter(Boolean).join(" ");
   const work = ctx.pickFolder ? folderFields(prev) : ctx.pickWork ? field("Work", `<select id="lWork">
@@ -188,7 +230,7 @@ function draw(prev) {
   // adapter's own models and the current choice; "Other model…" finds the rest by typing (#5238).
   const { shown, all } = modelChoices(models, model);
   const modelSel = `<select id="lModel"><option value="">the agent's default</option>${shown.map(m =>
-    `<option value="${esc(m.name)}" ${m.name === model ? "selected" : ""}${m.note ? ` title="${esc(m.note)}"` : ""}>${esc(m.name)}</option>`).join("")}${
+    `<option value="${esc(m.name)}" ${m.name === model ? "selected" : ""}${m.note ? ` title="${esc(m.note)}"` : ""}>${esc(m.label || m.name)}</option>`).join("")}${
     all.length ? `<option value="${OTHER}">Other model…</option>` : ""}</select>${all.length ? `
     <input id="lModelOther" class="hidden" list="lModelAll" autocomplete="off" spellcheck="false"
       placeholder="Type to find one of ${all.length} models" aria-label="Other model">
@@ -204,7 +246,8 @@ function draw(prev) {
       ${work}
       ${ctx.pickFolder || workSel === PLAIN ? "" : newFolderField((it && it.project) || ctx.project, prev)}
       ${field("Agent", select({ id: "lAgent" }, opts.map(o => o.label), agent))}
-      ${opt.efforts.length ? two(field("Model", modelSel), field("Effort", select({ id: "lEffort" }, [["", "the agent's default"], ...opt.efforts.map(e => [e, e])], effort))) : field("Model", modelSel)}
+      ${!opt.models.length ? `<div id="lEffortSlot">${effortField(opt, model, effort)}</div>`
+        : opt.efforts.length || opt.models.some(m => (m.efforts || []).length) ? two(field("Model", modelSel), `<div id="lEffortSlot">${effortField(opt, model, effort)}</div>`) : field("Model", modelSel)}
       ${note ? `<div class="muted t-s">${esc(note)}</div>` : ""}
       ${S.tmux === false ? `<div class="ld-warn t-s">Every agent starts in tmux, and tmux is not installed on this computer: ${esc(S.tmux_install || "brew install tmux")}</div>` : ""}
       ${more ? `<details class="ld-more"><summary>More</summary>${more}</details>` : ""}

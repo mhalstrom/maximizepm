@@ -69,6 +69,10 @@ CLIS = {
                       "ANTHROPIC_API_KEY in the runner's environment"},
     "codex": {"label": "Codex", "type": "codex", "key": "a secret with --var CODEX_API_KEY in a set granted to the "
                                                         "runner, else codex login or CODEX_API_KEY there"},
+    # Antigravity CLI 1.5.13 (#6249): agy -p prints one JSON object at its end; with GEMINI_API_KEY from a set the run
+    # uses the model provider gemini, else agy's own sign-in on the runner.
+    "agy": {"label": "Antigravity CLI", "type": "antigravity",
+            "key": "a secret with --var GEMINI_API_KEY in a set granted to the runner, else agy signed in there"},
 }
 LOG_KEEP = 400      # transcript lines that maxpm runner log and the page show at most
 SPAWN = None        # tests: fn(argv, script, transcript_path) -> an object with pid, poll() and terminate()
@@ -142,6 +146,8 @@ def add(conn, name, ssh, cli=None, slots=None, max_minutes=None, max_cost=None, 
     name = (name or "").strip().lower()
     if not NAME.match(name) or name == "this":
         raise RiverError("a runner's name is lower-case letters, digits and '-' (up to 32), such as ci-1")
+    if cli is not None and cli not in CLIS:
+        raise RiverError(f"the agent CLI of a runner is one of: {', '.join(CLIS)}")
     from .pipeline import agent_job
     if name in agent_job.FORGES:
         raise RiverError(f"{name} names the agent job in {agent_job.label(name)} (maxpm runner {name} <pipeline>); "
@@ -426,13 +432,17 @@ def _prompt(run, item_id, runner_name):
             f"left>\"`. Report each step with `maxpm now \"<about 10 words>\"`. Then stop: do not run maxpm wait.")
 
 
-def _cli_line(r, run, model, perm=None):
+def _cli_line(r, run, model, perm=None, gemini=False):
     """The agent CLI command with no terminal: its prompt is in $MAXPM_PROMPT. perm (#6154): the pipeline's list as
-    the run's own flags: --allowedTools (allow) and --disallowedTools (ask and never), never a file in the CLI's home."""
+    the run's own flags: --allowedTools (allow) and --disallowedTools (ask and never), never a file in the CLI's home;
+    agy (#6249): the same lists as its --settings rules. gemini: a granted set gives GEMINI_API_KEY."""
     if (run["cli"] or r["cli"]) == "codex":
         return ('codex exec --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true '
                 '--skip-git-repo-check "$MAXPM_PROMPT"')
     rules = perm["allow"] if perm else (r["allow"] or ALLOW).split()
+    if (run["cli"] or r["cli"]) == "agy":
+        from .pipeline import agent_job
+        return agent_job.agy_line(rules, (perm or {}).get("deny") or [], provider=bool(gemini))
     allow = " ".join(shlex.quote(t) for t in rules)
     deny = " ".join(shlex.quote(t) for t in (perm or {}).get("deny") or [])
     return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
@@ -482,7 +492,7 @@ def script_for(r, run, origin, project, port, key, token, model=None, keys_env=N
         "MAXPM_PROMPT=$(cat <<'MAXPM_PROMPT_END'", prompt, "MAXPM_PROMPT_END", ")",
         "export MAXPM_PROMPT",
         f'echo "maxpm: run {run["id"]} of task #{run["item"]} starts in $work at $start"',
-        "exec " + _cli_line(r, run, model, perm) + " </dev/null",
+        "exec " + _cli_line(r, run, model, perm, gemini="GEMINI_API_KEY" in (keys_env or {})) + " </dev/null",
         ""])
 
 
@@ -654,6 +664,8 @@ def _transcript_end(path):
             last = d.get("result") or last
         elif d.get("type") == "item.completed" and (d.get("item") or {}).get("type") == "agent_message":
             last = d["item"].get("text") or last
+        elif "conversation_id" in d:  # agy's one JSON object (#6249)
+            last = d.get("response") or d.get("error") or last
     return cost, last
 
 
@@ -834,6 +846,10 @@ def readable(line):
         return ("end", f"turn done · {u.get('input_tokens', 0)} tokens in, {u.get('output_tokens', 0)} out")
     if t == "error":
         return ("out", _short(d.get("message") or d))
+    if t is None and "conversation_id" in d:  # agy -p --output-format json: one object at its end (#6249)
+        failed = bool(d.get("error")) or str(d.get("status") or "").lower() not in ("", "success", "completed", "done")
+        text = d.get("response") or d.get("error") or ""
+        return ("end", ("failed" if failed else "finished") + (f": {_short(text, 400)}" if text else ""))
     return None
 
 

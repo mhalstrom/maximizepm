@@ -39,7 +39,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      # GitHub runs the deterministic subset (#6504, mark 2026-11-20): real Chrome and latency/timing/process
+      # tests run locally, not on shared runners.
       - name: Tests (standard library only)
+        env:
+          MAXPM_NO_BROWSER: "1"
+          MAXPM_SKIP_LOCAL_ONLY: "1"
         run: python tests/junit_run.py report.xml "${{ matrix.os }} py${{ matrix.python }}"
       - name: The JUnit report, for the pipeline of MaximizePM
         if: always()

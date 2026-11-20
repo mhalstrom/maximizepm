@@ -31,7 +31,7 @@ import re
 import shlex
 from pathlib import Path
 
-from . import Raw
+from . import CliList, Raw
 
 DESCRIBE = {
     "id": "pi",
@@ -42,8 +42,9 @@ DESCRIBE = {
     # Pi resolves a pattern against the models of the providers a person signed in to (pi --list-models): an exact
     # "provider/id" first, else the newest model whose id holds the text. So the model_ladder names go as they are
     # (opus: the newest Opus of any signed-in provider), and a person may name any "provider/id" instead. "" lets Pi
-    # use its own defaultProvider and defaultModel (settings.json).
-    "models": ["opus", "sonnet", "haiku"],
+    # use its own defaultProvider and defaultModel (settings.json). The list comes from `pi --list-models` (read_models,
+    # #6257); these names stand only until it has been read, or when Pi does not answer.
+    "models": [],
     "default_model": "",
     "model_ids": {},
     "prefix": "pi_",
@@ -67,6 +68,49 @@ SETTINGS = [
 
 LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
+
+def _default_provider():
+    """Pi's defaultProvider (~/.pi/agent/settings.json), or None."""
+    try:
+        got = json.loads((Path.home() / ".pi" / "agent" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return got.get("defaultProvider") if isinstance(got, dict) else None
+
+
+def parse_models(text):
+    """The models of `pi --list-models` (a table: provider, model, context, max-out, thinking, images; only the
+    providers a person signed in to; 299 rows of 4 providers on 2026-11-20, pi 1.5), one row per model as Pi's --model
+    takes it, "provider/model", with Pi's thinking levels when its thinking column says yes and none else (#6257).
+    Pi's defaultProvider comes first, and its models are the ones the dialog offers before 'Other model…'."""
+    rows = []
+    for line in (text or "").splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 5 and re.fullmatch(r"[\w.-]+", f[0]) and f[4] in ("yes", "no"):
+            rows.append({"name": f"{f[0]}/{f[1]}", "efforts": list(LEVELS) if f[4] == "yes" else []})
+    first = _default_provider()
+    for r in rows:
+        r["pick"] = bool(first) and r["name"].startswith(first + "/")
+    return sorted(rows, key=lambda r: not r["pick"])
+
+
+# `pi --list-models`, read by maxpm serve in a thread at most once in ten minutes (agents.CliList); until serve's first
+# read ends, and
+# when Pi does not answer, these model_ladder names stand: Pi resolves each against its signed-in providers.
+MODELS = CliList(["pi", "--list-models"], parse_models,
+                 fallback=[{"name": m, "efforts": list(LEVELS), "pick": True} for m in ("opus", "sonnet", "haiku")])
+
+
+def read_models():
+    """The models of the installed Pi, one dict per model (parse_models)."""
+    return [dict(m, efforts=list(m["efforts"])) for m in MODELS.get()]
+
+
+def read_effort_levels(model):
+    """Pi's thinking levels for a model: [] for one whose thinking column says no; None for one it does not list."""
+    row = next((r for r in MODELS.get() if r["name"] == model), None)
+    return list(row["efforts"]) if row else None
+
 EFFORT = {
     "levels": LEVELS,
     "map": {},  # each MaximizePM level has the same name in Pi
@@ -88,7 +132,6 @@ LAUNCH = {
 IDENTITY = {
     "source": "hook",  # the state extension reports ctx.sessionManager.getSessionId() on session_start
     "env": None,
-    "log_glob": "~/.pi/agent/sessions/*/*.jsonl",
     "pane": None,
     "url": None,
     "inside_env": ["PI_CODING_AGENT"],
@@ -158,6 +201,9 @@ SETUP = {
     "voice": None,
     "open_link": None,
 }
+
+# 12. Update (#6430): pi -p answers one request and exits; npm publishes its versions.
+UPDATE = {"smoke": ["-p", "Reply OK", "--model", "{model}"], "npm": "@earendil-works/pi-coding-agent"}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -527,6 +573,37 @@ def _entries(row):
     if kind == "thinking_level_change":
         return [{"at": at, "role": "event", "text": f"thinking: {row.get('thinkingLevel')}"}]
     return []
+
+
+def chat_settings(lines):
+    """The model and thinking level the session runs now (#6280): its last model_change ("provider/modelId") and
+    thinking_level_change entries."""
+    got = {}
+    for row in _rows(lines):
+        if row.get("type") == "model_change" and row.get("modelId"):
+            got["model"] = f"{row['provider']}/{row['modelId']}" if row.get("provider") else row["modelId"]
+        elif row.get("type") == "thinking_level_change" and row.get("thinkingLevel"):
+            got["effort"] = row["thinkingLevel"]
+    return got
+
+
+def config_settings():
+    """What a Pi session takes from ~/.pi/agent/settings.json when nothing names it (#6280): defaultProvider and
+    defaultModel (openai-codex/gpt-6.1-sol on 2026-11-20), and defaultThinkingLevel."""
+    try:
+        d = json.loads((Path.home() / ".pi" / "agent" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    model = d.get("defaultModel")
+    if model and d.get("defaultProvider") and "/" not in model:
+        model = f"{d['defaultProvider']}/{model}"
+    return {"model": model, "effort": d.get("defaultThinkingLevel")}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config")}
 
 
 def _turn(path):

@@ -16,9 +16,28 @@ DESCRIBE = {
 
 
 def read_models():
-    """The model ids in Codex's own model cache (~/.codex/models_cache.json, or $CODEX_HOME), or None without one."""
-    got = codex_models()
-    return sorted(got) if got else None
+    """The models that Codex's own /model menu shows, from its model cache (~/.codex/models_cache.json, or
+    $CODEX_HOME), or None without one (#6257): one dict per model, {"name": its id, "label": Codex's name for it,
+    "efforts": its reasoning levels}; a model the cache hides (visibility "hide": gpt-reserve, codex-auto-review)
+    is left out."""
+    import json
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if _READ[0] == key:  # the same file as at the last read: each page state build asked (#6394: 1 ms each)
+            return [dict(r, efforts=list(r["efforts"])) for r in _READ[1]] or None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = [{"name": m["slug"], "label": m.get("display_name") or m["slug"],
+                 "efforts": [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]}
+                for m in data.get("models") or [] if m.get("slug") and m.get("visibility") != "hide"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    _READ[:] = [key, rows]
+    return [dict(r, efforts=list(r["efforts"])) for r in rows] or None
+
+
+_READ = [None, []]  # (the file, its time and size), its rows: read_models reads the file again only after a change
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -28,7 +47,7 @@ def read_models():
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from . import Raw  # noqa: E402
+from . import Raw, parse_reset_time  # noqa: E402
 
 EFFORT = {
     "levels": ["low", "medium", "high", "xhigh", "max"],  # when Codex's model cache does not list the model
@@ -38,10 +57,81 @@ EFFORT = {
     "read": r"model_reasoning_effort=([a-z][a-z0-9_-]{0,31})\b",
 }
 
-LAUNCH = {"extra_dirs": True, "resume": True}
+# read_dirs (#6281, #6304): Codex's sandbox (read-only and workspace-write) reads the whole disk with no question and
+# writes only in its workspace, so a read folder needs no allow rule. To refuse secret files (.env, .env.*, .envrc,
+# *.secret, *.secrets, a secrets folder), each start and resume adds a permission profile from -c that extends the
+# active profile (config.toml's default_permissions, read and not changed: p140, else :workspace) and denies those
+# globs. Measured 2026-11-20 with codex-cli 0.159.1 in a read folder outside /tmp: cat Cargo.toml ran with no question,
+# cat .env (including gitignored files) was refused ('Operation not permitted'), touch in the read folder was refused,
+# and the PreToolUse hook ran with no trust prompt. A legacy --sandbox flag overrides default_permissions, so
+# workspace-write and read-only go into the profile's extends instead when read_dirs is set.
+#
+# The queue guard (#6412): the same profile marks the queue file and its -wal and -shm files "read", so only maxpm
+# serve writes the queue, although --add-dir lets the session write the rest of the queue folder. Measured 2026-11-20
+# with codex-cli 0.159.1 (codex sandbox -P with a profile that extends :workspace): a "read" file inside a "write"
+# folder refused 'echo >> file' and the creation of the -shm file ('Operation not permitted'), read the file, and
+# wrote another file of the folder. So every start and resume in a sandbox has the profile; danger-full-access has
+# no sandbox and gets none.
+LAUNCH = {"extra_dirs": True, "resume": True, "read_dirs": True}
+READ_DIR_DENY = ("{d}/**/.env", "{d}/**/.env.*", "{d}/**/.envrc",
+                 "{d}/**/*.secret", "{d}/**/*.secrets", "{d}/**/secrets/**")
+_PROFILE = "maxpm"
+_OLD_PROFILES = ("maxpm_read_dirs",)  # the profile's name before #6412
+_SANDBOX_PROFILES = {"workspace-write": ":workspace", "read-only": ":read-only"}
+
+
+def _config_top():
+    """Top-level 'key = "value"' lines of ~/.codex/config.toml (or $CODEX_HOME): the standard library of Python 3.10
+    has no TOML reader."""
+    import re
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    got = {}
+    for ln in lines:
+        if ln.strip().startswith("["):
+            break  # a table: the keys after it are not the top-level ones
+        m = re.match(r"""^\s*(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""", ln)
+        if m:
+            got[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+    return got
+
+
+def _base_profile(sandbox):
+    """The profile that MaximizePM's profile extends: --sandbox read-only or workspace-write, else config.toml's
+    default_permissions, else its sandbox_mode, else :workspace. None when the session has no sandbox
+    (danger-full-access): no profile then."""
+    if sandbox:
+        return _SANDBOX_PROFILES.get(sandbox)
+    top = _config_top()
+    base = top.get("default_permissions")
+    if base in (_PROFILE, *_OLD_PROFILES):
+        return ":workspace"
+    if base:
+        return None if "danger" in base else base
+    mode = top.get("sandbox_mode") or "workspace-write"
+    return _SANDBOX_PROFILES.get(mode)
+
+
+def read_dir_words(dirs, sandbox=None):
+    """-c words for a permission profile extending the active profile: it marks the queue files "read" (#6412) and
+    denies secret files in each of the project's read_dirs (#6304). Codex's -c splits keys on '.' even when quoted,
+    so filesystem entries go as one inline table. [] when the session has no sandbox, or nothing to mark."""
+    import json
+    from ..core import queue_files
+    base = _base_profile(sandbox)
+    entries = ([f'{json.dumps(f)}="read"' for f in queue_files()]
+               + [f'{json.dumps(p.format(d=d))}="deny"' for d in dirs or () for p in READ_DIR_DENY])
+    if not base or not entries:
+        return []
+    fs = ",".join(entries)
+    return ["-c", f"default_permissions={json.dumps(_PROFILE)}",
+            "-c", f"permissions.{_PROFILE}={{extends={json.dumps(base)},filesystem={{{fs}}}}}"]
 
 # A Codex session records no task link: its web link is Codex's web app (core.CODEX_WEB).
-IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "log_glob": None, "pane": None, "url": "https://chatgpt.com/codex",
+IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "pane": None, "url": "https://chatgpt.com/codex",
             "inside_env": ["CODEX_THREAD_ID", "CODEX_SANDBOX"]}
 
 
@@ -49,6 +139,27 @@ def read_effort_levels(model):
     """The effort levels Codex takes for model id `model`, from its model cache; None when the cache does not list it.
     MaximizePM refuses another effort for that model before it starts Codex."""
     return (codex_models() or {}).get(model) if model else None
+
+
+def _has_maxpm_mcp():
+    """True when ~/.codex/config.toml (or $CODEX_HOME/config.toml) defines [mcp_servers.maxpm].
+    Codex 0.171.0 refuses -c mcp_servers.maxpm.enabled=false when no mcp_servers.maxpm table exists
+    ('invalid transport in mcp_servers.maxpm'), so build_command adds the override only when the entry is there."""
+    import re
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        import tomllib
+        data = tomllib.loads(text)
+        return isinstance(data.get("mcp_servers"), dict) and "maxpm" in data["mcp_servers"]
+    except ImportError:
+        pass
+    except ValueError:
+        return False
+    return bool(re.search(r'^\s*\[\s*mcp_servers\.(?:maxpm|"maxpm"|\'maxpm\')\s*\]', text, re.M))
 
 
 def build_command(name, folder, model, effort, settings, prompt):
@@ -59,11 +170,25 @@ def build_command(name, folder, model, effort, settings, prompt):
     it out (settings['noflags'])."""
     from ..core import river_dir
     s = settings
+    rd = s.get("read_dirs") or ()
+    sandbox = s.get("sandbox")
     words = ["codex"] + (["resume", s["resume"]] if s.get("resume") else [])
     words += (["-m", model] if model else []) + ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
-    words += ["--sandbox", s["sandbox"]] if s.get("sandbox") else []
+    # A legacy --sandbox flag overrides default_permissions in Codex 0.159.1, dropping MaximizePM's profile;
+    # workspace-write and read-only go into the profile's extends instead.
+    profile = read_dir_words(rd, sandbox)
+    if sandbox and not profile:
+        words += ["--sandbox", sandbox]
     words += ["--ask-for-approval", s["approval"]] if s.get("approval") else []
     words += ["--add-dir", river_dir()]
+    words += profile
+    # Disable a configured maxpm MCP server (e.g. from setup-agent --chatgpt-desktop, which pins MAXPM_DB to the main
+    # queue and sets MAXPM_CHAT=1) so the session uses the shell maxpm with its own token and queue (#6443).
+    # Measured 2026-11-20 with codex-cli 0.171.0: -c mcp_servers.maxpm.enabled=false sets enabled=false and prevents
+    # spawning the server when [mcp_servers.maxpm] is in config.toml, but fails at bootstrap ('invalid transport') when
+    # the table is absent, so emit it only when config.toml defines mcp_servers.maxpm.
+    if _has_maxpm_mcp() and "mcp_servers.maxpm.enabled" not in s.get("args", ""):
+        words += ["-c", "mcp_servers.maxpm.enabled=false"]
     if ("--no-daemon" in codex_flags() and "--no-daemon" not in s.get("args", "")
             and "--no-daemon" not in (s.get("noflags") or ())):
         words.append("--no-daemon")
@@ -75,6 +200,59 @@ def build_command(name, folder, model, effort, settings, prompt):
 def resume_command(session_ref, model, effort, settings, name=None):
     """codex resume <thread id>, with the profile's settings and settings['prompt'] as its first prompt."""
     return build_command(name, None, model, effort, {**settings, "resume": session_ref}, settings.get("prompt"))
+
+
+def _trust_root(folder):
+    """The folder that Codex trusts for a git worktree: the main worktree of its repository (the folder that holds the
+    common .git directory). Codex reads the worktree's .git file the same way and asks 'Trusting will apply to the
+    repository root' when only the worktree is trusted (#6415). For a folder inside a repository's main folder, that
+    main folder (a project's linked folder can be a part of a repository, #6432). None for the main folder itself,
+    outside a repository, for a bare repository, and on an error."""
+    try:
+        d = Path(folder)
+        for p in (d, *d.parents):
+            dot = p / ".git"
+            if dot.is_dir():
+                return None if p == d else str(p)  # the main worktree itself: its own path is the root
+            if dot.is_file():
+                gd = Path(dot.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+                gd = gd if gd.is_absolute() else (p / gd)
+                cd = gd / "commondir"
+                common = (gd / cd.read_text(encoding="utf-8").strip()) if cd.exists() else gd
+                common = Path(os.path.realpath(common))
+                return str(common.parent) if common.name == ".git" else None
+    except (OSError, IndexError, ValueError):
+        return None
+    return None
+
+
+def trust_workspace(folder, command, env=None):
+    """Pass -c projects={"<folder>"={trust_level="trusted"}, ...} for a worktree that MaximizePM made (#6339), or a
+    project's linked folder (#6432), so Codex starts there without its folder trust prompt and without writing to
+    ~/.codex/config.toml. The repository's main
+    folder is in the same table: Codex 0.159 applies trust to the repository root of a worktree (#6415).
+    One inline table, not the dotted form -c projects."<folder>".trust_level="trusted": codex-cli 0.171.0 ignores the
+    dotted form for its trust question and asks 'Trust this folder?'; the inline table starts with no question, in a
+    plain git folder and in a worktree whose path holds dots (measured 2026-11-20, #6437)."""
+    import json
+    import shlex
+    if not folder or not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    if not words:
+        return command
+    paths = []
+    for raw in (str(folder), _trust_root(folder)):
+        for p in (raw, os.path.realpath(raw)) if raw else ():
+            if p not in paths:
+                paths.append(p)
+    val = "projects={" + ",".join(f'{json.dumps(p)}={{trust_level="trusted"}}' for p in paths) + "}"
+    if val in words:
+        return command
+    return shlex.join(words[:1] + ["-c", val] + words[1:])
 
 
 def parse_command(words):
@@ -120,9 +298,57 @@ DETECT = {
     "idle": r"^\s*›(\s|$)",  # the marker of its input box
     "working": r"(?i)\besc to interrupt\b",
     "blocked": BLOCKED,
+    # Limit-stop text (#6348): Codex's usage/rate limit stop messages.
+    "limit": [
+        r"(?i)you've\s+hit\s+your\s+usage\s+limit",
+        r"(?i)\b(?:5-hour|weekly|usage|rate)\s+limit\s+reached\b",
+        r"(?i)\busage\s+limit\s+exceeded\b",
+    ],
+    # #6429: Codex 0.159.1 ended every turn with {"type":"error","status":400,..."The 'gpt-6.2-sol' model is not
+    # supported when using Codex with a ChatGPT account."} (seen 2026-11-20; 0.171.0 runs that model).
+    "refused": [
+        r"(?i)\bthe '(?P<model>[\w.:/-]+)' model is not supported\b",
+        r"(?i)\bthe model [`'\"]?(?P<model>[\w.:/-]+)[`'\"]? does not exist\b",
+    ],
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Codex what to do differently"
     "image_paste": None,  # not read yet: an image path is pasted alone, as for every agent
+    # The request_user_input dialog of Plan mode (#6235): 'Question 1/2 (2 unanswered)', the question, numbered
+    # options with a description, 'None of the above' with notes, and the question before a submit with unanswered
+    # questions; read and answered by river/ask_forms.
+    # The question of Default mode (request_user_input_async, #6258) is read by its key line 'enter submit   ctrl+]
+    # skip ...': it has no header. Codex shows it closed while its turn goes on ('? 1 question · 12s', 'shift+← to
+    # answer'); MaximizePM opens it (ask_open) so that the page can read it.
+    "ask": r"^\s*(?:Question \d+/\d+(?: \(\d+ unanswered\))?|Submit with unanswered questions\?)\s*$"
+           r"|^\s*enter submit\s+ctrl\+\] skip\b",
+    "ask_form": "codex",
+    "ask_open": {"line": r"^\s*shift\+← to answer\s*$", "keys": ["S-Left"]},
 }
+
+
+def screen_limits(lines, now=None):
+    """Read plan limits from Codex's `/usage` or `/status` screen (#6348): lines such as
+    '5h limit: [████████--] 80% left (resets 14:30)' or 'Weekly limit: ... 40% used (resets Nov 25)'."""
+    import re
+    seq = [str(ln) for ln in (lines or ())]
+    row_rx = re.compile(
+        r"^\s*(?:[│┃]\s*)?(5h\s+limit|5-hour\s+limit|weekly\s+limit)\s*:\s*"
+        r"(?:[█▓▒░▇▆▅▄▃▂▁━─=\[\]#-]{2,}\s+)?(\d{1,3}(?:\.\d+)?)\s*%\s*(left|remaining|used)\b",
+        re.I,
+    )
+    out = []
+    for i, raw in enumerate(seq):
+        m = row_rx.match(raw)
+        if not m:
+            continue
+        name = "5-hour window" if m.group(1).lower().startswith("5") else "weekly window"
+        pct, kind = float(m.group(2)), m.group(3).lower()
+        rem = round(max(0.0, min(100.0, pct)), 1) if kind in ("left", "remaining") else round(max(0.0, 100.0 - pct), 1)
+        used = round(max(0.0, 100.0 - rem), 1)
+        chunk = raw + (" " + seq[i + 1] if i + 1 < len(seq) else "")
+        resets_at, resets_text = parse_reset_time(chunk, now=now)
+        out.append({"name": name, "used_percent": used, "remaining_percent": rem,
+                    "resets_at": resets_at, "resets_text": resets_text})
+    return out or None
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'). The turn's shell command keeps running as a
@@ -130,6 +356,55 @@ DETECT = {
 # which ends them all (manager-477c 2026-11-12, #5563).
 INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"], "interrupt": ["Escape"],
          "interrupt_again": {"text": "/stop", "does": "end its background commands"}}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# The guard before a shell command (#6254): a PreToolUse hook runs maxpm report --hook codex, and core.hook_report
+# refuses the command by core.tmux_guard and core.push_guard, as for Claude Code. The state still comes from the
+# screen (STATE): the hook says nothing of it. Codex takes hooks from -c on its command line (the session flags
+# layer), so nothing goes into ~/.codex (p140), and it runs a hook only when hooks.state holds the hash that Codex
+# computes for it (codex-rs discovery.rs hook_hash: the sha256 of the JSON of {event_name, hooks: [the handler]}, keys
+# sorted, no spaces; #5911 found it). A hash that differs makes Codex ask the person to trust the hook. Measured with
+# codex-cli 0.159.1 on 2026-11-20: its input is Claude Code's (tool_name "Bash", tool_input.command a string), and
+# Claude Code's JSON answer (permissionDecision deny) blocks the command: 'Command blocked by PreToolUse hook: <why>'.
+# The hook has no matcher (a matcher's part in the hash is not measured): it runs before every tool call, and
+# read_hook passes only Bash on.
+# ---------------------------------------------------------------------------------------------------------------
+
+HOOK_TIMEOUT = 5
+_HOOK_KEY = "/<session-flags>/config.toml:pre_tool_use:0:0"  # the key of a hook from -c (discovery.rs)
+
+
+def hook_hash(command, timeout=HOOK_TIMEOUT):
+    """The trust hash that Codex computes for a PreToolUse command hook with no matcher."""
+    import hashlib
+    import json
+    identity = {"event_name": "pre_tool_use",
+                "hooks": [{"type": "command", "command": command, "timeout": timeout, "async": False}]}
+    text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+
+
+def install_hooks(folder, report):
+    """The -c words that add the PreToolUse hook (maxpm report --hook codex) and its trust, for one start or resume."""
+    import json
+    import shlex
+    command = " ".join(shlex.quote(w) for w in [*report, "--hook", "codex"])
+    return ["-c", f'hooks.PreToolUse=[{{hooks=[{{type="command",command={json.dumps(command)},'
+                  f'timeout={HOOK_TIMEOUT}}}]}}]',
+            "-c", "hooks.state={" + f'{json.dumps(_HOOK_KEY)}={{trusted_hash={json.dumps(hook_hash(command))}}}' + "}"]
+
+
+def read_hook(payload):
+    """A Codex hook's JSON input as a hook report (river/agents HOOK_REPORT_KEYS): a Bash call before it runs, with its
+    command; None for another tool or event."""
+    if payload.get("hook_event_name") != "PreToolUse" or payload.get("tool_name") != "Bash":
+        return None
+    inp = payload.get("tool_input")
+    cmd = inp.get("command") if isinstance(inp, dict) else None
+    sid = payload.get("session_id")
+    return {"event": "PreToolUse", "session_id": sid if isinstance(sid, str) and sid else None, "state": None,
+            "run": cmd if isinstance(cmd, str) else ""}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -201,6 +476,27 @@ def parse_chat_line(d):
 
 def parse_chat(lines):
     return _s().parse_lines(parse_chat_line, lines)
+
+
+_PERM_SANDBOX = {":workspace": "workspace-write", ":read-only": "read-only",
+                 ":danger-full-access": "danger-full-access"}
+
+
+def config_settings():
+    """What a Codex session takes from config.toml when its command line names nothing (#6280, #6316): the top-level
+    model, model_reasoning_effort, sandbox (default_permissions, else sandbox_mode, else Codex's default
+    workspace-write in a trusted folder) and approval_policy (else Codex's default on-request). Measured on
+    codex-cli 0.159.1 on 2026-11-20 via app-server thread/start."""
+    got = _config_top()
+    sandbox = _PERM_SANDBOX.get(got.get("default_permissions") or "") or got.get("sandbox_mode") or "workspace-write"
+    return {"model": got.get("model"), "effort": got.get("model_reasoning_effort"),
+            "sandbox": sandbox, "approval": got.get("approval_policy") or "on-request"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): a turn_context at each turn, and
+# config.toml before the first one.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config"), "sandbox": ("chat", "config"),
+                 "approval": ("chat", "config")}
 
 
 def chat_settings(lines):
@@ -438,6 +734,41 @@ def chat_limits(lines):
     return None
 
 
+_LATEST = {}  # {path: (mtime, limits)}: the newest log is read again only when it changed
+
+
+def latest_limits(root=None):
+    """The plan limits of the newest Codex session log of any session (#6348): Codex writes its rate limits to each
+    log, so the page shows them also when no Codex session runs. Only the newest day folder is listed. None when no
+    log has them."""
+    base = Path(root or chat_root())
+    try:
+        days = sorted(base.glob("[0-9]*/[0-9]*/[0-9]*"), reverse=True)[:2]
+    except OSError:
+        return None
+    path = _s().newest([p for d in days for p in d.glob("rollout-*.jsonl")])
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    got = _LATEST.get(str(path))
+    if got and got[0] == mtime:
+        return got[1]
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    limits = chat_limits(lines)
+    _LATEST.clear()
+    _LATEST[str(path)] = (mtime, limits)
+    return limits
+
+
 def read_commands(folder):
     """The user's custom prompts (~/.codex/prompts/*.md, or $CODEX_HOME/prompts), which Codex runs as
     /prompts:<name>. Codex reads no project folder for them, so folder does not change the list."""
@@ -454,7 +785,6 @@ def read_commands(folder):
 
 SETUP = {
     "instructions": "AGENTS.md",
-    "import": None,
     "skills_dir": None,
     # Voice (#4626): checked in Codex 0.159.1; it takes no audio from outside, so the page dictates (#5107).
     "voice": ("/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with "
@@ -463,6 +793,10 @@ SETUP = {
     "open_title": None,
     "no_link": "A Codex session has no web link, and this one runs in no tmux pane here",
 }
+
+# 12. Update (#6430): codex exec answers one request and exits; outside a git folder it needs --skip-git-repo-check.
+# Codex 0.159.1 refused gpt-6.2-sol with a ChatGPT account until 0.171.0 (2026-11-20).
+UPDATE = {"smoke": ["exec", "--skip-git-repo-check", "-m", "{model}", "Reply OK"], "npm": "@openai/codex"}
 
 
 def _toml_block(entry):
@@ -498,6 +832,19 @@ def _toml_load(text, f):
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise RiverError(f"{f} is not valid TOML ({e}); fix it first, MaximizePM does not overwrite it")
+
+
+DESKTOP_APPS = ("/Applications/ChatGPT.app", "~/Applications/ChatGPT.app")  # tests replace it
+
+
+def desktop_app():
+    """The ChatGPT desktop app on this computer, for the setup guide (#6477). Its Work and Codex modes read
+    ~/.codex/config.toml, which the Codex CLI also reads, so only the app itself counts, not that file. added: the
+    file has MaximizePM's server. None without the app."""
+    if not any(Path(p).expanduser().exists() for p in DESKTOP_APPS):
+        return None
+    return {"name": "ChatGPT desktop app", "added": _has_maxpm_mcp(),
+            "path": str(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml")}
 
 
 def write_mcp_config(path=None, remove=False):

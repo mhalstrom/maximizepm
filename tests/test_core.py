@@ -130,6 +130,49 @@ class Ordering(Base):
         self.assertEqual([(n["to_agent"], n["body"].split(" ended")[0]) for n in notes],
                          [("ag", f"the wait on #{y} agent step")])
 
+    def test_block_releases_held_item(self):
+        core.project_add(self.c, "a")
+        core.register(self.c, "w")
+        core.register(self.c, "boss")
+        x = self.add("a", "first")
+        y = core.item_add(self.c, "a", "second", found_during=x)["id"]
+        z = self.add("a", "third")
+        # Holder blocks an in_progress item: released in the same tx, shows blocked until, next skips it, go moves on.
+        core.claim(self.c, x, "w")
+        got = core.block(self.c, x, "waiting on DNS", actor="w", until="3h")
+        self.assertEqual(got["status"], "open")
+        self.assertIsNone(got["assignee"])
+        self.assertIsNone(got["claimed_at"])
+        self.assertIsNone(got["lease_expires_at"])
+        a = core.annotate(self.c)
+        self.assertFalse(a[x]["ready"])
+        self.assertTrue(a[x]["blocked_text"].startswith("blocked until "))
+        changes = [e["change"] for e in got["events"]]
+        self.assertTrue(any(c.startswith("blocked: waiting on DNS (until ") for c in changes))
+        self.assertIn("released: waiting on DNS", changes)
+        self.assertNotIn(x, [i["id"] for i in core.ready_list(self.c)])
+        nxt = core.go(self.c, ".", actor="w", project="a")
+        self.assertEqual(nxt["item"]["id"], y)
+        # Holder blocks a held item (waiting on a prereq): also released and prereq reservation cleared.
+        pre = core.item_add(self.c, "a", "prereq", blocks=y, actor="w", mode="keep")["id"]
+        self.assertEqual(core._item(self.c, y)["status"], "held")
+        got_y = core.block(self.c, y, "waiting on vendor", actor="w")
+        self.assertEqual(got_y["status"], "open")
+        self.assertIsNone(got_y["assignee"])
+        self.assertIsNone(got_y["hold_expires_at"])
+        self.assertIsNone(core._item(self.c, pre)["reserved_for"])
+        # Unnamed caller (actor=None) blocking an in_progress item also releases it.
+        core.claim(self.c, z, "w")
+        got_z = core.block(self.c, z, "outside wait", until="2h")
+        self.assertEqual(got_z["status"], "open")
+        self.assertIsNone(got_z["assignee"])
+        # Another actor blocking a held item leaves it with the holder (so push_guard can still stop a push).
+        core.unblock(self.c, z)
+        core.claim(self.c, z, "w")
+        got_boss = core.block(self.c, z, "hold on", actor="boss")
+        self.assertEqual(got_boss["status"], "in_progress")
+        self.assertEqual(got_boss["assignee"], "w")
+
     def test_zones_without_a_time_zone_database(self):
         # Windows has no zone database unless tzdata is installed: UTC still works, other names say how to fix it.
         from unittest import mock
@@ -985,6 +1028,7 @@ class Targets(Base):
         self.assertEqual(core.target_show(core.connect(self.path), "site-com")["mode"], "push")
         # Back to deploy: ship works again; the risk class shows in the line.
         core.target_mode(self.c, "site-com", "deploy", "mark")
+        core.done(self.c, it, "done", "w")
         core.ship(self.c, it, "w")
         self.assertIn("risk low", core.target_mode_text(core.target_risk(self.c, "site-com", "low", "mark")))
 
@@ -1535,6 +1579,96 @@ class BackgroundWork(Base):
         core.config_set(self.c, "busy_max", "0s")
         self.assertEqual(self.what(), [])
 
+    def test_the_list_keeps_each_task_with_its_end_and_reads_only_new_lines(self):
+        """#6454: the Sessions tab and maxpm who list each task with its start, its end and its status; a read after
+        the first one reads only the lines written since."""
+        from river import agents
+        cl = agents.load()["claude"]
+        use = self.tr.background(self.at(1), "b1", "cargo test -p server", "Run the server tests")
+        got = core.session_tasks(cl, self.tr.path)
+        self.assertEqual([(x["id"], x["what"], x["command"], x["end"]) for x in got],
+                         [("b1", "Run the server tests", "cargo test -p server", None)])
+        size = os.path.getsize(self.tr.path)
+        self.tr.ended(self.at(5), "b1", use, "failed")
+        self.tr.background(self.at(6), "b2", "maxpm --as ag wait", "Wait for work")
+        reads = []
+        real = agents.new_lines
+        with mock.patch.object(agents, "new_lines", lambda p, s: (reads.append(s), real(p, s))[1]):
+            got = core.session_tasks(cl, self.tr.path)
+        self.assertEqual(reads, [size])
+        self.assertEqual([(x["id"], x["end"], x["status"]) for x in got],
+                         [("b1", self.at(5).replace(microsecond=0), "failed"), ("b2", None, None)])
+        # The rows: the one that runs (a wait, flagged), then the ended ones newest first; a wait that ended goes.
+        rows = core.task_rows(got, core.now(), timedelta(hours=4))
+        self.assertEqual([(r["id"], r["wait"], r["end"] is None) for r in rows], [("b2", True, True), ("b1", False, False)])
+        # A new file in its place (a new inode, or a shorter one) is read again from the start.
+        os.replace(self.tr.path, self.tr.path + ".old")
+        self.tr.background(self.at(7), "b3", "npm test", "Run the page tests")
+        self.assertEqual([x["id"] for x in core.session_tasks(cl, self.tr.path)], ["b3"])
+
+    def test_serve_stores_the_tasks_of_each_session_and_who_shows_them(self):
+        from river import cli
+        core.record_claude_session(self.c, "ag", self.SID)
+        self.c.execute("UPDATE agents SET pid=?, host=?, agent_type='claude-code' WHERE name='ag'",
+                       (os.getpid(), core.this_host()))
+        use = self.tr.background(self.at(1), "b1", "cargo test", "Run the server tests")
+        self.tr.ended(self.at(3), "b1", use)
+        self.tr.background(self.at(4), "b2", "make gate", "Run the full gate")
+        self.tr.background(self.at(4), "b3", "maxpm --as ag inbox --wait", "Wait for messages")
+        got = core.record_tasks(self.c)
+        self.assertEqual([(r["id"], r["wait"]) for r in got["ag"]], [("b2", False), ("b3", True), ("b1", False)])
+        ag = next(g for g in core.who(self.c) if g["name"] == "ag")
+        self.assertEqual([r["id"] for r in ag["tasks"]], ["b2", "b3", "b1"])
+        lines = cli.tasks_lines(ag["tasks"], ended=True)
+        self.assertEqual(lines[0], "runs 1 background task now:")
+        self.assertIn("command: Run the full gate", lines[1])
+        self.assertEqual(lines[2], "waits in the background: Wait for messages")
+        self.assertEqual(lines[3], "ended background tasks (the last 1):")
+        self.assertIn("(completed): command: Run the server tests", lines[4])
+        self.assertEqual(cli.tasks_lines(ag["tasks"])[-1], "waits in the background: Wait for messages")
+        # An agent CLI with no reader of them (Codex): no list at all, not an empty one.
+        self.c.execute("UPDATE agents SET agent_type='codex' WHERE name='ag'")
+        self.assertIsNone(core.record_tasks(self.c)["ag"])
+        self.assertIsNone(next(g for g in core.who(self.c) if g["name"] == "ag")["tasks"])
+        self.assertEqual(cli.tasks_lines(None), [])
+        # A list that maxpm serve has not read lately counts as unknown.
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        core.record_tasks(self.c)
+        late = core.now() + core.SHELLS_FRESH
+        with mock.patch.object(core, "now", lambda: late):
+            self.assertIsNone(next(g for g in core.who(self.c) if g["name"] == "ag")["tasks"])
+
+    def test_agy_tasks_come_from_its_transcript(self):
+        from river import agents
+        ag = agents.load()["antigravity"]
+        conv = "0de5f79c-1111-4222-8333-444444444444"
+        path = os.path.join(self.dir.name, "transcript_full.jsonl")
+        stamp = "Created At: 2026-11-20T10:00:00-08:00\nCompleted At: 2026-11-20T10:00:00-08:00\n"
+        steps = [
+            {"type": "GENERIC", "source": "MODEL", "step_index": 4, "created_at": "2026-11-20T18:00:05Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-4\nTask Description: "
+                                "python3 -m unittest discover\nTask logs are available at: file:///x/task-4.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 6, "created_at": "2026-11-20T18:01:00Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-6\nTask Description: "
+                                "maxpm wait\nTask logs are available at: file:///x/task-6.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 8, "created_at": "2026-11-20T18:01:30Z",
+             "content": stamp + f"Tool is running as a background task with task id: {conv}/task-8\nTask Description: "
+                                "cargo build\nTask logs are available at: file:///x/task-8.log"},
+            {"type": "GENERIC", "source": "MODEL", "step_index": 10, "created_at": "2026-11-20T18:02:00Z",
+             "content": stamp + f'Task "{conv}/task-8" cancelled.'},
+            {"type": "SYSTEM_MESSAGE", "source": "SYSTEM", "step_index": 12, "created_at": "2026-11-20T18:09:30Z",
+             "content": "The following is a <SYSTEM_MESSAGE>.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T18:09:00Z "
+                        f'sender={conv}/task-4 priority=MESSAGE_PRIORITY_HIGH content=Task id "{conv}/task-4" finished '
+                        "with result:\nCommand exited with code 1.\n\nCommand output:\nFAILED\n</SYSTEM_MESSAGE>"},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(json.dumps(s) + "\n" for s in steps))
+        got = core.session_tasks(ag, path)
+        self.assertEqual([(x["id"].split("/")[1], x["what"], x["end"] and core.iso(x["end"]), x["status"]) for x in got],
+                         [("task-4", "python3 -m unittest discover", "2026-11-20T18:09:00Z", "failed"),
+                          ("task-6", "maxpm wait", None, None),
+                          ("task-8", "cargo build", "2026-11-20T18:02:00Z", "cancelled")])
+
 
 class Usage(Base):
     """The token cost of each item, from the Claude Code transcripts of the sessions that held it (#1102)."""
@@ -1688,13 +1822,13 @@ class Ship(Base):
         a = self.add("site", "page", p=1)
         b = self.add("api", "endpoint")
         core.done(self.c, a, "abc", "t", ship_it=True)
+        core.done(self.c, b, "def", "t")
         d1 = core.ship(self.c, b, "dev")
         self.assertEqual(d1["kind"], "deploy")
         self.assertEqual(d1["project"], "deploy-web")
         self.assertEqual(d1["waits_on"], sorted([a, b]))
         self.assertEqual(d1["priority"], 1)
         self.assertEqual(d1["context"], "rsync, then smoke test")
-        core.done(self.c, b, "def", "t")
         self.assertEqual([x["id"] for x in core.next_item(self.c, actor="dev")], [])
         with self.assertRaises(RiverError):
             core.claim(self.c, d1["id"], "dev")
@@ -1702,6 +1836,7 @@ class Ship(Base):
         self.assertEqual([x["id"] for x in core.next_item(self.c, actor="ops")], [d1["id"]])
         core.claim(self.c, d1["id"], "ops")
         c = self.add("site", "later")
+        core.done(self.c, c, "ghi", "t")
         d2 = core.ship(self.c, c, "dev")  # the first deploy item is taken: a new one starts
         self.assertNotEqual(d2["id"], d1["id"])
         done = core.done(self.c, d1["id"], "release r-42", "ops")
@@ -1718,6 +1853,7 @@ class Ship(Base):
         with self.assertRaises(RiverError):
             core.ship(self.c, self.add("misc", "x"), "dev")
         a = self.add("site", "page")
+        core.done(self.c, a, "abc", "dev")
         d = core.ship(self.c, a, "dev")
         self.assertEqual(core.ship(self.c, a, "dev")["id"], d["id"])
         with self.assertRaises(RiverError):
@@ -1734,28 +1870,31 @@ class Ship(Base):
         self.assertEqual((it["status"], it["output"], it["assignee"]), ("in_progress", "", "dev"))
         self.assertEqual(core.done(self.c, x, "out", "dev")["status"], "done")
 
-    def test_a_ship_of_an_open_item_warns_that_the_release_waits_on_it(self):
-        # #5386: a walk item, or part 1 of a split build, stays open after its release; ship held the release.
+    def test_a_ship_of_an_open_item_is_refused(self):
+        # #6452: a walk item, or part 1 of a split build, stays open after its release; ship must refuse it
+        # instead of linking the deploy and its review to an open item.
         core.config_set(self.c, "review", "on")
         walk = self.add("site", "walk the onboarding")
+        msg = (rf"close it first: maxpm done {walk} --ship; "
+               r"a pushed part of an open item goes out with the next release by itself")
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is open; {msg}"):
+            core.ship(self.c, walk, "dev")
         core.claim(self.c, walk, "dev")
-        d = core.ship(self.c, walk, "dev")
-        rv = [i for i in d["waits_on"] if i != walk][0]
-        w = d["ship_warning"]
-        self.assertIn(f"#{walk} is in progress: deploy #{d['id']} and review #{rv} now wait on it", w)
-        self.assertIn(f"maxpm done {walk} --ship", w)
-        self.assertIn(f"maxpm undep {d['id']} --on {walk}; maxpm undep {rv} --on {walk}", w)
-        from river import cli
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
-            cli.run(["--as", "dev", "ship", str(walk)])
-        self.assertIn(f"  WARNING: #{walk} is in progress:", out.getvalue())
-        # Done, then ship: no warning.
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is in progress; {msg}"):
+            core.ship(self.c, walk, "dev")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='held' WHERE id=?", (walk,))
+        with self.assertRaisesRegex(RiverError, rf"#{walk} is held; {msg}"):
+            core.ship(self.c, walk, "dev")
+        # No deploy or review item was created by the refused ships.
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind IN ('deploy','review')").fetchone()[0], 0)
+        # Done, then ship (or done --ship): works.
         x = self.add("site", "a page")
         core.claim(self.c, x, "ops")
         res = core.done(self.c, x, "abc", "ops", ship_it=True)
-        self.assertNotIn("ship_warning", core.ship(self.c, x, "ops"))
+        d = core.ship(self.c, x, "ops")
         self.assertEqual(res["shipped_in"], d["id"])
+        self.assertNotIn("ship_warning", d)
 
 
 class Plan(Base):
@@ -1911,6 +2050,85 @@ class PlanFile(Base):
                 self.assertIn(f"cannot read the plan file {plan}: ", str(e.exception))
                 self.assertEqual(len(str(e.exception).splitlines()), 1)
         self.assertEqual(core.item_list(self.c, "shop"), [])
+
+    def run_init(self, folder, *words):
+        from river import cli
+        old = os.getcwd()
+        os.chdir(folder)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, mock.patch.object(sys.stdin, "isatty", lambda: False):
+                cli.run(["init", *words])
+        finally:
+            os.chdir(old)
+        return out.getvalue()
+
+    def test_init_with_a_plan_creates_the_project_and_its_items(self):
+        # A folder with a written plan: one command links the project and adds the plan's items with their waits.
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            plan = os.path.join(d, "plan.md")
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write(self.PLAN)
+            out = self.run_init(folder, "--plan", plan)
+            ids = {i["title"]: i["id"] for i in core.item_list(self.c, "shop")}
+            self.assertEqual(len(ids), 6)
+            self.assertEqual(core.annotate(self.c)[ids["Preorder form"]]["waits_on"], [ids["Friday list"]])
+            self.assertIn("6 item(s) added from the plan", out)
+            self.assertIn("next: open an agent here and say go", out)
+            self.assertNotIn("next: add work", out)
+            with open(os.path.join(folder, "AGENTS.md"), encoding="utf-8") as f:
+                self.assertIn("maxpm go", f.read())
+
+    def test_init_with_a_bad_plan_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            plan = os.path.join(d, "plan.md")
+            with open(plan, "w", encoding="utf-8") as f:
+                f.write("# only a heading\n")
+            from river import cli
+            old = os.getcwd()
+            os.chdir(folder)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        code = cli.run(["init", "--plan", plan])
+                    except (RiverError, SystemExit) as e:
+                        code = e
+            finally:
+                os.chdir(old)
+            self.assertTrue(code)  # an error, not a success
+            self.assertEqual(os.listdir(folder), [])
+            self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
+
+    def test_init_with_a_plan_file_it_cannot_read_says_so_in_one_line(self):
+        # A missing plan file, or a folder: one error line with the path, and nothing changes.
+        from river import cli
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            old = os.getcwd()
+            os.chdir(folder)
+            try:
+                for plan in (os.path.join(d, "no-such-plan.md"), d):
+                    # maxpm prints a RiverError as one line; an OSError would reach the person as a traceback
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RiverError) as e:
+                        cli.run(["init", "--plan", plan])
+                    self.assertIn(f"cannot read the plan file {plan}: ", str(e.exception))
+                    self.assertEqual(len(str(e.exception).splitlines()), 1)
+            finally:
+                os.chdir(old)
+            self.assertEqual(os.listdir(folder), [])
+            self.assertFalse(self.c.execute("SELECT 1 FROM projects WHERE name='shop'").fetchone())
+
+    def test_init_without_a_plan_names_the_plan_file_form(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "shop")
+            os.mkdir(folder)
+            out = self.run_init(folder)
+            self.assertIn("maxpm add shop --from plan.md", out)
+            self.assertEqual(core.item_list(self.c, "shop"), [])
 
     def test_add_dry_run_without_a_plan_file_is_refused_and_adds_nothing(self):
         from river import cli
@@ -3657,6 +3875,7 @@ class Takeover(Base):
 class Upgrade(Base):
     """connect() runs SCHEMA and the migrations once for each schema id, not on every command (#5396)."""
 
+    @timing.local_only("wall-clock lock timing")
     def test_a_connect_writes_nothing_while_another_command_holds_the_write_lock(self):
         path = self.c.execute("PRAGMA database_list").fetchone()[2]
         holder = sqlite3.connect(path, isolation_level=None)
@@ -3668,6 +3887,43 @@ class Upgrade(Base):
         self.assertLess(time.time() - t, timing.limit(1, below=10))  # before #5396 it waited busy_timeout (10s), then died
         self.assertTrue(c.execute("SELECT 1 FROM meta WHERE key=?", ("schema:" + core.schema_print(),)).fetchone())
         holder.execute("ROLLBACK")
+
+    def test_wal_tries_again_when_another_connection_sets_it_at_the_same_time(self):
+        # SQLite calls no busy handler for this lock, so 'database is locked' comes at once (#6243).
+        class Fake:
+            calls = 0
+
+            def execute(self, sql):
+                Fake.calls += 1
+                if Fake.calls < 3:
+                    raise sqlite3.OperationalError("database is locked")
+        core._wal(Fake())
+        self.assertEqual(Fake.calls, 3)
+        Fake.calls = 0
+        with self.assertRaises(sqlite3.OperationalError):  # the last try gives the error
+            core._wal(Fake(), tries=1)
+
+    def test_several_threads_open_a_new_queue_file_at_once(self):
+        # serve's first start on a new queue: its threads connected at once and one stopped at the WAL pragma (#6243).
+        import tests as _tests
+        old = _tests.USE_TEMPLATE_DB
+        _tests.USE_TEMPLATE_DB = False
+        self.addCleanup(setattr, _tests, "USE_TEMPLATE_DB", old)
+        for n in range(8):
+            path = os.path.join(self.dir.name, f"new{n}.db")
+            errors = []
+
+            def open_it():
+                try:
+                    core.connect(path).close()
+                except Exception as e:
+                    errors.append(e)
+            threads = [threading.Thread(target=open_it) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
 
     def test_a_new_schema_id_runs_the_migrations_again(self):
         path = self.c.execute("PRAGMA database_list").fetchone()[2]
@@ -3688,6 +3944,7 @@ class Upgrade(Base):
             line = f.read().splitlines()[-1]
         self.assertRegex(line, r"held=\d+\.\ds pid=\d+ .* thread=MainThread in item_add$")
 
+    @timing.local_only("wall-clock lock timing")
     def test_needs_you_and_a_command_take_no_write_lock_when_nothing_changes(self):
         core.project_add(self.c, "a")
         core.register(self.c, "mark", human=True)
@@ -3732,15 +3989,17 @@ class Prompts(Base):
         p = core.prompt_for(self.c, h)
         from pathlib import Path
         folder = Path(self.dir.name).resolve()
-        for part in (f"cd {folder} && maxpm --as mark show {h}", "docs/policy.md", "It blocks: #",
-                     f"maxpm --as mark done {h} --output", "takeover"):
+        # No --as mark: maxpm refuses a person's name inside a session (#6442).
+        for part in (f"cd {folder} && maxpm show {h}", "docs/policy.md", "It blocks: #",
+                     f"maxpm done {h} --output", "takeover"):
             self.assertIn(part, p)
         allp = core.prompt_for_all(self.c, "mark")
         self.assertIn("1. Item #", allp)
         # The agent that goes through the list (#5103): one at a time, read first, record each answer.
-        for part in ("Never two in one message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
+        for part in ("Never two in one card or message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
             self.assertIn(part, allp)
-        self.assertIn(f"maxpm --as mark answer {q['id']}", allp)
+        self.assertIn(f"maxpm answer {q['id']}", allp)
+        self.assertNotIn("--as mark", p + allp)
         core.done(self.c, h, "approved", "mark")
         self.assertIn("Nothing", core.prompt_for_all(self.c, "nobody"))
 
@@ -4084,7 +4343,7 @@ class AgentBlock(unittest.TestCase):
             cli.setup_instructions(d)  # nothing yet: AGENTS.md holds the block
             self.assertEqual((c.exists(), a.read_text(encoding="utf-8")), (False, cli.AGENT_SNIPPET))
             self.assertEqual(cli.instructions_layout(d), "none")
-            self.assertEqual(cli.setup_instructions(d), ["AGENTS.md: already has the work queue block"])
+            self.assertEqual(cli.setup_instructions(d)[0], "AGENTS.md: already has the work queue block")
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("# Rules\n\nPush to main deploys.\n", encoding="utf-8")
@@ -4114,7 +4373,7 @@ class AgentBlock(unittest.TestCase):
             c.write_text("claude rules\n", encoding="utf-8")
             lines = cli.setup_instructions(d, move=False)  # keep it as it is
             self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("claude rules\n", cli.AGENT_SNIPPET))
-            self.assertIn("CLAUDE.md: kept as it is", lines[-1])
+            self.assertTrue(any(line.startswith("CLAUDE.md: kept as it is") for line in lines))
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("@AGENTS.md\n" + cli.AGENT_SNIPPET, encoding="utf-8")  # what an older maxpm init made
@@ -4140,7 +4399,8 @@ class DeployNow(Base):
         with self.assertRaisesRegex(RiverError, "nothing is collected"):
             core.deploy_now(self.c, "web")
         a = self.add("site", "page")
-        core.ship(self.c, a, "dev")
+        core.done(self.c, a, "draft", "dev", ship_it=True)
+        core.reopen(self.c, a, "dev")
         r = core.deploy_now(self.c, "web")
         self.assertEqual((r["ready"], [w["id"] for w in r["waits_on"]], r["start"]["kind"]), (False, [a], "deploy"))
         core.claim(self.c, a, "dev")
@@ -4485,7 +4745,9 @@ class DoneWaitsOnPrerequisites(Base):
 
     def test_a_deploy_is_refused_even_with_force(self):
         a = self.add("site", "page")
+        core.done(self.c, a, "commit", "dev")
         d = core.ship(self.c, a, "dev")
+        core.reopen(self.c, a, "dev")
         with self.assertRaises(RiverError) as e:
             core.done(self.c, d["id"], "release", "ops", force="ship it anyway")
         self.assertIn("deploy", str(e.exception))
@@ -4785,6 +5047,7 @@ class ReleaseReview(Base):
         res = core.review_pass(self.c, self.review, None, "rev", runner=lambda c, d: R(0))
         self.assertEqual((res["status"], res["review_cmd"]), ("done", "make test"))
 
+    @timing.local_only("live child process timeout")
     def test_review_cmd_past_review_timeout_is_stopped_with_its_children(self):
         # A gate that runs past review_timeout stops, with the processes it started, and the error names
         # the setting; the reviewer's lease stays renewed while it runs (#1142).
@@ -4907,6 +5170,7 @@ class ReleaseReview(Base):
     def test_review_off_changes_nothing(self):
         core.config_set(self.c, "review", "off")
         c = self.add("site", "x")
+        core.done(self.c, c, "done", "dev")
         d = core.ship(self.c, c, "dev")
         self.assertEqual(d["id"], self.deploy)
         self.assertEqual([i for i in core.item_show(self.c, c)["unblocks"]], [self.deploy])
@@ -4932,6 +5196,9 @@ class ProjectArchive(Base):
         (arch,) = st["archived_projects"]
         self.assertEqual((arch["name"], arch["open_items"], arch["done_items"]), ("b", 2, 0))
         self.assertTrue(arch["archived_at"])
+        # The archive events come from their own index (#6394); a queue without it yet gives the same answer.
+        self.c.execute("DROP INDEX events_global")
+        self.assertEqual(core.project_archived(self.c)[0]["archived_at"], arch["archived_at"])
         with self.assertRaisesRegex(RiverError, "archived already; .*maxpm project restore b"):
             core.project_archive(self.c, "b")
         r = core.project_restore(self.c, "b", "mark")
@@ -4961,6 +5228,66 @@ class ProjectArchive(Base):
         self.assertIn("project a is back, at rank 1", run("project", "restore", "a"))
         self.assertIn("(no archived projects)", run("project", "list", "--archived"))
         self.c = core.connect(self.path)
+
+
+class SessionLink(Base):
+    """#6425: maxpm link prints the page address of a session, of its Browser or of its Changes, so an agent gives a
+    person a link that works instead of one it built by hand."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "w1")
+
+    def cli(self, *words):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(list(words))
+        return out.getvalue()
+
+    def test_the_link_of_a_session_and_of_its_browser(self):
+        port = core.serve_port_now(self.c)
+        self.assertEqual(self.cli("--as", "w1", "link"), f"http://127.0.0.1:{port}/sessions/w1\n")
+        self.assertEqual(self.cli("link", "w1", "--browser"), f"http://127.0.0.1:{port}/sessions/w1/browser\n")
+        self.assertEqual(self.cli("link", "w1", "--changes"), f"http://127.0.0.1:{port}/sessions/w1/changes\n")
+
+    def test_an_unknown_session_is_refused(self):
+        from river import cli
+        a = cli.build_parser().parse_args(["link", "nobody"])
+        with self.assertRaisesRegex(RiverError, "no session named nobody; maxpm who --all lists them"):
+            cli.dispatch(self.c, a, "mark")
+        a = cli.build_parser().parse_args(["link"])
+        with self.assertRaisesRegex(RiverError, r"name the session: maxpm link <session>"):
+            cli.dispatch(self.c, a, None)
+
+
+class ProjectNewFolder(Base):
+    """#6236: maxpm project add --path and project path with a folder that does not exist: the error names
+    --create, and --create makes the folder before it links the project."""
+
+    def run_cli(self, *words):
+        from river import cli
+        a = cli.build_parser().parse_args(list(words))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cli.dispatch(self.c, a, "mark")
+
+    def test_create_makes_the_folder_and_the_error_names_it(self):
+        new = os.path.join(self.dir.name, "code", "shop")
+        with self.assertRaisesRegex(RiverError, r"does not exist. To create it: maxpm project add shop --path .* --create"):
+            self.run_cli("project", "add", "shop", "--path", new)
+        self.assertFalse(os.path.exists(new))
+        self.assertFalse(any(p["name"] == "shop" for p in core.project_list(self.c)))
+        r = self.run_cli("project", "add", "shop", "--path", new, "--create")
+        self.assertTrue(os.path.isdir(new))
+        self.assertEqual(r["path"], os.path.realpath(new))
+        other = os.path.join(self.dir.name, "code", "shop2")
+        with self.assertRaisesRegex(RiverError, "maxpm project path shop .* --create"):
+            self.run_cli("project", "path", "shop", other, "--move")
+        self.run_cli("project", "path", "shop", other, "--move", "--create")
+        self.assertEqual(core._project(self.c, "shop")["path"], os.path.realpath(other))
+        with self.assertRaisesRegex(RiverError, "a folder of the system"):
+            self.run_cli("project", "path", "shop", "/System/shop", "--create")
 
 
 class Version(unittest.TestCase):
@@ -5263,6 +5590,49 @@ class Wait(Base):
             self.c.execute("UPDATE items SET fresh_start=? WHERE id=?", (core.iso(core.now()), i))
         self.assertEqual([a["id"] for a in core.next_item(self.c, "a", None, False, "fresh1", 5)], [i])
 
+    def _asked_and_released(self):
+        """w took an item, asked mark about it and released it (result_look ask_first), as Pi did in #6422."""
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "fresh_sessions", "on")
+        core.config_set(self.c, "question_hold", "0s")
+        i = self.add("a", "needs a look")
+        core.scope_start(self.c, "w", [f"tasks:{i}"], "Dispatch")
+        core.claim(self.c, i, "w")
+        q = core.send(self.c, "question", "Push?", to="mark", item=i, actor="w")
+        self.assertIn(f"If you release #{i} instead, run maxpm go and then maxpm wait", q["then"])
+        core.release(self.c, i, "w")
+        return i, q["id"]
+
+    def test_an_answer_goes_back_to_the_asker_that_waits_in_maxpm_wait(self):
+        # #6422: the answer started a fresh session (a cold start) while the asker waited for work.
+        i, q = self._asked_and_released()
+        self.assertEqual(self.wait()["result"], "again")
+        core.answer(self.c, q, "yes, push", "mark")
+        self.assertEqual(core.item_show(self.c, i)["reserved_for"], "w")
+        self.assertEqual(core.fresh_items(self.c), [])
+        self.assertEqual(self.wait()["why"], f"#{i} was pushed to you")
+        b = core.go(self.c, self.dir.name, "w")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", i))
+        self.assertIn("[answer from mark] yes, push", b["item"]["notes"])
+
+    def test_an_answer_for_an_asker_that_left_its_wait_starts_a_fresh_session(self):
+        i, q = self._asked_and_released()
+        core.unregister(self.c, "w")
+        core.answer(self.c, q, "yes", "mark")
+        self.assertIsNone(core.item_show(self.c, i)["reserved_for"])
+        self.assertEqual(core.fresh_items(self.c), [i])
+
+    def test_go_tells_a_session_whose_item_waits_on_its_own_question_to_wait(self):
+        # #6422: 'tell the user' and 'the manager widens your scope' made Pi, Goose and Amp end their turn.
+        i, q = self._asked_and_released()
+        for b in (core.go(self.c, self.dir.name, "w"), core.go(self.c, self.dir.name, "w", focus=f"item:{i}")):
+            text = b["why"] + b.get("focus_note", "")
+            self.assertEqual(b["role"], "idle")
+            self.assertIn(f"mark's answer to your question #{q}", text)
+            self.assertIn(f"the answer gives #{i} back to you in maxpm wait", text)
+            self.assertNotIn("tell the user", text)
+            self.assertNotIn("widens your scope", text)
+
     def test_capacity_still_warns_about_idle_sessions_that_do_not_wait(self):
         core.register(self.c, "idle1")
         self.wait()
@@ -5350,6 +5720,16 @@ class Models(Base):
             core.launch_target(self.c, item=x, agent="Claude Code", model="claude-haiku-4-5", actor="mark")
         with self.assertRaisesRegex(RiverError, "a version such as 5.5"):
             core.config_set(self.c, "model_min_version", "new")
+
+    def test_launch_agent_takes_a_label_an_id_or_an_alias(self):
+        # #6421: launch --agent codex was refused while the entry's label is Codex; every other command takes the id.
+        x = core.item_add(self.c, "a", "x")["id"]
+        for name, label in (("Codex", "Codex"), ("codex", "Codex"), ("CODEX", "Codex"),
+                            ("claude-code", "Claude Code"), ("claude", "Claude Code"), ("claude code", "Claude Code")):
+            r = core.launch_target(self.c, item=x, agent=name, actor="mark")
+            self.assertEqual(r["agent"], label, name)
+        with self.assertRaisesRegex(RiverError, r"no agent 'nobody' in launch_agents; known: .*an agent id or alias"):
+            core.launch_target(self.c, item=x, agent="nobody", actor="mark")
 
     def test_add_and_edit_store_the_fields_and_validate_them(self):
         i = core.item_add(self.c, "a", "x", models={"model": "Opus", "effort": "high", "min_model": "opus, sol"})
@@ -6203,6 +6583,38 @@ class Approvals(Base):
         i = self.c.execute("SELECT MAX(id) FROM items").fetchone()[0]
         self.assertEqual(core.approval(self.c, i)["once"], 1)
 
+    def test_done_on_a_closed_approval_says_it_is_done_already_with_who_and_when(self):
+        """#6277: done on a closed approval says who closed it and when, not 'only the person approves it'."""
+        clock = [core.parse_iso("2026-11-20T06:41:06Z")]
+        with mock.patch.object(core, "now", lambda: clock[0]):
+            g = core.goal_add(self.c, "a", "studies", "studies are done", "each study has a canvas", "w1")
+            prop = g["proposal"]
+            core.done(self.c, prop, actor="mark")
+            for caller in ("w1", "mark"):
+                with self.assertRaises(RiverError) as cm:
+                    core.done(self.c, prop, actor=caller, proof={})
+                self.assertEqual(str(cm.exception), f"#{prop} is done already: mark approved it at Fri 6:41 UTC")
+                self.assertNotIn("only the person approves it", str(cm.exception))
+            clock[0] = core.parse_iso("2026-11-20T06:45:00Z")
+            i2 = core.item_add(self.c, "a", "Approve: delete old host", doer="human", actor="w1",
+                               approve_once=True)["id"]
+            core.drop(self.c, i2, actor="mark", note="keep it")
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, i2, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{i2} is dropped already: mark dropped it at Fri 6:45 UTC")
+            clock[0] = core.parse_iso("2026-11-20T06:50:00Z")
+            plain = self.add("a", "plain task")
+            core.done(self.c, plain, "ok", actor="w1")
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, plain, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{plain} is done already: w1 closed it at Fri 6:50 UTC")
+            legacy = self.add("a", "legacy closed")
+            with core.tx(self.c):
+                self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(clock[0]), legacy))
+            with self.assertRaises(RiverError) as cm:
+                core.done(self.c, legacy, actor="w1")
+            self.assertEqual(str(cm.exception), f"#{legacy} is done already: closed at Fri 6:50 UTC")
+
 
 class Pause(Base):
     """#5962 (policies p79 and p136): maxpm pause stops every working session, holds every new session, changes no
@@ -6680,7 +7092,14 @@ class Kill(Base):
         """#5060: the manager ran maxpm --as <agent> ... in its session, and the manager's pid went into that agent's
         row: who showed a dead expert as active, its resume refused, and tmux_adopt ended the manager."""
         from unittest import mock
-        from river import cli
+        from river import cli, peer
+        # 500, 600 and 700 are made-up pids. On a CI runner a real process can have one of them: set_process then
+        # records its start time, and #5823 keeps a recorded process that still runs, so ex could not move from 600
+        # to 700 (macOS runner of release v1.3.0, run 43841544534, #6487). Here no process has these pids.
+        real_info = peer.info
+        made_up = mock.patch.object(peer, "info", lambda p: None if p in (500, 600, 700) else real_info(p))
+        made_up.start()
+        self.addCleanup(made_up.stop)
         for n in ("mgr", "ex", "old"):
             core.register(self.c, n)
         with core.tx(self.c):
@@ -6924,6 +7343,235 @@ class PersonHold(Base):
         core.manage(self.c, self.dir.name, "boss2")
         k = self.worker_item("Third")
         self.assertTrue(self.sees(item_id=k))
+
+
+class EscalationOptions(Base):
+    """#6413: the manager forwards a question or a person item with its short question and 2 to 4 options; the page
+    opens them as a dialog, and the person's choice reaches the asker as a field."""
+
+    OPTS = ["Blue: calm, the color of the logo", "Red: loud, for the sale week"]
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        self.x = self.add("a", "x")
+        core.claim(self.c, self.x, "w1")
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def test_the_options_are_checked(self):
+        q = core.message(self.c, "question", "Which color for the banner?", to="mark", item=self.x, actor="w1")[0]
+        for opts, rec, err in ((self.OPTS[:1], "Blue", "2 to 4 options"), (self.OPTS, None, "--recommend"),
+                               (self.OPTS, "Green", "no option"), (["Blue", "Red: loud"], "Red", "one line"),
+                               (self.OPTS + ["blue: again"], "Red", "two options")):
+            with self.assertRaisesRegex(RiverError, err):
+                core.forward(self.c, q["id"], actor="boss", options=opts, recommend=rec)
+        self.assertEqual(core.message_show(self.c, q["id"])["held_for"], "boss")  # nothing changed
+
+    def test_a_question_with_options_and_the_answer_as_a_field(self):
+        q = core.message(self.c, "question", "Which color for the banner? Long reasons follow ...", to="mark",
+                         item=self.x, actor="w1")[0]
+        core.forward(self.c, q["id"], actor="boss", options=self.OPTS, recommend="2", question="Banner color?")
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        ev = next(n for n in core.needs_you(self.c, "mark") if n.get("message_id") == q["id"])
+        d = ev["decision"]
+        self.assertEqual(d["question"], "Banner color?")
+        self.assertEqual([(o["label"], o["recommended"]) for o in d["options"]], [("Red", True), ("Blue", False)])
+        self.assertEqual(d["options"][1]["detail"], "calm, the color of the logo")
+        from river import sessions
+        self.assertEqual(sessions._open_questions(self.c, "w1")[0]["id"], q["id"])
+        with self.assertRaisesRegex(RiverError, "no option"):
+            core.answer(self.c, q["id"], None, actor="mark", choice="Green")
+        a = core.answer(self.c, q["id"], "a dark blue", actor="mark", choice="blue")
+        self.assertEqual((a["choice"], a["body"]), ("Blue", "Blue: a dark blue"))
+        self.assertIn("choice: Blue\n", core.answer_text(core.message_show(self.c, q["id"]), "mark", a["body"],
+                                                         choice=a["choice"]))
+        self.assertTrue(any("decision for the person on question" in r["change"] and "recommended Red" in r["change"]
+                            for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (self.x,))))
+
+    def test_a_person_item_with_options_closes_with_the_choice(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="w1", blocks=self.x,
+                          mode="keep")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Blue")
+        card = core.item_show(self.c, i)
+        self.assertEqual(card["decision"]["options"][0]["label"], "Blue")
+        self.assertIsNone(card["decision"]["question"])
+        # With no option and no words, nothing closes; an option alone is enough.
+        with self.assertRaisesRegex(RiverError, "pick an option"):
+            core.done(self.c, i, "", actor="mark", choice="")
+        res = core.done(self.c, i, None, actor="mark", choice="Red")
+        self.assertEqual((res["choice"], res["output"]), ("Red", "Red"))
+        note = self.c.execute("SELECT body FROM messages WHERE kind='notice' AND to_agent='w1' AND item_id=?",
+                              (self.x,)).fetchone()["body"]
+        self.assertIn("(choice: Red)", note)
+
+    def test_options_on_what_is_with_the_person_already(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="boss")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        self.assertEqual(core.item_show(self.c, i)["held_for"], "")  # the manager's own item: the person has it
+        with self.assertRaisesRegex(RiverError, "with the person already"):
+            core.forward(self.c, item=i, actor="boss")
+        got = core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Red", question="Color?")
+        self.assertEqual(got["decision"]["question"], "Color?")
+        with self.assertRaisesRegex(RiverError, "no open person item"):
+            core.forward(self.c, item=self.x, actor="boss", options=self.OPTS, recommend="Red")
+        # An item with no options closes with words only, as before; a choice there is refused.
+        j = core.item_add(self.c, "a", "Look at the page", doer="human", actor="boss")["id"]
+        with self.assertRaisesRegex(RiverError, "it has no options"):
+            core.done(self.c, j, None, actor="mark", choice="A")
+        self.assertEqual(core.done(self.c, j, "fine", actor="mark")["output"], "fine")
+
+    def test_an_answer_that_no_open_item_waits_on_reaches_someone(self):
+        """#6484: a person's Decide or Approve item that blocks no open item: the answer reached nobody."""
+        # A worker added it during its item, and that item is done: a task acts on the answer.
+        i = core.item_add(self.c, "a", "Approve the draft replies", doer="human", actor="w1", found_during=self.x)["id"]
+        core.done(self.c, self.x, "shipped", actor="w1")
+        res = core.done(self.c, i, "A", actor="mark")
+        task = core.item_show(self.c, res["acts_on_answer"]["task"])
+        self.assertEqual((task["title"], task["found_during"], task["status"]),
+                         ("Act on mark's answer to #%d: Approve the draft replies" % i, i, "open"))
+        self.assertIn("mark answered #%d" % i, task["context"])
+        self.assertIn(": A.", task["context"])
+        # The manager added one itself (#6491): the manager gets a blocked alert with the answer, and no task.
+        j = core.item_add(self.c, "a", "Decide: undo the link", doer="human", actor="boss")["id"]
+        core.forward(self.c, item=j, actor="boss", options=self.OPTS, recommend="Red", question="Undo?")
+        res = core.done(self.c, j, None, actor="mark", choice="Red")
+        self.assertEqual(res["acts_on_answer"], {"alert": "boss"})
+        a = self.c.execute("SELECT body, blocked FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
+                           (j,)).fetchone()
+        self.assertEqual(a["blocked"], "sender")
+        self.assertIn("mark answered #%d Decide: undo the link: Red. You added it" % j, a["body"])
+        # A worker's item that the manager forwarded with a decision: the manager hears it too.
+        f = core.item_add(self.c, "a", "Decide the color", doer="human", actor="w1")["id"]
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        core.forward(self.c, item=f, actor="boss", options=self.OPTS, recommend="Blue")
+        self.assertEqual(core.done(self.c, f, None, actor="mark", choice="Blue")["acts_on_answer"], {"alert": "boss"})
+        # Nothing new: an item that an open item waits on, a Look item, a drop, an agent's takeover, a person's own.
+        k = core.item_add(self.c, "a", "Decide the font", doer="human", actor="w1", blocks=self.add("a", "y"))["id"]
+        look = core.item_add(self.c, "a", "Look at the page http://x", doer="human", actor="w1")["id"]
+        d = core.item_add(self.c, "a", "Decide the size", doer="human", actor="w1")["id"]
+        t = core.item_add(self.c, "a", "Decide the logo", doer="human", actor="w1")["id"]
+        own = core.item_add(self.c, "a", "Decide the name", doer="human", actor="mark")["id"]
+        self.assertIsNone(core.done(self.c, k, "serif", actor="mark")["acts_on_answer"])
+        self.assertIsNone(core.done(self.c, look, "fine", actor="mark")["acts_on_answer"])
+        self.assertNotIn("acts_on_answer", core.drop(self.c, d, "mark", note="no"))
+        self.assertIsNone(core.done(self.c, t, None, actor="w1", note="the brand guide decides")["acts_on_answer"])
+        self.assertIsNone(core.done(self.c, own, "River", actor="mark")["acts_on_answer"])
+
+
+class NeedsYouDialog(Base):
+    """#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to use the question
+    asking modal'. The needs-you session puts each decision with maxpm forward (the page's dialog), and
+    the person's answer there comes back to it as a notice, so it goes on to the next one."""
+
+    OPTS = ["Blue: calm, the color of the logo", "Red: loud, for the sale week"]
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+        core.assistant_make(self.c, "you-1", "mark")
+
+    def as_session(self, name):
+        tok = core.TOKEN_AGENT.set(name)
+        self.addCleanup(core.TOKEN_AGENT.reset, tok)
+
+    def notices(self, to="you-1"):
+        return [r["body"] for r in self.c.execute("SELECT body FROM messages WHERE kind='notice' AND to_agent=? "
+                                                  "ORDER BY id", (to,))]
+
+    def test_the_steps_put_each_decision_in_the_dialog(self):
+        core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")
+        x = self.add("a", "x")
+        core.message(self.c, "question", "Which font?", to="mark", item=x, actor="w1")
+        for p in (core.prompt_for_all(self.c, "mark"),
+                  core.prompt_for(self.c, core.item_list(self.c, project="a")[0]["id"], "mark")):
+            for part in ("maxpm forward --item <id> --question", "--recommend <label>",
+                         "maxpm inbox --wait", "record nothing", "Decision <n> of <total>",
+                         "Waits for you card"):
+                self.assertIn(part, p)
+            self.assertNotIn("the dialog on", p)
+
+    def test_an_item_answered_in_the_dialog_tells_the_session_that_put_it(self):
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        j = core.item_add(self.c, "a", "Sign in to the shop", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=i, actor="mark", options=self.OPTS, recommend="Blue", question="Banner color?")
+        core.forward(self.c, item=j, actor="mark", question="Sign in to the shop in the Browser tab")
+        self.assertEqual(core.item_show(self.c, i)["decision"]["by"], "you-1")
+        core.TOKEN_AGENT.set(None)  # the page: the person picks in the dialog
+        core.done(self.c, i, "a dark one", actor="mark", choice="red")
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn(f"#{i} Decide the banner color (done): Red: a dark one [choice: Red]", self.notices()[0])
+        self.assertIn("Go on to the next one", self.notices()[0])
+        # The session records an answer from its chat itself: no notice to itself.
+        self.as_session("you-1")
+        core.done(self.c, j, "signed in", actor="mark")
+        self.assertEqual(len(self.notices()), 1)
+
+    def test_a_question_answered_in_the_dialog_tells_the_session_and_the_asker(self):
+        x = self.add("a", "x")
+        core.claim(self.c, x, "w1")
+        q = core.message(self.c, "question", "Which color for the banner?", to="mark", item=x, actor="w1")[0]
+        self.as_session("you-1")
+        core.forward(self.c, q["id"], actor="mark", options=self.OPTS, recommend="Red")
+        core.TOKEN_AGENT.set(None)
+        core.answer(self.c, q["id"], None, actor="mark", choice="Blue")
+        self.assertIn(f"question #{q['id']} from w1: Blue", self.notices()[0])
+        self.assertEqual(self.c.execute("SELECT choice FROM messages WHERE kind='answer' AND to_agent='w1'")
+                         .fetchone()["choice"], "Blue")
+
+    def test_the_session_forwards_for_its_person_without_as(self):
+        # #6442: the needs-you session ran plain 'maxpm forward' (no --as mark), was refused, and asked in the chat.
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        core.forward(self.c, item=i, actor="you-1", options=self.OPTS, recommend="Blue", question="Banner color?")
+        d = core.item_show(self.c, i)["decision"]
+        self.assertEqual((d["by"], d["options"][0]["label"]), ("you-1", "Blue"))
+        core.done(self.c, i, None, actor="mark", choice="Blue")
+        self.assertIn("[choice: Blue]", self.notices()[0])
+        # The one-item helper that the page opens for a person's item acts for that person too.
+        j = core.item_add(self.c, "a", "Decide the font", doer="human", actor="mark")["id"]
+        core.register(self.c, "help-1")
+        self.assertEqual(core.go(self.c, self.dir.name, actor="help-1", focus=f"help:{j}@mark")["role"], "helper")
+        core.forward(self.c, item=j, actor="help-1", options=self.OPTS, recommend="Red")
+        self.assertEqual(core.item_show(self.c, j)["decision"]["by"], "help-1")
+        # The helper records an answer from its chat under its own name: no notice to itself.
+        core.done(self.c, j, None, actor="help-1", choice="Red")
+        self.assertEqual(self.notices("help-1"), [])
+        # Any other session still leaves it to the manager or the person.
+        with self.assertRaisesRegex(RiverError, "only the manager forwards"):
+            core.forward(self.c, item=j, actor="w1", question="Which font?")
+
+    def test_the_steps_name_the_option_limits(self):
+        core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")
+        self.assertIn(f"a label of at most {core.DECISION_LABEL_MAX} characters, a line of at most "
+                      f"{core.DECISION_DETAIL_MAX}", core.prompt_for_all(self.c, "mark"))
+
+    def test_the_manager_s_decision_and_an_ended_session_get_no_notice(self):
+        core.manage(self.c, self.dir.name, "boss")
+        i = core.item_add(self.c, "a", "Decide the banner color", doer="human", actor="mark")["id"]
+        self.as_session("boss")
+        core.forward(self.c, item=i, actor="boss", options=self.OPTS, recommend="Blue")
+        # #6472: the manager's forwarded decision names the manager (so its session panel and badge show it),
+        # while _tell_asker still sends the manager no 'Go on to the next one' notice.
+        self.assertEqual(core.item_show(self.c, i)["decision"]["by"], "boss")
+        core.TOKEN_AGENT.set(None)
+        core.done(self.c, i, None, actor="mark", choice="Blue")
+        j = core.item_add(self.c, "a", "Decide the font", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=j, actor="mark", options=self.OPTS, recommend="Blue")
+        core.unregister(self.c, "you-1")
+        core.TOKEN_AGENT.set(None)
+        core.done(self.c, j, None, actor="mark", choice="Blue")
+        self.assertEqual(self.notices("boss") + self.notices(), [])
 
 
 class QuestionHold(Base):
@@ -7775,6 +8423,7 @@ class Manager(Base):
         core.target_give(self.c, "web", "boss", "mark")
         core.inbox(self.c, "boss")
         x = self.add("a", "page")
+        core.done(self.c, x, "done", "w1")
         core.ship(self.c, x, "w1")
         got = [m for m in core.inbox(self.c, "boss", mark_read=False) if "ship request" in m["body"]]
         # The owner is the manager: a ship request wakes it at once (#4289, mark 2026-11-04), one notice.
@@ -7784,7 +8433,9 @@ class Manager(Base):
         self.assertEqual((w["result"], minutes), ("messages", 0))
         # Another owner: it gets the low notice, and the manager gets one that wakes it at once.
         core.target_give(self.c, "web", "w2", "mark")
-        core.ship(self.c, self.add("a", "footer"), "w1")
+        footer = self.add("a", "footer")
+        core.done(self.c, footer, "done", "w1")
+        core.ship(self.c, footer, "w1")
         self.assertEqual(sorted((m["to_agent"], m["level"]) for m in self.c.execute(
             "SELECT to_agent, level FROM messages WHERE body LIKE 'ship request%footer%'")), [("boss", "now"), ("w2", "low")])
         core.inbox(self.c, "boss")
@@ -8814,7 +9465,7 @@ class ReleaseGate(DeployHook):
         for bad in ({}, {"item": self.deploy}, {"agent": "ops"}):
             with self.assertRaisesRegex(RiverError, "set for each project from its needs"):
                 core.config_set(self.c, "release_approval", "person", **bad)
-        with self.assertRaisesRegex(RiverError, "review .* or person"):
+        with self.assertRaisesRegex(RiverError, "review .*, person .* or draft"):
             core.config_set(self.c, "release_approval", "always", project="site")
         self.assertEqual(core.release_approval(self.c, "web"), {"approval": "", "project": None})
         core.config_set(self.c, "release_approval", "person", project="site")
@@ -8959,6 +9610,107 @@ class ReleaseGate(DeployHook):
         self.assertIn("release cadence: off (why: each push is a release)", text)
         self.assertEqual(core.release_plan(self.c, "web")["cadence_reason"], "each push is a release")
 
+class DraftRelease(DeployHook):
+    """#6213 (mark 2026-11-19: 'the tag to be a final step with a manual approval'): with release_approval draft the
+    deploy hook prepares the release and exits HOOK_YES; MaximizePM adds the person's yes with the hook's last lines;
+    after the yes the hook runs again with MAXPM_APPROVED and finishes. The stages are one line."""
+
+    def draft(self):
+        """The draft hook and release_approval draft (not in setUp: the inherited tests of DeployHook run as before)."""
+        self.seen = os.path.join(self.dir.name, "approved.txt")
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("import os, sys\n"
+                    f"open({self.seen!r}, 'a').write(os.environ.get('MAXPM_APPROVED', '') + '\\n')\n"
+                    "if not os.environ.get('MAXPM_APPROVED'):\n"
+                    "    print('::step start push kind=deploy'); print('::step end push passed')\n"
+                    "    print('github-release: v1.5.0 is prepared and waits for your yes.')\n"
+                    "    print('  the draft: https://github.example/releases/v1.5.0'); sys.exit(76)\n"
+                    "print('::step start tag kind=deploy'); print('::step end tag passed')\n"
+                    "print('released v1.5.0')\n")
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" "{path}"', actor="mark")
+        core.config_set(self.c, "release_approval", "draft", project="site")
+
+    def stages(self):
+        from river.pipeline import targets
+        return {s["name"]: s["last_run"] for s in targets.default_pipeline(self.c, "web")["stages"]}
+
+    def test_the_hook_prepares_the_person_approves_then_the_hook_publishes(self):
+        from river.pipeline import targets
+        self.draft()
+        self.assertEqual(targets.shape(self.c, "web"), ["holding", "review", "deploy", "approval", "publish", "watch"])
+        self.pass_review("rev")
+        self.assertEqual(core.release_yes_pass(self.c), {}, "no yes before the hook prepared the release")
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(False, "waits for a person's yes")])
+        self.assertIn("prepared, waits for a person's yes (exit 76)", r[0]["result"])
+        yes = r[0]["yes"]
+        it = core.item_show(self.c, yes)
+        self.assertTrue(it["title"].startswith("Approve release web: "), it["title"])
+        self.assertIn("  the draft: https://github.example/releases/v1.5.0", it["context"])
+        self.assertNotIn("::step", it["context"])
+        dep = core.item_show(self.c, self.deploy)
+        self.assertEqual(dep["status"], "open")
+        self.assertIsNotNone(core._item(self.c, self.deploy)["cut_at"])
+        self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
+        self.assertEqual([i for i in dep["waits_on"] if core.item_show(self.c, i)["status"] != "done"], [yes])
+        self.assertEqual(core._draft_yes(self.c, self.deploy, ""), yes, "one yes for each preparation")
+        s = self.stages()
+        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["approval"]["item"], s["publish"]),
+                         ("passed", "queued", yes, None))
+        self.assertEqual([x["name"] for x in s["deploy"]["step_list"]], ["push"])
+        with self.assertRaisesRegex(RiverError, "only the person approves it"):
+            core.done(self.c, yes, "yes", "ops")
+        core.done(self.c, yes, "yes", "mark")
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+        with open(self.seen, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines(), ["", str(yes)])
+        s = self.stages()
+        self.assertEqual((s["deploy"]["state"], s["approval"]["state"], s["publish"]["state"]),
+                         ("passed", "passed", "passed"))
+        self.assertEqual([x["name"] for x in s["publish"]["step_list"]], ["tag"])
+
+    def test_a_failure_after_the_yes_starts_the_release_again_without_it(self):
+        self.draft()
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        with open(self.flag, "w"):
+            pass
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"sys.exit(3 if os.path.exists({self.flag!r}) else 0)\n")
+        r = self.run_deploy()
+        self.assertEqual(r[0]["deploy_end"], "failed")
+        self.assertEqual(core._approvals(self.c, self.deploy), [], "the release takes a new yes")
+        self.assertEqual(self.stages()["publish"]["state"], "failed")
+
+    def test_without_the_setting_the_yes_still_ends_the_wait(self):
+        self.draft()
+        core.config_unset(self.c, "release_approval", project="site")
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")], "no second yes")
+        with open(self.seen, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines(), ["", str(yes)])
+
+    def test_exit_76_after_the_yes_is_a_failure(self):
+        self.draft()
+        self.pass_review("rev")
+        yes = self.run_deploy()[0]["yes"]
+        core.done(self.c, yes, "yes", "mark")
+        path = os.path.join(self.dir.name, "draft.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("import sys\nsys.exit(76)\n")
+        r = self.run_deploy()
+        self.assertEqual(r[0]["deploy_end"], "failed")
+        self.assertIn("asked for a person's yes again", core.item_show(self.c, r[0]["fix"])["title"])
+
+
 class Hooks(Base):
     """A hook is a command that MaximizePM runs when a release event of a target occurs (maxpm target hook)."""
 
@@ -9003,7 +9755,8 @@ class Hooks(Base):
 
     def test_each_release_event_runs_its_hook_once_with_the_environment(self):
         cmd = self.recorder()
-        events = [e for e in core.HOOK_EVENTS if e != "deploy"]  # a deploy hook releases with no session (DeployHook)
+        # A deploy hook releases with no session (DeployHook); maxpm serve runs a merged hook (test_merged_...).
+        events = [e for e in core.HOOK_EVENTS if e not in ("deploy", "merged")]
         for event in events:
             core.target_hook(self.c, "web", event, cmd, actor="mark")
         here = os.path.realpath(self.dir.name)
@@ -9036,6 +9789,39 @@ class Hooks(Base):
         for event in events:  # one line for each run, on the deploy item
             self.assertEqual(len([c for c in history if c.startswith(f"hook {event}: exit 0, ")]), 1, history)
         self.assertEqual([m for m in core.inbox(self.c, "ops") if "hook" in m["body"]], [])  # no alert: none failed
+
+    def test_merged_runs_in_maxpm_serve_in_the_items_project_folder(self):
+        """#6401: when an item of a project of the target is done, its commits are on main, and a hook removes the
+        builds that only it used. done answers at once: only maxpm serve runs it, as a hook whose command ended."""
+        other = os.path.join(self.dir.name, "other")
+        os.mkdir(other)
+        core.project_add(self.c, "api", target="web", path=other)
+        core.target_hook(self.c, "web", "merged", self.recorder(), actor="mark")
+        a, h = self.add("api", "endpoint"), self.add("api", "Decide the name", doer="human")
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit 1", "dev")
+        core.done(self.c, h, "named", "mark")  # a person's item has no commits
+        self.assertEqual(core.run_hooks(self.c), [])  # not the command's own hook
+        self.c.execute("UPDATE hook_runs SET queued_at=?", (core.iso(core.now() - core.timedelta(minutes=3)),))
+        r = core.run_hooks(self.c, orphans=True)
+        self.assertEqual([(x["event"], x["item"], x["ok"]) for x in r], [("merged", a, True)])
+        self.assertEqual([(x["event"], x["item"], x["deploy"], x["cwd"]) for x in self.runs()],
+                         [("merged", str(a), str(a), os.path.realpath(other))])
+        self.assertTrue(any(e["change"].startswith("hook merged: exit 0") for e in core.item_show(self.c, a)["events"]))
+        core.claim(self.c, self.review, "rev")  # a review or deploy item of the target is no merge
+        core.review_pass(self.c, self.review, None, "rev")
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "release 7", "ops")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM hook_runs WHERE event='merged'").fetchone()[0], 1)
+
+    def test_a_push_target_has_the_merged_hook_and_no_other(self):
+        core.target_add(self.c, "docs")
+        core.target_mode(self.c, "docs", "push", "mark")
+        core.target_hook(self.c, "docs", "merged", "scripts/sweep.sh", actor="mark")
+        with self.assertRaisesRegex(RiverError, "mode push.*no hooks"):
+            core.target_hook(self.c, "docs", "deployed", "x", actor="mark")
+        core.target_mode(self.c, "docs", "deploy", "mark")
+        core.target_mode(self.c, "docs", "push", "mark")  # the merged hook does not stop the push mode
 
     def test_a_cut_that_comes_with_a_claim_runs_the_hook_with_no_revision(self):
         core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
@@ -9227,6 +10013,7 @@ class Hooks(Base):
         self.assertIn("does not exist", h["output"])
         self.assertEqual(self.runs(), [])
 
+    @timing.local_only("live child process timeout")
     def test_a_hook_past_hook_timeout_is_stopped_with_its_children(self):
         pidfile = os.path.join(self.dir.name, "child.pid")
         slow = self.script("slow.py", "import subprocess, sys\n"
@@ -9289,7 +10076,7 @@ class Hooks(Base):
         with self.assertRaises(RiverError) as e:
             core.target_hook(self.c, "web", "item-done", "scripts/x.sh", actor="mark")
         self.assertEqual(str(e.exception), "no hook event 'item-done'; the events: release-cut, review-passed, "
-                                           "review-failed, deployed, deploy")
+                                           "review-failed, deployed, deploy, merged")
         with self.assertRaisesRegex(RiverError, "no hook event 'cut'"):
             core.target_hook(self.c, "web", "cut", clear=True)
         self.assertEqual(core.target_hook(self.c, "web")["hooks"], [])
@@ -10401,7 +11188,9 @@ class PushGuard(Base):
 
     def test_a_blocked_item_holds_a_push_and_the_setting_turns_it_off(self):
         core.block(self.c, self.item, "waiting on the vendor", actor="w")
-        self.assertIsNone(self.bash("git push")["deny"])  # its own block: it pushes the parts that are done
+        self.assertIsNone(self.bash("git push")["deny"])  # its own block releases the item: it pushes the parts that are done
+        core.unblock(self.c, self.item)
+        core.claim(self.c, self.item, "w")
         core.block(self.c, self.item, "waiting on the vendor", actor="boss")
         self.assertIn(f"#{self.item} is blocked: waiting on the vendor", self.bash("git push")["deny"])
         core.message(self.c, "alert", "stop", to="w", actor="boss")
@@ -10431,6 +11220,53 @@ class PushGuard(Base):
         self.assertEqual(set(agents.get("claude").read_hook({"hook_event_name": "PreToolUse"})), set(agents.HOOK_REPORT_KEYS))
 
 
+class TmuxGuard(Base):
+    """#6246: on 2026-11-19 two workers ended a test tmux server with 'TMUX_TMPDIR=<folder> tmux kill-server' inside
+    their panes. TMUX names the pane's server there, so the kill ended the server of every agent session, twice."""
+
+    def bash(self, command, sid="sess-unknown"):
+        return core.activity_event(self.c, {"hook_event_name": "PreToolUse", "session_id": sid, "tool_name": "Bash",
+                                            "tool_input": {"command": command}}, env={})
+
+    def test_a_kill_server_of_no_own_server_is_refused(self):
+        # The two commands of that day, and other ways to the same server. The hook refuses them for any session,
+        # also one that MaximizePM does not know.
+        for cmd in ("TMUX_TMPDIR=/private/tmp/mx6239 /opt/homebrew/bin/tmux kill-server; echo kill $?",
+                    'd=$(cat x); TMUX_TMPDIR=$d/tm tmux kill-server 2>&1; d2=$(mktemp -d)',
+                    "tmux kill-server", "env TMUX_TMPDIR=/tmp/x tmux -f /dev/null kill-server",
+                    "ls\ntmux kill-server", f"tmux -L {core.TMUX_SOCKET} kill-server", "(tmux kill-server)",
+                    "env -u TMUX TMUX_TMPDIR=$D tmux kill-server; rm -rf $D", "x=$(tmux kill-server)",
+                    "true && /usr/local/bin/tmux -f /dev/null kill-server", "echo 'unclosed\ntmux kill-server"):
+            self.assertIn("ends the tmux server of every agent session", self.bash(cmd)["deny"] or "", cmd)
+        # A server of its own, other tmux commands, and the words in a search or a message run.
+        for cmd in ("tmux -L t6242 kill-server", "tmux -S /tmp/x/sock kill-server", "tmux -L't6242' kill-server",
+                    "/opt/homebrew/bin/tmux -Lbuildcheck kill-server", "tmux list-sessions", "tmux kill-pane -t %3",
+                    "grep -rn 'tmux.*kill-server' tests/", 'git commit -m "a test ends tmux kill-server"',
+                    "grep -n kill-server river/server.py"):
+            self.assertIsNone(self.bash(cmd)["deny"], cmd)
+
+    def test_a_tmux_of_a_test_reaches_no_server_of_the_person(self):
+        """tests/__init__.py takes TMUX out and puts TMUX_TMPDIR in the test folder: a plain tmux in a test starts a
+        server of the test run. The check comes before any tmux call, so a failure here ends no server."""
+        import shutil
+        self.assertNotIn("TMUX", os.environ)
+        self.assertTrue(os.environ.get("TMUX_TMPDIR", "").startswith(tempfile.gettempdir().rstrip("/")) or
+                        "maxpm-tests-" in os.environ.get("TMUX_TMPDIR", ""), os.environ.get("TMUX_TMPDIR"))
+        if not shutil.which("tmux"):
+            self.skipTest("tmux is not installed")
+        sock = os.path.join(os.environ["TMUX_TMPDIR"], f"tmux-{os.getuid()}", "default")
+        # Only by its path: a kill-server with no -S would go to whatever server this environment names.
+        self.addCleanup(subprocess.run, ["tmux", "-S", sock, "kill-server"], capture_output=True, timeout=15)
+        r = subprocess.run(["tmux", "-f", "/dev/null", "new-session", "-d", "-s", "t6246", "sleep 30"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode or "not permitted" in r.stderr:
+            self.skipTest(f"tmux cannot start a server here: {r.stderr.strip()}")  # a sandbox, or a long socket path
+        self.assertTrue(os.path.exists(sock), r.stderr)
+        got = subprocess.run(["tmux", "-S", sock, "list-sessions", "-F", "#{session_name}"],
+                             capture_output=True, text=True, timeout=15).stdout.split()
+        self.assertEqual(got, ["t6246"])
+
+
 class ManagerWake(Base):
     """A ship request, a review that passed and a deploy that is done wake the manager's watch at once (#4289)."""
 
@@ -10457,13 +11293,12 @@ class ManagerWake(Base):
             "SELECT level, body FROM messages WHERE to_agent='boss' ORDER BY id")]
         self.assertEqual(got, [
             ("now", f"ship request: #{x} page joins deploy #{dep} for web"),
-            # The cut offers the review report (#6003): a low notice, read at the next wake.
-            ("low", f"release #{dep} of web is cut with 1 task: read its report (maxpm target report {dep}) and write "
-                    f"its summary, risks first (maxpm target summary {dep} \"<one paragraph>\"): the person then gets "
-                    f"it as a Read card"),
+            # The cut asks the manager for nothing: a task writes the summary of the report (#6493).
             ("now", f"review #{rv} of web passed: its deploy can start (checked the page)"),
             ("now", f"deploy #{dep} to web is done (release-1)")])
-        # The watch returns for them at once.
+        # The watch returns for them at once (the summary task, a new task, is a change before them: it is done).
+        summary = self.c.execute("SELECT id FROM items WHERE found_during=? AND kind='operational'", (dep,)).fetchone()[0]
+        core.drop(self.c, summary, "w1", note="written")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None)
         self.assertEqual(w["result"], "messages")
         # The manager's own steps wake nothing.
@@ -11265,10 +12100,10 @@ class OpsSelf(Base):
         with mock.patch.object(cli, "SETUP_ASK", ask), contextlib.redirect_stdout(out):
             cli.run(["--as", "mark", "ops", "setup"])
         text = out.getvalue()
-        self.assertIn("  0. MaximizePM itself: 10 checks", text)
-        self.assertIn("added 10 checks to the project maximizepm", text)
+        self.assertIn("  0. MaximizePM itself: 9 checks", text)
+        self.assertIn("added 9 checks to the project maximizepm", text)
         self.assertIn("What should MaximizePM watch in maximizepm?", text)  # then more checks, as for any project
-        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 10)
+        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 9)
 
 
 class EditKeepsOldText(Base):
@@ -11302,6 +12137,17 @@ class ShippedPolicies(unittest.TestCase):
             for x in ([roles] if isinstance(roles, str) or roles is None else roles):
                 self.assertIn(x, (None,) + core.POLICY_ROLES)
         self.assertEqual(len(core.global_policies()), len(ids))
+
+    def test_the_manager_only_rules_reach_only_the_manager(self):
+        # #6450: the general rules of the manager ship as built-in policies with the role manager.
+        with tempfile.TemporaryDirectory() as d:
+            c = core.connect(os.path.join(d, "t.db"))
+            mine = {p["pid"] for p in core.global_policies() if p["roles"] == ["manager"]}
+            self.assertLessEqual({"g8", "g9", "g10"}, mine)
+            self.assertLessEqual(mine, {p["pid"] for p in core.policies_for(c, role="manager")})
+            for role in ("worker", "reviewer", "expert"):
+                self.assertFalse(mine & {p["pid"] for p in core.policies_for(c, role=role)}, role)
+            c.close()
 
 
 class SessionSamples(Base):
@@ -11763,6 +12609,7 @@ class Ops(Base):
         self.c.commit()
         self.assertIsNone(core._fault_refusal(self.c, "boss", "deploy"))
         core.target_hook(self.c, "prod", "deployed", "echo again", actor="boss")
+        core.done(self.c, work, "fixed", "dev")
         core.ship(self.c, work, "boss")
 
     def test_project_show_has_a_monitoring_line_with_the_checks_of_the_project_and_its_target(self):
@@ -11957,6 +12804,29 @@ class Ops(Base):
             self.run_at("site", "job", later, bad); r = self.run_at("site", "job", later + timedelta(minutes=5), bad)
         self.assertEqual(r["items"][0]["action"], "opened")
         self.assertEqual(len(self.ops_items()), 2)
+
+    def test_a_fault_item_that_opens_again_leaves_the_open_release(self):
+        # #6505: the page-speed fault #6342 was shipped into the open release #6211 of maximizepm-github; a fault
+        # again would open it again, and the release would wait on it. A check never holds a release.
+        core.target_add(self.c, "web", "rsync, then restart")
+        core.project_target(self.c, "site", "web")
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1, "recover_after": 1},
+                     actor="boss")
+        t = core.now()
+        bad = self.proc(2, "JOB CRITICAL - no run for 2h\n")
+        self.run_at("site", "job", t, bad)
+        (it,) = self.ops_items()
+        core.done(self.c, it["id"], actor="boss", output="the disk was full")
+        dep = core.ship(self.c, it["id"], "boss")["id"]
+        waits = lambda: [r[0] for r in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?", (dep,))]
+        self.assertIn(it["id"], waits())
+        self.run_at("site", "job", t + timedelta(minutes=5), self.proc(0, "JOB OK"))
+        r = self.run_at("site", "job", t + timedelta(minutes=10), bad)
+        self.assertEqual(r["items"][0]["action"], "reopened")
+        self.assertNotIn(it["id"], waits())
+        self.assertEqual(core.item_show(self.c, dep)["status"], "open")
+        changes = [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (dep,))]
+        self.assertTrue(any(f"#{it['id']} left this release" in x for x in changes), changes)
 
     def test_the_briefing_of_a_fault_item_shows_the_check_and_its_commands(self):
         core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1,
@@ -12155,6 +13025,7 @@ class Ops(Base):
         self.assertEqual((run["status"], run["timed_out"]), ("unknown", 1))
         self.assertIn("timeout 30s", run["summary"])
 
+    @timing.local_only("live child process timeout")
     def test_a_real_command_past_its_timeout_stops_and_counts_as_unknown(self):
         core.ops_add(self.c, "site", "slow", "cmd", {"command": f"{sys.executable} -c 'import time; time.sleep(30)'",
                                                     "timeout": "1s", "every": "1m", "fail_after": 1}, actor="boss")
@@ -12461,6 +13332,7 @@ class Ops(Base):
 
     # ---- the outside switch (#5435)
 
+    @timing.local_only("wall-clock thread timing")
     def test_serve_beats_to_the_outside_address_once_each_interval_and_a_failure_is_logged_not_retried(self):
         sent = []
         state = dict(core.OPS_DEADMAN)
@@ -13278,6 +14150,27 @@ class OpsKindRelease(ReleaseBase):
         self.assertEqual((p["doer"], p["priority"]), ("human", 0))
         self.assertTrue(p["title"].startswith(f"Roll back web to release #{self.deploy}: HTTP 500"), p["title"])
         self.assertIn("deploy.sh --to <rev>", p["context"])
+
+    def test_a_release_regression_with_no_rollback_command_goes_to_a_fix(self):
+        # #6505 (mark 2026-11-20): a check never rolls back a release. With no rollback command (maxpm: a release is
+        # a version on GitHub), no person's rollback step: the fault item is the fix, and nothing waits on a person.
+        first = self.release()
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "fail_after": 1}, actor="dev")
+        w = self.add("site", "new page")
+        core.claim(self.c, w, "dev")
+        core.done(self.c, w, "def", "dev", ship_it=True)
+        second = self.c.execute("SELECT id FROM items WHERE kind='deploy' AND status='open'").fetchone()["id"]
+        self.run_at("home", first + timedelta(minutes=1), 200)
+        core.claim(self.c, second, "ops")
+        with mock.patch.object(core, "now", lambda: first + timedelta(minutes=30)):
+            core.done(self.c, second, "v2 out", "ops")
+        r = self.run_at("home", first + timedelta(minutes=35), 500)
+        [x] = [i for i in r["items"] if i["key"] == "ops:site:home"]
+        it = core.item_show(self.c, x["item"])
+        self.assertEqual(x["kind"], "release-regression")
+        self.assertEqual(it["waits_on"], [])
+        self.assertNotIn("ROLLBACK FIRST", it["context"])
+        self.assertFalse(self.c.execute("SELECT 1 FROM items WHERE title LIKE 'Roll back %'").fetchone())
 
 
 class OpsOutside(Base):
@@ -14353,6 +15246,7 @@ class RunLog(Base):
         self.assertEqual(g["why"], "space")
         self.assertEqual(set(json.loads(g["row"])) - set(core.GONE_SHORT), set())
 
+    @timing.local_only("wall-clock lock timing")
     def test_run_log_skips_a_locked_or_missing_queue(self):
         with mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "none", "q.db")}):
             core.log_run(["list"], core.iso(core.now()), 1, 0, "list")  # no error, no file
@@ -14517,9 +15411,7 @@ class ReleaseReport(Base):
         self.assertEqual(names[0], "Risks")  # risks first
         self.assertEqual(r["groups"][0]["items"], [self.r])
         self.assertEqual(r["tasks"][self.r]["risk"], "a revert")
-        self.assertIn("checkout", names)
-        self.assertEqual(next(g for g in r["groups"] if g["name"] == "checkout")["line"], "People can pay")
-        self.assertIn("site", names)
+        self.assertEqual(names, ["Risks", "site"])  # before the summary: by project, not by goal (#6493)
         t = r["tasks"][self.a]
         self.assertEqual((t["changed"], t["commits"], t["done_by"]), ("You can pay by card", [f"abc{self.a:04d}f"], "dev"))
         self.assertEqual(t["decisions"][0]["answer"]["body"], "Card first")
@@ -14528,23 +15420,64 @@ class ReleaseReport(Base):
         with self.assertRaisesRegex(RiverError, "is no release"):
             report.report(self.c, self.a)
 
-    def test_the_cut_tells_the_manager_and_the_summary_sends_a_read_card(self):
+    def test_the_cut_adds_the_summary_task_and_the_summary_sends_a_read_card(self):
+        # #6493: at the cut a fresh session writes the summary; the manager is not asked and nothing waits on it.
         from river import report
         core.target_cut(self.c, "web", actor="mark")
-        note = self.c.execute("SELECT body FROM messages WHERE to_agent='boss' AND body LIKE 'release #%'").fetchone()
-        self.assertIn(f"maxpm target report {self.deploy}", note["body"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM messages WHERE to_agent='boss' AND body LIKE 'release #%'").fetchone())
+        task = self.c.execute("SELECT * FROM items WHERE found_during=? AND kind='operational'", (self.deploy,)).fetchone()
+        self.assertEqual(task["title"], f"Write the summary of release #{self.deploy} of web")
+        self.assertEqual((task["doer"], task["status"], task["short"]), ("ai", "open", "Write the release summary"))
+        self.assertIn(f"maxpm target summary {self.deploy} --file", task["context"])
+        self.assertIn("## Risks and what to check", task["context"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM deps WHERE blocked_by=?", (task["id"],)).fetchone())
+        r = report.report(self.c, self.deploy)
+        self.assertEqual(r["summary"]["task"], {"id": task["id"], "status": "open"})
+        self.assertTrue(r["summary"]["text"].startswith(f"An agent writes the summary of this release now (#{task['id']})"))
+        self.assertNotIn(task["id"], r["tasks"])
+        with self.assertRaisesRegex(RiverError, "--file"):
+            report.summary_set(self.c, self.deploy, "  ", "boss")
         self.c.execute("UPDATE agents SET last_seen=? WHERE name='mark'", (core.iso(core.now()),))
         self.c.commit()
-        out = report.summary_set(self.c, self.deploy, "One revert of the menu; card payments are new.", "boss")
+        text = (f"## What changes for you\n\n### Checkout\n- You can pay by card (#{self.a}).\n\n### Pages\n"
+                f"- The footer shows again (#{self.b}, #{self.a}).\n\n## Risks and what to check\n"
+                f"- The menu change is undone (#{self.r}).\n\n## Under the hood\nNo other tasks.\n")
+        with self.assertRaisesRegex(RiverError, "only the session that holds the summary task"):
+            report.summary_set(self.c, self.deploy, text, "dev")
+        core.register(self.c, "writer")
+        core.claim(self.c, task["id"], "writer")
+        out = report.summary_set(self.c, self.deploy, text, "writer")
         self.assertEqual(len(out["read_cards"]), 1)
         card = self.c.execute("SELECT body, level FROM messages WHERE to_agent='mark' AND kind='alert'").fetchone()
         self.assertTrue(card["body"].startswith("Read the report"))
+        self.assertIn("before it goes out: You can pay by card. The footer shows again. The menu change is undone.",
+                      card["body"])
         self.assertEqual(card["level"], "low")
         self.assertEqual(core.action_type(card["body"]), "read")
         r = report.report(self.c, self.deploy)
-        self.assertEqual((r["summary"]["by"], r["summary"]["text"]), ("boss", "One revert of the menu; card payments are new."))
-        again = report.summary_set(self.c, self.deploy, "Changed.", "boss")
+        self.assertEqual((r["summary"]["by"], r["summary"]["text"]), ("writer", text.strip()))
+        # The task list follows the areas of the summary; the revert stays under Risks, each task in one group.
+        self.assertEqual([(g["name"], g["items"]) for g in r["groups"]],
+                         [("Risks", [self.r]), ("Checkout", [self.a]), ("Pages", [self.b])])
+        self.assertEqual(r["tasks"][self.r]["risk"], "a revert")
+        # The manager edits it; a task that only its risks name joins the Risks group.
+        again = report.summary_set(self.c, self.deploy, f"Changed.\n\n## Risks and what to check\n- Footer (#{self.b})",
+                                   "boss")
         self.assertEqual(again["read_cards"], [])  # one Read card only
+        r = report.report(self.c, self.deploy)
+        self.assertEqual([(g["name"], g["items"]) for g in r["groups"]],
+                         [("Risks", [self.r, self.b]), ("Under the hood", [self.a])])
+        self.assertEqual(r["tasks"][self.b]["risk"], "a risk the summary names")
+
+    def test_the_areas_of_a_summary(self):
+        from river import report
+        tasks = {1: {}, 2: {}, 3: {}}
+        text = ("## What changes for you\n- A flat point (#1)\n### Pages\n- Page (#2, #1, #99)\n"
+                "## Risks and what to check\n- Restart (#3)\n")
+        self.assertEqual(report.areas(text, tasks), [("What changes for you", [1]), ("Pages", [2]),
+                                                     ("Risks and what to check", [3])])
+        self.assertEqual(report.areas("One paragraph about #1.", tasks), [])
+        self.assertEqual(report.plain("## A\n- One (#1, #2).\n- Two #3\n"), "One. Two")
 
     def _card(self):
         from river import report
@@ -14735,9 +15668,20 @@ class ReleaseReport(Base):
         old = cli.INSIDE_AGENT
         cli.INSIDE_AGENT = lambda: True
         self.addCleanup(setattr, cli, "INSIDE_AGENT", old)
-        with self.assertRaisesRegex(RiverError, "not allowed"):
+        # #6493: a session writes only the summary of the release whose summary task it holds.
+        with self.assertRaisesRegex(RiverError, "only the session that holds the summary task"):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 cli.run(["--as", "dev", "target", "summary", str(self.deploy), "All good"])
+        core.target_cut(self.c, "web", actor="mark")
+        task = self.c.execute("SELECT id FROM items WHERE found_during=? AND kind='operational'", (self.deploy,)).fetchone()[0]
+        core.register(self.c, "writer")
+        core.claim(self.c, task, "writer")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "writer", "target", "summary", str(self.deploy), "## What changes for you\n- Pay by card"])
+            cli.run(["--as", "writer", "target", "summary", str(self.deploy)])
+        self.assertIn(f"The summary of release #{self.deploy} is saved.", out.getvalue())
+        self.assertTrue(out.getvalue().rstrip().endswith("## What changes for you\n- Pay by card"))
 
 
 class CardShare(Base):
@@ -15351,6 +16295,27 @@ class Proof(Base):
         q = core.item_add(self.c, "web", "Small fix")["id"]
         core.claim(self.c, q, "w")
         self.assertEqual(self.done(q)[0], 0)
+
+    def test_shot_already_in_proof_folder_keeps_the_file(self):
+        # #6285: a --shot whose source is already in proof/<id>/ closes the item instead of raising SameFileError.
+        with open(os.path.join(self.repo, "app.css"), "w") as f:
+            f.write("body {}\n")
+        self.git("add", "app.css")
+        self.git("commit", "-q", "-m", "Style tweak")
+        sha = self.git("rev-parse", "--short", "HEAD")
+        x = core.item_add(self.c, "web", "Check layout", touches="river/static/app.css")["id"]
+        core.claim(self.c, x, "w")
+        kept = os.path.join(self.dir.name, "proof", str(x), "shot.png")
+        os.makedirs(os.path.dirname(kept), exist_ok=True)
+        data = b"\x89PNG already in proof"
+        with open(kept, "wb") as f:
+            f.write(data)
+        code, text = self.done(x, "--commit", sha, "--test", "npm test", "--result", "ok", "--shot", kept)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(core._item(self.c, x)["status"], "done")
+        with open(kept, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertIn(f"shot: {kept}", text)
 
 
 class FullQuestion(Base):

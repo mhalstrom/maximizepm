@@ -56,10 +56,9 @@ export function urlPath() {
 }
 function go(r) { setDeploy(r); nav.deployGo(); }
 
-// The page of the pipeline that releases a target: the pipeline whose environment names it, else its default.
+// A target's release page.
 export function openTarget(name) {
-  const p = data && data.pipelines.find(x => (x.targets || []).includes(name) && !x.default);
-  go({ part: null, pipeline: p ? p.name : name, tab: "stages" });
+  go({ part: null, pipeline: name, tab: "stages" });
 }
 
 // ---- reading and drawing
@@ -71,6 +70,11 @@ export async function renderDeploy(force) {
   catch (e) { if (on) $("#dpList").innerHTML = empty(esc(e.message)); return; }
   drawBadge();
   if (tab !== "deploy") return;
+  const alias = data.aliases?.[D.pipeline];
+  if (typeof alias === "string") {
+    D.pipeline = alias;
+    nav.deployReplaceUrl();
+  }
   drawParts();
   for (const id of ["list", "pipeline", "part"]) $("#deploy-" + id).classList.toggle("hidden", id !== view());
   if (D.pipeline) return drawPage(force);
@@ -305,7 +309,7 @@ $("#tab-deploy").addEventListener("click", (e) => {
   if (!t) return;
   const d = t.dataset;
   if (d.dpTriggers) return go({ part: null, pipeline: d.dpTriggers, tab: "triggers" });
-  if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the forge");
+  if (d.dpCheck !== undefined) return pipeAct("pipeline_account_check", { secret: d.dpCheck || null }, "Checked with the Git host");
   if (d.dpPart) return go({ part: d.dpPart, pipeline: null, tab: "stages" });
   if (d.dpOpen) return go({ part: null, pipeline: d.dpOpen, tab: "stages" });
   if (d.dpTab) return go({ part: null, pipeline: D.pipeline, tab: d.dpTab });

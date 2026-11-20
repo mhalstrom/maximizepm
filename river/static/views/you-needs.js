@@ -9,7 +9,7 @@ import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
-import { openCard, openItemCard, openCardQueue, isOpen as waitOpen } from "../components/waitDialog.js";
+import { openCard, openItemCard } from "../components/waitDialog.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
 import { fromEvent, typeChip } from "../components/askCard.js";
 import { openSignin } from "./signinAsk.js";
@@ -23,6 +23,7 @@ const browserOf = (body) => { const m = /\/sessions\/([^/\s?#]+)\/browser\b/.exe
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
 export let NY = [], nySig = "";
+let nyDecSig = "";
 const nyOpen = new Set();
 export function humanActor() { const a = S && S.agents.find(x => x.name === actor()); return a && a.kind === "human" ? a.name : null; }
 
@@ -30,34 +31,43 @@ export async function pollNeedsYou() {
   const h = humanActor();
   const r = await fetch("api/needs-you" + (h ? "?human=" + encodeURIComponent(h) : "")); if (!r.ok) return;
   NY = (await r.json()).events;
-  renderNeedsYou(); notifyNew(); autoCards();
+  // #6438 (mark 2026-11-20: 'it also should not take over the screen'): a new question or person item opens nothing by
+  // itself. The count of Your action items, the session's row and the bell say it came; the asking session shows it in
+  // its own view.
+  renderNeedsYou(); notifyNew();
+  const ds = JSON.stringify(NY.map(e => [e.id, e.decision || null]));
+  if (ds !== nyDecSig) { nyDecSig = ds; document.dispatchEvent(new CustomEvent("maxpm-needs-you")); }
 }
 
-// #6017 (mark 2026-11-15: 'This question should pop up as a modal, with all of the information that is relevant'): a
-// question or a person item that reaches the person opens its card by itself, once, over any tab, as Allow sign-ins
-// does. This browser keeps the ids it showed; the first time it only records what is open, so old cards do not all
-// open. It waits while another dialog is open, the page is hidden, or the person types in a box. Several new ones:
-// one card with "1 of N" and Next (waitDialog.js). The bell (#6001) is for the phone and Mac notices; this opens on
-// the page also with the bell off.
-const AUTO_KEEP = 500;
-export function newCards(list, seen) {
-  const cards = list.filter(e => e.kind === "item" || e.message_kind === "question");
-  if (!Array.isArray(seen)) return { show: [], seen: cards.map(e => e.id).slice(-AUTO_KEEP) };
-  const s = new Set(seen), show = cards.filter(e => !s.has(e.id));
-  return { show, seen: show.length ? [...seen, ...show.map(e => e.id)].slice(-AUTO_KEEP) : seen };
+const liveAgent = (n) => {
+  const a = n && S && (S.agents || []).find(x => x.name === n);
+  return a && a.kind !== "human" && !["gone", "stopped"].includes(a.state) ? a.name : null;
+};
+const activeManager = () => {
+  const a = S && (S.agents || []).find(x => x.role === "manager" && !["gone", "stopped"].includes(x.state));
+  return a ? a.name : null;
+};
+
+// What waits for the person in a session (#6438, #6472): its prompts and questions (s.waiting, api/sessions), and the
+// decisions it put to the person (decision.by: the manager, the needs-you session, or a one-item helper), from Needs
+// you, as {kind: "card", id, e}. A decision with no live decision.by (forwarded before #6472 or by an ended session)
+// shows in the active manager session so it is never lost. A question of its own is in its list already. The row's
+// badge, its dot and its panel count the same.
+export function waitsOf(s) {
+  const own = s.waiting || [];
+  const put = NY.filter(e => e.decision
+    && (e.decision.by === s.name || (s.role === "manager" && (!e.decision.by || (S && !liveAgent(e.decision.by)))))
+    && !own.some(w => w.kind === "question" && w.id === e.message_id));
+  return [...own, ...put.map(e => ({ kind: "card", id: e.id, e }))];
 }
-function autoCards() {
-  const h = humanActor(); if (!h) return;
-  const key = "river.card.auto." + h;
-  let seen = null;
-  try { seen = JSON.parse(store(key) || "null"); } catch (e) { seen = null; }
-  const got = newCards(NY, seen);
-  if (!got.show.length) { if (!Array.isArray(seen)) store(key, JSON.stringify(got.seen)); return; }
-  const typing = document.activeElement && document.activeElement.matches("input, textarea, [contenteditable]")
-    && (document.activeElement.value || document.activeElement.textContent || "").trim();
-  if (document.hidden || typing || waitOpen() || document.querySelector(".dlg:not(.hidden)")) return;  // later
-  store(key, JSON.stringify(got.seen));
-  openCardQueue(got.show);
+
+// The live agent session that asks (#6438, #6472): the one that put the decision (decision.by), else for a question
+// the asker, else for a forwarded decision with no live decision.by the active manager. A click on the line opens that
+// session's view with it. None (MaximizePM, a person, an ended session, a plain person item): the card.
+function askingSession(e) {
+  return liveAgent(e.decision && e.decision.by)
+    || (e.kind === "item" ? null : liveAgent(e.from_agent))
+    || (e.decision ? activeManager() : null);
 }
 
 // An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE), or for a manager that
@@ -186,8 +196,11 @@ export function onClick(t) {
     const id = +nyt.dataset.nyt, e = NY.find(x => x.id === id);
     // #6002: a question or a person item opens its card; a sign-in request opens its permission dialog; another
     // alert opens in the list, as before.
-    if (e && e.kind === "item") return openItemCard(e.item_id);  // the whole item: its tries too (#5996)
-    if (e && e.message_kind === "question") return openCard(fromEvent(e));
+    if (e && (e.kind === "item" || e.message_kind === "question")) {  // in the session that asks (#6438), else its card
+      const s = askingSession(e);
+      if (s && await nav.openSessionAsk(s, e)) return;
+      return e.kind === "item" ? openItemCard(e.item_id) : openCard(fromEvent(e));  // an item: its tries too (#5996)
+    }
     if (e && e.message_kind === "alert" && e.item_id && /^Read the report/.test(e.body || "")) {  // its Read card (#6003)
       act("message_read", { msg: e.message_id }).catch(() => {});
       return import("../components/reportDialog.js").then(m => m.openReport(e.item_id));

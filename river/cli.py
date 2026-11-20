@@ -69,8 +69,8 @@ SETUP = """Setting up agents to use MaximizePM
 
 """ + "\n".join("     " + line for line in AGENT_SNIPPET.splitlines()) + """
 
-   Or let maxpm add it:  maxpm init   (AGENTS.md holds the rules and the block;
-   the rules of an old CLAUDE.md move into it, and CLAUDE.md is deleted)
+   Or run maxpm init. It puts the work queue block in AGENTS.md and can
+   move rules from CLAUDE.md and GEMINI.md into AGENTS.md.
 
 3. Claude Code only, optional: install the skills so they load when needed:
      ln -s <repo>/skills/maxpm ~/.claude/skills/maxpm
@@ -111,6 +111,12 @@ SETUP = """Setting up agents to use MaximizePM
      maxpm setup-agent --claude-desktop    then quit and reopen the app
    The ChatGPT desktop app (Work and Codex modes) the same way:
      maxpm setup-agent --chatgpt-desktop   then restart the app
+
+8. Claude Code sessions that the person starts by hand: only maxpm serve
+   writes the queue, and the sessions that MaximizePM starts cannot write its
+   file. Ask the person whether their own sessions get the same rule (it goes
+   into ~/.claude/settings.json); with a yes:
+     maxpm setup-agent --guard             (--remove takes it out)
 """
 
 HINTS = {
@@ -234,6 +240,9 @@ def _release_lines(p):
     gate = p.get("approval") or {}
     if gate.get("approval") == "person":
         out = [f"release gate: a person's yes for each release (release_approval person, project {gate['project']})"]
+    elif gate.get("approval") == "draft":
+        out = [f"release gate: the deploy hook prepares each release as a draft, a person approves the draft, then the "
+               f"hook publishes it (release_approval draft, project {gate['project']})"]
     elif gate.get("approval") == "review":
         out = [f"release gate: a release goes out when its review passes (release_approval review, project "
                f"{gate['project']})"]
@@ -404,8 +413,6 @@ def _print_show(a):
               f"joins the next deploy item")
     if (a.get("release") or {}).get("text") or (a.get("release") or {}).get("in_cut"):  # maxpm ship
         print(f"  {_ship_line(a['release'])}")
-    if a.get("ship_warning"):  # maxpm ship of an item that is not done (#5386)
-        print(f"  WARNING: {a['ship_warning']}")
     if a["notes"]:
         print("  notes:", a["notes"])
     for line in _context_lines(a):
@@ -463,6 +470,10 @@ def _print_show(a):
     for p in a.get("plan") or []:  # #5989
         print(f"  from plan: {p['canvas']}, part '{p['part']}' (in plan version {p['plan_version']} of {p['plans']}): "
               f"maxpm canvas plan {p['canvas']}")
+    if a.get("artifact_links"):  # #6208
+        print("  reviews or names:")
+        for line in artifact_lines(a["artifact_links"], "    "):
+            print(line)
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
     if a.get("artifacts"):
@@ -490,6 +501,11 @@ def _print_show(a):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):
         print("  back in progress for its holder:", ", ".join(f"#{i}" for i in a["resumed"]))
+    acts = a.get("acts_on_answer") or {}
+    if acts.get("task"):
+        print(f"  no open item waits on this answer: #{acts['task']} acts on it")
+    elif acts.get("alert"):
+        print(f"  no open item waits on this answer: the manager {acts['alert']} acts on it")
     if a.get("close_check"):
         print("\n".join(_close_check_lines(a["close_check"], a["id"] if "merged" not in a else a["merged"]["id"])))
     if a.get("goal_checks"):
@@ -564,6 +580,8 @@ def _print_brief(a, n=240):
         x = a["artifacts"]
         print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
               + f", maxpm artifacts --item {x['item']}")
+    if a.get("artifact_links"):  # #6208
+        print("  reviews or names: " + "; ".join(line.strip() for line in artifact_lines(a["artifact_links"], "")))
     ap = a.get("approval")
     if ap:  # #5957
         print("  approval: " + ", ".join((["one action"] if ap["once"] else []) + ([f"only on {ap['on_day']}"]
@@ -804,7 +822,7 @@ def _unread_text(u, actor):
     if u["questions"]:
         parts.append(f"{u['questions']} question{'s' if u['questions'] > 1 else ''} to answer"
                      + (f", {u['questions_waiting']} waiting over {u['nudge_after']}" if u.get("questions_waiting") else ""))
-    return f"inbox: {', '.join(parts)} (maxpm --as {actor} inbox)"
+    return f"inbox: {', '.join(parts)} ({core.as_cmd(actor)} inbox)"
 
 
 def _footer(conn, actor):
@@ -837,11 +855,11 @@ def _footer(conn, actor):
     asked = core.asked_open(conn, actor)
     if asked:  # #5001: the asker closes each question that is answered or moot
         bits.append(f"{len(asked)} open question(s) you asked ({', '.join('#' + str(q['id']) for q in asked)}): close "
-                    f"each answered one: maxpm --as {actor} answer <id> --self \"...\", or a moot one: withdraw <id> "
+                    f"each answered one: {core.as_cmd(actor)} answer <id> --self \"...\", or a moot one: withdraw <id> "
                     f"--note \"...\"")
     gap = core.watch_gap(conn, actor)
     if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898); a stopped one ends (#6057)
-        bits.append(f"no watch runs for {core._short(gap)}: start maxpm --as {actor} manage --watch in the "
+        bits.append(f"no watch runs for {core._short(gap)}: start {core.as_cmd(actor)} manage --watch in the "
                     f"background before you end your turn")
     if bits:
         print(f"[{actor}: {'; '.join(bits)}]", file=sys.stderr)
@@ -878,6 +896,18 @@ LEVEL_HELP = ("high (the default) or low. A person's message wakes the manager a
               "more: its message waits for the manager's beat and escalates by the sender's state (#5976, #5977)")
 BLOCKED_HELP = ("a person's message that cannot wait wakes the manager's watch at once. An agent's flag counts no more: "
                 "its message escalates when it stops working (#5976)")
+ARTIFACT_HELP = ("the artifact it reviews or is about: a canvas name, a full file path, or an address (repeatable); "
+                 "the artifact then links back to it (#6208). A canvas, file or address in the text is linked too")
+
+
+def _artifact_args(a):
+    """The --artifact values, a relative file path made full from this folder (core reads it in another process)."""
+    out = []
+    for x in getattr(a, "artifact", None) or ():
+        p = Path(x).expanduser()
+        rel = not p.is_absolute() and not re.match(r"https?://", x, re.I) and ("/" in x or p.exists())
+        out.append(str(p.resolve()) if rel else x)
+    return out
 
 
 class _Null:
@@ -1022,10 +1052,17 @@ def parse_args(argv=None):
         try:
             args = build_parser(only=cmd).parse_args(words)
             if args.cmd == cmd:
-                return args
+                return _alias(args)
         except _Retry:
             pass
-    return build_parser().parse_args(words)
+    return _alias(build_parser().parse_args(words))
+
+
+def _alias(args):
+    """maxpm pipeline host is maxpm pipeline forge (#6482: the page says Git host; argparse keeps the alias typed)."""
+    if getattr(args, "plcmd", None) == "host":
+        args.plcmd = "forge"
+    return args
 
 
 BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
@@ -1082,6 +1119,7 @@ def build_parser(only=None):
     x.add_argument("--description", "--notes", dest="notes", default="",
                    help="what the project covers and what context helps (agents read this to pick an area)")
     x.add_argument("--path", help="folder this project lives in; maxpm go run there finds it")
+    x.add_argument("--create", action="store_true", help="make the --path folder when it does not exist")
     x.add_argument("--target", help="deploy target this project ships to (maxpm target list)")
     x.add_argument("--result-look", choices=("ask_first", "push_first"),
                    help="the look of the person at a finished result, as the person confirmed it: ask_first (the worker "
@@ -1090,6 +1128,7 @@ def build_parser(only=None):
     x = prs.add_parser("describe", help="set a project's description"); x.add_argument("name"); x.add_argument("text")
     x = prs.add_parser("path", help="link a project to a folder (maxpm go uses it)"); x.add_argument("name"); x.add_argument("path", nargs="?")
     x.add_argument("--move", action="store_true", help="move a project that is linked to another folder (the user decides)")
+    x.add_argument("--create", action="store_true", help="make the folder when it does not exist")
     x = prs.add_parser("show", help="a project's description, who works on it, and its ready items"); x.add_argument("name")
     x = prs.add_parser("target", help="put a project in a deploy target (no target clears it)")
     x.add_argument("name"); x.add_argument("target", nargs="?")
@@ -1332,9 +1371,13 @@ def build_parser(only=None):
     x.add_argument("--note"); x.add_argument("--project")
     x = cvs.add_parser("design", help="a new design document (#5989): a doc with the outline brief, discovery, "
                        "decisions, plan, risks, each part pending; fill each with maxpm canvas section")
-    x.add_argument("name"); x.add_argument("--title")
+    x.add_argument("name", nargs="?", help="the canvas (with --goal: goal-<goal>)"); x.add_argument("--title")
     x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
+    x.add_argument("--goal", help="the goal it belongs to: the doc is the canvas goal-<goal> in the goal's project, "
+                   "and maxpm goal show lists it")
     x.add_argument("--project", help="default: the item's project, or this folder's")
+    x.add_argument("--open", action="store_true", help="put it in front of the person: the page opens it in its side "
+                   "panel (maxpm serve must run)")
     x = cvs.add_parser("plan", help="the plan of a design document: each version of its Plan section, the tasks it "
                        "names (#<id>) and their state, and what each version added and removed")
     x.add_argument("name"); x.add_argument("--version", type=int, help="print the text of this plan version")
@@ -1851,11 +1894,12 @@ def build_parser(only=None):
                        "first), each task with what changed, its proof and its decisions (#6003). The page shows it from "
                        "the target's pipeline in Deploy")
     x.add_argument("id", type=int, help="the release's deploy item, or its review")
-    x = tgs.add_parser("summary", help="the person or the manager: write the paragraph at the top of a release's "
-                       "report, risks first; the first one sends the person a Read card")
+    x = tgs.add_parser("summary", help="the summary at the top of a release's report: what changes for a user, the "
+                       "risks and what to check (Markdown). A task at the cut writes it; a person or the manager edits "
+                       "it. With no text it prints it. The first one sends the person a Read card")
     x.add_argument("id", type=int, help="the release's deploy item, or its review")
-    x.add_argument("text", nargs="?", help="one paragraph (or --file)")
-    x.add_argument("--file", help="read the paragraph from a file (- for stdin)")
+    x.add_argument("text", nargs="?", help="the text (or --file)")
+    x.add_argument("--file", help="read the text from a file (- for stdin)")
     x = tgs.add_parser("cut", help="fix the list of items of the collected release now (the target owner, the "
                        "manager, or a person): later ship requests join the next deploy item, which waits until this "
                        "release is done. The cut also comes by itself when a reviewer takes the review of the release")
@@ -1900,7 +1944,7 @@ def build_parser(only=None):
     x = pls.add_parser("env", help="add or change an environment: a place that runs the code (dev, beta, prod, a "
                        "server)")
     x.add_argument("name"); x.add_argument("env")
-    x.add_argument("--target", help="the deploy target of today that it is"); x.add_argument("--url")
+    x.add_argument("--target", help="attach GitHub test checks to a deploy target"); x.add_argument("--url")
     x.add_argument("--notes"); x.add_argument("--remove", action="store_true")
     x = pls.add_parser("stage", help="add or change a stage: its kind, the command or forge workflow that does its "
                        "work, its environment, its gate, its place")
@@ -1944,7 +1988,7 @@ def build_parser(only=None):
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
                        "stage: maxpm serve runs each stage in order, each one after its gate opens")
     x.add_argument("name"); x.add_argument("--rev")
-    x = pls.add_parser("forge", help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
+    x = pls.add_parser("forge", aliases=["host"], help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
                        "minute and starts a gated workflow after the gate), an installed plugin (maxpm pipeline "
                        "plugins), or none (the stages run here)")
     x.add_argument("name")
@@ -2153,6 +2197,7 @@ def build_parser(only=None):
     x.add_argument("--blocks", type=int, help="item that must wait on this new one (usually the one you hold)")
     x.add_argument("--found-during", type=int, dest="found_during",
                    help="the item you were working on when you found this (links them; not a dependency)")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     g = x.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="mode", action="store_const", const="keep",
                    help="with --blocks: keep holding that item and do this one yourself now")
@@ -2220,6 +2265,7 @@ def build_parser(only=None):
     x.add_argument("--due", help="due date (2026-10-15, 'fri 17:00'), or none to remove it")
     x.add_argument("--goal", action="append", help="tag the item with a goal (repeatable)")
     x.add_argument("--untag", action="append", help="remove a goal tag (repeatable)")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     x.add_argument("--unreserve", action="store_true", help="end the reservation of an open item (\"reserved for <agent>\"), "
                    "so every agent can take it: that agent, a person, or a manager (the same as maxpm push <id> --cancel)")
 
@@ -2294,8 +2340,12 @@ def build_parser(only=None):
     x.add_argument("--description", default="", help="what the project covers, for agents")
     x.add_argument("--file", action="append", help="add the block to this file only (repeatable)")
     x.add_argument("--move", action="store_true", default=None,
-                   help="move the rules in CLAUDE.md to AGENTS.md and delete CLAUDE.md (the default with no terminal)")
-    x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md as it is")
+                   help="move the rules from CLAUDE.md and GEMINI.md to AGENTS.md and delete the old files "
+                        "(the default with no terminal)")
+    x.add_argument("--no-move", dest="move", action="store_false", help="keep old instruction files that hold rules")
+    x.add_argument("--plan", metavar="FILE",
+                   help="add every line of a plan file (an outline) to the project as an item, as maxpm add --from "
+                        "does; - reads it from stdin")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -2433,6 +2483,12 @@ def build_parser(only=None):
     x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
                                          "and item); --message then types a message into it at once (a person, or the manager)")
     x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
+    x = sub.add_parser("approve", help="answer the prompt in a session's terminal (allow a file read, a command, an edit; "
+                                       "the manager or a person): maxpm approve <session> <option number>, or --text "
+                                       "\"<what to do instead>\"")
+    x.add_argument("agent", help="the session")
+    x.add_argument("option", type=int, nargs="?", help="the number of the option, as the prompt lists it (1: the first)")
+    x.add_argument("--text", help="what the session does instead (the prompt's 'No, and tell ... what to do')")
     x = sub.add_parser("relay", help="hand a person's own words to a session word for word, as the person's prompt "
                        "(the manager or a person): maxpm relay <session> \"<words>\" --from <person>")
     x.add_argument("agent", help="the session")
@@ -2476,6 +2532,8 @@ def build_parser(only=None):
     x.add_argument("--shot", action="append", metavar="FILE", help="a screenshot or short video of a visible change, "
                    "or canvas:<name> (repeatable; the file is kept beside the queue)")
     x.add_argument("--no-proof", metavar="WHY", help="the result has no commit or test: why (setting done_proof)")
+    x.add_argument("--choice", metavar="LABEL", help="a person's item with options (maxpm forward --option): the "
+                   "option chosen; --output adds words to it")
     x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
                        "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
     x.add_argument("--project", help="project name(s) to wait on (default: this folder's)")
@@ -2579,6 +2637,7 @@ def build_parser(only=None):
         x.add_argument("--holder-of", type=int, help="send it to whoever holds this item")
         x.add_argument("--item", type=int, help="the item it is about (without an agent: its holder)")
         x.add_argument("--goal", help="send it to the owner of this goal")
+        x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
         x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
         x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
         x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does "
@@ -2614,11 +2673,14 @@ def build_parser(only=None):
     x.add_argument("--to", help="agent name"); x.add_argument("--item", type=int, help="the item it is about; without --to it goes to the holder")
     x.add_argument("--reply", type=int, help="message id this replies to (goes to its sender)")
     x.add_argument("--goal", help="send it to the owner of this goal")
+    x.add_argument("--artifact", action="append", default=[], help=ARTIFACT_HELP)
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x.add_argument("--type", dest="atype", choices=core.ACTION_TYPES, help="to a person: what the person does with it "
                    "(default: from its first word; a question: decide)")
-    x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
+    x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int)
+    x.add_argument("text", nargs="?", help="the answer (with --choice: words added to the chosen option)")
+    x.add_argument("--choice", metavar="LABEL", help="a question with options (maxpm forward --option): the option chosen")
     x.add_argument("--in-chat", action="store_true", help="you asked it, and the person answered in your own chat: "
                    "record their words as the answer and close the question")
     x.add_argument("--self", dest="self_answer", action="store_true", help="you asked it, and you have the answer "
@@ -2628,6 +2690,11 @@ def build_parser(only=None):
     x.add_argument("--item", type=int, help="a held person item (item id) instead of a message")
     x.add_argument("--drop", action="store_true", help="a held alert you dealt with yourself: close it, the person never sees it")
     x.add_argument("--note", help="what you add for the person (what you checked, your recommendation)")
+    x.add_argument("--option", action="append", default=[], metavar="LABEL: LINE",
+                   help="a choice for the person, a short label and one line on what it does (2 to 4 times); the page "
+                        "opens them as a dialog. Also on a question or item that is with the person already")
+    x.add_argument("--recommend", metavar="LABEL", help="the option you recommend (shown first); needed with --option")
+    x.add_argument("--question", help="your short question for the person (the asker's words stay on the card)")
     x = sub.add_parser("release-changes", help="a person says no to a release on its sign-off: the review runs again "
                                                "after a fix with these words (#6039)")
     x.add_argument("id", type=int, help="the 'Approve release' item")
@@ -2649,11 +2716,14 @@ def build_parser(only=None):
     x.add_argument("name"); x.add_argument("--human", action="store_true"); x.add_argument("--note", default="")
     x.add_argument("--session", help="the Claude Code session this agent runs in")
     x = sub.add_parser("session", help="record the Claude Code session you run in: maxpm session \"<name>\" --ref <ref>; "
-                       "or pin a session to the top of the Sessions tab: maxpm --as <you> session pin|unpin <agent>")
+                       "pin a session: maxpm --as <you> session pin|unpin <agent>; "
+                       "or end a hanging child command: maxpm session kill-command <agent> [--pid <pid>]")
     x.add_argument("name", nargs="*", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
     x.add_argument("--move", metavar="SESSION_ID", help="a person or the manager: the session id belongs to --to only")
     x.add_argument("--to", metavar="AGENT", help="with --move: the agent whose session it is")
+    x.add_argument("--pid", type=int, help="with kill-command: end only this PID (must be under the session's agent process)")
+    x.add_argument("--reason", help="with kill-command: why the command was ended")
     x = sub.add_parser("unregister", help="remove an agent that holds nothing (default: you)")
     x.add_argument("name", nargs="?")
     x = sub.add_parser("now", help="what you do now, in about 10 plain words, for your row on the Sessions tab: "
@@ -2668,9 +2738,17 @@ def build_parser(only=None):
     x.add_argument("--goal", help="send the note to the owner of this goal")
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
-    x = sub.add_parser("who", help="who is doing what"); x.add_argument("--item", type=int); x.add_argument("--project")
+    x = sub.add_parser("who", help="who is doing what")
+    x.add_argument("name", nargs="?", help="only this session, with its ended background tasks too")
+    x.add_argument("--item", type=int); x.add_argument("--project")
     x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
+    x = sub.add_parser("link", help="the page address of a session (yours by default), to give a person")
+    x.add_argument("name", nargs="?", help="the session; default: you")
+    g = x.add_mutually_exclusive_group()
+    g.add_argument("--browser", action="store_true", help="its Browser (a sign-in step)")
+    g.add_argument("--changes", action="store_true", help="its Changes")
+    x.add_argument("--phone", action="store_true", help="also the address on a phone (Tailscale, else the relay)")
     sub.add_parser("heartbeat", help="renew your leases")
     x = sub.add_parser("report", help="for an agent's hook, plugin or pane rule: the session's state now "
                                       "(docs/agent-adapters.md); maxpm release says that it ended")
@@ -2694,8 +2772,8 @@ def build_parser(only=None):
     hos.add_parser("forget", help="use this queue here again after a move to a host")
     x = hos.add_parser("signin", help="sign an agent CLI in on the host: its link here, you sign in in your browser")
     x.add_argument("target", help="the SSH target of the host")
-    x.add_argument("agent", choices=["claude", "codex"])
-    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    x.add_argument("agent", help="the agent CLI's command, such as claude; a wrong one lists them")
+    x.add_argument("--code", help="Claude Code, agy: the code that its sign-in page showed")
     ru = sub.add_parser("runner", help="runners: servers where a trigger rule's agent works with no person, terminal "
                         "or prompt (Deploy > Runners)")
     rus = ru.add_subparsers(dest="rucmd", required=True)
@@ -2703,12 +2781,12 @@ def build_parser(only=None):
     x = rus.add_parser("add", help="check a server over SSH, install this computer's maxpm there, and add it")
     x.add_argument("name", help="a short name, such as ci-1"); x.add_argument("--ssh", required=True,
                                                                           help="its SSH target: ci-1, ci@server")
-    x.add_argument("--cli", choices=["claude", "codex"], help="the agent CLI that runs the tasks (default: claude)")
+    x.add_argument("--cli", help="the agent CLI that runs the tasks (default: claude); a wrong one lists them")
     x.add_argument("--slots", type=int); x.add_argument("--max-minutes", type=int); x.add_argument("--max-cost", type=float)
     x = rus.add_parser("check", help="ask the server again what it has (its maxpm, its agent CLIs)")
     x.add_argument("name")
     x = rus.add_parser("set", help="change a runner: its agent CLI, slots, limits, the tools allowed with no prompt")
-    x.add_argument("name"); x.add_argument("--cli", choices=["claude", "codex"])
+    x.add_argument("name"); x.add_argument("--cli", help="the agent CLI that runs the tasks; a wrong one lists them")
     x.add_argument("--slots", type=int, help="runs at the same time")
     x.add_argument("--max-minutes", type=int, help="maxpm serve stops a run after this")
     x.add_argument("--max-cost", type=float, help="dollars for one run (Claude Code stops there)")
@@ -2727,8 +2805,9 @@ def build_parser(only=None):
     x = rus.add_parser("github", help="write .github/workflows/agent.yml: when a stage's workflow fails, GitHub "
                        "starts the agent in its own runner; its state and proof come back (#6152)")
     x.add_argument("pipeline")
-    x.add_argument("--cli", choices=["claude", "codex"], default="claude", help="the agent CLI of the job")
-    x.add_argument("--secret", help="the repository secret of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--cli", default="claude", help="the agent CLI of the job (default: claude); a wrong one lists them")
+    x.add_argument("--secret", help="the repository secret of the model key (ANTHROPIC_API_KEY, CODEX_API_KEY or "
+                   "GEMINI_API_KEY)")
     x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
     x.add_argument("--max-minutes", type=int, default=30, help="GitHub stops the job after this")
     x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
@@ -2738,8 +2817,9 @@ def build_parser(only=None):
     x = rus.add_parser("gitlab", help="write the job maxpm-agent into .gitlab-ci.yml: when a job of the pipeline "
                        "fails, GitLab starts the agent in its own runner; its state and proof come back (#6172)")
     x.add_argument("pipeline")
-    x.add_argument("--cli", choices=["claude", "codex"], default="claude", help="the agent CLI of the job")
-    x.add_argument("--secret", help="the CI/CD variable of the model key (ANTHROPIC_API_KEY, or CODEX_API_KEY)")
+    x.add_argument("--cli", default="claude", help="the agent CLI of the job (default: claude); a wrong one lists them")
+    x.add_argument("--secret", help="the CI/CD variable of the model key (ANTHROPIC_API_KEY, CODEX_API_KEY or "
+                   "GEMINI_API_KEY)")
     x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
     x.add_argument("--max-minutes", type=int, default=30, help="GitLab stops the job after this")
     x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
@@ -2753,7 +2833,7 @@ def build_parser(only=None):
     x.add_argument("--env", help="the Pulumi ESC environment that holds the model key (project/env)")
     x.add_argument("--stack", help="the stack whose deployments run the job (default: the pipeline stack)")
     x.add_argument("--branch", help="the branch the job checks out and a fix goes into (default main)")
-    x.add_argument("--cli", choices=["claude", "codex"], default="claude", help="the agent CLI of the job")
+    x.add_argument("--cli", default="claude", help="the agent CLI of the job (default: claude); a wrong one lists them")
     x.add_argument("--test", help="the command that proves a fix; the job runs it after the agent")
     x.add_argument("--max-minutes", type=int, default=30, help="the job stops the agent after this")
     x.add_argument("--max-cost", type=float, default=5.0, help="dollars for one run (Claude Code stops there)")
@@ -2780,8 +2860,8 @@ def build_parser(only=None):
     x = pgs.add_parser("pin", help="the kept version of its plugin that a pipeline runs (folder: the plugin's folder)")
     x.add_argument("pipeline"); x.add_argument("version")
     x = sub.add_parser("agent-login", help="sign an agent CLI in on a computer with no browser (a host)")
-    x.add_argument("agent", choices=["claude", "codex"])
-    x.add_argument("--code", help="Claude Code: the code that its sign-in page showed")
+    x.add_argument("agent", help="the agent CLI's command, such as claude; a wrong one lists them")
+    x.add_argument("--code", help="Claude Code, agy: the code that its sign-in page showed")
     ph = sub.add_parser("phone", help="reach this MaximizePM from your phone over Tailscale: its address and QR code")
     ph.add_argument("--on", action="store_true", help="turn it on: run tailscale serve --bg <serve_port>")
 
@@ -2846,8 +2926,13 @@ def build_parser(only=None):
     x.add_argument("--chatgpt-desktop", "--codex", dest="codex", action="store_true",
                    help="add MaximizePM (maxpm mcp) to ~/.codex/config.toml, which the ChatGPT desktop app (Work and Codex "
                         "modes) and the Codex CLI share, leaving the other servers as they are")
-    x.add_argument("--remove", action="store_true", help="with --claude-desktop or --chatgpt-desktop: take MaximizePM out again")
-    x.add_argument("--config", help="with --claude-desktop or --chatgpt-desktop: the config file (default: where the app keeps it)")
+    x.add_argument("--guard", action="store_true",
+                   help="add the queue guard to Claude Code's user settings: sessions that you start by hand cannot "
+                        "write the queue file (the sessions that maxpm serve starts get it by themselves)")
+    x.add_argument("--remove", action="store_true",
+                   help="with --claude-desktop, --chatgpt-desktop or --guard: take MaximizePM out again")
+    x.add_argument("--config", help="with --claude-desktop, --chatgpt-desktop or --guard: the config file (default: "
+                                    "where the app keeps it)")
     return p
 
 
@@ -2888,18 +2973,34 @@ def activity_command(stdin=None, agent_id="claude"):
     import json
     conn = None
     try:
+        from . import agents
+        ad = agents.get(agent_id)
+        if ad.has("project_hooks") and not any(os.environ.get(v) for v in
+                                               getattr(ad.module, "HOOK_ENV", ("MAXPM_AGENT", core.TOKEN_ENV))):
+            # A hook in a project's hook file runs in every session of that CLI there (#6351): one that MaximizePM
+            # did not start has no MaximizePM session in its environment, and the hook does nothing.
+            return 0
         payload = json.loads((stdin or sys.stdin).read() or "{}")
         conn = core.connect()
         conn.execute("PRAGMA busy_timeout=2000")
         res = core.hook_report(conn, agent_id, payload if isinstance(payload, dict) else {})
+        if ad.has("hook_answer") and res["state"] == "idle" and res["agent"]:
+            # A CLI whose turn end takes a message (agy's Stop hook, #6351): the messages that wait go into the
+            # session now, and its turn goes on (hook_answer).
+            res["deliver"] = core.turn_end_messages(conn, res["agent"])
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
-        if res["state"] == "idle" and core.pending_waits(conn, res["agent"]):
+        if res["state"] == "idle" and not res.get("deliver") and core.pending_waits(conn, res["agent"]):
             # A message that the person sent during this turn waits (#5587): maxpm serve types it at the idle prompt.
             try:
                 ask_server(conn, "pending_deliver", {"agent": res["agent"]}, timeout=1, retries=0)
             except Exception:  # noqa: BLE001 - its next pass types it
                 pass
+        if ad.has("hook_answer"):
+            out = ad.hook_answer(res)  # the CLI's own JSON (agy: decision deny or continue)
+            if out:
+                print(out)
+            return 0
         if res.get("deny"):
             # A push or a launch while an alert is unread (#5381): Claude Code refuses the call and shows the reason.
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -3089,7 +3190,7 @@ def _for_other(conn, actor, cmd=None):
         return False  # the agent of this session is gone: the session takes another name
     manager = core.active_manager(conn)
     raise RiverError(f"refused: this session is {own}, and only the manager runs a command as another agent "
-                     f"(--as {actor}). Run it as yourself, or ask the manager: maxpm --as {own} alert "
+                     f"(--as {actor}). Run it as yourself, or ask the manager: {core.as_cmd(own)} alert "
                      f"{manager or '<manager>'} \"<what {actor} needs>\"")
 
 
@@ -3303,8 +3404,12 @@ def _run_words(words, rec):
         print(json.dumps(res) if args.json else "\n".join(core.ops_probe_lines(res)))
         return core.OPS_PROBE_EXIT[res["status"]]
     if args.cmd == "setup-agent":
-        if args.claude_desktop and args.codex:
-            raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")
+        if sum(map(bool, (args.claude_desktop, args.codex, args.guard))) > 1:
+            raise RiverError("one at a time: --claude-desktop, --chatgpt-desktop or --guard")
+        if args.guard:  # #6412: the person runs it, which is the yes
+            from . import agents
+            print(agents.get("claude").write_guard(args.config, args.remove))
+            return 0
         if args.claude_desktop:
             from . import agents
             print(agents.get("claude").write_mcp_config(args.config, args.remove))
@@ -3314,7 +3419,7 @@ def _run_words(words, rec):
             print(agents.get("codex").write_mcp_config(args.config, args.remove))
             return 0
         if args.remove or args.config:
-            raise RiverError("--remove and --config go with --claude-desktop or --chatgpt-desktop")
+            raise RiverError("--remove and --config go with --claude-desktop, --chatgpt-desktop or --guard")
         if not args.append:
             print(AGENT_SNIPPET)
             return 0
@@ -3977,8 +4082,8 @@ def serve_restart(conn, wait=60, sleep=None):
 
 def _stop_banner(me, st):
     return (f"STOP REQUESTED by {st['stop_by'] or 'someone'}: {st['stop_reason']}. Take no new work. Commit finished "
-            f"work, release or hand back your item with a note (maxpm --as {me} release <id> --note \"...\"), "
-            f"then run maxpm --as {me} go once more: it ends the session.")
+            f"work, release or hand back your item with a note ({core.as_cmd(me)} release <id> --note \"...\"), "
+            f"then run {core.as_cmd(me)} go once more: it ends the session.")
 
 
 def _print_queue(res):
@@ -3999,17 +4104,18 @@ def _hint(a, res, actor):
     c = a.cmd
     if c in ("go", "plan"):
         return None
+    me = core.as_cmd(actor)
     if actor and c == "done":
-        return ((f"what changed, for a person: maxpm --as {actor} edit {res['id']} --changed \"<one plain line>\"\n"
+        return ((f"what changed, for a person: {me} edit {res['id']} --changed \"<one plain line>\"\n"
                  if isinstance(res, dict) and not res.get("changed") and res.get("id") else "")
-                + f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
+                + f"next: {me} go   (now: keep going while go gives you items, unless auto_continue is off; "
                 f"with tree, go gives only the tasks of your own tree)")
     if c == "report" or (c == "release" and a.id is None):
         return None  # a hook runs it: no hint
     if actor and (c == "release" or c == "review"):
-        return f"next: maxpm --as {actor} go"
+        return f"next: {me} go"
     if actor and c == "goal" and a.gcmd == "done":
-        return f"next: maxpm --as {actor} go --role owner   (takes the highest-ranked goal nobody owns)"
+        return f"next: {me} go --role owner  (takes the highest-ranked goal nobody owns)"
     if c == "register":
         return HINTS["register"].format(name=res["name"])
     if c == "next":
@@ -4025,13 +4131,11 @@ def _hint(a, res, actor):
     if c == "release":
         return HINTS["release"]
     if c == "inbox" and isinstance(res, dict):
-        me = f"maxpm --as {actor}"
         if res["result"] == "stop":
             return f"stop: {me} go"
         return (f"act on them, then start it again in the background: {me} inbox --wait" if res["messages"] else
                 f"start it again in the background: {me} inbox --wait")
     if c == "inbox" and res:
-        me = f"maxpm --as {actor}"
         return (f"answer a question: {me} answer <id> \"...\"   reply: {me} send note --reply <id> \"...\"   "
                 f"whole conversation: {me} thread <id>")
     if not actor and c in ("list", "show", "who", "capacity", "blockers"):
@@ -4051,7 +4155,7 @@ def _append_block(f):
 
 
 def _old_rules(text):
-    """The rules of an old instruction file (CLAUDE.md, #6024): its text without the work queue block and without a
+    """The rules of an old instruction file: its text without the work queue block and without a
     line that imports AGENTS.md (@AGENTS.md, which maxpm init wrote there before)."""
     from . import agents
     line = "@" + agents.SHARED_INSTRUCTIONS
@@ -4063,22 +4167,34 @@ def _only_block(text):
     return not text.replace(OLD_SNIPPET, "").replace(AGENT_SNIPPET, "").strip()
 
 
+def legacy_instructions(folder):
+    """The project instruction files setup can move, with the agent label and the rules each holds."""
+    from . import agents
+    from .agents import antigravity
+    global_file = antigravity.global_instructions().resolve()
+    for name, label in agents.replaced_files():
+        path = Path(folder, name)
+        if path.is_file() and path.resolve() != global_file:
+            yield path, label, _old_rules(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def agy_instruction_warnings(folders):
+    from .agents import antigravity
+    return [f"agy also reads this file: {path}" for path in antigravity.extra_instruction_files(folders)]
+
+
 def instructions_layout(folder):
-    """How a folder's agent instructions are laid out. AGENTS.md is the one file of every agent; CLAUDE.md is the old
-    file of Claude Code (the adapters give the names: agents.SHARED_INSTRUCTIONS, agents.replaced_files):
-    none: no rules (no file, or only the work queue block or the line @AGENTS.md).  agents_only: the rules are in
-    AGENTS.md.  claude_only: the rules are in CLAUDE.md, and AGENTS.md has none.  both: each file holds rules."""
+    """Whether the shared file and any legacy file hold rules. The legacy-only value is named claude_only."""
     from . import agents
     a = Path(folder, agents.SHARED_INSTRUCTIONS)
     at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else None
-    old = [Path(folder, f) for f, _ in agents.replaced_files()]
-    c_rules = any(f.exists() and _old_rules(f.read_text(errors="replace", encoding="utf-8")) for f in old)
+    old_rules = any(rules for _, _, rules in legacy_instructions(folder))
     a_rules = at is not None and not _only_block(at)
-    return "both" if c_rules and a_rules else "claude_only" if c_rules else "agents_only" if a_rules else "none"
+    return "both" if old_rules and a_rules else "claude_only" if old_rules else "agents_only" if a_rules else "none"
 
 
 def move_hint(old):
-    """The choice that maxpm init names when an old instruction file (CLAUDE.md) holds rules of a folder."""
+    """The choice that maxpm init names when an old instruction file holds rules of a folder."""
     from . import agents
     shared = agents.SHARED_INSTRUCTIONS
     return (f"{old} holds rules of this folder. Every agent reads {shared}; to keep the rules in that one file: "
@@ -4090,11 +4206,10 @@ def _paragraphs(text):
     return [p.strip("\n") for p in re.split(r"\n[ \t]*\n", text) if p.strip()]
 
 
-def _move_rules(old, a):
+def _move_rules(old, a, rules):
     """Move the rules of the old instruction file old into AGENTS.md a: each paragraph that a does not hold yet
     (the same words, whitespace aside) goes after a's own rules, before its work queue block when it holds only that
     block. Returns the line that says what moved."""
-    rules = _old_rules(old.read_text(errors="replace", encoding="utf-8"))
     at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else ""
     have = {" ".join(p.split()) for p in _paragraphs(at)}
     new = [p for p in _paragraphs(rules) if " ".join(p.split()) not in have]
@@ -4110,51 +4225,28 @@ def _move_rules(old, a):
 
 
 def setup_instructions(folder, move=None):
-    """_setup_shared, and the instruction file of every agent that imports AGENTS.md (_setup_importers), whose lines
-    come before the advice that ends the lines of a folder whose CLAUDE.md keeps its rules (move not True)."""
+    """Set up the shared instructions and report files that still supply separate rules."""
     main, note = _setup_shared(folder, move)
-    return main + _setup_importers(folder) + note
-
-
-def _setup_importers(folder):
-    """The own instruction file of each agent that imports AGENTS.md (Gemini CLI: GEMINI.md, #5218): missing, or
-    holding only the work queue block, it becomes the one import line; holding its own rules, it gets the work queue
-    block, and nothing else of it changes. Returns one line per change."""
-    from . import agents
-    out = []
-    for own, line, label in agents.import_files():
-        f = Path(folder) / own
-        text = f.read_text(errors="replace", encoding="utf-8") if f.exists() else None
-        if text is not None and any(x.strip() == line for x in text.splitlines()):
-            continue
-        if text is None or _only_block(text):
-            f.write_text(line + "\n", encoding="utf-8")
-            out.append(f"{own}: {'created as' if text is None else 'now'} the one line {line}, so {label} reads "
-                       f"{agents.SHARED_INSTRUCTIONS} too")
-        else:
-            out.append(_append_block(f))
-    return out
+    return main + note + agy_instruction_warnings([folder])
 
 
 def _setup_shared(folder, move=None):
     """Put the rules of a folder and the work queue block in the one file that every agent reads, AGENTS.md (#6024).
 
-    An old instruction file (CLAUDE.md, agents.replaced_files) that holds no rules (only the block or the line
+    An old instruction file that holds no rules (only the block or the line
     @AGENTS.md) is deleted. One that holds rules: move=True moves them into AGENTS.md and deletes it; move=False keeps
     it as it is; move=None keeps it and says the choice. Returns (one line per change, the closing advice)."""
     from . import agents
     folder = Path(folder)
     a = folder / agents.SHARED_INSTRUCTIONS
     out, note = [], []
-    for name, label in agents.replaced_files():
-        c = folder / name
-        if not c.exists():
-            continue
-        if not _old_rules(c.read_text(errors="replace", encoding="utf-8")):
+    for c, label, rules in legacy_instructions(folder):
+        name = c.name
+        if not rules:
             c.unlink()
             out.append(f"{name}: deleted (it held no rules of its own); {label} reads {a.name}")
         elif move:
-            out.append(_move_rules(c, a))
+            out.append(_move_rules(c, a, rules))
             c.unlink()
             out.append(f"{name}: deleted; {label} reads {a.name}")
         else:
@@ -4200,24 +4292,48 @@ def link_folder(conn, here, project=None, description="", actor=None):
 def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
+    plan = None
+    if args.plan:  # read and check the plan first: a plan with an error leaves the folder as it was
+        try:
+            plan = sys.stdin.read() if args.plan == "-" else Path(args.plan).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:  # no such file, a folder, no permission, not text
+            why = e.strerror if isinstance(e, OSError) and e.strerror else "it is not UTF-8 text"
+            raise RiverError(f"cannot read the plan file {args.plan}: {why}") from None
+        core.parse_plan(plan)
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
-    # AGENTS.md for every agent (Claude Code, Codex, OpenCode, ...); an old CLAUDE.md gives its rules to it (#6024).
+    # AGENTS.md holds the rules shared by all agents.
     if args.file:
         lines += [_append_block(Path(f)) for f in args.file]
     else:
         move = args.move
-        if move is None and instructions_layout(here) in ("claude_only", "both") and sys.stdin.isatty():
-            from . import agents
-            olds = " and ".join(f for f, _ in agents.replaced_files() if (here / f).exists())
-            ans = input(f"{olds} holds rules of this folder. Move them to {agents.SHARED_INSTRUCTIONS}, which every "
-                        f"agent reads, and delete {olds}? [Y/n] ")
-            move = ans.strip().lower() in ("", "y", "yes")
+        if move is None and sys.stdin.isatty():
+            olds = [path.name for path, _, rules in legacy_instructions(here) if rules]
+            if olds:
+                from . import agents
+                ans = input(f"Move the rules from {' and '.join(olds)} to {agents.SHARED_INSTRUCTIONS}, which every "
+                            "agent reads, and delete the old files? [Y/n] ")
+                move = ans.strip().lower() in ("", "y", "yes")
         lines += setup_instructions(here, True if move is None else move)
     shown = name or linked_here[0]
+    from . import agents
+    for ad in agents.load().values():
+        # A CLI that loads hooks only from the project (agy, #6351): the folder's hook file follows its setting.
+        if ad.has("project_hooks"):
+            got = core.project_hooks(conn, ad.id, here, shown)
+            if got and got["file"]:
+                lines.append(f"{ad.label}: MaximizePM's hooks in {got['file']} ({ad.config_key('activity_hooks')} on)")
     if not core._project(conn, shown)["notes"]:
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     lines += look_setup_lines(shown, core.look_setup(conn, shown))
-    lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
+    if plan is not None:
+        rows = core.add_plan(conn, shown, plan, args.actor)["items"]
+        ids = [r["id"] for r in rows]
+        lines.append(f"{shown}: {len(ids)} item(s) added from the plan (#{min(ids)} to #{max(ids)}); "
+                     f"maxpm list --project {shown} shows them")
+        lines.append("next: open an agent here and say go")
+    else:
+        lines.append(f"next: add work (maxpm add {shown} \"...\", or a whole plan: maxpm add {shown} --from plan.md) "
+                     f"or open an agent here and say go")
     print("\n".join(lines))
     return 0
 
@@ -4478,7 +4594,7 @@ def ops_setup(conn, a, actor):
                 + [f"target:{r['name']}" for r in conn.execute("SELECT name FROM targets ORDER BY name")])
             if own:
                 say(f"  0. MaximizePM itself: {len(own['checks'])} checks of maxpm serve, the relay, sessions that "
-                    f"stop, notices that fail, errors in its log and a slow page (the profile maximizepm)")
+                    f"stop, notices that fail and errors in its log (the profile maximizepm)")
             for i, n in enumerate(names, 1):
                 say(f"  {i}. {n.replace(':', ' ', 1)}")
             pick = ask("Which project or deploy target should MaximizePM watch? (a number or a name)")
@@ -4658,6 +4774,29 @@ def _dispatch_ops(conn, a, actor):
     return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor)
 
 
+def _project_folder(path, create, again):
+    """The folder of maxpm project add --path and project path (#6236). A folder that does not exist: --create makes
+    it; a person at a terminal is asked; else the error names the command with --create (again, {} for the path)."""
+    import shlex
+    if not path:
+        return path
+    folder = Path(path).expanduser()
+    if folder.is_dir():
+        return path
+    if folder.exists():
+        raise RiverError(f"{folder} is a file; pick a folder")
+    why = core.folder_create_refusal(folder)
+    if why:
+        raise RiverError(why)
+    if not create and sys.stdin.isatty() and sys.stdout.isatty():
+        create = input(f"{folder} does not exist. Create it? [y/N] ").strip().lower() in ("y", "yes")
+        if not create:
+            raise RiverError(f"{folder} does not exist; nothing changed")
+    if not create:
+        raise RiverError(f"{folder} does not exist. To create it: {again.format(shlex.quote(str(folder)))}")
+    return core.make_folder(folder)
+
+
 def dispatch(conn, a, actor):
     c = a.cmd
     if c == "schedule":
@@ -4671,11 +4810,13 @@ def dispatch(conn, a, actor):
         return _dispatch_ops(conn, a, actor)
     if c == "project":
         if a.pcmd == "add":
-            return core.project_add(conn, a.name, a.rank, a.notes, actor, a.path, a.target, a.result_look)
+            path = _project_folder(a.path, a.create, f"maxpm project add {a.name} --path {{}} --create")
+            return core.project_add(conn, a.name, a.rank, a.notes, actor, path, a.target, a.result_look)
         if a.pcmd == "rank":
             return core.project_rank(conn, a.name, a.rank, actor)
         if a.pcmd == "path":
-            return core.project_path(conn, a.name, a.path, actor, move=a.move)
+            path = _project_folder(a.path, a.create, f"maxpm project path {a.name} {{}} --create")
+            return core.project_path(conn, a.name, path, actor, move=a.move)
         if a.pcmd == "describe":
             return core.project_describe(conn, a.name, a.text, actor)
         if a.pcmd == "show":
@@ -4804,6 +4945,8 @@ def dispatch(conn, a, actor):
     if c == "interrupt":
         # maxpm serve types the keys: a sandboxed session cannot reach tmux, and the page does the same (#5547).
         return ask_server(conn, "agent_interrupt", {"agent": a.agent, "text": a.message}, actor)
+    if c == "approve":  # #6282: serve types the answer, as the card on the page does
+        return ask_server(conn, "prompt_approve", {"agent": a.agent, "option": a.option, "text": a.text}, actor)
     if c == "relay":  # #5964 (policy p148): serve types the person's words, as the page's message box does
         return ask_server(conn, "relay", {"agent": a.agent, "text": a.text, "person": a.person}, actor)
     if c == "stop":
@@ -4891,9 +5034,10 @@ def dispatch(conn, a, actor):
             return report.report(conn, a.id)
         if a.tcmd == "summary":
             from . import report
+            if a.text is None and not a.file:  # #6493: print it, to edit it
+                return {"id": a.id, "show": report.report(conn, a.id)["summary"]}
             text = a.text if a.text is not None else (
-                sys.stdin.read() if a.file == "-" else Path(a.file).expanduser().read_text(encoding="utf-8") if a.file
-                else "")
+                sys.stdin.read() if a.file == "-" else Path(a.file).expanduser().read_text(encoding="utf-8"))
             return report.summary_set(conn, a.id, text, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
@@ -4944,7 +5088,7 @@ def dispatch(conn, a, actor):
                             [] if a.no_goal else a.goal, _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
                             kind=a.kind, short=a.short, start=a.start, start_check=True, approve_once=a.once,
-                            approve_on=a.approve_on,
+                            approve_on=a.approve_on, artifacts=_artifact_args(a),
                             # a Look or Approve item carries the thing itself (#5956, policy g3)
                             thing_type=(a.atype or core.action_type(title)) if a.doer == "human" else None)
         if a.atype and res.get("id"):
@@ -4959,7 +5103,8 @@ def dispatch(conn, a, actor):
             core.cancel_push(conn, a.id, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, _models(a),
-                              tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
+                              tier=a.tier, kind=a.kind, short=a.short, changed=a.changed,
+                              artifacts=_artifact_args(a))
     if c == "list":
         rows = core.item_list(conn, a.project, a.status, a.all, a.goal)
         return rows[:a.limit] if a.limit and a.limit > 0 else rows
@@ -5086,7 +5231,8 @@ def dispatch(conn, a, actor):
         shots = [s if s.startswith("canvas:") or os.path.isabs(os.path.expanduser(s)) else os.path.abspath(s)
                  for s in a.shot or ()]
         return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.force, a.changed,
-                         proof=dict(commits=a.commit, tests=a.test, result=a.result, shots=shots, none=a.no_proof))
+                         proof=dict(commits=a.commit, tests=a.test, result=a.result, shots=shots, none=a.no_proof),
+                         choice=a.choice)
     if c == "cleanup":
         if a.space or a.dry_run:  # the size limits (#5711)
             from . import space
@@ -5183,7 +5329,7 @@ def dispatch(conn, a, actor):
         if kind == "question" and to and core._is_person(conn, to):  # #5956, policy g3
             _thing_check(conn, core.action_type(text, "decide"), text, item=a.item)
         return core.message(conn, kind, text, to, a.holder_of, a.item, getattr(a, "file", None), os.getcwd(), actor,
-                            a.goal, a.level, a.blocked)
+                            a.goal, a.level, a.blocked, _artifact_args(a))
     if c == "decline":
         if a.message:
             return core.decline_message(conn, a.id, a.note, actor)
@@ -5209,15 +5355,16 @@ def dispatch(conn, a, actor):
             body = core.typed_body(a.text, a.atype, a.kind)
             _thing_check(conn, core.action_type(body, "decide"), body, item=a.item)
         return core.send(conn, a.kind, core.typed_body(a.text, a.atype, a.kind), a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
-                         a.item, a.reply, actor, a.level, a.blocked)
+                         a.item, a.reply, actor, a.level, a.blocked, _artifact_args(a))
     if c == "answer":
-        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
+        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer, choice=a.choice)
     if c == "withdraw":
         return core.withdraw(conn, a.id, a.note, actor)
     if c == "release-changes":
         return core.release_changes(conn, a.id, a.note, actor)
     if c == "forward":
-        return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop)
+        return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop, options=a.option,
+                            recommend=a.recommend, question=a.question)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -5245,6 +5392,11 @@ def dispatch(conn, a, actor):
             raise RiverError('maxpm session "<name>" --ref <ref>')
         if len(a.name) == 2 and a.name[0] in ("pin", "unpin") and not a.ref:
             return {"pin": core.session_pin(conn, a.name[1], actor, a.name[0] == "pin")}
+        if a.name[0] == "kill-command":
+            if len(a.name) != 2 or a.ref:
+                raise RiverError('maxpm session kill-command <session> [--pid <pid>] [--reason "..."]')
+            return ask_server(conn, "session_kill_command",
+                              {"agent": a.name[1], "pid": a.pid, "reason": a.reason}, actor, timeout=15)
         if not actor:
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.set_session(conn, actor, " ".join(a.name), a.ref)
@@ -5263,12 +5415,24 @@ def dispatch(conn, a, actor):
     if c == "who":
         from . import sessions
         res = [dict(g, cache=sessions.cache_state(conn, g["name"])) if g.get("role") == "expert" else g
-               for g in core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all)]
-        if not a.all and a.item is None and a.project is None and a.file is None and not a.json:
+               for g in core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all or bool(a.name))
+               if not a.name or g["name"] == a.name]
+        if a.name and not res:
+            raise RiverError(f"no session {a.name}: maxpm who --all lists them")
+        if not a.all and not a.name and a.item is None and a.project is None and a.file is None and not a.json:
             ended = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] - len(res)
             if ended:
                 print(f"({ended} stopped or gone agent(s) that hold nothing are hidden: maxpm who --all)", file=sys.stderr)
         return res
+    if c == "link":
+        from . import notify
+        name = a.name or actor
+        if not name:
+            raise RiverError("name the session: maxpm link <session> (maxpm who lists them)")
+        if not conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+            raise RiverError(f"no session named {name}; maxpm who --all lists them")
+        url = notify.page_url(conn, terminal=name, browser=a.browser, changes=a.changes)
+        return {"session": name, "url": url, "phone": notify.remote_page(url) if a.phone else None}
     if c == "heartbeat":
         if actor == _session_self(conn):  # a command as another agent records no process for it (#5576)
             _record_process(conn, actor)
@@ -5381,6 +5545,42 @@ def render_status(res):
         print(f"  {ag['name']} ({ag['kind']}, {ag['state']}): {holds}{owns}")
     if res.get("ended"):
         print(f"  ({res['ended']} stopped or gone agent(s) that hold nothing: maxpm who --all)")
+    if res.get("providers"):
+        print()
+        how = "agent_order" if res["providers"][0].get("set") else "the launch_agents entries; agent_order sets an order and limits"
+        print(f"Agent providers, in launch order ({how}):")
+        for p in res["providers"]:
+            me = ", ".join(x for x in (p.get("run_model"), p.get("run_effort")) if x)
+            slots = (f"{p['used']} of {p['max']} session{'s' if p['max'] != 1 else ''}" if p["max"] is not None
+                     else f"{p['used']} session{'s' if p['used'] != 1 else ''}, no limit")
+            use = (f"AT USAGE LIMIT{' ' + p['until'] if p.get('until') else ''}" if p["limited"]
+                   else f"{p['remaining_pct']:.0f}% usage left" if p.get("remaining_pct") is not None else "usage not known")
+            full = " (full: the next provider takes new work)" if p["full"] and not p["limited"] else ""
+            print(f"  {p['pos']}. {p['label']}{f' ({me})' if me else ''}: {slots}{full}; {use}")
+    if res.get("agent_limits"):
+        print()
+        print("Agent usage:")
+        for al in res["agent_limits"]:
+            if not al.get("known", True):
+                print(f"  {al['label']}: not known (no reading yet; /usage in its terminal shows it)")
+                continue
+            reset = ""
+            if al.get("resets_at"):
+                reset = f", resets {core.show_time(al['resets_at'])}"
+            elif al.get("resets_text"):
+                reset = f", resets {al['resets_text']}"
+            read = f" (read {core.show_time(al['updated_at'])})" if al.get("updated_at") else ""
+            if al.get("limited"):
+                why = f": {al['reason']}" if al.get("reason") else ""
+                print(f"  {al['label']}: AT LIMIT{reset}{why}")
+            elif al.get("remaining_pct") is not None:
+                print(f"  {al['label']}: {al['remaining_pct']:.0f}% remaining{reset}{read}")
+            else:
+                print(f"  {al['label']}: no limit reached{reset}{read}")
+            wins = [w for w in al.get("windows") or () if w.get("remaining_percent") is not None]
+            for w in wins if len(wins) > 1 else ():
+                at = core.show_time(w["resets_at"]) if w.get("resets_at") else w.get("resets_text") or ""
+                print(f"    {w['name']}: {w['remaining_percent']:.0f}% left{f', resets {at}' if at else ''}")
     if res.get("due"):
         print()
         print("Due dates:")
@@ -5427,6 +5627,9 @@ def _findings_lines(f, r):
         out.append(f"  STUCK {x['agent']} ({x['state']}, {x['why']}): holds "
                    + (", ".join(f"#{i}" for i in x["holds"]) or "nothing") + (f", {x['queued']} queued" if x["queued"] else "")
                    + f".  Ask it to stop: {r} stop {x['agent']} --reason \"...\"")
+    for x in f.get("hanging_commands", []):
+        out.append(f"  COMMAND HANGS {x['agent']} {x['command']} {x['minutes']}m"
+                   f" (PID {x['pid']}).  End it: {r} session kill-command {x['agent']} --pid {x['pid']}")
     for x in f.get("ends", []):
         # #5776: a session that waits at its prompt for a person's answer should end; the answer starts a fresh one.
         out.append(f"  END IT {x['agent']}: waits at its prompt {x['waited']} for {x['person']}'s answer to question "
@@ -5554,7 +5757,7 @@ def _unanswered_line(m, r):
 
 def render_manage(b):
     me = b["agent"]
-    r = f"maxpm --as {me}"
+    r = core.as_cmd(me)
     if "result" in b:  # --watch
         if b["result"] == "stop":
             # #6057: the loop starts the watch again after every other exit; after this one it must not.
@@ -5613,7 +5816,7 @@ def render_manage(b):
                f"and end the turn."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
-    if b["new_name"]:
+    if b["new_name"] and r != "maxpm":  # a token names the session itself (#6423)
         out.append(f"Pass --as {me} on every maxpm command.")
     out += _tmux_line()
     if b.get("release"):
@@ -5776,6 +5979,32 @@ def shells_lines(shells):
         for s in shells]
 
 
+def tasks_lines(tasks, ended=False):
+    """The lines of maxpm who for the background tasks of a session (#6454): how many run, each with its start and
+    age; the river waits that run (maxpm wait, the manager's watch) in one line apart; with ended (maxpm who <name>),
+    the last ones that ended, with their start, end and status. None when its CLI has no reader of them, or when
+    maxpm serve has not read them lately (None)."""
+    if not tasks:
+        return []
+    t = core.now()
+    age = lambda d: f"{int(d.total_seconds())}s" if d.total_seconds() < 60 else core._short(d)  # noqa: E731
+    run = [x for x in tasks if not x["end"] and not x["wait"]]
+    waits = [x for x in tasks if not x["end"] and x["wait"]]
+    out = []
+    if run:
+        out.append(f"runs {len(run)} background task{'s' if len(run) > 1 else ''} now:")
+        out += [f"  since {core.show_time(x['at'])} ({age(t - core.parse_iso(x['at']))}): {x['kind']}: {x['what']}"
+                for x in run]
+    if waits:
+        out.append("waits in the background: " + "; ".join(x["what"] for x in waits))
+    done = [x for x in tasks if x["end"]] if ended else []
+    if done:
+        out.append(f"ended background tasks (the last {len(done)}):")
+        out += [f"  {core.show_time(x['at'])} to {core.show_time(x['end'])} ({x['status'] or 'ended'}): "
+                f"{x['kind']}: {x['what']}" for x in done]
+    return out
+
+
 def cache_text(c, name=None):
     """One line on an expert's prompt cache (#5023): warm with the minutes left, or cold; the context; and what the
     next message costs."""
@@ -5815,7 +6044,7 @@ def render_expert(res):
         x = res["adopted"]
         print(f"{x['name']} is now an expert on: {x['topic']}")
         print(f"  MaximizePM does not end it as a worker, and gives it no queue work. Keep its notes: "
-              f"maxpm --as {x['name']} expert notes {x['name']} --put <file>. Run maxpm --as {x['name']} go for the rules.")
+              f"{core.as_cmd(x['name'])} expert notes {x['name']} --put <file>. Run {core.as_cmd(x['name'])} go for the rules.")
     elif "ended_expert" in res:
         e = res["ended_expert"]
         print(f"ended the expert {e['ended']}." + (f" Done: {', '.join('#' + str(i) for i in e['done'])}." if e.get("done") else "")
@@ -5827,7 +6056,7 @@ def render_expert(res):
             print(f"Notes of {n['name']} (canvas {n['canvas']}, version {n['version']}):\n")
             print(n["text"].rstrip())
         else:
-            print(f"{n['name']} has no notes yet. Write them: maxpm --as {n['name']} expert notes {n['name']} --put <file>")
+            print(f"{n['name']} has no notes yet. Write them: {core.as_cmd(n['name'])} expert notes {n['name']} --put <file>")
     elif "expert_started" in res:
         t = res["expert_started"]
         if t.get("fresh_from"):
@@ -5849,6 +6078,11 @@ def print_trust(res):
         print(f"  Claude Code asks first whether it may trust {res['trust']}: answer 'Yes, I trust this folder' in the "
               f"question card on the Sessions tab (or in its pane). 'No, exit' ends the session, and its item goes "
               f"back to the queue.")
+    if res.get("no_instructions"):
+        # #6411: an agent there has no project rules (secret files, the build folder), only the briefing.
+        print(f"  {res.get('path') or res.get('folder')} and the folders above it have no "
+              f"{res['no_instructions']}, the rules file that {res.get('agent') or 'the agent'} reads: write the "
+              f"project's rules there (maxpm init adds the work queue block)")
 
 
 def _fault_lines(f, r):
@@ -5883,7 +6117,13 @@ def render_release_report(r):
           f"({n['faults_open']} open); review fixes {n['fixes']}; your decisions {n['decisions']}"
           + (f"; cost ${n['usd']:.2f}" if n["usd"] is not None else ""))
     print()
-    print(textwrap.fill(r["summary"]["text"], 100, initial_indent="  ", subsequent_indent="  "))
+    if r["summary"]["by"] == "maxpm":
+        print(textwrap.fill(r["summary"]["text"], 100, initial_indent="  ", subsequent_indent="  "))
+    else:  # the written summary is Markdown: its lines as they are (#6493)
+        print("\n".join(("  " + ln).rstrip() for ln in r["summary"]["text"].splitlines()))
+        print(f"  (the summary of {r['summary']['by']})")
+    print()
+    print("THE TASKS")
     for g in r["groups"]:
         print()
         print(("RISKS" if g["risk"] else g["name"].upper()) + (f": {g['line']}" if g["line"] and not g["risk"] else ""))
@@ -5905,7 +6145,7 @@ def render_release_report(r):
 
 def render_go(b):
     me = b["agent"]
-    r = f"maxpm --as {me}"
+    r = core.as_cmd(me)
     out = []
     out.append(f"You are MaximizePM agent {me}. Role: {'SESSION' if b['role'] == 'plain' else b['role'].upper()}. "
                f"({b['why']})")
@@ -5930,7 +6170,7 @@ def render_go(b):
         return
     if core.queue_note():
         out.append(core.queue_note() + ". Tell the user if that is not what they meant.")
-    if b["new_name"]:
+    if b["new_name"] and r != "maxpm":  # a token names the session itself (#6423)
         out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
     out += _tmux_line()
     # Only Claude Code has session names and ListAgents; it sets CLAUDECODE in the commands it runs.
@@ -5956,6 +6196,10 @@ def render_go(b):
         out += [f"WORKTREE: you work in {w['path']}, on the branch {w['branch']} of {w['repo']}. Commit there, and merge "
                 f"the branch the way the project's rules say. When your session has ended and the branch is in the "
                 f"HEAD of {w['repo']}, maxpm serve removes the worktree; unmerged work stays.", ""]
+    if b.get("build_dir"):
+        out += [f"BUILDS: a build outside the checkout's own target (a clean copy, an export, a test copy) goes to "
+                f"CARGO_TARGET_DIR=$MAXPM_BUILD_DIR/<name> ({b['build_dir']}), never to a scratch folder. maxpm serve "
+                f"removes that folder, and any build folder in your scratchpad, when your session has ended.", ""]
     if b.get("help_prompt"):
         out += [b["help_prompt"], "",
                 f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\"."]
@@ -6121,6 +6365,10 @@ def render_go(b):
             out.append(f"  canvas {cv['name']} v{cv['version']}: "
                        + (f"{cv['open_comments']} open comment(s) wait for a change: {r} canvas comments {cv['name']} --open"
                           if cv["open_comments"] else f"no open comments ({r} canvas show {cv['name']})"))
+        named = [x for x in it.get("artifact_links") or [] if x["how"] != "made for"]  # #6208
+        if named:
+            out.append("  reviews or names (read it first):")
+            out += artifact_lines(named, "    ")
         if b.get("related"):
             out.append(f"  RELATED (look first: some of it may be done or in progress; {r} show <id>):")
             out += _related_lines(b["related"], "  ")
@@ -6193,6 +6441,7 @@ def render_go(b):
                 f"  a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, then "
                 f"{r} inbox --wait",
                 f"  a refused command:     a step for the user, with the exact command and the reason of the refusal",
+                f"  long tests/commands:   give them a timeout (never --test-timeout=0)",
                 *_look_rule(b, it, r, short=True),
                 f"  vague item: make a reasonable choice and say what you chose in --output.",
                 "",
@@ -6204,6 +6453,7 @@ def render_go(b):
                 f"  - Do this item only. Read `{r} show {it['id']}` again if you need the links.",
                 f"  - Say what you do, for your row on the Sessions tab: {r} now \"<about 10 plain words>\" when you",
                 f"    start and at each new step (no ids, file names or commands).",
+                f"  - Give long tests and commands a timeout (never --test-timeout=0): a command with no output is ended by maxpm serve.",
                 f"  - The item is vague: make a reasonable choice and say what you chose in --output. Ask the user",
                 f"    (a human item, below) only when a wrong guess would be costly.",
                 f"  - It needs something first: {r} add \"<title>\" --blocks {it['id']} --keep   (small; you do it now)",
@@ -6211,7 +6461,7 @@ def render_go(b):
                 f"  - It needs an item that is in the queue already: {r} dep {it['id']} --on <its id> --release   (add the link;",
                 f"    after a release with only a note such as \"waits on #12\", go gives this item to the next session).",
                 f"  - You find other work: {r} add \"<title>\" --found-during {it['id']}. Do not do it now.",
-                f"  - Waiting on something outside the queue: {r} blocked {it['id']} --reason \"<what>\", release, run go again.",
+                f"  - Waiting on something outside the queue: {r} blocked {it['id']} --reason \"<what>\" (releases the item), then run go again.",
                 # The three rules of #1599 (research #1597: 30 stops and 11 stands at the prompt for limits of the
                 # machine, 10 stands after a refused command, an item held 6.5 hours for the word "push").
                 f"  - A limit of the machine (a full disk, a build stop, a push freeze, quiet time during a release gate) "
@@ -6375,7 +6625,7 @@ def render_cleanup(rows, r="maxpm"):
 
 
 def render_wait(res):
-    r = f"maxpm --as {res['agent']}"
+    r = core.as_cmd(res["agent"])
     if res["result"] == "stop":
         st = res["stop"]
         print(f"STOP: {st['stop_by'] or 'someone'} asked this session to stop: {st['stop_reason']}. "
@@ -6625,7 +6875,7 @@ def render_secret(a, res):
               + (f"; grant {res['grant']}" if res.get("grant") else ""))
         if cmd == "request" and res.get("sites") and res.get("item_id"):  # #5840: do not wait at the prompt (p154)
             print(f"next: commit what is done, then maxpm blocked {res['item_id']} --reason \"waits for request "
-                  f"{res['request']}\" and maxpm release {res['item_id']}: the person's Allow ends the block, and the "
+                  f"{res['request']}\": that releases the item, the person's Allow ends the block, and the "
                   f"next session of #{res['item_id']} opens the sites signed in")
     elif cmd == "requests":
         if not res["requests"]:
@@ -6792,9 +7042,10 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_list(conn, a.project, a.item, actor if a.mine else None, a.deleted)
     if v == "show":
         res = core.canvas_show(conn, a.name, a.project, a.version)
-        if actor and not core._is_person(conn, actor) and res.get("shown"):  # what this session read (#5986)
+        reader = core.planner_name(actor)  # a planner chat app reads as <person>@<client> (#6221)
+        if reader and (reader != actor or not core._is_person(conn, actor)) and res.get("shown"):  # #5986
             with core.unless_readonly(), core.tx(conn):
-                core.canvas_seen(conn, res["id"], actor, res["shown"]["version"])
+                core.canvas_seen(conn, res["id"], reader, res["shown"]["version"])
         return res
     if v == "comments":
         return core.canvas_comments(conn, a.name, actor, a.open, a.project)
@@ -6826,11 +7077,28 @@ def _canvas_dispatch(conn, a, actor):
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         return core.canvas_section(conn, a.name, a.heading, body, actor, a.project, a.note, a.pending)
     if v == "design":
-        project = a.project
+        name, project = a.name, a.project
+        if a.goal:  # a goal's doc (#6221): a canvas has an item, not a goal, so the name links it
+            g = core._goal(conn, a.goal)
+            name, gp = core.goal_doc_name(g["name"]), core._project_name(conn, g["project_id"])
+            if a.name and a.name.strip().lower() != name:
+                raise RiverError(f"the design document of goal {g['name']} is the canvas {name}; leave out the name")
+            if project and project != gp:
+                raise RiverError(f"goal {g['name']} is in project {gp}, not {project}")
+            project = gp
+        if not name:
+            raise RiverError("name the design document: maxpm canvas design <name> (or --goal <goal>)")
         if not project and a.item is None and not core._held_item(conn, actor):
             names = core.projects_for_dir(conn, os.getcwd())
             project = names[0] if len(names) == 1 else None
-        return core.design_doc(conn, a.name, actor, a.title, a.item, project)
+        res = core.design_doc(conn, name, actor, a.title, a.item, project)
+        if a.open:  # the person sees it at once; a doc that cannot open now is still made
+            try:
+                ask_server(conn, "canvas_open", {"name": str(res["id"])}, actor=actor)
+                res = dict(res, opened=True)
+            except RiverError as e:
+                res = dict(res, opened=False, open_error=str(e))
+        return res
     if v == "plan":
         res = core.plan_versions(conn, a.name, a.project)
         if a.version is not None and not any(p["plan_version"] == a.version for p in res["plans"]):
@@ -7159,6 +7427,33 @@ def render_browser(a, res):
     else:
         print("  controlled by nobody: maxpm browser control takes it")
 
+def task_line(t):
+    """One task or question that reviews or names an artifact (#6208), as core.artifact_tasks gives it."""
+    if t.get("message"):
+        return (f"asked in {t.get('message_kind') or 'message'} #{t['message']}" + (f" to {t['to']}" if t.get("to") else "")
+                + (f" about #{t['item']}" if t.get("item") else "") + f" ({t['state']})")
+    word = "made for" if t["how"] == "made for" else "reviewed in"
+    return f"{word} #{t['item']} {core.short_title(t.get('title') or '', t.get('short'))} ({t['state']})"
+
+
+def task_lines(tasks, indent="  "):
+    return [f"{indent}{task_line(t)}" for t in tasks or ()]
+
+
+def artifact_lines(links, indent="  "):
+    """The artifacts a task or a question reviews or names (#6208): what opens each one."""
+    out = []
+    for x in links or ():
+        if x["kind"] == "canvas":
+            c = x.get("canvas") or {}
+            out.append(f"{indent}canvas {c.get('name')} v{c.get('version')} ({c.get('project')}): maxpm canvas show "
+                       f"{c.get('name')} --project {c.get('project')}")
+        else:
+            out.append(f"{indent}{ {'file': 'file', 'page': 'page', 'artifact': 'claude.ai artifact'}.get(x['kind'], x['kind'])} "
+                       f"{x['target']}")
+    return out
+
+
 def render_canvas(a, res):
     v = a.cvcmd
     if v == "kit":
@@ -7175,6 +7470,10 @@ def render_canvas(a, res):
         print(f"  design document with the parts {', '.join(res['sections'])}, each pending. Fill each one: maxpm "
               f"canvas section {res['name']} <part> <file>. In Plan, name each task as #<id>: maxpm show <id> then "
               f"links it to its part, and maxpm canvas plan {res['name']} shows the plan's versions.")
+        if res.get("opened"):
+            print("  opened in the side panel of the MaximizePM page")
+        elif "opened" in res:
+            print(f"  the page cannot open it now ({res['open_error']}); the person sees it in Sessions > Artifacts")
         return
     if v == "plan":
         plans = res["plans"]
@@ -7232,6 +7531,8 @@ def render_canvas(a, res):
               + (f": {sh['note']}" if sh["note"] else ""))
         print("  versions: " + ", ".join(f"v{x['version']} {x['author']}" for x in res["versions"]))
         for line in page_lines(res.get("page")):
+            print(line)
+        for line in task_lines(res.get("tasks")):
             print(line)
         for r in res["comments"]:
             print("\n".join(_comment_lines(r)))
@@ -7406,6 +7707,8 @@ def render_artifacts(res, a):
         name = f' "{_cut(r["title"], 50)}" v{r["version"]}' if r["kind"] == "canvas" else ""
         extra = f", {r['open_comments']} open comment(s)" if r.get("open_comments") else ""
         print(f"{r['n']:>3}. {r['label']:<9} {r['target']}{name}  ({_art_where(r)}{extra}; id {r['id']})")
+        for line in task_lines(r.get("tasks"), "       "):  # #6208
+            print(line)
     if res["total"] > len(rows):
         print(f"... {res['total'] - len(rows)} more: -n {res['total']}")
     flags = "".join(f" --{k} {v}" for k, v in (("agent", a.agent), ("item", a.item), ("since", a.since)) if v is not None)
@@ -7795,11 +8098,18 @@ def _pipeline_cmd(conn, a, actor):
     sub = a.plcmd  # who may run each one: river/rights.py
     from .pipeline import targets
     if sub == "list":
-        return store.pipelines(conn) + targets.default_list(conn)
+        sources = targets.check_source_ids(conn)
+        return [p for p in store.pipelines(conn) if p["id"] not in sources] + targets.default_list(conn)
     if sub == "add":
         return define.pipeline_add(conn, a.name, a.project, a.notes, actor)
     if sub == "show":  # a target with no pipeline of its own shows as its default pipeline (#6115)
-        if conn.execute("SELECT 1 FROM pipelines WHERE name=? AND target IS NULL", (a.name,)).fetchone():  # #6176
+        p = conn.execute("SELECT id, forge FROM pipelines WHERE name=? AND target IS NULL", (a.name,)).fetchone()
+        if p:
+            names = targets.check_targets(conn, p["id"]) if p["forge"] == "github" else []
+            if len(names) == 1:
+                return targets.default_pipeline(conn, names[0])
+            if names:
+                raise RiverError(f"GitHub checks for {a.name} appear on these deploy targets: {', '.join(names)}")
             return store.show(conn, a.name)
         return targets.default_pipeline(conn, a.name)
     if sub == "env":
@@ -8356,7 +8666,12 @@ def render_pipeline(a, res):
         print(f"Versions in {res['stage']} (pipeline {res['pipeline']}), newest first:")
         for r in res["runs"]:
             took = f", {r['seconds'] / 60:.0f}m" if r["seconds"] is not None else ""
-            print(f"  run #{r['run']}  {(r['rev'] or '')[:12]}  {r['what']}: {r['state']}{took}"
+            # #6222: a deploy target's rows are its releases (no stage run): the release's deploy item, 'not pinned'
+            # for a release with no pin, and no word for a plain release, as the page shows them.
+            head = f"run #{r['run']}" if r["run"] is not None else f"deploy #{r['deploy']}"
+            rev = "not pinned" if r.get("pinned") is False else (r["rev"] or "")[:12]
+            what = f"{r['what']}: " if r["what"] else ""
+            print(f"  {head}  {rev}  {what}{r['state']}{took}"
                   + (f"  {show_time(r['started_at'] or r['queued_at'])}" if r["started_at"] or r["queued_at"] else "")
                   + ("  (live)" if r["live"] else "")
                   + (f"  by {r['by']}" if r["by"] else "") + (f": {r['why']}" if r["why"] else ""))
@@ -8392,6 +8707,8 @@ def render_pipeline(a, res):
         d = res.get("detail") or {}
         extra = ", ".join(f"{k} {v}" for k, v in d.items() if v and k != "name")
         print(f"pipeline {res['pipeline']}: {what} {res['changed']}" + (f" ({extra})" if extra else ""))
+        if res.get("message"):
+            print(res["message"])
         return
     # show
     print(f"pipeline {res['name']}" + (f"  (project {res['project']})" if res["project"] else "")
@@ -8404,6 +8721,11 @@ def render_pipeline(a, res):
                                                    else f": {src.get('error')}"))
     if res.get("poll_error"):
         print(f"  the last read failed: {res['poll_error']}")
+    for check in res.get("checks", []):
+        run = check["last_run"] or {}
+        state = run.get("state") or "no run yet"
+        at = f" at {run['version'][:12]}" if run.get("version") else ""
+        print(f"  {check['source']} {check['workflow']} on {check['branch']}: {state}{at}")
     if not res["stages"]:
         print(f"  no stages; add one: maxpm pipeline stage {res['name']} <stage> --kind <kind> --run \"<command>\"")
     for s in res["stages"]:
@@ -8610,8 +8932,9 @@ def render_runner(a, res):
         for line in res["rules"]:
             print(f"  - rule {line}")
         print("Next, a person does these on Pulumi's page, once:")
+        from .pipeline import agent_job
         print(f"  1. Puts the model key in the ESC environment {res['env']}, as an environment variable "
-              f"(environmentVariables: {'CODEX_API_KEY' if res['cli'] == 'codex' else 'ANTHROPIC_API_KEY'}), and "
+              f"(environmentVariables: {agent_job.SECRET[res['cli']]}), and "
               f"MAXPM_GIT_TOKEN, a token that may push branches (and open pull requests on GitHub), when the fix "
               f"should come back as a branch; without it, it comes back as a patch.")
         print(f"  2. Sets the deployment settings of stack {res['stack']} (Settings > Deploy): the source repository "
@@ -8675,7 +8998,7 @@ def render(a, res):
     if c == "cleanup" and isinstance(res, dict) and "folder" in res:
         return render_space(res)
     if c == "cleanup":
-        return render_cleanup(res, f"maxpm --as {a.actor}" if a.actor else "maxpm")
+        return render_cleanup(res, core.as_cmd(a.actor) if a.actor else "maxpm")
     if c == "keep" and isinstance(res, dict) and "kept" in res:
         print(f"kept after the close of #{res['closed']}: " + ", ".join(f"#{k['id']} {_cut(k['title'], 50)}" for k in res["kept"]))
         return
@@ -8748,6 +9071,10 @@ def render(a, res):
                     print("\n".join([f"  parent goal {g['parent']}: {first.strip()}"] + rest))
                 print("\n".join(_handoff_lines(g["name"], g.get("handoff") and dict(
                     g["handoff"], text=g.get("handoff_text")), g.get("handoff_due"))))
+                for d in g.get("docs") or []:  # its design document and its tasks' canvases (#6221)
+                    print(f"  canvas {d['name']} v{d['version']} {d['kind']}" + (f" #{d['item_id']}" if d["item_id"] else "")
+                          + (f" \"{d['title']}\"" if d["title"] else "") + f" by {d['agent'] or '?'}"
+                          + (f" [{d['open_comments']} open comment(s)]" if d["open_comments"] else ""))
                 for it in g.get("items", []):
                     print("  " + _fmt_item(it, show_reason=False))
                 if not g.get("items"):
@@ -8909,6 +9236,10 @@ def render(a, res):
         print(f"{res['person']}'s words go to {res['agent']} as {res['person']}'s prompt"
               + (" when its turn ends" if res.get("waiting") else "") + f" (relayed by {res.get('relayed_by')})")
         return
+    if c == "approve":
+        print(f"{res['agent']}: {res.get('question') or 'its prompt'} -> {res.get('picked')}"
+              + (f", then: {res['text']}" if res.get("text") else ""))
+        return
     if c == "interrupt":
         sent = res.get("sent")
         if res.get("command"):  # a second Stop (#5563): its command, after the keys only when the turn still ran
@@ -8960,6 +9291,12 @@ def render(a, res):
     if c == "target" and getattr(a, "tcmd", None) == "report":
         return render_release_report(res)
     if c == "target" and getattr(a, "tcmd", None) == "summary":
+        if "show" in res:
+            s = res["show"]
+            print(s["text"] if s["by"] != "maxpm" else
+                  f"No summary yet. {s['text']}\nWrite it: maxpm target summary {res['id']} --file <file>"
+                  + (f" (the form: maxpm show {s['task']['id']})" if s.get("task") else ""))
+            return
         print(f"The summary of release #{res['id']} is saved."
               + (f" The person got a Read card." if res["read_cards"] else "")
               + (f" No Read card: the person reads it on the release's approval card." if res.get("on_approval")
@@ -9258,6 +9595,11 @@ def render(a, res):
               else "") + f"; sign-off #{res['dropped']} is dropped, and a new one comes after the review")
         return
     if c == "forward":
+        d = res.get("decision") or {}
+        if d.get("options"):
+            print("the person picks in a dialog: " + "; ".join(
+                o["label"] + (" (recommended)" if o["recommended"] else "") for o in d["options"])
+                + ", or writes an answer")
         if a.item is not None:
             print(f"#{res['id']} {res['title']} went on to the person: their Waits for you, needs-you and phone show it now")
         elif a.drop:
@@ -9272,10 +9614,11 @@ def render(a, res):
             elif res["result"] == "timeout":
                 print(f"(no new message in {res['waited']})")
             else:
-                print(f"NEW MESSAGES for {res['agent']}:" + (f" (and {res['still_open']} older, still open: maxpm "
-                                                             f"--as {res['agent']} inbox)" if res.get("still_open") else ""))
+                me = core.as_cmd(res["agent"])
+                print(f"NEW MESSAGES for {res['agent']}:" + (f" (and {res['still_open']} older, still open: {me} "
+                                                             f"inbox)" if res.get("still_open") else ""))
                 # Delivered, not read (#5685): the sender sees that until the session acts on them.
-                print(f"  (delivered, not read: maxpm --as {res['agent']} inbox, an answer or a reply marks them read)")
+                print(f"  (delivered, not read: {me} inbox, an answer or a reply marks them read)")
             res = res["messages"]
         elif not res:
             print("(inbox empty)")
@@ -9307,9 +9650,16 @@ def render(a, res):
                   + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else "")
                   + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else "")
                   + (f"\n    {cache_text(ag['cache'], ag['name'])}" if "cache" in ag else "")
-                  + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells"))))
+                  + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells")))
+                  + "".join(f"\n    {x}" for x in tasks_lines(ag.get("tasks"), ended=bool(getattr(a, "name", None)))))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
+        return
+    if c == "link":
+        print(res["url"])
+        if a.phone:
+            print(f"on a phone: {res['phone']}" if res["phone"] else
+                  "on a phone: none (Tailscale does not serve the page and the relay is not connected: maxpm phone)")
         return
     if c == "phone":
         from . import tailnet
@@ -9363,6 +9713,11 @@ def render(a, res):
         return
     if c == "register":
         print(f"{res['name']} ({res['kind']}) registered. Set MAXPM_AGENT={res['name']} in your shell.")
+        return
+    if c == "session" and "killed_pids" in res:
+        print(f"{res['agent']}: ended child command PID {res['pid']} ({res['command']}); "
+              f"signaled {len(res['killed_pids'])} process{'es' if len(res['killed_pids']) != 1 else ''}"
+              + (f", SIGKILLed {len(res['force_killed'])}" if res.get("force_killed") else ""))
         return
     if c == "session" and "pin" in res:
         x = res["pin"]

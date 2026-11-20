@@ -279,6 +279,7 @@ class Calls(Base):
         self.assertEqual(self.runs()["deploy"]["state"], "running")  # its poll linked the run through maxpm.run
         self.assertEqual(self.runs()["deploy"]["key"], "x-2")
 
+    @timing.local_only("live plugin subprocess timeout")
     def test_a_hang_a_crash_bad_output_and_a_refusal_stay_on_the_pipeline(self):
         self.install(manifest(timeout=1))
         for mode, words in (("sleep", "ran past its time limit of 1s"), ("crash", "exit 3 on poll: Traceback: the "

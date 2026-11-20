@@ -32,6 +32,7 @@ import { findMark, findClear, findGo } from "./findText.js";
 import { queueHtml } from "./agentActions.js";
 import { button, iconButton } from "./button.js";
 import { publishButton, pageLine, openOnRqs } from "./rqsPublish.js";
+import { tasksHtml } from "./artifactTasks.js";
 import { S } from "../page.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
@@ -51,6 +52,21 @@ const fixedTool = (target) => isBrowser(target) || isChanges(target);
 // A page of maxpm serve itself (the relay's address, #4711) stays in a frame; any other outside page goes to the browser.
 const ownPage = (target) => target === location.origin || target.startsWith(location.origin + "/");
 const isWeb = (target) => /^https?:\/\//i.test(target) && !LOCAL.test(target) && !ownPage(target);
+// A view of this page (#6425): /sessions/<name>/browser, /plan, ?item=<id>, ... on this page's own address, or on
+// 127.0.0.1 at its port (the link maxpm prints; seen through the relay or Tailscale, any 127.0.0.1 page view). The
+// page goes there itself: in a frame of the side panel it showed the whole page inside the page. Its path, or null.
+const VIEWS = ["sessions", "you", "artifacts", "cost", "browsers", "plan", "deploy", "settings", "terminal"];
+export function pageView(target) {
+  let u; try { u = new URL(target); } catch (e) { return null; }
+  const root = new URL("./", document.baseURI).pathname;
+  const mine = ownPage(target) || (LOCAL.test(target) && (awayFromHome() || u.port === location.port));
+  const rel = ownPage(target) && u.pathname.startsWith(root) ? u.pathname.slice(root.length) : u.pathname.replace(/^\//, "");
+  const first = rel.split("/")[0];
+  if (!mine || (first && !VIEWS.includes(first)) || (!first && !u.search)) return null;
+  return root + rel + u.search;
+}
+let goView = null;  // app.js: show the page's view of an address (history entry, openFromUrl)
+export function onPageView(fn) { goView = fn; }
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
 // What the panel shows changed (#4653): fn(session, target or null). The page puts it in its address.
@@ -381,7 +397,8 @@ function drawBar(t, meta) {
   if (t.title !== title) { t.title = title; renderTabs(); }
   // The realquicksite page of the canvas (#5789): its own line under the bar, drawn when it changed.
   t.meta = meta;
-  const line = pageLine(meta.page, v);
+  // The tasks and questions that review or name the canvas (#6208), on the same line.
+  const line = pageLine(meta.page, v) + tasksHtml(meta.tasks);
   if (t.rqs && t.rqs._html !== line) { t.rqs.innerHTML = line; t.rqs._html = line; }
   const sigNow = JSON.stringify([meta.versions, v, t.pin, meta.item_id, meta.item_title, meta.kind, Math.floor(Date.now() / 60000)]);
   if (sigNow === t.barSig || bar.contains(document.activeElement)) return;
@@ -1101,6 +1118,8 @@ export function openInPanel(target, by) {
   if (!target) return;
   if (!isFile(target) && !itemOf(target) && !canvasOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, an item (#12), or a canvas (canvas:3)", true);
   if (ownSignIn(target)) { window.open(target, "_blank", "noopener"); return; }  // the person's own browser (#5804)
+  const view = goView && pageView(target);
+  if (view) return goView(view);
   reveal(true);
   if (isWeb(target)) return openBrowserTab(target);  // every site shows and works there (#5628)
   // The same thing again, from any link, list, or session: its tab shows and reads it again (#5000).

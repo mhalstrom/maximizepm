@@ -21,6 +21,21 @@ SERVE_PORT = {"port": None}  # set by maxpm serve, so links point at the page th
 LOOP = {"started": None, "last_pass": None}
 # The loop runs in a process of its own (river/loop.py, #5569): on; and it ended to ask serve for a restart.
 CHILD = {"on": False, "restart": False}
+# The errors of the loop's steps whose traceback serve.log has already: each distinct error gets it once (#6227: seven
+# passes logged 'Object of type PosixPath is not JSON serializable' with no line that said where).
+TRACED = set()
+TRACED_MAX = 200
+
+
+def _trace(key):
+    """Print the traceback of the error being handled, the first time this process sees key."""
+    import traceback
+    if key in TRACED:
+        return
+    if len(TRACED) >= TRACED_MAX:
+        TRACED.clear()
+    TRACED.add(key)
+    _say(traceback.format_exc().rstrip())
 
 
 def register_channel(name, make):
@@ -529,6 +544,21 @@ def release_check(conn):
         release.loop_step(conn)
 
 
+def refresh_cli_lists(conn):
+    """maxpm serve only: the model lists that agent CLIs print (agents.CliList), read in threads and kept in files that
+    a page build in any process reads (#6510)."""
+    if SERVE_PORT.get("port"):
+        from . import agents
+        agents.refresh_lists(conn)
+
+
+def agent_versions(conn):
+    """maxpm serve only: the versions of the agent CLIs and their updates (river/agentupdate.py)."""
+    if SERVE_PORT.get("port"):
+        from . import agentupdate
+        agentupdate.serve_pass(conn)
+
+
 def loop(stop, interval_s=None):
     """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
     No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
@@ -541,7 +571,7 @@ def loop(stop, interval_s=None):
             # Inside the try: a queue that is busy or cannot open fails this pass, not the thread (#1663).
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
-            from . import cost, runners, server, space, vault
+            from . import cost, diskguard, runners, scratch, server, space, vault
             from .pipeline import runner as pipeline_runner
             from .routes import canvas as canvas_routes
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
@@ -556,6 +586,7 @@ def loop(stop, interval_s=None):
                 server.paste_pending,  # a message held during a turn: type it at the idle prompt (#5587)
                 core.escalate_by_state,  # a message to the manager whose sender stopped working wakes it now (#5976)
                 server.watch_busy,  # an agent that is busy with no river command keeps its leases
+                server.watch_commands,  # a child command with no new pane output for command_hang_after (#6497)
                 core.sample_sessions,  # once a minute: what each live session does, for maxpm health (#5352)
                 core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person
                 core.tell_unanswered,  # a blocked message the manager did not answer in manage_unanswered: tell its sender
@@ -571,6 +602,8 @@ def loop(stop, interval_s=None):
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.browser_sweep,  # a session's Chrome whose session ended or that idled browser_idle_end (#5636)
                 space.serve_pass,  # over db_max_size or folder_max_size: the oldest removable data goes (#5711)
+                scratch.serve_pass,  # an ended session's build folder and the Cargo targets in its scratchpad (#6398)
+                diskguard.serve_pass,  # low free disk: an alert at disk_warn_free, the sweep at disk_sweep_free (#6506)
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 pipeline_runner.serve_pass,  # pipeline stages whose gate opened, each in a thread of its own (#6114)
                 runners.serve_pass,  # agents on runners: start the queued runs, end and time out the others (#6151)
@@ -580,8 +613,12 @@ def loop(stop, interval_s=None):
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
                 vault.grant_summary,  # once a day: the manager's credential grants, to the person (#5828)
                 cost.watch,  # cost_limit set: one alert at 80% and at 100% of each limit in its period (#5857)
+                core.record_log_limits,  # the plan limits an agent wrote to its newest log (Codex), for the page (#6348)
+                server.probe_usage,  # Claude Code and agy with no session: /usage in a hidden pane (#6364)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
+                agent_versions,  # at the start, then once a day: each agent CLI's versions; queued updates (#6430)
+                refresh_cli_lists,  # each CLI's model list, in a thread; a page build starts no CLI (#6510)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []
@@ -593,6 +630,7 @@ def loop(stop, interval_s=None):
                     name = "notify" if name == "<lambda>" else name
                     failed.append(f"{name}: {type(e).__name__}: {e}")
                     _say(f"maxpm notify: {name}: {e}")
+                    _trace(f"{name}: {type(e).__name__}: {e}")
                     try:
                         conn.rollback()  # a step that failed inside a tx leaves no open transaction for the next
                     except Exception:
@@ -615,6 +653,7 @@ def loop(stop, interval_s=None):
         except Exception as e:  # keep the loop alive; the next pass retries
             error = f"{type(e).__name__}: {e}"
             _say(f"maxpm notify: {e}")
+            _trace(error)
         t = core.iso(core.now())
         if not error:
             LOOP["last_pass"] = t

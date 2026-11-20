@@ -1,0 +1,17 @@
+{
+  "name": "maximizepm-push-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateless Cloudflare Worker that relays encrypted push notices to APNs and FCM",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test --test-timeout=60000 test/unit.test.js",
+    "test:integration": "node --test --test-timeout=60000 test/wrangler.test.js",
+    "test:all": "node --test --test-timeout=60000 test/unit.test.js test/wrangler.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
