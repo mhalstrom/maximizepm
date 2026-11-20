@@ -1149,6 +1149,72 @@ class Passkey(Base):
         self.assertEqual(kinds, ["get"])
 
 
+class ChromePages(Base):
+    """#6301 (mark 2026-11-20: 'it works in other sessions ... that is a bug'): after a Google sign-in with a passkey,
+    the switch back to the panel attached to Chrome's own 'Sign in to Chrome?' page (chrome://signin-dice-web-intercept),
+    its Page.startScreencast failed with 'Screencast is already active', and the panel stayed blank. The panel never
+    attaches to Chrome's own pages, and a screencast left running starts again."""
+
+    DICE = "chrome://signin-dice-web-intercept.top-chrome/chrome-signin"
+
+    def test_the_switch_back_attaches_to_the_web_page_not_to_chrome_s_own_page(self):
+        b = browser.get("web")
+        pages = [{"targetId": "dice", "type": "page", "url": self.DICE, "title": "Sign in to Chrome?"},
+                 {"targetId": "web", "type": "page", "url": "https://myaccount.google.com/", "title": "App passwords"}]
+        b.call = lambda method, params=None, **k: {"targetInfos": pages} if method == "Target.getTargets" else {}
+        b._version = lambda port: {"webSocketDebuggerUrl": "ws://127.0.0.1:1/x"}
+        got = []
+        b._attach = lambda target: got.append(target)
+        with mock.patch.object(browser, "WS", lambda url: None), mock.patch.object(browser.threading, "Thread"):
+            b._connect()
+        self.assertEqual(got, ["web"])
+        self.assertEqual(list(b.targets), ["web"])
+        # Only Chrome's own page: a new tab, never that page.
+        pages[1:] = []
+        b.targets, got[:] = {}, []
+        b._new_target = lambda url="about:blank": "new"
+        with mock.patch.object(browser, "WS", lambda url: None), mock.patch.object(browser.threading, "Thread"):
+            b._connect()
+        self.assertEqual(got, ["new"])
+
+    def test_a_tab_that_becomes_chrome_s_own_page_leaves_the_panel(self):
+        b = browser.get("web")
+        b.target, b.targets = "web", {"web": {"url": "https://myaccount.google.com/", "title": "", "opener": None}}
+        switched = []
+        b._switch_quiet = lambda target: switched.append(target)
+        info = lambda tid, url, opener="web": {"targetInfo": {"targetId": tid, "type": "page", "url": url, "title": "",
+                                                              "openerId": opener}}
+        with mock.patch.object(browser.threading, "Thread", lambda target, args, **k: mock.Mock(
+                start=lambda: target(*args))):
+            b._event("Target.targetCreated", info("dice", self.DICE), None)  # opened by the shown page: not shown
+            self.assertEqual((list(b.targets), switched), (["web"], []))
+            b._event("Target.targetCreated", info("tab", "about:blank"), None)  # a new tab first shows about:blank
+            self.assertEqual(switched, ["tab"])
+            b.target = "tab"
+            b._event("Target.targetInfoChanged", info("tab", self.DICE), None)  # then becomes Chrome's own page
+            self.assertEqual((list(b.targets), switched), (["web"], ["tab", "web"]))
+
+    def test_a_screencast_left_running_starts_again(self):
+        b = browser.get("web")
+        calls = []
+
+        def call(method, params=None, session=None, **k):
+            calls.append(method)
+            if method == "Target.attachToTarget":
+                return {"sessionId": "s1"}
+            if method == "Page.startScreencast" and calls.count(method) == 1:
+                raise RiverError("the browser refused Page.startScreencast: Screencast is already active")
+            return {}
+        b.call = call
+        b._hook_passkeys = lambda s: None
+        b._fit = lambda: None
+        b._cast_quality = lambda: 60
+        b._attach("web")
+        self.assertEqual([m for m in calls if "Screencast" in m],
+                         ["Page.startScreencast", "Page.stopScreencast", "Page.startScreencast"])
+        self.assertEqual((b.session, b.target), ("s1", "web"))
+
+
 class Reattach(Base):
     """#5816: when serve starts, a Chrome of the last start that still runs gets its proxy again on its own port."""
 

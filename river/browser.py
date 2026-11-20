@@ -336,6 +336,18 @@ NO_DOWNLOADS = ("--disable-component-update",
 DISK_CACHE = 64 * 1024 * 1024
 
 
+# Chrome's own pages that open as tabs of their own: the 'Sign in to Chrome?' page that Chrome opens after a Google
+# sign-in (chrome://signin-dice-web-intercept.top-chrome), its settings, DevTools. The panel never shows one (its
+# network rule blocks them) and never attaches to one: Page.startScreencast there failed with 'Screencast is already
+# active', and the switch back from a passkey window ended on a blank panel (#6301).
+CHROME_PAGES = ("chrome://", "chrome-untrusted://", "chrome-search://", "chrome-extension://", "devtools://")
+
+
+def web_page(url):
+    """True for a page the panel shows: a web page, about:blank, a data: page; False for Chrome's own pages."""
+    return not str(url or "").lower().startswith(CHROME_PAGES)
+
+
 def session_dir(project, owner):
     """The folder of one session's browser of a project (#5636): its own profile, downloads and state.json."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", owner).strip("._") or "session"
@@ -1050,7 +1062,7 @@ class Browser:
         self.ws = WS(url)
         threading.Thread(target=self._reader, args=(self.ws,), daemon=True, name=f"browser-{self.project}").start()
         self.call("Target.setDiscoverTargets", {"discover": True})
-        pages = [t for t in self.call("Target.getTargets")["targetInfos"] if t["type"] == "page"]
+        pages = [t for t in self.call("Target.getTargets")["targetInfos"] if t["type"] == "page" and web_page(t["url"])]
         if self.attached:  # only serve's own tab: the other tabs are other sessions' and the person's (#5406)
             self.targets = {}
             if self.owner:  # a session: a browser context of its own, with the sign-ins of the default one (#5634)
@@ -1105,7 +1117,16 @@ class Browser:
         self.call("Network.setBlockedURLs", {"urls": ["file://*", "chrome://*", "chrome-extension://*"]}, session=s)
         self._fit()
         self.cast_quality = self._cast_quality()
-        self.call("Page.startScreencast", {"format": "jpeg", "quality": self.cast_quality, "everyNthFrame": 1}, session=s)
+        cast = {"format": "jpeg", "quality": self.cast_quality, "everyNthFrame": 1}
+        try:
+            self.call("Page.startScreencast", cast, session=s)
+        except RiverError as e:
+            # #6301: a tab whose screencast another connection left running (a Chrome of a passkey window that the
+            # switch back took over): stop that one, then start the panel's.
+            if "already active" not in str(e):
+                raise
+            self.call("Page.stopScreencast", session=s)
+            self.call("Page.startScreencast", cast, session=s)
         try:
             self.call("Target.activateTarget", {"targetId": target})
         except RiverError:
@@ -1359,6 +1380,13 @@ class Browser:
         elif method in ("Target.targetCreated", "Target.targetInfoChanged"):
             t = p["targetInfo"]
             if t["type"] != "page":
+                return
+            if not web_page(t["url"]):  # Chrome's own page (#6301): no tab of the panel; the panel leaves it
+                gone = self.targets.pop(t["targetId"], None)
+                self.mine.discard(t["targetId"])
+                if gone is not None and t["targetId"] == self.target:
+                    back = gone.get("opener") if gone.get("opener") in self.targets else None
+                    threading.Thread(target=self._switch_quiet, args=(back,), daemon=True).start()
                 return
             if self.attached:  # attached: only serve's own tabs and the tabs they open
                 if t["targetId"] not in self.mine and t.get("openerId") not in self.mine:

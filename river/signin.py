@@ -50,7 +50,11 @@ FIND_JS = r"""(() => {
   if (user) user.setAttribute('data-maxpm-signin', 'user');
   const robot = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
     + 'iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile');
-  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].map(e => e.innerText.trim())
+  // Only an alert that shows (#6301): innerText of a hidden element is its whole text. On Google's passkey page the
+  // check read 'Too many failed attempts' while the page showed no such text and the passkey worked.
+  const shows = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.closest('[aria-hidden=true]'); };
+  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].filter(shows).map(e => e.innerText.trim())
     .filter(Boolean).join(' / ').slice(0, 200);
   return {pw: !!pw, otp: !!otp, user: !!user, user_value: user ? user.value : '', robot, said, url: location.href};
 })()"""
@@ -353,7 +357,11 @@ STOP_MARK = "[sign-in stopped on {site}]"
 SIGNS_JS = r"""(() => {
   const robot = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
     + 'iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile, #challenge-form');
-  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].map(e => e.innerText.trim())
+  // Only an alert that shows (#6301): innerText of a hidden element is its whole text. On Google's passkey page the
+  // check read 'Too many failed attempts' while the page showed no such text and the passkey worked.
+  const shows = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.closest('[aria-hidden=true]'); };
+  const said = [...document.querySelectorAll('[role=alert], [aria-live=assertive]')].filter(shows).map(e => e.innerText.trim())
     .filter(Boolean).join(' / ').slice(0, 200);
   return {robot, said};
 })()"""
