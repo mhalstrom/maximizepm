@@ -547,7 +547,7 @@ minutes after beta") goes on the transition, not in a script.
 
 ```
 maxpm pipeline add <name> --project <project>
-maxpm pipeline env <name> <env> [--target <target>]
+maxpm pipeline env <name> <env>
 maxpm pipeline stage <name> <stage> --kind build|test|review|approve|deploy|check --run "<command>" [--env <env>]
 maxpm pipeline transition <name> <stage> --mode auto|yes|"yes <person>"|"yes manager"|"delay 30m"|release|"release every 2h"
 maxpm pipeline transition <name> <stage> --window "mon-thu 09:00-17:00 <zone>" --fault-rule on --reason "<why>"
@@ -561,14 +561,28 @@ A test stage names its JUnit file (`--junit report.xml`); a stage's command
 prints `::step start <name>` and `::step end <name> passed|failed` lines to
 show its parts.
 
-A new deploy target shows on the Deploy tab as its default pipeline at once.
-When the person asks for its stages, write its pipeline as above and name the
-target on its production environment (`maxpm pipeline env <name> prod
---target <target>`): the pipeline then takes the target's place, with the
-target's release card on its page. Send one version through (`maxpm pipeline
-start <name>`) and read `maxpm pipeline show <name>` until it passes. The
-details for you and for the sessions that write the scripts: `maxpm guide
-pipelines`.
+Each deploy target owns its release flow on the Deploy tab (holding, optional
+review, approval, Release now, deploy hook, watch, and what shipped). Naming a
+target on a pipeline never replaces that flow. To show GitHub test runs next to
+Holding on a target's release flow, configure a test-only GitHub source and
+attach it to the target:
+
+```
+maxpm pipeline add <name> --project <project>
+maxpm pipeline forge <name> github --repo <owner/name> --secret <secret name>
+maxpm pipeline stage <name> tests --kind test --workflow tests.yml --mode forge
+maxpm pipeline env <name> checks --target <target>
+```
+
+MaximizePM refuses `--target` on a pipeline with non-test stages or no GitHub
+test workflow. The target's hook, `release_approval`, cadence and Release now
+stay in charge of releases; GitHub test runs only report checks on the release
+branch next to Holding. GitHub runs a subset of the tests, and a failed GitHub
+test run never stops a release. For a standalone multi-stage pipeline with no deploy
+target, define its environments and stages as above (without `--target`), send
+one version through (`maxpm pipeline start <name>`), and read `maxpm pipeline
+show <name>` until it passes. The details for you and for the sessions that
+write the scripts: `maxpm guide pipelines`.
 
 The work can run on a forge instead: `maxpm pipeline forge <name>
 github|gitlab|gitea|forgejo --repo <owner/name> --secret <secret name> [--url

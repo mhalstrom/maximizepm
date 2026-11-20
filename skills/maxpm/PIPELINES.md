@@ -54,9 +54,12 @@ Deploy tab of the page.
   Forgejo, Pulumi Delivery), `maxpm serve` reads the forge's runs once a
   minute with a token, and starts a stage's workflow when its transition lets
   the version in.
-- **Default pipeline**: each deploy target that no pipeline names shows as a
-  pipeline of its own, computed from its releases: holding, build (the
-  release-cut hook), review, approval, deploy, watch. It needs no setup.
+- **Default pipeline**: each deploy target owns its release flow, computed
+  from its releases: holding, build (the release-cut hook), review, approval,
+  deploy (and publish with `release_approval draft`), watch. It needs no setup.
+  The target's deploy hook, `release_approval`, cadence and Release now control
+  every release and record what shipped; attaching a test-only GitHub source
+  adds checks next to Holding without replacing the flow.
   Its transitions (not their modes, which come from the target), operators,
   emergency actions, trigger rules and audit log work as on any pipeline. A
   closed transition holds the release item after it. A run again, move back
@@ -73,7 +76,7 @@ Only a person or the manager defines a pipeline. A worker asks the manager.
    ```
    maxpm pipeline add <name> --project <project>
    maxpm pipeline env <name> beta
-   maxpm pipeline env <name> prod [--target <deploy target>]
+   maxpm pipeline env <name> prod
    ```
 2. Add the stages in order. Each one names its kind and its work:
    ```
@@ -158,6 +161,38 @@ Delivery a Delivery stage. The person saves the token first (`maxpm secret put
   roll back is done on Pulumi's page (the plugin pulumi, below).
 - A stage that the forge starts by itself (a push, a tag) has the mode
   `forge`: MaximizePM only reads its run.
+
+### Attach GitHub tests to a deploy target
+
+Each deploy target keeps its own release flow (holding, optional review,
+approval, Release now, deploy hook, watch, and its record of what shipped).
+Naming a deploy target with `--target` does not replace that flow; it attaches
+a test-only GitHub source whose test runs appear as checks next to Holding.
+
+```
+maxpm pipeline add <name> --project <project>
+maxpm pipeline forge <name> github --repo <owner/name> --secret <secret name> [--ref main]
+maxpm pipeline stage <name> tests --kind test --workflow tests.yml --mode forge
+maxpm pipeline env <name> checks --target <deploy target>
+```
+
+- Set the GitHub source and its test workflow before running `pipeline env ...
+  --target <deploy target>`. MaximizePM refuses `--target` if the pipeline has
+  any non-test stage or no GitHub test workflow, and refuses a pipeline name
+  that matches an existing target.
+- MaximizePM reads push runs of that workflow on the source's branch (`--ref`,
+  `main` by default). Open Holding on the target's Deploy page to see each
+  check's workflow, branch, latest state, commit and Open run link.
+- Release controls stay on the target: its deploy hook (`maxpm target hook
+  <target> deploy`), `release_approval` (`review`, `person` or `draft`),
+  cadence and Release now run releases and record what shipped. GitHub test
+  runs do not start a release or change the target's deployed version or date.
+  When the deploy hook starts a GitHub build, its jobs report on the release
+  that started them.
+- GitHub runs only a subset of the tests (it skips the timing, process and
+  browser tests); the deploy hook tests the release's exact commit with the
+  full suite on this computer. A failed GitHub test run is a report only: it
+  never stops a release.
 
 ### Accounts and tokens
 
@@ -900,9 +935,13 @@ release, else the last version tag). It lists them oldest first, each with:
 - its tasks (the `#<id>` in its message) and the session that wrote it (its
   Claude-Session line; else git's author);
 - its changes (added and removed lines; Diff shows the commit);
-- its review: passed in, or in, the review of a cut release that covers it;
-  approved, or changes requested, in the Changes view of its task; else not
-  reviewed.
+- its review (when the flow has review): passed in, or in, the review of a cut
+  release that covers it; approved, or changes requested, in the Changes view
+  of its task; else not reviewed.
+
+When a deploy target has an attached GitHub test source, the latest test runs
+on its release branch appear right beside Holding on the target's Deploy page,
+with each check's state, commit and Open run link.
 
 ```
 maxpm pipeline holding <name>                 # the commits, their review, and what the release takes
