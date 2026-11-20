@@ -9588,8 +9588,8 @@ class DraftRelease(DeployHook):
             self.assertEqual(f.read().splitlines(), ["", str(yes)])
         s = self.stages()
         tag = s["release tag"]
-        self.assertEqual((s["deploy"]["state"], tag["state"], tag["word"], tag["yes"], tag["item"]),
-                         ("passed", "passed", "published", None, self.deploy))
+        self.assertEqual((s["deploy"]["state"], tag["state"], tag["word"], tag["yes"], tag["item"], tag["draft"]),
+                         ("passed", "passed", "published", None, self.deploy, None))
         self.assertEqual([x["name"] for x in tag["step_list"]], ["tag"])
 
     def test_a_failure_after_the_yes_starts_the_release_again_without_it(self):
