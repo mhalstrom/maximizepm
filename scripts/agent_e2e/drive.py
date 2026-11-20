@@ -4,7 +4,8 @@ It starts the agent for <item> through the test serve (maxpm launch, as Dispatch
 queue: maxpm go ran, the item claimed, the item done, maxpm wait, a question answered, maxpm stop. It answers no card
 of the agent (trust, approval): those are the person's, and a step that waits at one fails with the card's text.
 Each step goes with its time to stdout and to <T>/<tag>.log. It only reads the queue file; it writes through maxpm.
-With FOLLOW=<session> in the environment it follows that session instead of a launch.
+With FOLLOW=<session> in the environment it follows that session instead of a launch. OPTIONS='key=value ...' adds
+launch settings (maxpm launch --option), as a person sets them in the launch dialog.
 
 <label> is a launch_agents label ('Claude Code', 'GitHub Copilot CLI'); '-' leaves model or effort out.
 """
@@ -99,6 +100,8 @@ if os.environ.get("FOLLOW"):
 else:
     args = ["launch", "--item", str(ITEM), "--agent", LABEL] + (["--model", MODEL] if MODEL else []) + (
         ["--effort", EFFORT] if EFFORT else [])
+    for opt in os.environ.get("OPTIONS", "").split():  # launch settings, as the dialog sets them: force=on
+        args += ["--option", opt]
     out = q(*args)
     log("LAUNCH", " ".join(args), "->", out.splitlines()[0] if out else "")
     m = re.search(r" as (\S+) in ", out)

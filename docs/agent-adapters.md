@@ -497,7 +497,29 @@ the subfolder's `AGENTS.md`.
 Also found: after the person's answer, the fresh sessions for the Pi, Goose and Amp items ran Claude Code, not the
 agent of the Dispatch (#6419); `maxpm launch --agent` takes only a label, not an id (#6421); a session with a token
 gets briefing lines with `--as` and then a note on each such command (#6423). The rest of the run, after #6415 to
-#6418: #6424.
+#6418: #6424, below.
+
+### The second run, after the trust and permission fixes (#6424)
+
+2026-11-20, 19:36 to 19:55 UTC, the same scripts and rules, each project with `workspace worktree` (a MaximizePM
+worktree of a new git repository), `wait_step` 2m. Versions: codex-cli 0.171.0 (Homebrew updated it at 19:29 UTC,
+after the fixes), cursor-agent 2026.11.19-f005e9d, GitHub Copilot CLI 1.0.114, agy 1.5.13. Each agent ran first with
+its default settings; Copilot and Cursor ran a second time with the permission setting that a person picks in the
+launch dialog, so the run reached the later steps.
+
+| Agent | Settings | Start with no question | go, claim, done (with a commit) | wait | A message | Stop | AGENTS.md (root, subfolder) |
+|---|---|---|---|---|---|---|---|
+| Codex (gpt-6-luna, low) | default | fail: 'Trust this folder?' although the start passes `-c projects.<worktree>` and `-c projects.<repository root>.trust_level="trusted"`; 0.171.0 ignores that override, also in a plain new git folder, and has `--trust` only on `codex exec` (#6437) | not reached | not reached | not reached | pass: serve ended it at the card | pass (run 1) |
+| Cursor CLI (auto) | default | trust: pass (`--trust`, #6416); then 'Run this command?' for `maxpm go`: nothing in its start allows `Shell(maxpm)` (#6439) | not reached | not reached | not reached | pass: serve ended it | pass with `--trust` in print mode |
+| Cursor CLI (auto) | Run Everything (`--force`) | pass | pass: 15 s from the claim to done | pass | pass: 'pong' in 10 s, through its `maxpm wait` | pass: it ended its turn at once; its row left when serve ended the idle session (4.4 min) | as above |
+| GitHub Copilot CLI (auto, low) | default | pass: no trust question in the worktree, and `maxpm go` ran with no question (#6417) | claim: pass; then 'Do you want to create ok.txt?': with no Permissions setting Copilot asks before each change, as the setting says | not reached | not reached | pass: serve ended it | pass (run 1) |
+| GitHub Copilot CLI (auto, low) | Permissions `allow-all-tools` | pass | pass: 34 s from the claim to done | pass | pass: 'pong' in 15 s, through its `maxpm wait`; the native channel needs Copilot's experimental mode, which the person turns on | pass, slowly: its model ran `maxpm stop` on itself (refused: a person's command), then sat at its prompt until serve ended it (4.6 min) | as above |
+| Antigravity CLI (default, Gemini 4 Neon high) | default | pass: no trust question in the worktree, and its Gemini quota had reset (19:40 UTC) | pass: 4.5 min from the claim to done; two `maxpm done` with no proof were refused, the third had `--commit` and `--test` | pass | pass: read through its `maxpm wait` in 45 s, 'pong' in 112 s | pass: it ended its turn at the STOP of its wait; its row left when serve ended the idle session (4.9 min) | pass: both codewords in print mode |
+
+With the defaults, only Antigravity CLI ran the whole session with no question. Copilot's question about a file
+write is its Permissions setting at work, not a defect. Open: #6437 (Codex trust on 0.171.0; #6432 decides trust in a
+project's own folder and needs the same flag) and #6439 (Cursor's allow of maxpm). A stopped session that sits at its
+prompt leaves the queue only after serve's idle end, about 4.5 minutes, also when it ended its turn at once.
 
 ## Slash commands on the page (#5224)
 

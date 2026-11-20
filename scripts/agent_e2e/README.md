@@ -21,7 +21,8 @@ bash scripts/agent_e2e/inst.sh $T/inst          # AGENTS.md in print mode
   variable of the calling session reaches it.
 - `tx.sh`: tmux of the test serve. It clears `TMUX`, or tmux reaches the person's server.
 - `drive.py`: launch, maxpm go, claim, done, wait, a question, stop. It answers no card of the agent: a step that
-  waits at a trust or approval question fails with the question's text.
+  waits at a trust or approval question fails with the question's text. `OPTIONS="force=on"` before it adds launch
+  settings (`maxpm launch --option`), as a person sets them in the launch dialog.
 - `inst.sh`: each agent in print mode, asked for the codewords of two `AGENTS.md` files.
 
 End the run: stop each session (`maxpm stop`), stop the test serve, then `bash scripts/agent_e2e/tx.sh $T

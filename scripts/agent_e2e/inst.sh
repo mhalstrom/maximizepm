@@ -27,7 +27,8 @@ run hermes hermes chat --provider openai-codex -m gpt-6.1-terra -q "$P" --onesho
 run opencode opencode run -m opencode/big-pickle "$P"
 run goose goose run --no-session -t "$P"
 run amp amp -x "$P"
-run cursor cursor-agent -p "$P" --model auto
+# Print mode refuses a folder that Cursor does not trust; a MaximizePM start passes --trust in its worktrees (#6416).
+run cursor cursor-agent -p "$P" --model auto --trust
 # Aider needs a terminal on stdin: script(1) gives it one.
 run aider script -q /dev/null aider --model ollama_chat/qwen2.5:3b --no-git --no-show-model-warnings --message "$P"
 wait
