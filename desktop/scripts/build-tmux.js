@@ -28,7 +28,7 @@ const ARCHES = { "mac-arm64": { arch: "arm64", host: "aarch64-apple-darwin" },
   "mac-x64": { arch: "x86_64", host: "x86_64-apple-darwin" } };
 const MIN_MACOS = "12.0";  // the oldest macOS that Electron 45 runs on
 // The stamp of a finished build: the pins and the flags; a change of either builds again.
-const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color", LG_PAGE])).digest("hex");
+const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color", LG_PAGE, "force_load"])).digest("hex");
 
 const top = path.join(__dirname, "..", "build", "tmux");
 
@@ -49,6 +49,13 @@ function source(name) {
   const got = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   if (got !== s.sha256) { fs.rmSync(file); throw new Error(`sha256 mismatch for ${s.url}: got ${got}, want ${s.sha256}`); }
   return file;
+}
+
+// tmux finds jemalloc only with pkg-config: these two variables stand in for it. On macOS jemalloc takes malloc and
+// calloc by a constructor in its zone code (zone_register), which nothing calls by name: a plain link of the static
+// library leaves that code out and tmux keeps the calloc of macOS. -force_load links every part of the library.
+function jemallocEnv(prefix) {
+  return { JEMALLOC_CFLAGS: `-I${prefix}/include`, JEMALLOC_LIBS: `-Wl,-force_load,${path.join(prefix, "lib", "libjemalloc.a")}` };
 }
 
 function buildOne(key) {
@@ -92,10 +99,8 @@ function buildOne(key) {
   sh("make", ["install_lib_static", "install_include"], { cwd: j, env });
 
   const t = path.join(work, SOURCES.tmux.dir);
-  // tmux finds jemalloc only with pkg-config: these two variables stand in for it (the static library by its path).
   sh("./configure", [...host, `--prefix=${prefix}`, "--enable-utf8proc", "--enable-jemalloc", "--with-TERM=screen-256color",
-    "--disable-dependency-tracking"], { cwd: t, env: { ...env, JEMALLOC_CFLAGS: `-I${prefix}/include`,
-      JEMALLOC_LIBS: path.join(prefix, "lib", "libjemalloc.a") } });
+    "--disable-dependency-tracking"], { cwd: t, env: { ...env, ...jemallocEnv(prefix) } });
   sh("make", ["-j8"], { cwd: t, env });
 
   // The program may use only the libraries every Mac has.
@@ -105,6 +110,9 @@ function buildOne(key) {
   if (outside.length) throw new Error(`tmux ${key} links libraries a Mac does not have: ${outside.join(", ")}`);
   const kind = execFileSync("lipo", ["-archs", exe], { encoding: "utf8" }).trim();
   if (kind !== a.arch) throw new Error(`tmux ${key} is built for ${kind}, not ${a.arch}`);
+  // jemalloc replaces the malloc zone only when its zone code is in the program (see jemallocEnv).
+  if (!/zone_register/.test(execFileSync("nm", [exe], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })))
+    throw new Error(`tmux ${key} has no jemalloc zone code: its malloc and calloc would be the system's`);
   // The build for this Mac's own chip starts (jemalloc's page size, the libraries): tmux -V prints its version.
   if ((process.arch === "arm64" ? "arm64" : "x86_64") === a.arch) {
     const v = execFileSync(exe, ["-V"], { encoding: "utf8" }).trim();
@@ -132,4 +140,4 @@ if (require.main === module) {
   } catch (e) { console.error(e.message); process.exit(1); }
 }
 
-module.exports = { SOURCES, ARCHES };
+module.exports = { SOURCES, ARCHES, jemallocEnv };
