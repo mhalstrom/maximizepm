@@ -584,10 +584,12 @@ def _investigate(conn, ad, inst, old, target, failure, output=None, step=None, p
                          context=ctx)["id"]
 
 
-def _failed(conn, ad, inst, old, target, message, output=None, step=None, priority=2):
-    """Mark the update failed, with the task that investigates it (_investigate)."""
+def _failed(conn, ad, inst, old, target, message, output=None, step=None, priority=2, kept=False):
+    """Mark the update failed, with the task that investigates it (_investigate). kept: the old version runs, so the
+    row says 'Failed, rolled back' (#6460); the message shows only in the row's Details."""
     task = _investigate(conn, ad, inst, old, target, message, output, step, priority)
-    return _set(conn, ad.id, state="failed", message=message, output=_tail(output) if output else None, task=task)
+    return _set(conn, ad.id, state="failed", message=message, output=_tail(output) if output else None, task=task,
+                kept=kept)
 
 
 def _default_model(conn, ad):
@@ -636,10 +638,11 @@ def run_update(conn, aid):
     if code != 0:
         if NEEDS_PERSON.search(out or ""):
             item = _person_item(conn, ad, argv, out)
-            return _set(conn, aid, state="failed", person_item=item, output=_tail(out),
+            return _set(conn, aid, state="failed", person_item=item, output=_tail(out), kept=True,
                         message="the update asks for a password, sudo or a sign-in"
                                 + (f": your item #{item} has the command" if item else ""))
-        return _failed(conn, ad, inst, old, target, f"the update failed (exit {code}); {old} still runs", out, step)
+        return _failed(conn, ad, inst, old, target, f"the update failed (exit {code}); {old} still runs", out, step,
+                       kept=True)
     inst = install_of(ad) or inst
     new = installed_version(ad, inst)
     change(conn, lambda d: d["agents"].setdefault(aid, {}).update(installed=new))
@@ -667,14 +670,16 @@ def run_update(conn, aid):
         bcode, bout = _run(back, UPDATE_TIMEOUT)
         restored = installed_version(ad, install_of(ad) or inst) if bcode == 0 else None
         change(conn, lambda d: d["agents"][aid].update(installed=restored or new))
-    if restored and not newer(restored, old) and not newer(old, restored):
+    # kept: the old version runs again, so the row says 'Failed, rolled back'; the message stays for Details.
+    kept = bool(restored and not newer(restored, old) and not newer(old, restored))
+    if kept:
         how = f"the old version {old} is back"
     else:
         how = (f"MaximizePM cannot put {old} back ({inst['how']} installs only the newest)" if not back
                else f"putting {old} back failed")
     # A new version that fails and stays is a broken agent: its task comes first.
     return _failed(conn, ad, inst, old, target or new, f"the test after the update failed; {how}", shown, step,
-                   priority=2 if "is back" in how else 1)
+                   priority=2 if kept else 1, kept=kept)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -698,7 +703,7 @@ def request(conn, aid, who=None):
     if (row.get("update") or {}).get("state") in ACTIVE:
         return agent_status(conn, ad.id)
     _set(conn, ad.id, state="queued", by=who or "maxpm", message=None, output=None, person_item=None, new=None,
-         step=None, task=None, late=None, idle_from=None, waits=0, target=row.get("latest"))
+         step=None, task=None, late=None, idle_from=None, waits=0, kept=None, target=row.get("latest"))
     with core.tx(conn):
         core._event(conn, None, who or "maxpm", f"asked for the update of {ad.label}"
                                                 + (f" to {row['latest']}" if row.get("latest") else ""))

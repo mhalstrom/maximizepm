@@ -183,6 +183,7 @@ class Update(Base):
         r = self.row()
         self.assertEqual((r["update"]["state"], r["installed"]), ("failed", "0.159.1"))
         self.assertIn("the old version 0.159.1 is back", r["update"]["message"])
+        self.assertTrue(r["update"]["kept"])  # the row says 'Failed, rolled back' (#6460)
         self.assertEqual(self.ran[-2][-1], "@openai/codex@0.159.1")
         it = core.item_show(self.c, r["update"]["task"])
         self.assertEqual((it["doer"], it["kind"], it["project"]), ("ai", "operational", "shop"))
