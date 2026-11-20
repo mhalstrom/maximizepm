@@ -3657,6 +3657,39 @@ class Upgrade(Base):
         self.assertTrue(c.execute("SELECT 1 FROM meta WHERE key=?", ("schema:" + core.schema_print(),)).fetchone())
         holder.execute("ROLLBACK")
 
+    def test_wal_tries_again_when_another_connection_sets_it_at_the_same_time(self):
+        # SQLite calls no busy handler for this lock, so 'database is locked' comes at once (#6243).
+        class Fake:
+            calls = 0
+
+            def execute(self, sql):
+                Fake.calls += 1
+                if Fake.calls < 3:
+                    raise sqlite3.OperationalError("database is locked")
+        core._wal(Fake())
+        self.assertEqual(Fake.calls, 3)
+        Fake.calls = 0
+        with self.assertRaises(sqlite3.OperationalError):  # the last try gives the error
+            core._wal(Fake(), tries=1)
+
+    def test_several_threads_open_a_new_queue_file_at_once(self):
+        # serve's first start on a new queue: its threads connected at once and one stopped at the WAL pragma (#6243).
+        for n in range(8):
+            path = os.path.join(self.dir.name, f"new{n}.db")
+            errors = []
+
+            def open_it():
+                try:
+                    core.connect(path).close()
+                except Exception as e:
+                    errors.append(e)
+            threads = [threading.Thread(target=open_it) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+
     def test_a_new_schema_id_runs_the_migrations_again(self):
         path = self.c.execute("PRAGMA database_list").fetchone()[2]
         self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'launch_in', 'tab')")

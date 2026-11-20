@@ -7056,11 +7056,11 @@ def serve(port: int, open_browser=False, dev=False):
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
+    conn = core.connect()  # before the threads: a new queue file gets its schema and WAL mode once (#6243)
     # The listener for the sessions that serve brings messages into (Hermes, #5704): a thread of its own, since a pass
     # of the loop comes only every notify_interval.
     threading.Thread(target=wake_loop, args=(stop,), daemon=True, name="maxpm-wake").start()
     threading.Thread(target=shells_loop, args=(stop,), daemon=True, name="maxpm-shells").start()
-    conn = core.connect()
     try:
         runners = core.setting(conn, "serve_runners") == "on"
         child = core.setting(conn, "serve_loop_process") == "on"

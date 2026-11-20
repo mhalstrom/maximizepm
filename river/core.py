@@ -2153,9 +2153,26 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return _setup(sqlite3.connect(p, timeout=10, isolation_level=None))
 
 
+def _wal(conn, tries=50):
+    """Set WAL mode, and try again when another connection sets it on the same new file at the same time (#6243).
+    On a file that is not in WAL mode yet, the change needs the exclusive lock while this connection holds a
+    read lock, so SQLite gives 'database is locked' at once and calls no busy handler: two connections
+    that both wait would wait for each other. serve's first start on a new queue opened several
+    connections in its threads at once, and the start stopped there. A file in WAL mode already returns at once."""
+    import time
+    for n in range(tries):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or n == tries - 1:
+                raise
+            time.sleep(0.02 * (n + 1) if n < 10 else 0.2)
+
+
 def _setup(conn):
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    _wal(conn)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=10000")
     _upgrade(conn)
