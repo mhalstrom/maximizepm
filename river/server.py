@@ -191,8 +191,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     """Name a new session, reserve the item for it (push), and open the agent with MAXPM_AGENT and
     MAXPM_FOCUS=item:<id>: its first maxpm go claims that item, or says why not. A session that never runs
     a river command is a manager finding (not connected) and does not count as the project's agent."""
-    import secrets
-    name = f"{t['project']}-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, t["project"])  # never a stopped session's name (#6359)
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     _give_scope(conn, name, [f"tasks:{t['item']['id']}"], f"{by}: {why}")
     try:
@@ -261,7 +260,6 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once.
     It is the person's assistant (#5110): its own session type, named for its job (you-<id>), long-lived, with no
     queue work. One per person: while it runs, this opens it again ("existing") and starts nothing."""
-    import secrets
     person = core._person(conn, person)
     have = core.assistant_of(conn, person)
     if have:
@@ -275,9 +273,7 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     p = next((x for x in projects if x["path"]), None)
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
-    name = f"you-{secrets.token_hex(2)}"
-    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
-        name = f"you-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, "you")
     core.assistant_make(conn, name, person)
     try:
         t = _open_focused(conn, p, f"needs:@{person}", runner, agent, model, effort, options, agent_name=name)
@@ -294,7 +290,6 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
     one. The project whose folder holds it (the deepest) gives the launch settings; a folder of no project, the
     global ones. Its first prompt is prompt, or none: no maxpm go and no queue skill. It is a session with no item
     (core.plain_make): no queue work, no worker slot, and the worker rules never end it."""
-    import secrets
     if folder:
         path = Path(str(folder)).expanduser()
         if not path.is_absolute():
@@ -314,9 +309,7 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
         prompt = None
     _can_open_terminal(runner, f"cd {path} && claude")
     base = re.sub(r"[^a-z0-9]+", "-", (project["name"] if project else path.name).lower()).strip("-")[:24] or "session"
-    name = f"{base}-{secrets.token_hex(2)}"
-    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
-        name = f"{base}-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, base)
     title = core._short_title(" ".join(str(prompt).split()) if prompt else path.name)
     t = {"project": project["name"] if project else None, "path": str(path), "session_title": title or name,
          **core._launch_agent_cmd(conn, project["id"] if project else None, agent, model, effort, options, title or name,
@@ -564,7 +557,6 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
     it registers as (MAXPM_AGENT), when the caller registered one. Else river names the session (<project>-<hex>, the
     name its maxpm go would choose) and registers it before it starts (#5201): the pane then carries @maxpm_agent at
     once, so the page never shows 'This session runs outside tmux' for a pane that maxpm opened itself."""
-    import secrets
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     kind = focus.split(":")[0]
     if agent is None and kind in FOCUS_ROLES:  # agent_for.<role>, else default_agent (#5168)
@@ -574,9 +566,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, title)}
     named = agent_name
     if named is None:
-        named = f"{p['name']}-{secrets.token_hex(2)}"
-        while conn.execute("SELECT 1 FROM agents WHERE name=?", (named,)).fetchone():
-            named = f"{p['name']}-{secrets.token_hex(2)}"
+        named = core.new_agent_name(conn, p["name"])
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
         _give_scope(conn, named, _focus_scope(conn, focus, p["name"]), f"started for {focus}")
     try:
@@ -606,7 +596,6 @@ def manage_command(cmd):
 def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=None, options=None):
     """Start manager (the page's Manager section): the chosen agent with manage in place of go, in the folder
     of the first project that has one, compacted at manager_autocompact. Refuses while a manager is active."""
-    import secrets
     other = core.active_manager(conn)
     if other:
         raise RiverError(f"{other} is the active manager; open its chat instead")
@@ -620,7 +609,7 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager",
                                   autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact")))}
     t["command"] = manage_command(t["command"])
-    name = f"manager-{secrets.token_hex(2)}"
+    name = core.new_agent_name(conn, "manager")
     core.register(conn, name, note="started from the page as the manager")
     core._set_role_note(conn, name, "manager", None)  # the next Start manager sees it at once
     try:
@@ -3655,7 +3644,6 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     """Start a deployer session for a target: river names it, gives it the target (the old owner is told), and
     opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy
     item's model and effort. Its maxpm go claims the deploy item when it is ready, else it waits for it."""
-    import secrets
     why = core.pause_refusal(conn) or core.net_refusal(conn)  # #5962, #6099
     if why:
         raise RiverError(why)
@@ -3669,11 +3657,11 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     # Each deployer gets a session name of its own (claude --name, --remote-control): the one it replaces may still
     # run, and #1010 saw both starts beside a live session of the same name end before they connected.
-    tag = secrets.token_hex(2)
+    name = core.new_agent_name(conn, f"deploy-{target}")  # never a stopped deployer's name (#6359)
+    tag = name.rsplit("-", 1)[1]
     title = f"{core._short_title(core.focus_title(conn, focus), 43)} {tag}"
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
          **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title)}
-    name = f"deploy-{target}-{tag}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
     _give_scope(conn, name, [f"target:{target}"], f"started to deploy {target}")
     with core.tx(conn):

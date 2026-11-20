@@ -139,6 +139,28 @@ class LaunchAgent(unittest.TestCase):
         r = server.dispatch_item(self.c, top, runner=sent.append)
         self.assertEqual((r["pushed_to"], len(sent)), ("idle", 1))  # a waiting session gets it; no new Terminal
 
+    def test_a_new_session_never_gets_the_name_of_a_stopped_or_ended_one(self):
+        # #6359: a launch drew the 4-hex name of a session that a manager had killed minutes before; register kept that
+        # row with its stop request, and the new session's first maxpm go read the stop and ended with no work.
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "shop-aaaa")
+        core.stop_agent(self.c, "shop-aaaa", "usage limit; the item moves to Claude Code", actor="mark")
+        core.register(self.c, "shop-bbbb")
+        core.unregister(self.c, "shop-bbbb")
+        x = core.item_add(self.c, "shop", "first")["id"]
+        with mock.patch("secrets.token_hex", side_effect=["aaaa", "bbbb", "cccc"]):
+            t = server.dispatch_item(self.c, x, runner=[].append)
+        self.assertEqual(t["session_name"], "shop-cccc")
+        self.assertIsNone(core.stop_request(self.c, "shop-cccc"))
+        b = core.go(self.c, self.dir.name, "shop-cccc", focus=f"item:{x}")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", x))
+        # The stopped session keeps its request: it may still run and must still end.
+        self.assertEqual(core.stop_request(self.c, "shop-aaaa")["stop_by"], "mark")
+        # After 50 used names the name takes six hex digits.
+        with mock.patch("secrets.token_hex", side_effect=["aaaa"] * 50 + ["abcdef"]):
+            self.assertEqual(core.new_agent_name(self.c, "shop"), "shop-abcdef")
+
     def test_launch_starts_a_reviewer_for_a_ready_release_review_and_skips_its_authors(self):
         # #902: launch --item <review> refused the review, and launch --project <deploy project> found nothing.
         core.target_add(self.c, "web", "push, then smoke test")

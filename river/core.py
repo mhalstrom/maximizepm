@@ -15525,6 +15525,20 @@ def outbox_mark(conn, notification_id, ok, error=None):
     return dict(conn.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone())
 
 
+def new_agent_name(conn, base):
+    """A name '<base>-<4 hex>' for a new session that no agent had: none in agents and none in gone_agents. A stop
+    request lives on the agents row of a name, and register keeps that row: a new session that drew the name of a
+    stopped or killed one read its stop at its first maxpm go and ended with no work (#6359). With 65,536 names a
+    base, a long-lived queue meets a used one; after 50 tries the name takes 6 hex digits."""
+    import secrets
+    for n in range(80):
+        name = f"{base}-{secrets.token_hex(2 if n < 50 else 3)}"
+        if not conn.execute("SELECT 1 FROM agents WHERE name=? UNION ALL SELECT 1 FROM gone_agents WHERE name=?",
+                            (name, name)).fetchone():
+            return name
+    raise RiverError(f"no free session name for {base}: 80 names were all taken")
+
+
 def register(conn, name, human=False, note="", session=None):
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name):
         raise RiverError("agent names use letters, digits, '.', '_', '-' (up to 64)")
@@ -23723,8 +23737,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             register(conn, actor, note=f"started with maxpm go in {area}")
             new_name = True
     else:
-        import secrets
-        actor = f"{'chat' if chat and not project else names[0]}-{secrets.token_hex(2)}"
+        actor = new_agent_name(conn, 'chat' if chat and not project else names[0])
         register(conn, actor, note=f"started with maxpm go in {area}" + (" (chat, no folder)" if chat else ""))
         new_name = True
     activity(conn, actor)
@@ -25416,8 +25429,7 @@ def manage(conn, cwd, actor=None, takeover=None):
     (launch, queues, messages, stop, launch settings, target give) and takes no work itself."""
     new_name = False
     if not actor:
-        import secrets
-        actor = f"manager-{secrets.token_hex(2)}"
+        actor = new_agent_name(conn, "manager")
     if not conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
         register(conn, actor, note="role: manager")
         new_name = True
