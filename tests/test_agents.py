@@ -1660,9 +1660,12 @@ class CodexWorktreeTrust(unittest.TestCase):
 
         words = shlex.split(codex.trust_workspace(wt, "codex hi"))
         trusted = [words[i + 1] for i, w in enumerate(words) if w == "-c" and "trust_level" in words[i + 1]]
-        self.assertEqual(trusted, [f'projects.{json.dumps(wt)}.trust_level="trusted"',
-                                   f'projects.{json.dumps(repo)}.trust_level="trusted"'])
+        # One inline table (#6437): codex-cli 0.171.0 ignores the dotted form projects."<path>".trust_level.
+        self.assertEqual(trusted, ["projects={" + f'{json.dumps(wt)}={{trust_level="trusted"}},'
+                                   + f'{json.dumps(repo)}={{trust_level="trusted"}}' + "}"])
         self.assertEqual(words[-1], "hi")
+        cmd = codex.trust_workspace(wt, "codex hi")
+        self.assertEqual(codex.trust_workspace(wt, cmd), cmd)
         self.assertEqual(codex._trust_root(os.path.join(wt, "sub")), repo)
         # The main folder of a repository and a folder outside one: only the folder itself.
         self.assertIsNone(codex._trust_root(repo))

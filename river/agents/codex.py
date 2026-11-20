@@ -198,9 +198,12 @@ def _trust_root(folder):
 
 
 def trust_workspace(folder, command, env=None):
-    """Pass -c projects."<folder>".trust_level="trusted" for a worktree that MaximizePM made (#6339), so Codex starts
-    there without its folder trust prompt and without writing to ~/.codex/config.toml. The repository's main folder
-    gets the same -c words: Codex applies trust to the repository root of a worktree (#6415)."""
+    """Pass -c projects={"<folder>"={trust_level="trusted"}, ...} for a worktree that MaximizePM made (#6339), so Codex
+    starts there without its folder trust prompt and without writing to ~/.codex/config.toml. The repository's main
+    folder is in the same table: Codex 0.159 applies trust to the repository root of a worktree (#6415).
+    One inline table, not the dotted form -c projects."<folder>".trust_level="trusted": codex-cli 0.171.0 ignores the
+    dotted form for its trust question and asks 'Trust this folder?'; the inline table starts with no question, in a
+    plain git folder and in a worktree whose path holds dots (measured 2026-11-20, #6437)."""
     import json
     import shlex
     if not folder or not command:
@@ -216,12 +219,10 @@ def trust_workspace(folder, command, env=None):
         for p in (raw, os.path.realpath(raw)) if raw else ():
             if p not in paths:
                 paths.append(p)
-    extra = []
-    for p in paths:
-        val = f'projects.{json.dumps(p)}.trust_level="trusted"'
-        if val not in words:
-            extra += ["-c", val]
-    return shlex.join(words[:1] + extra + words[1:]) if extra else command
+    val = "projects={" + ",".join(f'{json.dumps(p)}={{trust_level="trusted"}}' for p in paths) + "}"
+    if val in words:
+        return command
+    return shlex.join(words[:1] + ["-c", val] + words[1:])
 
 
 def parse_command(words):

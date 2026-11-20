@@ -1207,7 +1207,7 @@ class LaunchAgent(unittest.TestCase):
 
     def test_a_worktree_made_by_maxpm_is_trusted_before_antigravity_codex_copilot_and_grok_start(self):
         """#6339: a worktree maxpm makes is trusted before the agent starts (agy --settings trustedWorkspaces,
-        codex -c projects.<wt>.trust_level, copilot config.json trustedFolders, grok trusted_folders.toml); a folder
+        codex -c projects={<wt>={trust_level=...}}, copilot config.json trustedFolders, grok trusted_folders.toml); a folder
         maxpm did not make keeps its prompt; removing the worktree cleans up the trusted-folders files."""
         import json
         import shlex
@@ -1269,8 +1269,10 @@ class LaunchAgent(unittest.TestCase):
                     self.assertIn("command(maxpm)", cfg["permissions"]["allow"])
                 elif label == "Codex":
                     words = shlex.split(t["command"])
-                    self.assertIn(f'projects.{json.dumps(wt)}.trust_level="trusted"', words)
-                    self.assertIn(f'projects.{json.dumps(root)}.trust_level="trusted"', words)  # #6415
+                    table = words[words.index("-c") + 1]
+                    self.assertTrue(table.startswith("projects={"), table)  # one inline table (#6437)
+                    self.assertIn(f'{json.dumps(wt)}={{trust_level="trusted"}}', table)
+                    self.assertIn(f'{json.dumps(root)}={{trust_level="trusted"}}', table)  # #6415
                 elif label == "Copilot":
                     data = json.loads((chome / "config.json").read_text())
                     self.assertIn(wt, data["trustedFolders"])
