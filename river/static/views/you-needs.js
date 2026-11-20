@@ -40,15 +40,11 @@ export async function pollNeedsYou() {
 // one card with "1 of N" and Next (waitDialog.js). The bell (#6001) is for the phone and Mac notices; this opens on
 // the page also with the bell off.
 const AUTO_KEEP = 500;
-// A card's key: its event id, and its decision when it has one. A decision put on a card that the person saw before
-// (#6436: the needs-you session puts each one with maxpm forward, one at a time) opens the card again.
-const djb = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
-export const cardKey = (e) => e.decision ? `${e.id}:${djb(JSON.stringify(e.decision))}` : e.id;
 export function newCards(list, seen) {
   const cards = list.filter(e => e.kind === "item" || e.message_kind === "question");
-  if (!Array.isArray(seen)) return { show: [], seen: cards.map(cardKey).slice(-AUTO_KEEP) };
-  const s = new Set(seen), show = cards.filter(e => !s.has(cardKey(e)));
-  return { show, seen: show.length ? [...seen, ...show.map(cardKey)].slice(-AUTO_KEEP) : seen };
+  if (!Array.isArray(seen)) return { show: [], seen: cards.map(e => e.id).slice(-AUTO_KEEP) };
+  const s = new Set(seen), show = cards.filter(e => !s.has(e.id));
+  return { show, seen: show.length ? [...seen, ...show.map(e => e.id)].slice(-AUTO_KEEP) : seen };
 }
 function autoCards() {
   const h = humanActor(); if (!h) return;

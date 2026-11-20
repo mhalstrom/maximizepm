@@ -22611,7 +22611,7 @@ DIALOG_STEPS = """Put the decision itself in the dialog on {person}'s MaximizePM
        --option "<label>: <one line: what happens>" --option "<label>: ..." --recommend <label>
    2 to 4 options, your recommendation among them. A question (not an item): maxpm --as {person} forward
    <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
-   --question "<what to do>"; the dialog then shows a text box. The dialog opens on the page by itself.
+   --question "<what to do>"; the dialog then shows a text box. The page shows the dialog to them.
    Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
    background command). The answer in the dialog closes the item or question, and MaximizePM sends you a
    notice with the choice and the person's words; record nothing for it. When the page is not open (they
