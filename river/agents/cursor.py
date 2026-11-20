@@ -249,6 +249,28 @@ def read_effort_levels(model):
     return list(row["efforts"]) if row else None
 
 
+def config_settings():
+    """What a Cursor session takes from ~/.cursor/cli-config.json when its command line names nothing (#6280): the
+    selected model (model.modelId: grok-4.7 on 2026-11-20; an id with a level gives the model and the level), the
+    sandbox (sandbox.mode: disabled) and the mode: agent, Cursor's own when no --mode names plan or ask."""
+    try:
+        d = json.loads((Path.home() / ".cursor" / "cli-config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    d = d if isinstance(d, dict) else {}
+    mid = ((d.get("model") or {}).get("modelId") if isinstance(d.get("model"), dict) else None) or \
+        ((d.get("selectedModel") or {}).get("modelId") if isinstance(d.get("selectedModel"), dict) else None)
+    m = _SUFFIX.search(mid or "")
+    model, level = (mid[:m.start()] + (m.group(2) or ""), m.group(1)) if m else (mid, None)
+    sandbox = (d.get("sandbox") or {}).get("mode") if isinstance(d.get("sandbox"), dict) else None
+    return {"model": model, "effort": level, "sandbox": sandbox, "mode": "agent"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280). The effort has no source when the model
+# id names no level (Cursor's default level of that model).
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "sandbox": ("config",), "mode": ("config",)}
+
+
 def model_word(model, effort):
     """The --model word: the model id, with the effort as its level when both are given, the model is no "auto", and
     its id names no level yet (claude-opus-5-5 + high -> claude-opus-5-5-high; the level goes before a -fast end:

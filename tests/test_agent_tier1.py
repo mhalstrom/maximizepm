@@ -120,16 +120,16 @@ def _model_order(a):
     return None
 
 
-def _session_settings(a):
-    """#6260: a running session's Settings dialog reads the model and the effort it runs (and its mode) from the
-    session itself, its chat log (chat_settings) or its screen (screen_settings), not only from a command line that
-    may name none."""
-    if not (a.has("chat_settings") or a.has("screen_settings")):
-        return "neither chat_settings nor screen_settings: a session started with no --model shows 'not known'"
+def _settings_read(a):
+    """#6260, #6280: a running session's Settings dialog reads each value the session runs with (model, effort, mode
+    and each other setting) from the session itself (its chat log or screen) or the agent's own config, not only
+    from a command line that may name none (tests.test_model_order.settings_problems)."""
+    from tests.test_model_order import settings_problems
     keys = [s["key"] for s in a.session_specs()]
     if "model" not in keys or "effort" not in keys:
         return f"the Settings dialog has no model or effort row (it has {', '.join(keys)})"
-    return None
+    problems = settings_problems(a)
+    return "; ".join(p for _, p in problems) if problems else None
 
 
 def _usage(a):
@@ -207,7 +207,7 @@ def _read_dirs(a):
 FEATURES = {
     "parts": _parts, "launch": _launch, "resume": _resume, "identity": _identity, "chat": _chat,
     "states": _states, "ask_card": _ask, "interrupt": _interrupt, "native_message": _native,
-    "commands": _commands, "effort": _effort, "model_order": _model_order, "session_settings": _session_settings, "usage": _usage, "setup_files": _setup_files,
+    "commands": _commands, "effort": _effort, "model_order": _model_order, "settings_read": _settings_read, "usage": _usage, "setup_files": _setup_files,
     "setup_main": _setup_main, "host_signin": _host_signin, "roles": _roles, "jobs": _jobs,
     "shell_guard": _shell_guard, "secrets": _secrets, "first_go": _first_go,
     "read_dirs": _read_dirs,

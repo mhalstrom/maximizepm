@@ -284,6 +284,13 @@ SETTING_KEYS = {"key": str, "label": str, "kind": str, "choices": (list, tuple),
                 "flag": (list, tuple), "live": (str, type(None)), "read": (str, type(None)), "config": bool,
                 "session": bool, "note": (str, type(None))}
 
+# config_settings() -> {setting key: value}: optional, what a session of the agent takes from the agent's own config
+# when its command line names nothing (#6280: ~/.codex/config.toml model and model_reasoning_effort; agy's mode is
+# auto), the agent's built-in default where its config names none. The Settings dialog of a session shows it last.
+# SETTINGS_READ = {setting key: (source, ...)}: where the Settings dialog reads each setting of a running session
+# (session_specs: model, effort and each setting with session True) when its command line names none: "chat"
+# (chat_settings), "screen" (screen_settings), "config" (config_settings). A toggle with a flag needs none (its flag
+# is on the command line or not). tests/test_model_order.py refuses a setting with no source (#6280).
 # 3. Effort. EFFORT = None (the agent has no effort; the page hides it) or {
 #      "levels": the agent's own levels, or None when read_effort_levels(model) reads them from the CLI per model,
 #      "map":    {MaximizePM level: the agent's level}; a level with no entry goes as it is,
@@ -578,7 +585,7 @@ SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
     "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models", "context_window"), "required": True},
-    "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ()},
+    "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ("config_settings",)},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
     "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
@@ -1036,6 +1043,18 @@ class Adapter:
     def chat_settings(self, lines):
         f = self._fn("chat_settings")
         return dict(f(list(lines)) or {}) if f else {}
+
+    def config_settings(self):
+        """What a session takes from the agent's own config (#6280), {} without the reader or when it fails."""
+        f = self._fn("config_settings")
+        try:
+            return {k: v for k, v in dict(f() or {}).items() if v} if f else {}
+        except Exception:  # noqa: BLE001 - a reader of a CLI's files: the other sources stand
+            return {}
+
+    def settings_read(self):
+        """{setting key: (source, ...)}: the module's SETTINGS_READ (#6280)."""
+        return {k: tuple(v) for k, v in dict(getattr(self.module, "SETTINGS_READ", None) or {}).items()}
 
     def screen_settings(self, lines):
         """The settings the session's screen shows now (#6260), {} without the reader or when it fails."""

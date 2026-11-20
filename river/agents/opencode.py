@@ -886,6 +886,11 @@ def chat_settings(lines):
     return {}
 
 
+# Where the Settings dialog reads each setting of a running session (#6280): the model of its last reply (none
+# before the first one: #6280's fix item).
+SETTINGS_READ = {"model": ("chat",)}
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # 10. Commands
 # ---------------------------------------------------------------------------------------------------------------

@@ -458,6 +458,19 @@ def chat_usage(lines):
     return out
 
 
+def config_settings():
+    """What a Copilot session runs with when nothing names it (#6280): Copilot's own defaults. On 2026-11-20 this Mac had
+    no ~/.copilot/settings.json; Copilot starts in the interactive mode, asks before each tool call that changes
+    something (no permission flag), and with a model of its own choice ('auto', which the log names) it gives no
+    reasoning effort: the model's default."""
+    return {"mode": "interactive", "permissions": "ask", "effort": "default"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): the log's session.model_change, from
+# the first one (cause initial_resolution).
+SETTINGS_READ = {"model": ("chat",), "effort": ("chat", "config"), "permissions": ("config",), "mode": ("config",)}
+
+
 def chat_settings(lines):
     """The model and effort the session runs now, from its last session.model_change: {"model", "effort"}."""
     got = {}

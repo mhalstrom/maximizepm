@@ -427,6 +427,27 @@ def chat_settings(lines):
     return got
 
 
+def config_settings():
+    """What a Claude Code session takes from settings.json when its command line names nothing (#6280): "model"
+    (claude-opus-5-5 on 2026-11-20), "effortLevel" (the model's own entry under modelSettings first), and
+    permissions.defaultMode; Claude Code's own defaults where it names none (permission mode default)."""
+    try:
+        d = _json.loads((_config_dir() / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    d = d if isinstance(d, dict) else {}
+    model = d.get("model") if isinstance(d.get("model"), str) else None
+    per = ((d.get("modelSettings") or {}).get(model) or {}) if model and isinstance(d.get("modelSettings"), dict) else {}
+    perm = (d.get("permissions") or {}).get("defaultMode") if isinstance(d.get("permissions"), dict) else None
+    return {"model": model, "effort": per.get("effortLevel") or d.get("effortLevel"),
+            "permission_mode": perm or "default"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): the transcript names the model and
+# effort on each reply; before the first reply, settings.json.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config"), "permission_mode": ("chat", "config")}
+
+
 def chat_cache_line(raw, st):
     """Fold one transcript line (bytes) into the prompt cache state st (#5023): the start of the last model call (the
     line before its answer: the person's prompt or a tool result), its context, and the cache lifetime in force (the

@@ -17,6 +17,7 @@ Read from Grok 1.0.77 on macOS (grok --help, ~/.grok/docs/user-guide, a recorded
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -103,6 +104,31 @@ EFFORT = {
     # The session's command line names it (#5262); Grok's updates.jsonl does not.
     "read": r"--reasoning-effort[= ]([a-z]+)",
 }
+
+
+def config_settings(env=None):
+    """What a Grok session takes when nothing names it (#6280): the model of its cache when it lists one (grok-4.7 on
+    2026-11-20), that model's default effort (its reasoning_effort: high), and [ui] permission_mode of
+    ~/.grok/config.toml (ask). Grok's config named no sandbox: Grok's own default stays unknown."""
+    cache = _models_cache(env)
+    got = {}
+    if len(cache) == 1:
+        model, row = next(iter(cache.items()))
+        info = row.get("info") if isinstance(row, dict) else None
+        got = {"model": model, "effort": info.get("reasoning_effort") if isinstance(info, dict) else None}
+    try:
+        text = (grok_home(env) / "config.toml").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    m = re.search(r'^\s*permission_mode\s*=\s*"([^"]+)"', text, re.M)
+    if m:
+        got["permission_mode"] = m.group(1)
+    return got
+
+
+# Where the Settings dialog reads each setting of a running session (#6280). The sandbox has no source when the
+# command line names none: #6280's fix item.
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "permission_mode": ("config",)}
 
 
 def read_effort_levels(model):

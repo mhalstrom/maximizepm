@@ -499,6 +499,16 @@ def chat_settings(lines):
     return got
 
 
+def config_settings():
+    """What an agy session takes when its command line names nothing (#6280): the mode auto. agy's settings.json held
+    no mode on 2026-11-20 (agy 1.5.13), and a start with no --mode showed 'auto' in its footer."""
+    return {"mode": "auto"}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("chat", "screen"), "effort": ("chat", "screen"), "mode": ("screen", "config")}
+
+
 # The footer at the right of the screen: '<mode> · <model> · <level>', the level left out for a model with none
 # ('auto · Orchestrator (Neon)'). Measured on agy 1.5.13 for every mode and form of start (#6260).
 FOOTER = re.compile(r"(?:^|\s)(" + "|".join(MODES) + r") · ([^·]+?)(?: · (" + "|".join(_LEVELS) + r"))?\s*$")

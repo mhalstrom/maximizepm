@@ -571,6 +571,37 @@ def _entries(row):
     return []
 
 
+def chat_settings(lines):
+    """The model and thinking level the session runs now (#6280): its last model_change ("provider/modelId") and
+    thinking_level_change entries."""
+    got = {}
+    for row in _rows(lines):
+        if row.get("type") == "model_change" and row.get("modelId"):
+            got["model"] = f"{row['provider']}/{row['modelId']}" if row.get("provider") else row["modelId"]
+        elif row.get("type") == "thinking_level_change" and row.get("thinkingLevel"):
+            got["effort"] = row["thinkingLevel"]
+    return got
+
+
+def config_settings():
+    """What a Pi session takes from ~/.pi/agent/settings.json when nothing names it (#6280): defaultProvider and
+    defaultModel (openai-codex/gpt-6.1-sol on 2026-11-20), and defaultThinkingLevel."""
+    try:
+        d = json.loads((Path.home() / ".pi" / "agent" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    model = d.get("defaultModel")
+    if model and d.get("defaultProvider") and "/" not in model:
+        model = f"{d['defaultProvider']}/{model}"
+    return {"model": model, "effort": d.get("defaultThinkingLevel")}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config")}
+
+
 def _turn(path):
     """working or idle from the last message on the branch, or None when it has none. A system message (Pi 1.x writes
     one when the tools or skills change) says nothing of the turn."""

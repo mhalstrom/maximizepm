@@ -531,6 +531,24 @@ def chat_settings(lines):
     return {"mode": s["goose_mode"]} if s and s.get("goose_mode") else {}
 
 
+def config_settings(path=None):
+    """What a goose session takes from config.yaml when nothing names it (#6280): the model of the active provider
+    (chatgpt_codex/gpt-5.6-terra on 2026-11-20), GOOSE_THINKING_EFFORT and GOOSE_MODE."""
+    path = Path(path) if path else config_dir() / "config.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    models = configured_models(path)
+    eff = re.search(r"^GOOSE_THINKING_EFFORT:\s*[\"']?([a-z]+)", text, re.M)
+    mode = re.search(r"^GOOSE_MODE:\s*[\"']?([a-z_]+)", text, re.M)
+    return {"model": models[0] if models else None, "effort": eff and eff.group(1), "mode": mode and mode.group(1)}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("config",), "effort": ("config",), "mode": ("chat", "config")}
+
+
 def chat_requests(session_ref, root=None):
     """(requests, fork) of a session from goose's usage ledger (one row for each model call, compactions too), or None
     when its database or the session is not on this computer. goose has no request id: the key is the ledger row."""

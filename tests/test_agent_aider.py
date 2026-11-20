@@ -310,9 +310,11 @@ class Chat(Env):
         self.assertEqual(aider.chat_usage(["> Tokens: 12k sent, 1.5k cache write, 9.8k cache hit, 340 received. "
                                            "Cost: $0.02 message, $0.05 session.  "]),
                          {"input": 12000, "output": 340, "cache_read": 9800, "cache_write": 1500})
-        self.assertEqual(aider.chat_settings(lines), {"edit_format": "whole"})  # the resumed session's start
+        # The resumed session's start, and its model (#6280).
+        self.assertEqual(aider.chat_settings(lines), {"edit_format": "whole", "model": "openai/fake-model"})
         before = lines[:lines.index("# aider chat started at 2026-11-10 23:49:11")]
-        self.assertEqual(aider.chat_settings(before), {"edit_format": "diff"})
+        self.assertEqual(aider.chat_settings(before), {"edit_format": "diff", "model": "openai/fake-model",
+                                                       "effort": "high"})  # #6280: the model line names both
         self.assertEqual(aider.read_effort(aider.parse_chat(before)[0]), "high")
         self.assertIsNone(aider.read_effort(aider.parse_chat(lines)[0]))  # the model ignored it after the resume
 

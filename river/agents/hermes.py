@@ -558,9 +558,26 @@ def chat_usage(lines):
 
 
 def chat_settings(lines):
-    """The provider that the session runs on (its billing provider)."""
+    """The provider that the session runs on (its billing provider) and its model (the session row's model, from its
+    start: gpt-6.1-terra on 2026-11-20, #6280)."""
     s = _session(lines) or {}
-    return {"provider": s["billing_provider"]} if s.get("billing_provider") else {}
+    got = {"provider": s.get("billing_provider"), "model": s.get("model")}
+    return {k: v for k, v in got.items() if v}
+
+
+def config_settings(env=None):
+    """What a Hermes session takes from its config.yaml when nothing names it (#6280): the agent's reasoning_effort
+    (medium on 2026-11-20). The session row names no effort. A small reader of the one key: no YAML library."""
+    try:
+        text = (hermes_home(env) / "config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    m = re.search(r"^\s*reasoning_effort:\s*[\"']?([a-z]+)", text, re.M)
+    return {"effort": m.group(1)} if m else {}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280).
+SETTINGS_READ = {"model": ("chat",), "effort": ("config",)}
 
 
 def chat_texts(raw):

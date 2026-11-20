@@ -488,6 +488,11 @@ def chat_settings(lines):
     return got
 
 
+# Where the Settings dialog reads each setting of a running session (#6280): the thread's meta line names the mode
+# from the start; the model shows from the first reply.
+SETTINGS_READ = {"model": ("chat",), "effort": ("chat",)}
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------------------------------------------

@@ -256,6 +256,93 @@ class EachAgentsOwnList(Db):
         self.assertEqual(agy["efforts"], ["low", "medium", "high", "xhigh"])  # no agy model takes max
 
 
+READERS = {"chat": "chat_settings", "screen": "screen_settings", "config": "config_settings"}
+
+# (agent, setting) -> the fix item of a setting that the Settings dialog cannot read yet when the command line names
+# none. The test fails when one of them has a source now.
+SETTINGS_EXCEPTIONS = {("grok", "sandbox"): "#6315"}
+
+
+def settings_problems(a):
+    """The settings of a running session that the Settings dialog cannot read without a command line that names them
+    (#6280), as sentences: no source in SETTINGS_READ, or a source whose reader the adapter lacks. A toggle with a
+    flag needs none."""
+    reads, out = a.settings_read(), []
+    for s in a.session_specs():
+        if s.get("flag"):
+            continue
+        src = reads.get(s["key"], ())
+        if not src:
+            out.append((s["key"], f"{s['key']}: no source in SETTINGS_READ (chat, screen or config)"))
+        for x in src:
+            if x not in READERS or not a.has(READERS[x]):
+                out.append((s["key"], f"{s['key']}: SETTINGS_READ names {x!r}, and the adapter has no "
+                                      f"{READERS.get(x, 'such reader')}"))
+    return out
+
+
+class SettingsRead(unittest.TestCase):
+    """#6280 (mark 2026-11-20: 'we need that to work for all agent types'): a running session's Settings dialog shows
+    the values that session runs with, never 'not known', also when it started with none named."""
+
+    def test_every_setting_of_every_agent_has_a_source_besides_the_command_line(self):
+        for platform, a in platforms():
+            for key, problem in settings_problems(a):
+                with self.subTest(agent=a.id, setting=key):
+                    if (a.id, key) in SETTINGS_EXCEPTIONS:
+                        continue
+                    self.fail(f"{a.label}: {problem}")
+        for (aid, key), item in SETTINGS_EXCEPTIONS.items():
+            with self.subTest(exception=(aid, key)):
+                self.assertIn(key, [k for k, _ in settings_problems(agents.get(aid))],
+                              f"{aid} {key} has a source now: take it out of SETTINGS_EXCEPTIONS ({item})")
+
+    def test_the_dialog_shows_the_agent_s_own_config_last(self):
+        from river import sessions
+        c = core.connect()
+        self.addCleanup(c.close)
+        core.register(c, "cx1")
+        c.execute("UPDATE agents SET agent_type='codex', pid_cmd='codex --add-dir /q go' WHERE name='cx1'")
+        with mock.patch.object(agents.get("codex").module, "config_settings",
+                               lambda: {"model": "gpt-6.1-sol", "effort": "medium"}):
+            got = {s["key"]: s for s in sessions.session_settings(c, "cx1")["settings"]}
+        # gpt-6.1-sol is the id of the ladder name sol: the dialog names the model as its list does.
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("sol", "config"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("medium", "config"))
+
+    def test_each_config_reader(self):
+        from pathlib import Path
+        from river.agents import codex, cursor, hermes, pi
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        home = Path(d.name)
+        (home / "config.toml").write_text('model = "gpt-6.1-terra"\nmodel_reasoning_effort = "medium"\n'
+                                          '[profiles.x]\nmodel = "other"\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            self.assertEqual(codex.config_settings(), {"model": "gpt-6.1-terra", "effort": "medium", "sandbox": None,
+                                                       "approval": None})
+        (home / ".pi" / "agent").mkdir(parents=True)
+        (home / ".pi" / "agent" / "settings.json").write_text(
+            '{"defaultProvider": "openai-codex", "defaultModel": "gpt-6.1-sol"}', encoding="utf-8")
+        (home / ".cursor").mkdir()
+        (home / ".cursor" / "cli-config.json").write_text(
+            '{"model": {"modelId": "gpt-5.6-sol-high"}, "sandbox": {"mode": "disabled"}}', encoding="utf-8")
+        with mock.patch.object(Path, "home", lambda: home):
+            self.assertEqual(pi.config_settings(), {"model": "openai-codex/gpt-6.1-sol", "effort": None})
+            self.assertEqual(cursor.config_settings(), {"model": "gpt-5.6-sol", "effort": "high", "sandbox": "disabled",
+                                                        "mode": "agent"})
+        (home / "config.yaml").write_text("agent:\n  reasoning_effort: \"medium\"\n", encoding="utf-8")
+        self.assertEqual(hermes.config_settings({"HERMES_HOME": str(home)}), {"effort": "medium"})
+
+    def test_aider_and_pi_logs_name_the_model(self):
+        from river.agents import aider, pi
+        self.assertEqual(aider.chat_settings(["Model: anthropic/claude-sonnet-4-5 with diff edit format, reasoning high"]),
+                         {"edit_format": "diff", "model": "anthropic/claude-sonnet-4-5", "effort": "high"})
+        self.assertEqual(pi.chat_settings(['{"type":"model_change","provider":"openai-codex","modelId":"gpt-6.1-sol"}',
+                                           '{"type":"thinking_level_change","thinkingLevel":"medium"}']),
+                         {"model": "openai-codex/gpt-6.1-sol", "effort": "medium"})
+
+
 class AgentDefaults(Db):
     """#6264 (mark 2026-11-19: 'set neon medium as our default agent for now'): each agent has a default model and
     effort, <prefix>model and <prefix>effort; a start that names none takes them, and the dialog preselects them."""

@@ -1525,6 +1525,7 @@ def session_settings(conn, agent, root=None, croot=None):
         except (OSError, ValueError, EOFError):
             seen = {}
     shown = screen_settings(conn, agent, ad)  # what its screen shows now (agy's footer, #6260): newer than the log
+    own = ad.config_settings()  # the agent's own config, the last source (#6280)
     cmd = a.get("pid_cmd") or pane_command(conn, agent, ad)
     models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
     live = _live_settings(conn, agent)
@@ -1545,6 +1546,9 @@ def session_settings(conn, agent, root=None, croot=None):
             value, source = ("on" if spec["flag"] in cmd.split() else "off"), "command line"
         if value is None and spec.get("default"):
             value, source = core.setting(conn, spec["default"], agent=agent) or None, "default"
+        if value is None and own.get(spec["key"]) is not None:
+            # What the agent takes from its own config when nothing names it (#6280: ~/.codex/config.toml).
+            value, source = own[spec["key"]], "config"
         row = {}
         if spec["kind"] == "model":
             # The models of the session's own provider (#4633), as the launch dialog lists them; the one it runs is

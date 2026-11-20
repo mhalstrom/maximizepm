@@ -260,7 +260,7 @@ class Chat(unittest.TestCase):
         self.assertEqual(hermes.chat_cwd(rows), "/tmp/work/hermes-run")
         self.assertEqual(hermes.chat_usage(rows), {"input": 12911, "output": 174, "cache_read": 95104,
                                                    "cache_write": 0})
-        self.assertEqual(hermes.chat_settings(rows), {"provider": "openai-codex"})
+        self.assertEqual(hermes.chat_settings(rows), {"provider": "openai-codex", "model": "gpt-6.1-terra"})  # #6280
         self.assertIsNone(hermes.read_effort(rows))  # the session ran at Hermes's configured level
         high = [json.dumps({"type": "session", "model_config": json.dumps(
             {"reasoning_config": {"enabled": True, "effort": "high"}})})]

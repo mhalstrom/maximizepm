@@ -400,8 +400,15 @@ def chat_settings(lines):
     for line in lines:
         m = _MODEL_LINE.match(line.rstrip())
         if m:
-            got = {"edit_format": m.group(2)}
+            # The model and its reasoning level too (#6280): the line names both from the start.
+            level = re.search(r"\breasoning (\w+)", line)
+            got = {"edit_format": m.group(2), "model": m.group(1), **({"effort": level.group(1)} if level else {})}
     return got
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): Aider's model line at its start. A
+# model with no reasoning names no level: the effort has no source then.
+SETTINGS_READ = {"model": ("chat",), "effort": ("chat",)}
 
 
 def read_effort(entries):

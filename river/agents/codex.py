@@ -279,6 +279,33 @@ def parse_chat(lines):
     return _s().parse_lines(parse_chat_line, lines)
 
 
+def config_settings():
+    """What a Codex session takes from config.toml when its command line names nothing (#6280): the top-level model,
+    model_reasoning_effort, sandbox_mode and approval_policy (gpt-6.1-terra and medium on 2026-11-20). A small reader
+    of top-level 'key = "value"' lines: the standard library of Python 3.10 has no TOML reader."""
+    import re
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    got = {}
+    for ln in lines:
+        if ln.strip().startswith("["):
+            break  # a table: the keys after it are not the top-level ones
+        m = re.match(r'^\s*(\w+)\s*=\s*"([^"]*)"', ln)
+        if m:
+            got[m.group(1)] = m.group(2)
+    return {"model": got.get("model"), "effort": got.get("model_reasoning_effort"),
+            "sandbox": got.get("sandbox_mode"), "approval": got.get("approval_policy")}
+
+
+# Where the Settings dialog reads each setting of a running session (#6280): a turn_context at each turn, and
+# config.toml before the first one.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config"), "sandbox": ("chat", "config"),
+                 "approval": ("chat", "config")}
+
+
 def chat_settings(lines):
     """The settings the log shows last: a turn_context at each turn."""
     got = {}
