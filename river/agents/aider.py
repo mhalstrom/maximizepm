@@ -49,6 +49,8 @@ DESCRIBE = {
     "default_model": "",  # Aider picks a model from the API keys it finds
     "model_ids": {},
     "prefix": "aider_",
+    # The command line names it (--model sonnet) before the first model line of the chat (#6280).
+    "model_read": r"(?:^|\s)--model[= ](\S+)",
 }
 
 # ---------------------------------------------------------------------------------------------------------------

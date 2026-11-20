@@ -106,6 +106,10 @@ EFFORT = {
 }
 
 
+# The default effort of each model as Grok's cache gave it on 2026-11-20 (reasoning_effort, the level marked default).
+SEEN_DEFAULT_EFFORT = {"grok-4.7": "high"}
+
+
 def config_settings(env=None):
     """What a Grok session takes when nothing names it (#6280): the model of its cache when it lists one (grok-4.7 on
     2026-11-20), that model's default effort (its reasoning_effort: high), and [ui] permission_mode of
@@ -116,6 +120,11 @@ def config_settings(env=None):
         model, row = next(iter(cache.items()))
         info = row.get("info") if isinstance(row, dict) else None
         got = {"model": model, "effort": info.get("reasoning_effort") if isinstance(info, dict) else None}
+    elif not cache and len(DESCRIBE["models"]) == 1:
+        # Grok removes its cache while a new session fetches the list (seen on 2026-11-20): its one described model,
+        # and the default effort the cache gave it then.
+        model = DESCRIBE["models"][0]
+        got = {"model": model, "effort": SEEN_DEFAULT_EFFORT.get(model)}
     try:
         text = (grok_home(env) / "config.toml").read_text(encoding="utf-8")
     except OSError:
