@@ -1849,7 +1849,10 @@ def iso(t: datetime) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+@functools.lru_cache(maxsize=8192)
 def parse_iso(s: str) -> datetime:
+    """A time as iso() writes it. Kept for the next call (#6394): strptime is slow, and a page state build read the
+    same times of about 1,000 agents and items each time (2 ms of a 45 ms build). A datetime does not change."""
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
@@ -2450,7 +2453,12 @@ def _migrate(conn):
                       ("items_project_status", "items(project_id, status, backlog_at)"),
                       ("events_actor", "events(actor, id)"),
                       # The item each running session finished last, for the name the Sessions tab shows (#5638).
-                      ("items_done_by", "items(assignee, closed_at) WHERE status='done'")):
+                      ("items_done_by", "items(assignee, closed_at) WHERE status='done'"),
+                      # Each page state build (#6394): the open takeovers (takeovers: 1.5 ms for a read of every
+                      # item), and the archive events of the archived projects (project_archived: 2 ms for a read of
+                      # every event of no item; it names this index, which SQLite would not pick by itself).
+                      ("items_takeover", "items(takeover_at) WHERE takeover_by IS NOT NULL"),
+                      ("events_global", "events(change, at) WHERE item_id IS NULL")):
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {sql}")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
@@ -3925,6 +3933,11 @@ def record_log_limits(conn):
 def provider_sessions(conn):
     """The live agent sessions (#6361): [(adapter id, model or None)] of the sessions that max_sessions counts
     (live_sessions: not gone or stopped; no assistant or plain session), whose agent type is known."""
+    if BUILD_MEMO.get() is not None:  # a page state build has every agent's state already (#6394: 4 ms again)
+        return [(_limit_adapter_id(a["agent_type"]), a["model"])
+                for a in _memo("agent_statuses", lambda: _agent_statuses(conn)).values()
+                if a["kind"] == "ai" and a["agent_type"] and (a["role"] or "") not in ("assistant", "plain")
+                and a["state"] not in ("gone", "stopped")]
     return [(_limit_adapter_id(r["agent_type"]), r["model"]) for r in conn.execute(
         "SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL AND agent_type != '' "
         "AND COALESCE(role, '') NOT IN ('assistant', 'plain')") if _agent_state(conn, r) not in ("gone", "stopped")]
@@ -4613,8 +4626,14 @@ def project_archived(conn):
     out = []
     projects = conn.execute("SELECT id, name, notes, path FROM projects WHERE archived=1").fetchall()
     # One read of the archive events for all of them (#5524: one read for each project took 5 ms).
-    events = conn.execute("SELECT change, at FROM events WHERE item_id IS NULL AND change LIKE 'project % archived%'"
-                          ).fetchall() if projects else []
+    events = []
+    if projects:
+        sql = ("SELECT change, at FROM events {} WHERE item_id IS NULL AND change >= 'project ' AND change < 'project!' "
+               "AND change LIKE 'project % archived%'")
+        try:
+            events = conn.execute(sql.format("INDEXED BY events_global")).fetchall()
+        except sqlite3.OperationalError:  # a process that cannot write the queue has not made the index yet (#5975)
+            events = conn.execute(sql.format("")).fetchall()
     for r in projects:
         word, more = f"project {r['name']} archived", f"project {r['name']} archived ("
         at = max((e["at"] for e in events if e["change"] == word or e["change"].startswith(more)), default=None)
@@ -16346,6 +16365,14 @@ def agent_status(conn, name):
     return dict(a)  # a field a caller sets stays its own; the lists are only read (state, capacity, sessions.running)
 
 
+def agent_statuses(conn, kind=None):
+    """The agent_status of every agent (of kind, when given), in name order, for a caller that only reads them. Inside a
+    page state build they are the build's own, not copies: state, capacity and sessions.running each copied all 962
+    agents of the live queue (#6394: 3 ms of each build). Outside a build, four queries for all of them."""
+    got = _memo("agent_statuses", lambda: _agent_statuses(conn))
+    return [got[n] for n in sorted(got) if kind is None or got[n]["kind"] == kind]
+
+
 def _agent_statuses(conn):
     """{name: agent_status} of every agent."""
     holds, owns, pins = {}, {}, {}
@@ -22012,7 +22039,7 @@ def capacity(conn, ann=None):
             runnable += 1
             taken.add(a["id"])
     ready_human = [a for a in ready if a["doer"] == "human"]
-    agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents")]
+    agents = agent_statuses(conn)
     # Planner sessions change the plan and take no work, so they are not slots.
     ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active"
                  and a.get("role") not in ("planner", "expert", "assistant", "plain")]  # no queue work (#4955, #5110, #5851)
@@ -23989,7 +24016,7 @@ def state(conn, closed=True):
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
         "items": _state_rows(shown, closed),
         "closed_counts": closed_counts,
-        "agents": [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")],
+        "agents": agent_statuses(conn),  # the callers only read the state
         "capacity": capacity(conn, ann),
         "targets": targets_view(conn, ann),
         "hook_events": dict(HOOK_EVENTS),  # the Targets tab offers a hook for each event

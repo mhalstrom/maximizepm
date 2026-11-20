@@ -773,6 +773,15 @@ class ProviderSlots(unittest.TestCase):
                          [("Antigravity CLI (gemini-4-neon)", 1, True), ("Antigravity CLI (claude-opus-5-5)", 1, True),
                           ("Claude Code (opus)", 1, False)])
         self.assertEqual(provs[1]["run_effort"], "high")
+        # A page state build counts the sessions from its agent statuses, with the same result (#6394).
+        self.conn.execute("UPDATE agents SET stop_at=? WHERE name=?", (core.iso(self.t0), got[2][0]))  # it stops
+        outside = core.provider_sessions(self.conn)
+        self.assertEqual(sorted(outside), [("antigravity", "claude-opus-5-5"), ("antigravity", "gemini-4-neon")])
+        tok = core.BUILD_MEMO.set({})
+        try:
+            self.assertEqual(sorted(core.provider_sessions(self.conn)), sorted(outside))
+        finally:
+            core.BUILD_MEMO.reset(tok)
 
     def test_a_model_group_out_of_usage_skips_only_its_entry(self):
         core.config_set(self.conn, "agent_order", "antigravity model gemini-4-neon, antigravity model claude-opus-5-5, "

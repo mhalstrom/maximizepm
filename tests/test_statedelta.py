@@ -346,6 +346,28 @@ class Timing(Base):
             self.assertGreaterEqual(t["gc_ms"], 0)  # the garbage collector's share (#5597)
 
 
+    def test_a_slow_build_records_where_each_thread_was(self):
+        """#6394: live builds of 1.7 to 3.1 s with 7 ms of CPU, in different parts. A build that runs past STALL_AFTER
+        records where it and the other threads were, and each build the CPU of all threads of serve."""
+        import time
+        server.STATE_TIMES.clear()
+        slow = core.goal_list
+
+        def goal_list(*a, **k):
+            time.sleep(0.3)
+            return slow(*a, **k)
+        with unittest.mock.patch.object(server, "STALL_AFTER", 0.05), \
+                unittest.mock.patch.object(core, "goal_list", goal_list):
+            server.state_changed()
+            wire("/api/state?since=", {})
+        (t,) = [x for x in self.get("/api/state-timing") if x.get("build_ms")]
+        self.assertGreaterEqual(t["proc_cpu_ms"], 0)
+        st = t["stall"]
+        self.assertGreater(st["samples"], 0, st)
+        self.assertTrue(any("goal_list" in line for line in st["build"]), st)
+        self.assertEqual(server._BUILDING, set())
+
+
     def test_the_build_runs_no_sweep_and_the_loop_of_serve_does(self):
         """#5597: live, the page builds once a minute, and each build ran the sweep (63 ms CPU, about 150 ms wall);
         the loop of serve runs it each pass instead."""

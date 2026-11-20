@@ -656,8 +656,7 @@ def running(conn, terminals=None):
     pane here, or it is active (or asked to stop and still holds work) and recorded no process (a sandbox that
     cannot run ps)."""
     out, here = [], core.this_host()
-    for r in conn.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY name"):
-        a = core.agent_status(conn, r["name"])
+    for a in core.agent_statuses(conn, kind="ai"):
         # A session asked to stop stays while it still holds its task or a target: its row shows 'ending' (#5041).
         # When it has released them (core.ended), it leaves the list.
         if core.ended(a) or a["state"] == "gone" or a.get("via") == "http":
@@ -667,7 +666,7 @@ def running(conn, terminals=None):
                 continue
         elif not ((terminals or {}).get(a["name"]) or (not a.get("pid") and a["state"] in ("active", "stopped"))):
             continue
-        out.append(a)
+        out.append(dict(a))  # its own copy, as agent_status gives: a caller may set a field
     return out
 
 

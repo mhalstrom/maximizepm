@@ -970,7 +970,12 @@ class Adapter:
 
     def read_models(self):
         f = self._fn("read_models")
-        got = f() if f else None
+        if f is None:
+            return list(self.describe["models"])
+        # Once in a page state build (#6394): it reads the CLI's files (a JSON cache, a SQLite file), and the
+        # launch options of each entry asked again.
+        from .. import core
+        got = core._memo(("read_models", self.id, self.source), f)
         return list(got) if got else list(self.describe["models"])
 
     def context_window(self, model):
@@ -1230,6 +1235,15 @@ def _builtin(mid):
 
 
 def _key():
+    """The override folder and its files with their times. Inside a page state build (core.BUILD_MEMO), read once:
+    a build looked up adapters about 400 times, and each lookup made a stat of the folder (#6394)."""
+    from .. import core
+    if core.BUILD_MEMO.get() is not None:
+        return core._memo("agents._key", _key_now)
+    return _key_now()
+
+
+def _key_now():
     d = override_dir()
     try:
         files = sorted((p.name, p.stat().st_mtime_ns) for p in d.glob("*.py")) if d.is_dir() else []

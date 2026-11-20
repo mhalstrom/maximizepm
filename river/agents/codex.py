@@ -23,13 +23,21 @@ def read_models():
     import json
     path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
     try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if _READ[0] == key:  # the same file as at the last read: each page state build asked (#6394: 1 ms each)
+            return [dict(r, efforts=list(r["efforts"])) for r in _READ[1]] or None
         data = json.loads(path.read_text(encoding="utf-8"))
         rows = [{"name": m["slug"], "label": m.get("display_name") or m["slug"],
                  "efforts": [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]}
                 for m in data.get("models") or [] if m.get("slug") and m.get("visibility") != "hide"]
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
-    return rows or None
+    _READ[:] = [key, rows]
+    return [dict(r, efforts=list(r["efforts"])) for r in rows] or None
+
+
+_READ = [None, []]  # (the file, its time and size), its rows: read_models reads the file again only after a change
 
 
 # ---------------------------------------------------------------------------------------------------------------

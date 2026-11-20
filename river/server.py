@@ -6603,8 +6603,9 @@ def page_state(closed, timing=None):
             timing["wait_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         if hit is not None:
             return hit
-        t1, c1 = time.perf_counter(), time.thread_time()
+        t1, c1, p1 = time.perf_counter(), time.thread_time(), time.process_time()
         g1, f1 = GC_SPENT["ms"], GC_SPENT["full"]
+        stall = _stall_watch(t1) if timing is not None else None
         prof = None
         if PROFILE_NEXT[0] and timing is not None:
             PROFILE_NEXT[0] = False
@@ -6669,6 +6670,13 @@ def page_state(closed, timing=None):
                 # The CPU time of this thread: much less than build_ms means the build waited (other threads of
                 # serve hold the interpreter lock, or the disk).
                 timing["cpu_ms"] = round((time.thread_time() - c1) * 1000, 1)
+                # The CPU time of every thread of serve during the build (#6394): near cpu_ms while build_ms is much
+                # more, the process waited (the disk, or macOS gave it no core); much more, other threads ran.
+                timing["proc_cpu_ms"] = round((time.process_time() - p1) * 1000, 1)
+                if stall is not None:
+                    _BUILDING.discard(stall)
+                    if stall.samples:
+                        timing["stall"] = stall.record()
                 timing["parts"] = parts
                 # The CPU time of each part (#5597): live, a build took 5 times the CPU of the same build on a copy
                 # of the queue; this says which part spends it.
@@ -6685,6 +6693,7 @@ def page_state(closed, timing=None):
                     pass
             return st
         finally:
+            _BUILDING.discard(stall)
             core.BUILD_MEMO.reset(memo)
             share.__exit__(None, None, None)
             conn.close()
@@ -6760,6 +6769,72 @@ class _BuildSampler:
                 "lines": [f"{n} {k}" for k, n in self.own.most_common(25)],
                 "functions": [f"{n} {k}" for k, n in self.within.most_common(30)],
                 "others": [f"{n} {k}" for k, n in self.others.most_common(20)]}
+
+
+class _Stall:
+    """Where each thread of serve is while a page state build runs longer than STALL_AFTER (#6394). Live, some builds
+    took 1.7 to 3.1 s with 7 ms of CPU, in different parts of the build: this says what the build waited on, in every
+    build, at little cost (a look every STALL_EVERY, only while a build runs late). late: how much later than asked
+    the watch itself woke; a late watch means that no thread of the process ran (macOS gave it no core) or that one
+    held the interpreter lock in C code."""
+
+    def __init__(self, t0):
+        import collections
+        self.tid, self.t0, self.samples, self.late = threading.get_ident(), t0, 0, 0.0
+        self.build, self.others = collections.Counter(), collections.Counter()
+
+    def look(self, frames, here, late):
+        self.samples += 1
+        self.late = max(self.late, late)
+        for tid, f in frames.items():
+            if tid == threading.get_ident():
+                continue
+            (self.build if tid == self.tid else self.others)[_frame_where(f, here)] += 1
+
+    def record(self):
+        return {"samples": self.samples, "every_ms": STALL_EVERY * 1000, "watch_late_ms": round(self.late * 1000),
+                "build": [f"{n} {k}" for k, n in self.build.most_common(6)],
+                "others": [f"{n} {k}" for k, n in self.others.most_common(10)]}
+
+
+STALL_AFTER, STALL_EVERY = 0.3, 0.05
+_BUILDING = set()  # the _Stall of each page state build that runs now
+_STALL_THREAD = [None]
+
+
+def _frame_where(f, here):
+    """A thread's innermost line (in any file: the call that waits), and its innermost line of MaximizePM's code."""
+    top = f"{os.path.basename(f.f_code.co_filename)}:{f.f_lineno} {f.f_code.co_name}"
+    while f is not None and not f.f_code.co_filename.startswith(here):
+        f = f.f_back
+    own = f"{os.path.basename(f.f_code.co_filename)}:{f.f_lineno} {f.f_code.co_name}" if f is not None else "-"
+    return top if own == top else f"{top} < {own}"
+
+
+def _stall_watch(t0):
+    """Register a page state build with the stall watch, and start the watch thread once."""
+    st = _Stall(t0)
+    _BUILDING.add(st)
+    if _STALL_THREAD[0] is None:
+        _STALL_THREAD[0] = threading.Thread(target=_stall_loop, daemon=True, name="maxpm-stall-watch")
+        _STALL_THREAD[0].start()
+    return st
+
+
+def _stall_loop():
+    here = os.path.dirname(os.path.abspath(__file__))
+    last = time.perf_counter()
+    while True:
+        time.sleep(STALL_EVERY)
+        t = time.perf_counter()
+        late, last = max(0.0, t - last - STALL_EVERY), t
+        for b in [b for b in list(_BUILDING) if t - b.t0 >= 120]:
+            _BUILDING.discard(b)  # a build that failed before its try (core.connect): nobody takes its record
+        builds = [b for b in list(_BUILDING) if t - b.t0 >= STALL_AFTER]
+        if builds:
+            frames = sys._current_frames()
+            for b in builds:
+                b.look(frames, here, late)
 
 
 def _gc_watch(phase, info):

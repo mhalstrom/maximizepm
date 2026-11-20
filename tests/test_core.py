@@ -4957,6 +4957,9 @@ class ProjectArchive(Base):
         (arch,) = st["archived_projects"]
         self.assertEqual((arch["name"], arch["open_items"], arch["done_items"]), ("b", 2, 0))
         self.assertTrue(arch["archived_at"])
+        # The archive events come from their own index (#6394); a queue without it yet gives the same answer.
+        self.c.execute("DROP INDEX events_global")
+        self.assertEqual(core.project_archived(self.c)[0]["archived_at"], arch["archived_at"])
         with self.assertRaisesRegex(RiverError, "archived already; .*maxpm project restore b"):
             core.project_archive(self.c, "b")
         r = core.project_restore(self.c, "b", "mark")
