@@ -477,6 +477,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "idle":         a regex of the pane when the agent waits at its prompt,
 #      "working":      a regex of the pane while it runs a turn ("esc to interrupt"),
 #      "blocked":      [regexes], one for each screen that waits for a person (a permission menu, a question, trust),
+#      "refused":      optional: [regexes] of an error that ends each turn because the provider refuses the model or
+#                      the account (Codex's 400 'model is not supported', #6429); a group (?P<model>...) names the
+#                      model. The pane watcher then ends the session and starts its item on the next provider,
 #      "tell_instead": a regex of the menu option that lets the person type an answer instead, or None,
 #      "image_paste":  how a pasted image shows in its prompt, with {n} ("[Image #{n}]"), or None,
 #      and the layout of a blocked screen, each optional (DETECT_LAYOUT holds the values of a key left out):
@@ -513,7 +516,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
-               "limit": (list, tuple),
+               "limit": (list, tuple), "refused": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
                "fixed": str, "ask": str, "ask_form": str, "ask_open": (dict, type(None))}
@@ -778,8 +781,9 @@ def check(module, mid=None):
                                    ["DETECT['item'] has a group of its own; use (?:...)"])
             for i, p in enumerate(det.get("blocked") or ()):
                 out += _regex(f"DETECT['blocked'][{i}]", p) if isinstance(p, str) else [f"DETECT['blocked'][{i}] is no str"]
-            for i, p in enumerate(det.get("limit") or ()):
-                out += _regex(f"DETECT['limit'][{i}]", p) if isinstance(p, str) else [f"DETECT['limit'][{i}] is no str"]
+            for key in ("limit", "refused"):
+                for i, p in enumerate(det.get(key) or ()):
+                    out += _regex(f"DETECT[{key!r}][{i}]", p) if isinstance(p, str) else [f"DETECT[{key!r}][{i}] is no str"]
     if getattr(module, "INPUT", None) is not None:
         out += _shape("INPUT", module.INPUT, INPUT_KEYS)
         keys = module.INPUT.get("interrupt") if isinstance(module.INPUT, dict) else None
@@ -1159,6 +1163,20 @@ class Adapter:
                 return None
         pats = (self.detect or {}).get("limit")
         return match_limit_stop(lines, pats, now=now) if pats else None
+
+    def model_refused(self, lines):
+        """Whether the session's screen shows that the provider refuses its model or account (DETECT['refused'],
+        #6429): {"message": the error's words, "model": the model it names or None}, or None. The lines are read
+        as one text, since a long error wraps over several lines of the pane."""
+        pats = (self.detect or {}).get("refused")
+        if not pats:
+            return None
+        text = re.sub(r"\s+", " ", " ".join(str(x).strip() for x in lines or ()))
+        for p in pats:
+            m = re.search(p, text)
+            if m:
+                return {"message": text[m.start():m.end() + 80].strip()[:240], "model": m.groupdict().get("model")}
+        return None
 
     def chat_cache_line(self, raw, st):
         f = self._fn("chat_cache_line")

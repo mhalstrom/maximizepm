@@ -3075,6 +3075,11 @@ def watch_prompts(conn):
                 limit_hits[agent] = (ad, hit, pane)
                 STILL.pop(agent, None)
                 continue
+            ref = _model_refused(conn, agent, ad, plain_text, working)
+            if ref:
+                limit_hits[agent] = (ad, ref, pane)
+                STILL.pop(agent, None)
+                continue
             if ad.has("screen_limits"):
                 scr_lim = ad.screen_limits(plain_text.splitlines())
                 # The same /usage screen on the next pass is no new reading: its 'Resets in 2h' read again moves.
@@ -3205,6 +3210,39 @@ def _end_at_prompt(conn, waiting, asks, t):
     return out
 
 
+def _model_refused(conn, agent, ad, text, working):
+    """#6429: a session whose agent refused its model or account at its turn (DETECT['refused']: Codex 0.159.1
+    answered each turn with a 400 'model is not supported when using Codex with a ChatGPT account', and four sessions
+    sat at their prompt with no alert). Only before the session's claim: an error of its first turn, not words in a
+    file or a diff of a session at work. Records the refusal (core.record_model_refused, so launches skip the entry for
+    MODEL_REFUSED_HOLD) and alerts the manager once for it. Returns the hit for _handle_limit_stops, or None."""
+    lines = [x for x in text.splitlines() if x.strip()][-(PROMPT_LINES + PROMPT_ABOVE):]
+    if working and any(re.search(working, x) for x in lines[-PROMPT_LINES:]):
+        return None
+    got = ad.model_refused(lines)
+    if not got or LIMIT_SEEN.get(("refused", agent)) == got["message"]:
+        return None
+    if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (agent,)).fetchone():
+        return None
+    LIMIT_SEEN[("refused", agent)] = got["message"]
+    r = conn.execute("SELECT model FROM agents WHERE name=?", (agent,)).fetchone()
+    model = got["model"] or None
+    what = f"model {model}" if model else "the account"
+    if core.record_model_refused(conn, ad.id, model, got["message"], session=agent):
+        manager = core.active_manager(conn)
+        to = [manager] if manager and manager != agent else [
+            x["name"] for x in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+        text = (f"{agent} ({ad.label}) failed at its first turn: {ad.label} refuses {what} ({got['message']}). "
+                f"maxpm serve ends it and starts its item on the next agent of agent_order; launches skip "
+                f"{ad.label} with {what} for {core.MODEL_REFUSED_HOLD.seconds // 3600}h. Fix the cause: update the "
+                f"{ad.label} CLI, or name another model in agent_order (maxpm config get agent_order).")
+        with core.tx(conn):
+            for p in to:
+                core._send(conn, "alert", "maxpm", text, to=p)
+            core.sync_needs_you(conn)
+    return {"message": got["message"], "refused": what, "model": model or (r["model"] if r else None)}
+
+
 def _limit_model(conn, agent, ad, lines):
     """The model of a session that stopped at its usage limit (#6382), so the limit covers only its model group (agy
     counts Gemini apart from Claude and GPT): what its screen shows (agy's footer), else the model it declared
@@ -3239,6 +3277,11 @@ def _handle_limit_stops(conn, limit_hits):
             held = _unclaimed_work(conn, agent)  # #6418: it stopped at its first prompt, before its claim
         msg = hit.get("message") or f"{ad.label} usage limit reached"
         reset_part = f" (resets {hit['resets_text'] or hit['resets_at']})" if (hit.get("resets_text") or hit.get("resets_at")) else ""
+        # #6429: a refused model or account ends the session as a limit stop does; _model_refused alerted already.
+        stop_what = (f"{ad.label} refused {hit['refused']}" if hit.get("refused")
+                     else f"{ad.label} usage limit{reset_part}")
+        if hit.get("refused") and (ag["role"] in ("manager", "expert") or not held):
+            continue
         if ag["role"] in ("manager", "expert") or not held:
             key = f"limit_alert:{agent}:{hit.get('resets_at') or msg[:40]}"
             with core.tx(conn):
@@ -3252,11 +3295,11 @@ def _handle_limit_stops(conn, limit_hits):
                                    f"{agent} ({ad.label}) stopped at its usage limit{reset_part}: {msg}", to=p)
                     core.sync_needs_you(conn)
             continue
-        handback = f"stopped at {ad.label} usage limit{reset_part}: {msg}"
+        handback = f"stopped at {stop_what}: {msg}"
         try:
             kill_agent(conn, agent, handback, "maxpm", by_serve=True)
         except RiverError as e:
-            print(f"maxpm: could not stop {agent} at its usage limit: {e}", file=sys.stderr, flush=True)
+            print(f"maxpm: could not stop {agent} ({stop_what}): {e}", file=sys.stderr, flush=True)
             continue
         PROMPTS.pop(agent, None)
         primary = held[0]
@@ -3268,16 +3311,17 @@ def _handle_limit_stops(conn, limit_hits):
             with core.tx(conn):
                 for p in to:
                     core._send(conn, "alert", "maxpm",
-                               f"maxpm serve stopped {agent} on #{primary['id']} ({ad.label} usage limit{reset_part}: "
-                               f"{msg}), and no fallback agent is available until it resets.",
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({stop_what}: "
+                               f"{msg}), and no fallback agent is available"
+                               + ("." if hit.get("refused") else " until it resets."),
                                to=p, item_id=primary["id"])
                 core.sync_needs_you(conn)
             out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "reason": "no fallback"})
             continue
         _fb_id, fb_label, _entry = fb  # dispatch_item picks the entry again (#6361): its model and effort run
         # A session that never claimed its item did no work: the new one starts it as a plain Dispatch does.
-        cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at its {ad.label} usage limit"
-                       f"{reset_part} ({msg}). Check git status and git diff in this folder and continue the "
+        cont_prompt = (f"Continue #{primary['id']} from {agent}, which stopped at {stop_what}"
+                       f" ({msg}). Check git status and git diff in this folder and continue the "
                        f"uncommitted work.") if claimed else None
         try:
             started = dispatch_item(conn, primary["id"], agent=fb_label, actor="maxpm",
@@ -3289,7 +3333,7 @@ def _handle_limit_stops(conn, limit_hits):
             with core.tx(conn):
                 for p in to:
                     core._send(conn, "alert", "maxpm",
-                               f"maxpm serve stopped {agent} on #{primary['id']} ({ad.label} usage limit{reset_part}), "
+                               f"maxpm serve stopped {agent} on #{primary['id']} ({stop_what}), "
                                f"but could not start fallback {fb_label}: {e}", to=p, item_id=primary["id"])
                 core.sync_needs_you(conn)
             out.append({"agent": agent, "item_id": primary["id"], "restarted": None, "error": str(e)})
@@ -3299,7 +3343,7 @@ def _handle_limit_stops(conn, limit_hits):
             core._event(conn, primary["id"], "maxpm",
                         f"started {new_name} ({fb_label}) to "
                         + ("continue uncommitted work" if claimed else "take it") + f" after {agent} hit "
-                        f"{ad.label} usage limit{reset_part}")
+                        f"{stop_what}")
         out.append({"agent": agent, "item_id": primary["id"], "restarted": new_name, "fallback": fb_label})
     return out
 

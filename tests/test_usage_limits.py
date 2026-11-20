@@ -957,5 +957,103 @@ class ProviderSlots(unittest.TestCase):
         self.assertEqual(core.state(self.conn)["providers"][0]["used"], 1)
 
 
+class ModelRefused(unittest.TestCase):
+    """#6429: four Codex sessions answered their first turn with a 400 'model is not supported' error and sat at
+    their prompt for minutes with no alert; and two Dispatches of Codex ran different models."""
+
+    # The error as Codex 0.159.1 printed it on 2026-11-20, wrapped as a pane shows it.
+    SCREEN = ("■ {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The\n"
+              "  'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}\n\n"
+              "› Improve documentation in @filename\n\n  gpt-6.1-sol medium · ~/app\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = _db(self.tmp.name)
+        self.t0 = datetime(2026, 11, 20, 19, 20, 0, tzinfo=timezone.utc)
+        p_now = mock.patch.object(core, "now", side_effect=lambda: self.t0)
+        p_now.start()
+        self.addCleanup(p_now.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+        self.addCleanup(server.LIMIT_SEEN.clear)
+        core.register(self.conn, "mark", human=True)
+        core.config_set(self.conn, "launch_agents", "Codex=@codex; Claude Code=@claude-code")
+        core.config_set(self.conn, "agent_order", "codex model sol effort medium, claude-code")
+
+    def _dispatch(self, item_id, agent=None):
+        with mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", return_value={}):
+            r = server.dispatch_item(self.conn, item_id, agent=agent, actor="mark")
+        return r["session_name"], self.conn.execute(
+            "SELECT agent_type, model FROM agents WHERE name=?", (r["session_name"],)).fetchone()
+
+    def _watch(self, agent, text):
+        launched = []
+
+        def fake_kill(conn, name, reason, actor=None, by_serve=False):
+            return core._killed(conn, name, reason, actor or "maxpm", pid=None, killed=True)
+
+        screen = {"ended": False, "running": "codex", "tty": None, "target": f"maxpm:{agent}", "text": text}
+        with mock.patch.object(server, "agent_terminals", return_value={agent: "%1"}), \
+             mock.patch.object(server, "_pane_screen", return_value=screen), \
+             mock.patch.object(server, "_pane_session_id", return_value=None), \
+             mock.patch.object(server, "_pane_process", return_value=None), \
+             mock.patch.object(server, "kill_agent", side_effect=fake_kill), \
+             mock.patch.object(server, "_can_open_terminal", return_value=None), \
+             mock.patch.object(server, "_open_terminal", side_effect=lambda t, env, r, c: launched.append((t, env))):
+            return server.watch_prompts(self.conn), launched
+
+    def test_codex_reads_the_refusal_over_wrapped_lines(self):
+        got = agents.get("codex").model_refused(self.SCREEN.splitlines())
+        self.assertEqual(got["model"], "gpt-6.1-sol")
+        self.assertIn("not supported when using Codex with a ChatGPT account", got["message"])
+        self.assertIsNone(agents.get("codex").model_refused(["› Improve documentation", "gpt-6.1-sol medium"]))
+        self.assertIsNone(agents.get("claude").model_refused(self.SCREEN.splitlines()))
+
+    def test_a_refused_first_turn_alerts_and_starts_the_item_on_the_next_agent(self):
+        it = core.item_add(self.conn, "app", "Implement feature Y")
+        name, (atype, model) = self._dispatch(it["id"])
+        self.assertEqual((atype, model), ("codex", "sol"))
+        res, launched = self._watch(name, self.SCREEN)
+        rr = res["limit_restarts"][0]
+        self.assertEqual((rr["agent"], rr["item_id"], rr["fallback"]), (name, it["id"], "Claude Code"))
+        self.assertIsNotNone(self.conn.execute("SELECT stop_at FROM agents WHERE name=?", (name,)).fetchone()[0])
+        self.assertEqual(core.item_show(self.conn, it["id"])["reserved_for"], rr["restarted"])
+        self.assertEqual(len(launched), 1)
+        alerts = [r["body"] for r in self.conn.execute(
+            "SELECT body FROM messages WHERE kind='alert' AND to_agent='mark'")]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("refuses model gpt-6.1-sol", alerts[0])
+        events = [r["change"] for r in self.conn.execute("SELECT change FROM events WHERE item_id=?", (it["id"],))]
+        self.assertTrue(any("Codex refused model gpt-6.1-sol" in e for e in events))
+        # The next launch skips the refused entry for an hour, and says why; after the hour Codex runs again.
+        other = core.item_add(self.conn, "app", "Implement feature Z")
+        provs = core.agent_providers(self.conn)
+        self.assertIn("refused model gpt-6.1-sol", provs[0]["refused"])
+        self.assertEqual(self._dispatch(other["id"])[1][0], "claude-code")
+        self.t0 += core.MODEL_REFUSED_HOLD + timedelta(minutes=1)
+        self.assertIsNone(core.agent_providers(self.conn)[0]["refused"])
+
+    def test_a_session_at_work_is_not_read_as_refused(self):
+        it = core.item_add(self.conn, "app", "Implement feature Y")
+        name, _ = self._dispatch(it["id"])
+        core.claim(self.conn, it["id"], name)
+        res, launched = self._watch(name, self.SCREEN)
+        self.assertNotIn("limit_restarts", res)
+        self.assertEqual(launched, [])
+        self.assertEqual(core.model_refusals(self.conn), {})
+
+    def test_a_dispatch_that_names_codex_runs_the_model_of_its_entry(self):
+        # A Dispatch that names Codex ran Codex's own default (GPT-6.1 Terra), the list's pick ran gpt-6.2-sol.
+        plain = core.item_add(self.conn, "app", "Implement feature Y")
+        opus = core.item_add(self.conn, "app", "Implement feature Z")
+        core.item_edit(self.conn, opus["id"], models={"model": "opus"}, actor="mark")
+        self.assertEqual(tuple(self._dispatch(plain["id"], agent="Codex")[1]), ("codex", "sol"))
+        t = core.launch_target(self.conn, item=opus["id"], agent="Codex", actor="mark")
+        self.assertEqual(tuple(self._dispatch(opus["id"], agent="Codex")[1]), ("codex", "sol"))
+        self.assertIn("gpt-6.1-sol", t["command"])
+        self.assertIn("model_reasoning_effort=medium", t["command"])
+
+
 if __name__ == "__main__":
     unittest.main()

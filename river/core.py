@@ -3691,6 +3691,53 @@ def _prev_windows(conn, aid):
     return prev
 
 
+# #6429: how long a launch skips a provider entry whose model (or account) the agent refused at a session's turn.
+# Four Codex launches in a row ran a model that its CLI refused, and each one sat dead. A newer CLI, or another model
+# in agent_order, can fix it; the manager hears of it, and after this time a launch tries the entry again.
+MODEL_REFUSED_HOLD = timedelta(hours=1)
+
+
+def record_model_refused(conn, agent_type, model, message, session=None):
+    """Record that `agent_type` refused `model` (None: the account, every model of the agent) at a turn of
+    `session` (#6429). Returns True when it is new: no record of it within MODEL_REFUSED_HOLD."""
+    aid = _limit_adapter_id(agent_type) or agent_type
+    key = f"model_refused:{aid}:{(model or '').lower()}"
+    with tx(conn):
+        old = model_refusal(conn, aid, model)
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (key, json.dumps({"at": iso(now()), "message": message, "session": session, "model": model})))
+    return old is None
+
+
+def model_refusals(conn):
+    """{(adapter id, model lower case or ''): record} of the refusals within MODEL_REFUSED_HOLD (#6429)."""
+    out, edge = {}, now() - MODEL_REFUSED_HOLD
+    for r in conn.execute("SELECT key, value FROM meta WHERE key LIKE 'model_refused:%'"):
+        try:
+            rec = json.loads(r["value"])
+            if parse_iso(rec["at"]) < edge:
+                continue
+        except (ValueError, TypeError, KeyError):
+            continue
+        _, aid, model = r["key"].split(":", 2)
+        out[(aid, model)] = rec
+    return out
+
+
+def model_refusal(conn, agent_type, model, refusals=None, project_id=None):
+    """The refusal record that covers a launch of `agent_type` with `model` (a ladder name or a CLI id), or None: one
+    of the account (every model), or one of the model's id or name."""
+    aid = _limit_adapter_id(agent_type) or agent_type
+    got = model_refusals(conn) if refusals is None else refusals
+    if not got:
+        return None
+    names = {""}
+    if model:
+        names |= {model.lower(), str(model_id(conn, _platform_of(_adapters().find(aid)), model, project_id)
+                                     or model).lower()}
+    return next((got[(aid, n)] for n in names if (aid, n) in got), None)
+
+
 def record_agent_limit(conn, agent_type, limited=False, windows=None, resets_at=None, resets_text=None,
                        reason=None, source="screen", model=None, session=None):
     """Record an agent type's remaining usage or limit-stop state (#6348).
@@ -4131,10 +4178,11 @@ def agent_providers(conn, project_id=None, model=None):
         i = next((i for i in mine if key and keys[i] == key), None)
         i = i if i is not None else next((i for i in mine if not lst[i]["model"]), mine[0])
         used[i] += 1
-    out = []
+    out, refusals = [], model_refusals(conn)
     for i, p in enumerate(lst):
         ad = _adapters().find(p["agent"])
         lim = agent_is_limited(conn, p["agent"], model=runs[i], project_id=project_id)
+        ref = model_refusal(conn, p["agent"], runs[i], refusals, project_id) if refusals else None
         label = ad.label if ad else p["agent"]
         out.append({
             "pos": i + 1, "agent": p["agent"], "platform": _platform_of(ad), "label": label,
@@ -4145,6 +4193,9 @@ def agent_providers(conn, project_id=None, model=None):
             "limited": bool(lim), "until": _until_text(lim).strip() if lim else "",
             "limit_reason": lim["reason"] if lim and lim.get("model") else None,  # a model group's window (#6370)
             "remaining_pct": 0.0 if lim else _entry_usage(conn, stats[p["agent"]], runs[i]),
+            # #6429: the agent refused this entry's model (or the account) at a session's turn, within the hold.
+            "refused": (f"{label} refused {'model ' + ref['model'] if ref.get('model') else 'the account'} at "
+                        f"{ref['at']}") if ref else None,
             "set": bool(text.strip()),
         })
     return out
@@ -4172,7 +4223,7 @@ def fallback_agent(conn, agent_type, project_id=None, model=None, slots=True):
     provs = agent_providers(conn, project_id, model=model)
     stopped = _entry_for(conn, provs, aid, model) if aid else None
     for p in provs:
-        if p is stopped or p["limited"] or (slots and p["full"]):
+        if p is stopped or p["limited"] or p["refused"] or (slots and p["full"]):
             continue
         lbl = agent_for_type(conn, p["platform"], project_id)
         if lbl:
@@ -4228,20 +4279,34 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
             if lim:
                 raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
                                  + (" or model" if lim.get("model") else "") + " or wait until it resets")
+            # #6429: with no model named, the agent's entry in agent_order gives its model and effort, as when the
+            # list picks the agent: two Dispatches of Codex ran gpt-6.2-sol (the list's pick) and GPT-6.1 Terra
+            # (Codex was named, so Codex's own default ran).
+            # A model of another family (the item's opus on Codex) does not run there, so it counts as none.
+            fam = platform_spec(plat).get("family")
+            mfam = _family(parse_ladder(setting(conn, "model_ladder")), model)[0] if model else None
+            none_named = not model or bool(fam and mfam and mfam != fam)
+            ent = _entry_for(conn, provs, aid, None) if none_named and provs and provs[0]["set"] else None
+            if ent and ent["model"]:
+                return {**none, "label": agent, "model": ent["model"], "effort": ent["effort"], "pos": ent["pos"]}
             return {**none, "label": agent}
         skip = _entry_for(conn, provs, aid, model)
         run = model or (skip["run_model"] if skip else None)
         lim = agent_is_limited(conn, plat, model=run, project_id=project_id)
         full = slots and skip is not None and skip["full"]
-        if not lim and not full:
+        refused = skip["refused"] if skip is not None else None
+        if not lim and not full and not refused:
             got = skip if skip is not None and not model else None
             return {**none, "label": keep, **({"model": got["model"], "effort": got["effort"], "pos": got["pos"]}
                                               if got else {})}
         why = (f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
-               else f"{skip['name']} has {_slots_text(skip)}")
+               else refused if refused else f"{skip['name']} has {_slots_text(skip)}")
     skipped = []
     for p in provs:
         if p is skip:
+            continue
+        if p["refused"]:
+            skipped.append(p["refused"])
             continue
         if p["limited"] or (slots and p["full"]):
             why_lim = f" ({p['limit_reason']})" if p.get("limit_reason") else ""
@@ -23733,6 +23798,12 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     agent, fallback_why = got["label"], got["note"]
     if auto_agent and preferred is not None and agent != preferred:
         model = effort = None  # chosen for the preferred agent: the new one takes the item's own or its default
+    # An item's own model of another family (opus on Codex) does not run: the entry's model runs instead (#6429).
+    own_fam = _family(ladder, own_model)[0] if own_model else None
+    if own_fam and got["model"]:
+        plat_fam = (platform_spec(_launch_platform(conn, p["id"], agent)) or {}).get("family")
+        if plat_fam and plat_fam != own_fam:
+            own_model = None
     entry_model = got["model"] if got["model"] and not model_explicit and not own_model else None
     if entry_model:
         model = entry_model

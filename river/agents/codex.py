@@ -273,6 +273,12 @@ DETECT = {
         r"(?i)\b(?:5-hour|weekly|usage|rate)\s+limit\s+reached\b",
         r"(?i)\busage\s+limit\s+exceeded\b",
     ],
+    # #6429: Codex 0.159.1 ended every turn with {"type":"error","status":400,..."The 'gpt-6.2-sol' model is not
+    # supported when using Codex with a ChatGPT account."} (seen 2026-11-20; 0.171.0 runs that model).
+    "refused": [
+        r"(?i)\bthe '(?P<model>[\w.:/-]+)' model is not supported\b",
+        r"(?i)\bthe model [`'\"]?(?P<model>[\w.:/-]+)[`'\"]? does not exist\b",
+    ],
     "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Codex what to do differently"
     "image_paste": None,  # not read yet: an image path is pasted alone, as for every agent
     # The request_user_input dialog of Plan mode (#6235): 'Question 1/2 (2 unanswered)', the question, numbered
