@@ -310,13 +310,48 @@ class Chat(Env):
         self.assertEqual(aider.chat_usage(["> Tokens: 12k sent, 1.5k cache write, 9.8k cache hit, 340 received. "
                                            "Cost: $0.02 message, $0.05 session.  "]),
                          {"input": 12000, "output": 340, "cache_read": 9800, "cache_write": 1500})
-        # The resumed session's start, and its model (#6280).
-        self.assertEqual(aider.chat_settings(lines), {"edit_format": "whole", "model": "openai/fake-model"})
+        # The resumed session's start, and its model and effort (#6280, #6317): no reasoning on the model line means
+        # Aider sends no reasoning_effort (the model's own default).
+        self.assertEqual(aider.chat_settings(lines), {"edit_format": "whole", "model": "openai/fake-model",
+                                                      "effort": "default"})
         before = lines[:lines.index("# aider chat started at 2026-11-10 23:49:11")]
         self.assertEqual(aider.chat_settings(before), {"edit_format": "diff", "model": "openai/fake-model",
                                                        "effort": "high"})  # #6280: the model line names both
         self.assertEqual(aider.read_effort(aider.parse_chat(before)[0]), "high")
         self.assertIsNone(aider.read_effort(aider.parse_chat(lines)[0]))  # the model ignored it after the resume
+
+    def test_effort_in_settings_dialog_when_the_model_line_names_none(self):
+        # #6317: a session started with no --reasoning-effort shows 'default', never 'not known', from its model line
+        # or from Aider's own config/defaults before the log has a model line.
+        self.assertEqual(aider.config_settings(), {"effort": "default"})
+        cfg = self.root / "home" / ".aider.conf.yml"
+        cfg.write_text("# Aider config\nmodel: sonnet\nreasoning-effort: medium  # comment\n", encoding="utf-8")
+        self.assertEqual(aider.config_settings(), {"model": "sonnet", "effort": "medium"})
+        cfg.write_text("reasoning-effort: null\n", encoding="utf-8")
+        self.assertEqual(aider.config_settings(), {"effort": "default"})
+        cfg.unlink()
+
+        c = core.connect()
+        self.addCleanup(c.close)
+        core.register(c, "a1")
+        c.execute("UPDATE agents SET agent_type='aider', pid_cmd='aider --no-gitignore' WHERE name='a1'")
+        # Before a chat log exists: config_settings gives Aider's default effort.
+        got = {s["key"]: s for s in sessions.session_settings(c, "a1")["settings"]}
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("default", "config"))
+        # Command line --reasoning-effort wins before the log has a model line.
+        c.execute("UPDATE agents SET pid_cmd='aider --model sonnet --reasoning-effort low' WHERE name='a1'")
+        got = {s["key"]: s for s in sessions.session_settings(c, "a1")["settings"]}
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "command line"))
+        # Once the log has a model line with no reasoning, the session runs at the model's default.
+        c.execute("UPDATE agents SET pid_cmd='aider --no-gitignore' WHERE name='a1'")
+        c.execute("INSERT INTO agent_sessions(agent, session_id, first_seen) VALUES ('a1', 'a1', '2026-11-20T02:00:00Z')")
+        log = aider.chat_file("a1")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("# aider chat started at 2026-11-20 02:00:00\n\n> Model: sonnet with diff edit format\n",
+                       encoding="utf-8")
+        got = {s["key"]: s for s in sessions.session_settings(c, "a1")["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("sonnet", "session"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("default", "session"))
 
     def test_the_log_of_a_session_is_found_by_its_name_or_its_path(self):
         self.assertIsNone(self.a.chat_path("w1"))

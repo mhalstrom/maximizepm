@@ -396,21 +396,49 @@ _MODEL_LINE = re.compile(r"^(?:> )?(?:Main model|Model): (\S+) with (\S+) edit f
 
 def chat_settings(lines):
     """{setting key: value} as the session runs now, from the last model announcement ('Model: <name> with <format>
-    edit format, reasoning high'): the edit format. Aider writes one at each start, /model, /chat-mode and
-    /reasoning-effort."""
+    edit format, reasoning high'): the edit format, model and effort. Aider writes one at each start, /model,
+    /chat-mode and /reasoning-effort. When the line names no reasoning level, Aider sends no reasoning_effort
+    parameter (aider/args.py default: not set; /settings: reasoning_effort: None), so the model runs at its own
+    default ('default', #6317)."""
     got = {}
     for line in lines:
         m = _MODEL_LINE.match(line.rstrip())
         if m:
-            # The model and its reasoning level too (#6280): the line names both from the start.
+            # The model and its reasoning level too (#6280, #6317): the line names both from the start.
             level = re.search(r"\breasoning (\w+)", line)
-            got = {"edit_format": m.group(2), "model": m.group(1), **({"effort": level.group(1)} if level else {})}
+            got = {"edit_format": m.group(2), "model": m.group(1),
+                   "effort": level.group(1) if level else "default"}
     return got
 
 
-# Where the Settings dialog reads each setting of a running session (#6280): Aider's model line at its start. A
-# model with no reasoning names no level: the effort has no source then.
-SETTINGS_READ = {"model": ("chat",), "effort": ("chat",)}
+def config_settings(path=None):
+    """What an Aider session takes from ~/.aider.conf.yml (or Aider's own default) when neither the chat log nor the
+    command line names it (#6317). Aider's --reasoning-effort defaults to None (not set, so the model runs at its own
+    default: 'default'). A small reader of the two keys: no YAML library."""
+    out = {"effort": "default"}
+    try:
+        text = (Path(path) if path is not None else Path.home() / ".aider.conf.yml").read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line or raw[:1].isspace():
+            continue
+        k, v = (p.strip() for p in line.split(":", 1))
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1].strip()
+        if not v or v.lower() in ("null", "~", "none"):
+            continue
+        if k == "reasoning-effort":
+            out["effort"] = v
+        elif k == "model":
+            out["model"] = v
+    return out
+
+
+# Where the Settings dialog reads each setting of a running session (#6280, #6317): Aider's model line at its start,
+# and ~/.aider.conf.yml (with Aider's own default for effort when unset) before the log has that line.
+SETTINGS_READ = {"model": ("chat", "config"), "effort": ("chat", "config")}
 
 
 def read_effort(entries):

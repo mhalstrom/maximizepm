@@ -346,6 +346,8 @@ class SettingsRead(unittest.TestCase):
         from river.agents import aider, pi
         self.assertEqual(aider.chat_settings(["Model: anthropic/claude-sonnet-4-5 with diff edit format, reasoning high"]),
                          {"edit_format": "diff", "model": "anthropic/claude-sonnet-4-5", "effort": "high"})
+        self.assertEqual(aider.chat_settings(["Model: sonnet with diff edit format"]),
+                         {"edit_format": "diff", "model": "sonnet", "effort": "default"})
         self.assertEqual(pi.chat_settings(['{"type":"model_change","provider":"openai-codex","modelId":"gpt-6.1-sol"}',
                                            '{"type":"thinking_level_change","thinkingLevel":"medium"}']),
                          {"model": "openai-codex/gpt-6.1-sol", "effort": "medium"})
