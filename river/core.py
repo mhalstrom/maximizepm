@@ -17794,7 +17794,7 @@ def hook_report(conn, agent_id, payload, env=None):
     if rep and rep["run"] is not None:
         # A hook before a shell command: a check only, nothing recorded (it runs before every Bash call).
         return {"agent": agent, "event": rep["event"], "state": None, "prompt": False, "alert": None, "answered": [],
-                "remind": None, "deny": push_guard(conn, agent, rep["run"]) if agent else None}
+                "remind": None, "deny": tmux_guard(rep["run"]) or (push_guard(conn, agent, rep["run"]) if agent else None)}
     if not agent or not rep:
         return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
                 "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
@@ -17858,6 +17858,58 @@ def hook_report(conn, agent_id, payload, env=None):
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
     return {"agent": agent, "event": rep["event"], "state": state, "prompt": typed is not None, "alert": alert,
             "answered": answered, "remind": remind}
+
+
+# The words that may come before the program of a shell command: env and its options, VAR=value, and wrappers.
+_RUN_WRAPPERS = {"env", "command", "exec", "nohup", "sudo", "time", "builtin"}
+
+
+def _shell_commands(command):
+    """The simple commands of a shell line as lists of words, in a quick parse: shell quotes hold, and ; & | ( ) and
+    a newline end a command. An unclosed quote reads each line as words."""
+    import shlex
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        words = command.replace("\n", " ; ").split()
+    out, cur = [], []
+    for w in words:
+        if w and set(w) <= set("();<>|&\n"):
+            if cur:
+                out.append(cur)
+            cur = []
+        else:
+            cur.append(w)
+    return out + ([cur] if cur else [])
+
+
+def tmux_guard(command):
+    """Why MaximizePM refuses this shell command, or None (#6246): a tmux kill-server that names no server of its own
+    (-L name or -S path), or names MaximizePM's (-L maximizepm). Every agent session runs in a pane of that server,
+    and in a pane the variable TMUX names it: tmux then goes to it whatever TMUX_TMPDIR says. On 2026-11-19 two
+    workers ended a test server with 'TMUX_TMPDIR=<their folder> tmux kill-server' and ended the manager, the
+    workers and the expert twice (16:57:21 and 16:59:43 PST)."""
+    if "kill-server" not in (command or ""):
+        return None
+    for words in _shell_commands(command):
+        i = 0
+        while i < len(words) and (words[i] in _RUN_WRAPPERS or words[i].startswith("-")
+                                  or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[i])):
+            i += 2 if words[i] == "-u" else 1  # env -u NAME
+        if i >= len(words) or os.path.basename(words[i]) != "tmux" or "kill-server" not in words[i + 1:]:
+            continue
+        opts = words[i + 1:words.index("kill-server", i + 1)]
+        own = next((w[2:] or (opts[j + 1] if j + 1 < len(opts) else "") for j, w in enumerate(opts)
+                    if w[:2] in ("-L", "-S")), None)
+        if not own or own == TMUX_SOCKET:
+            return ("MaximizePM refuses this command: tmux kill-server with no server of its own ends the tmux server "
+                    "of every agent session, this one too. In a tmux pane the variable TMUX names that server, and "
+                    "TMUX_TMPDIR does not change it. Name your own server on every tmux command of the test: "
+                    "tmux -L <name> ... and tmux -L <name> kill-server (or -S <socket path>).")
+    return None
 
 
 def push_guard(conn, agent, command):

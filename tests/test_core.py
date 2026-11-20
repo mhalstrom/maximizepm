@@ -10581,6 +10581,53 @@ class PushGuard(Base):
         self.assertEqual(set(agents.get("claude").read_hook({"hook_event_name": "PreToolUse"})), set(agents.HOOK_REPORT_KEYS))
 
 
+class TmuxGuard(Base):
+    """#6246: on 2026-11-19 two workers ended a test tmux server with 'TMUX_TMPDIR=<folder> tmux kill-server' inside
+    their panes. TMUX names the pane's server there, so the kill ended the server of every agent session, twice."""
+
+    def bash(self, command, sid="sess-unknown"):
+        return core.activity_event(self.c, {"hook_event_name": "PreToolUse", "session_id": sid, "tool_name": "Bash",
+                                            "tool_input": {"command": command}}, env={})
+
+    def test_a_kill_server_of_no_own_server_is_refused(self):
+        # The two commands of that day, and other ways to the same server. The hook refuses them for any session,
+        # also one that MaximizePM does not know.
+        for cmd in ("TMUX_TMPDIR=/private/tmp/mx6239 /opt/homebrew/bin/tmux kill-server; echo kill $?",
+                    'd=$(cat x); TMUX_TMPDIR=$d/tm tmux kill-server 2>&1; d2=$(mktemp -d)',
+                    "tmux kill-server", "env TMUX_TMPDIR=/tmp/x tmux -f /dev/null kill-server",
+                    "ls\ntmux kill-server", f"tmux -L {core.TMUX_SOCKET} kill-server", "(tmux kill-server)",
+                    "env -u TMUX TMUX_TMPDIR=$D tmux kill-server; rm -rf $D", "x=$(tmux kill-server)",
+                    "true && /usr/local/bin/tmux -f /dev/null kill-server", "echo 'unclosed\ntmux kill-server"):
+            self.assertIn("ends the tmux server of every agent session", self.bash(cmd)["deny"] or "", cmd)
+        # A server of its own, other tmux commands, and the words in a search or a message run.
+        for cmd in ("tmux -L t6242 kill-server", "tmux -S /tmp/x/sock kill-server", "tmux -L't6242' kill-server",
+                    "/opt/homebrew/bin/tmux -Lbuildcheck kill-server", "tmux list-sessions", "tmux kill-pane -t %3",
+                    "grep -rn 'tmux.*kill-server' tests/", 'git commit -m "a test ends tmux kill-server"',
+                    "grep -n kill-server river/server.py"):
+            self.assertIsNone(self.bash(cmd)["deny"], cmd)
+
+    def test_a_tmux_of_a_test_reaches_no_server_of_the_person(self):
+        """tests/__init__.py takes TMUX out and puts TMUX_TMPDIR in the test folder: a plain tmux in a test starts a
+        server of the test run. The check comes before any tmux call, so a failure here ends no server."""
+        import shutil
+        self.assertNotIn("TMUX", os.environ)
+        self.assertTrue(os.environ.get("TMUX_TMPDIR", "").startswith(tempfile.gettempdir().rstrip("/")) or
+                        "maxpm-tests-" in os.environ.get("TMUX_TMPDIR", ""), os.environ.get("TMUX_TMPDIR"))
+        if not shutil.which("tmux"):
+            self.skipTest("tmux is not installed")
+        sock = os.path.join(os.environ["TMUX_TMPDIR"], f"tmux-{os.getuid()}", "default")
+        # Only by its path: a kill-server with no -S would go to whatever server this environment names.
+        self.addCleanup(subprocess.run, ["tmux", "-S", sock, "kill-server"], capture_output=True, timeout=15)
+        r = subprocess.run(["tmux", "-f", "/dev/null", "new-session", "-d", "-s", "t6246", "sleep 30"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode or "not permitted" in r.stderr:
+            self.skipTest(f"tmux cannot start a server here: {r.stderr.strip()}")  # a sandbox, or a long socket path
+        self.assertTrue(os.path.exists(sock), r.stderr)
+        got = subprocess.run(["tmux", "-S", sock, "list-sessions", "-F", "#{session_name}"],
+                             capture_output=True, text=True, timeout=15).stdout.split()
+        self.assertEqual(got, ["t6246"])
+
+
 class ManagerWake(Base):
     """A ship request, a review that passed and a deploy that is done wake the manager's watch at once (#4289)."""
 

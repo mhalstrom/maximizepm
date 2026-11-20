@@ -65,6 +65,12 @@ _agentinstall.DIRS = []
 _agentinstall.STATUS_RUNNER = lambda argv: 1
 REAL_TMUX_PATH = core.tmux_path  # for the test of the lookup itself, with a fake app folder (#6237)
 core.tmux_path = lambda: None
+# Nor the tmux server of the person's sessions (#6246). Tests run in an agent session, in a tmux pane, and there TMUX
+# names that server: a tmux command with no -L or -S of its own (in a test, or in a program that a test starts) went
+# to it. With TMUX gone and TMUX_TMPDIR in the test folder, such a command starts a server of the test run instead.
+os.environ.pop("TMUX", None)
+os.environ.pop("TMUX_PANE", None)
+os.environ["TMUX_TMPDIR"] = _queue_dir
 # The tests never probe the network (#6099): this computer is online for every test, offline or in a sandbox. A test
 # of an outage sets core.NET_PROBE itself.
 core.NET_PROBE = lambda hosts, dns: None
