@@ -138,6 +138,22 @@ button.pl-arrow.pl-moving::after { left: var(--r-s); right: var(--r-s); }
 .pl-banner { padding: var(--sp-3) var(--sp-5); border-radius: var(--r-m); background: var(--warn-bg); color: var(--warn);
   font-size: var(--fs-m); }
 
+/* The first screen of a deploy target (#6486, views/release.js): Next release, the release that runs or the last one
+   with its steps, the tests, and More. */
+.rl { display: flex; flex-direction: column; gap: var(--sp-4); }
+.rl-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.rl-head .spacer { flex: 1; }
+.rl-next { border: var(--hair-2) solid var(--accent); background: var(--human-bg); }
+.rl-links:empty { display: none; }
+.rl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.rl-step { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) 0;
+  border-bottom: var(--hair) solid var(--line); }
+.rl-step:last-child { border-bottom: 0; }
+.rl-sname { min-width: var(--w-s); font-size: var(--fs-m); }
+.rl-step.failed .rl-sname { color: var(--warn); font-weight: 600; }
+.rl-note { flex-basis: 100%; color: var(--warn); white-space: pre-wrap; word-break: break-word; }
+.rl-more { align-items: center; }
+
 /* A phone: each test is a block, its name on a line of its own, then its result, time and message. */
 @media (max-width: 759px) {
   .pl-tests .pl-th { display: none; }

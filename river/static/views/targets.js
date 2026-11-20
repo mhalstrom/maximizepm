@@ -4,7 +4,7 @@
 // each open release is one state line in plain words, the button Open report (the review report, #6003: the main
 // action here; its tasks are in the report, not repeated on the card, #6182). Release
 // now is a plain button that opens a small dialog for the reason; Deploy now, the hooks and the past deploys stay.
-import { $, esc, toast, act, ago, left, clip, actor } from "../lib.js";
+import { $, esc, toast, act, ago, clip, actor } from "../lib.js";
 import { openTarget } from "./deploy.js";
 import { pickStage } from "./pipeline.js";
 import { ownerChip } from "../components/chip.js";
@@ -25,51 +25,49 @@ function when(iso) {
     : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
-// The state of one release in plain words: what it is now, and when it can go out.
+// The state of one release in plain words: what it is now, and when it can go out (#6486: canvas deploy-text-audit).
 function stateLine(t, d) {
   const r = t.release || {}, n = d.ships.length, tasks = plural(n, "task");
-  const rv = d.review, rvWho = rv && rv.assignee ? " by " + esc(rv.assignee) : "";
-  if (d.status === "in_progress") return `<b>Going out now</b>: ${tasks}${d.assignee ? ` · ${esc(d.assignee)} deploys` : ""}`;
-  if (d.status === "held") return `<b>Deploy paused</b>: ${tasks}${d.assignee ? ` · held by ${esc(d.assignee)}` : ""}`;
-  if (d.ready) return `<b>Ready to go out</b>: ${tasks}`;
-  if (d.cut_at) return `<b>Release cut ${ago(d.cut_at)}</b>: ${tasks}` + (rv ? (rv.status === "open" ? " · waits for its review"
+  const rv = d.review, rvWho = rv && rv.assignee ? " · " + esc(rv.assignee) : "";
+  if (d.status === "in_progress") return `<b>Releasing</b>: ${tasks}${d.assignee ? ` · ${esc(d.assignee)}` : ""}`;
+  if (d.status === "held") return `<b>Paused</b>: ${tasks}${d.assignee ? ` · ${esc(d.assignee)}` : ""}`;
+  if (d.ready) return `<b>Ready</b>: ${tasks}`;
+  if (d.cut_at) return `<b>Cut ${ago(d.cut_at)}</b>: ${tasks}` + (rv ? (rv.status === "open" ? " · review waiting"
     : ` · in review${rvWho}`) : "");
   const lead = `<b>Next release</b>: ${tasks}`;
-  if (!n) return `<b>Collecting</b>: no task yet`;
-  if (r.deploy === d.id && r.early) return `${lead} · goes out early (${esc(r.early)})`;
-  if (r.deploy === d.id && r.waits && r.until) return `${lead} · can go out ${esc(when(r.until))} <span class="muted">(in ${left(r.until)})</span>`;
-  if (r.deploy === d.id && r.waits && r.running) return `${lead} · goes out after release <span class="link" data-open="${r.running}">#${r.running}</span>`;
-  return `${lead} · collecting`;
+  if (!n) return `<b>No tasks yet</b>`;
+  if (r.deploy === d.id && r.early) return `${lead} · Early (${esc(r.early)})`;
+  if (r.deploy === d.id && r.waits && r.until) return `${lead} · next by itself ${esc(when(r.until))}`;
+  if (r.deploy === d.id && r.waits && r.running) return `${lead} · After <span class="link" data-open="${r.running}">#${r.running}</span>`;
+  return lead;
 }
 
-// One open release of a target: the state line with Open report. Its tasks are in the report only (#6182, mark
+// One open release of a target: the state line with Report. Its tasks are in the report only (#6182, mark
 // 2026-11-19: the card under the pipeline's tables listed the same tasks as Open report).
 function releaseHtml(t, d, first) {
-  const report = d.ships.length ? button("Open report", { kind: first ? "primary" : "", data: { report: d.id },
-    title: "What this release ships" }) : "";
+  const report = d.ships.length ? button("Report", { kind: first ? "primary" : "", data: { report: d.id },
+    title: "Report" }) : "";
   return `<section class="rel-rel">
       <div class="rel-state"><div class="rel-line t-m">${stateLine(t, d)}
-        <div class="muted t-s">Release <span class="link" data-open="${d.id}">#${d.id}</span>${d.review ? ` · review <span class="link" data-open="${d.review.id}">#${d.review.id}</span>` : ""}</div></div>
+        <div class="muted t-s"><span class="link" data-open="${d.id}">#${d.id}</span>${d.review ? ` · review <span class="link" data-open="${d.review.id}">#${d.review.id}</span>` : ""}</div></div>
         ${report}</div></section>`;
 }
 
-// A cadence as words: "1w" is "a week", "2h" is "every 2 hours"; another form stays as it is.
+// A cadence as one word: "1w" is "Weekly", "1d" "Daily", "2h" "Every 2h"; another form stays as it is.
 function cadenceWords(c) {
-  const m = /^(\d+)\s*([mhdw])$/.exec(String(c).trim()), unit = m && { m: "minute", h: "hour", d: "day", w: "week" }[m[2]];
-  if (!m) return "every " + c;
-  return +m[1] === 1 ? "a " + unit : `every ${m[1]} ${unit}s`;
+  const m = /^(\d+)\s*([mhdw])$/.exec(String(c).trim());
+  if (!m) return "Every " + c;
+  return +m[1] === 1 && { d: "Daily", w: "Weekly", h: "Hourly" }[m[2]] || `Every ${m[1]}${m[2]}`;
 }
 
 // How the target releases, only what a person needs: who approves, the cadence. A gate that is not set says nothing.
 function rulesLine(t) {
   const r = t.release || {}, a = r.approval || {}, bits = [];  // [text, hover]
-  if (a.approval === "person") bits.push([a.review ? "goes out after its review and your sign-off"  // #6039
-    : "you approve each release before it goes out"]);
-  else if (a.approval === "review") bits.push(["goes out when its review passes"]);
-  if (r.cadence) bits.push(["at most one release " + cadenceWords(r.cadence), r.cadence_reason]);
-  if (t.monitor) bits.push(["watched after each deploy", t.monitor]);
+  if (a.approval === "person") bits.push([a.review ? "Review + approval" : "Approval required"]);  // #6039
+  else if (a.approval === "review") bits.push(["Review required"]);
+  if (r.cadence) bits.push([cadenceWords(r.cadence), r.cadence_reason]);
+  if (t.monitor) bits.push(["Watched", t.monitor]);
   if (!bits.length) return "";
-  bits[0][0] = bits[0][0].charAt(0).toUpperCase() + bits[0][0].slice(1);
   return `<div class="muted t-s">${bits.map(([s, tip]) => tip ? `<span title="${esc(tip)}">${esc(s)}</span>` : esc(s)).join(" · ")}</div>`;
 }
 
@@ -89,20 +87,18 @@ function historyHtml(t) {
   const H = t.history || [];
   if (!H.length) return "";
   const rows = H.map(h => `<div class="rel-past t-s"${h.output ? ` title="${esc(h.output)}"` : ""}><span class="link" data-open="${h.id}">#${h.id}</span>
-    <span class="muted">${ago(h.closed_at)}${h.done_by ? " · " + esc(h.done_by) : ""} · ${plural(h.ships.length, "task")}</span>
+    <span class="muted">${ago(h.closed_at)} · ${plural(h.ships.length, "task")}</span>
     ${h.ships.length ? `<span class="link" data-report="${h.id}">Report</span>` : ""}</div>`).join("");
-  return `<details data-keep="deploys-${esc(t.name)}"><summary>Past deploys · last ${ago(H[0].closed_at)}</summary>${rows}</details>`;
+  return `<details data-keep="deploys-${esc(t.name)}"><summary>Past releases</summary>${rows}</details>`;
 }
 
 function cardHtml(t) {
-  const owner = t.owner && (S.sessions || []).includes(t.owner)
-    ? `<span class="link" data-session-go="${esc(t.owner)}" title="Open the owner's session">${ownerChip(t.owner)}</span>` : ownerChip(t.owner);
-  const P = t.project_names || [];
-  const projects = !P.length ? "" : `<span class="muted t-s" title="${esc(P.join(", "))}">${P.length > 3 ? P.length + " projects" : P.map(esc).join(", ")}</span>`;
+  const owner = !t.owner ? "" : (S.sessions || []).includes(t.owner)
+    ? `<span class="link" data-session-go="${esc(t.owner)}" title="Session">${ownerChip(t.owner)}</span>` : ownerChip(t.owner);
   const rels = t.pending.length ? t.pending.map((d, i) => releaseHtml(t, d, i === 0)).join("")
-    : `<div class="muted t-m">No open release. A task joins the next one with <code>maxpm done &lt;id&gt; --ship</code>.</div>`;
+    : `<div class="muted t-m">No queued tasks.</div>`;
   return `<article class="rel">
-      <div class="rel-h"><h3${t.description ? ` title="${esc(t.description)}"` : ""}>${esc(t.name)}</h3>${owner}${projects}</div>
+      <div class="rel-h"><h3>${esc(t.name)}</h3>${owner}</div>
       ${rulesLine(t)}
       ${rels}
       <div class="rel-fold">${hooksHtml(t, S.hook_events)}${historyHtml(t)}</div></article>`;
@@ -124,8 +120,8 @@ export function renderTargets() {
 }
 
 // Release now: a small dialog that asks why this release cannot wait (maxpm target release-now).
-let relDlg = null, relBox = null, relName = "", relShow = false;
-function openReleaseNow(name, show) {
+let relDlg = null, relBox = null, relName = "";
+function openReleaseNow(name) {
   if (!relDlg) {
     const d = document.createElement("div");
     d.id = "relNowDlg"; d.className = "hidden";
@@ -134,16 +130,14 @@ function openReleaseNow(name, show) {
     relBox = d.firstElementChild;
     relDlg = makeDialog(d);
   }
-  relName = name; relShow = show;
+  relName = name;
   const t = (S.targets || []).find(x => x.name === name) || {}, r = t.release || {}, n = (r.ships || []).length;
-  // #6189: what goes out (its tasks, with the report) and a reason already written, so one click and Release now start it.
-  relBox.innerHTML = `<div class="dlg-head"><h2>Release ${esc(name)} now?</h2>${iconButton("✕", "Close", { data: { relclose: "1" } })}</div>
-    <p class="t-m">${n ? `${plural(n, "task")} go out` : "The collected tasks go out"}${r.deploy ? ` (release <span class="link" data-open="${r.deploy}">#${r.deploy}</span>,
-      <span class="link" data-report="${r.deploy}">the report</span>)` : ""}, at the newest commit when the release starts.
-      ${r.until ? `Without this, it goes out ${esc(when(r.until))} (in ${left(r.until)}).`
-      : r.running ? `Release #${r.running} runs now; without this, the next one starts after it.` : ""}</p>
-    <div class="form">${field("Why now (it goes in the release's history)", textarea({ id: "relWhy", rows: 2 },
-      `Released by ${actor() || "a person"} from the Deploy tab`))}</div>
+  // #6189: what goes out (its tasks, with the report) and a reason already written, so one click and Release now start
+  // it. #6486: the words of canvas deploy-text-audit.
+  relBox.innerHTML = `<div class="dlg-head"><h2>Release ${esc(name)} now</h2>${iconButton("✕", "Close", { data: { relclose: "1" } })}</div>
+    <p class="t-m">${n ? plural(n, "task") : "The queued tasks"}${r.deploy ? ` · <span class="link" data-report="${r.deploy}">Report</span>` : ""}
+      ${r.until ? ` · Scheduled ${esc(when(r.until))}` : r.running ? ` · after #${r.running}` : ""}</p>
+    <div class="form">${field("Reason", textarea({ id: "relWhy", rows: 2 }, `Manual release by ${actor() || "a person"}`))}</div>
     ${actions(button("Cancel", { data: { relclose: "1" } }) + button("Release now", { kind: "primary", data: { relgo: "1" } }))}`;
   relDlg.open();
   relBox.querySelector('[data-relgo]').focus();
@@ -153,16 +147,16 @@ function openReleaseNow(name, show) {
 export function onClick(t) {
   const el = (k) => t.closest && t.closest(`[data-${k}]`);
   const now = el("relnow");
-  if (now) { openReleaseNow(now.dataset.relnow, !!now.dataset.relshow); return true; }
+  if (now) { openReleaseNow(now.dataset.relnow); return true; }
   if (el("relclose")) { relDlg.close(); return true; }
   if (el("relgo")) return run(async () => {
     const reason = ($("#relWhy").value || "").trim();
-    if (!reason) return toast("Say why this release cannot wait", true);
+    if (!reason) return toast("Add a reason", true);
     try { await act("release_now", { target: relName, reason }); } catch (e) { return; }
     relDlg.close();
-    toast(`The release of ${relName} starts now`);
-    // #6189: show the release as it runs: the target's pipeline with its deploy stage (the hook's steps).
-    if (relShow) { pickStage(relName, "deploy"); openTarget(relName); }
+    toast("Release started");
+    // #6189, #6486: show the release as it runs: the target's page, whose release card shows each step.
+    pickStage(relName, "deploy"); openTarget(relName);
   });
   if (t.dataset.hook) return run(async () => {
     const name = t.dataset.target, event = t.dataset.hook;

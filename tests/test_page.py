@@ -261,25 +261,25 @@ try {
     && !e.closest(".pl-table")).map(e => e.tagName + "." + e.className).slice(0, 5);
   q('#plArrowDlg [data-pl-arrowclose]').click();
   await until(() => q("#plArrowDlg.hidden"), "the dialog closes");
-  // #6141: a stage shows Versions in <stage>, each run with its buttons.
+  // #6141: a stage shows its recent runs, each run with its buttons.
   q('#plRow [data-pl-stage="test"]').click();
-  await until(() => q("#plStageRuns").textContent.includes("Versions in test"), "Versions in test");
+  await until(() => q("#plStageRuns").textContent.includes("Recent runs"), "Recent runs");
   out.runs = q("#plStageRuns").textContent.replace(/\s+/g, " ");
   out.stop = !!q('#plStageRuns [data-pl-stop]');
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1280,900", "390,844"):
             r = self.drive(driver, "/", size=size)
-            self.assertIn("⛔ blocked", r["test"], r)
-            self.assertIn("abc1234 waits", r["test"], r)
-            self.assertIn("🕒 closed", r["beta"], r)
-            self.assertIn("✋ mark approves", r["prod"], r)  # #6482: the chip says what the step does
+            self.assertIn("⛔ Blocked", r["test"], r)  # #6486: the words of canvas deploy-text-audit
+            self.assertIn("abc1234", r["test"], r)
+            self.assertIn("🕒 Closed", r["beta"], r)
+            self.assertIn("✋ mark", r["prod"], r)  # #6482: the chip says what the step does
             self.assertFalse(r["first"], r)  # the first stage's arrow is plain: not drawn
             self.assertEqual(r["tier"], "PROD", r)  # the tier badge on the stage card (#6137)
             self.assertIn("the test database is down", r["detail"], r)
             self.assertIn("build → test", r["detail"], r)  # #6198: the title names the transition
-            self.assertNotIn("Set by, until", r["detail"], r)  # no control table in the dialog
-            for b in ("Unblock", "Delay", "Disable", "Let abc1234 pass", "Freeze", "Window"):
+            self.assertNotIn("Set by", r["detail"], r)  # no control table in the dialog
+            for b in ("Unblock", "Delay", "Disable", "Pass once", "Freeze", "Window"):
                 self.assertIn(b, r["buttons"], r)
             self.assertEqual(r["over"], [], r)
             self.assertIn("abc1234", r["runs"], r)
@@ -315,6 +315,8 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="web-prod"]'), "Deploy: the target web-prod");
   q('#dpList [data-dp-open="web-prod"]').click();
+  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
+  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plRow [data-pl-stage="watch"]'), "the stages of web-prod");
   q('#plRow [data-pl-stage="watch"]').click();
   await until(() => q("#plDetail .pl-checks"), "the checks of the watch");
@@ -346,8 +348,8 @@ try {
             self.assertIn("240 runs", r["text"], r)
             # #6505 (mark 2026-11-20): a failed check is a note and never ends or fails the watch; it runs its 24 hours.
             self.assertIn("A note, not a failure of the release", r["text"], r)
-            self.assertIn("running for 5h 00m", r["text"], r)
-            self.assertIn("running for 5h 00m", r["card"], r)
+            self.assertIn("running", r["text"], r)
+            self.assertIn("running 5h 00m", r["card"], r)
             self.assertNotIn("failed", r["card"], r)
             self.assertNotIn("s ago", r["text"].split("2 failed")[0], r)
             self.assertEqual(r["dots"], 3, r)  # one dot for each check on the stage card
@@ -382,6 +384,8 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
+  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plRow [data-pl-stage="deploy"]'), "the stages");
   const tops = [...document.querySelectorAll('#plRow .pl-stage .pl-name')].map(e => Math.round(e.getBoundingClientRect().top));
   const kind = q('#plRow [data-pl-stage="deploy"] .pl-kind');
@@ -422,10 +426,10 @@ try {
             self.assertTrue(r["hold"], r)
             self.assertNotIn("monospace", r["holdFont"].lower(), r)  # 'nothing waits' is words
             self.assertEqual(r["rows"], 5, r)
-            self.assertEqual(r["head"], ["When", "Version", "State", "Took", "Task", "Actions"], r)
+            self.assertEqual(r["head"], ["When", "Commit", "Status", "Time", "Task", "Actions"], r)
             self.assertNotIn(" ran ", r["text"], r)
             self.assertNotIn("the release of deploy", r["text"], r)
-            self.assertIn("Show all 8", r["text"], r)
+            self.assertIn("Show all (8)", r["text"], r)
             self.assertEqual(r["live"], ["0000006 live"], r)  # the newest done deploy, not the newest row
             self.assertEqual(r["all"], 8, r)
             self.assertFalse(r["tasks"], r)
@@ -437,9 +441,10 @@ try {
             self.assertEqual(r["dlgOver"], [], r)
 
     def test_the_next_step_waits_on_the_graph_and_approves_in_place(self):
-        """#6193 (mark 2026-11-19: 'it has to be obvious'): a release that waits for the person's yes shows under the
-        graph as the next step, its approval card highlighted, with 'Approve and release #N'; one confirm approves the
-        person's approval item as them. Deploy now does not show while the yes waits. At 1920 and 390 px."""
+        """#6193 (mark 2026-11-19: 'it has to be obvious'), #6486: a release that waits for the person's yes shows on
+        the first screen of the target's page, the release card says 'waiting for approval' with Approve; one confirm
+        approves the person's approval item as them. Deploy now does not show while the yes waits; the tests of the
+        branch that goes out are on the same screen. At 1920 and 390 px."""
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
         core.project_add(self.c, "web", target="toolscaled-prod")
         from river.pipeline import define
@@ -464,40 +469,37 @@ try {
   const separate = !!q('#dpList [data-dp-open="web-checks"]');
   history.replaceState(null, "", "/deploy/pipeline/web-checks");
   dispatchEvent(new PopStateEvent("popstate"));
-  await until(() => q('.pl-next [data-pl-yes]'), "the next step");
-  const b = q('.pl-next [data-pl-yes]').getBoundingClientRect();
-  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " "), waits: [...document.querySelectorAll(".pl-waits")].map(e => e.dataset.plStage || e.dataset.plArrow),
-    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('.pl-next [data-deploy]'),
-    separate, address: location.pathname };
-  q('#plRow [data-pl-stage="holding"]').click();
-  await until(() => q('.hd')?.textContent.includes('GitHub tests.yml on main'), "the GitHub check in holding");
-  out.checkInView = [...document.querySelectorAll('.hd .pl-bar > *')].every(e =>
-    e.getBoundingClientRect().right <= innerWidth + 0.5);
-  q('.pl-next [data-pl-yes]').click();
+  await until(() => q('#rlLast [data-pl-yes]'), "the release card's Approve");
+  const b = q('#rlLast [data-pl-yes]').getBoundingClientRect();
+  const out = { last: q("#rlLast").textContent.replace(/\s+/g, " "), tests: (q("#rlTests") || {}).textContent || "",
+    inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('[data-deploy]'),
+    tabs: !q("#plTabs").classList.contains("hidden"), graph: !!q("#plRow"), separate, address: location.pathname };
+  q('#rlLast [data-pl-yes]').click();
   await until(() => q('#plAskDlg:not(.hidden) [data-pl-askgo]'), "the confirm");
   out.confirm = q("#plAskDlg").textContent.replace(/\s+/g, " ");
   q('#plAskDlg [data-pl-askgo]').click();
-  await until(() => !q('.pl-next [data-pl-yes]'), "the yes is given");
+  await until(() => !q('#rlLast [data-pl-yes]'), "the yes is given");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1920,1080", "390,844"):
             r = self.drive(driver, "/", size=size)
-            self.assertIn(f"Next: your yes for release #{dep}", r["next"], r)
-            self.assertIn(f"Approve and release #{dep}", r["next"], r)
-            self.assertEqual(r["waits"], ["approval"], r)
+            self.assertIn("waiting for approval", r["last"], r)
+            self.assertIn("Approve", r["last"], r)
+            self.assertIn("Tests (main)", r["tests"], r)
             self.assertTrue(r["inView"], r)  # no scroll
             self.assertFalse(r["deploy"], r)  # never around the yes
+            self.assertFalse(r["tabs"] or r["graph"], r)  # the first screen has no tab row and no graph
             self.assertFalse(r["separate"], r)
-            self.assertTrue(r["checkInView"], r)
             self.assertEqual(r["address"], "/deploy/pipeline/toolscaled-prod", r)
-            self.assertIn(f"Approve release #{dep}?", r["confirm"], r)
+            self.assertIn(f"Approve release #{dep}", r["confirm"], r)
             st = self.c.execute("SELECT status, assignee FROM items WHERE id=?", (appr,)).fetchone()
             self.assertEqual(st["status"], "done", r)
             with core.tx(self.c):  # open it again for the next size
                 self.c.execute("UPDATE items SET status='open', closed_at=NULL WHERE id=?", (appr,))
 
     def test_a_target_with_github_checks_offers_release_now(self):
-        """At 1500 and 390 px, Release now appears in the list and on the target's page."""
+        """At 1500 and 390 px, Release now appears in the list and on the first screen of the target's page (#6486:
+        the Next release card, with its tasks, the report and when it goes out by itself); the graph is behind More."""
         from river.pipeline import define
         core.register(self.c, "mark", human=True)
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
@@ -507,7 +509,8 @@ try {
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
         core.target_cut(self.c, "toolscaled-prod", rev="9783eb1abcdef", actor=None)
         with core.tx(self.c):  # the last release is out: the next one waits for the cadence
-            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE kind='deploy'", (core.iso(core.now()),))
+            self.c.execute("UPDATE items SET status='done', closed_at=?, output='released v1.2.0' WHERE kind='deploy'",
+                           (core.iso(core.now()),))
         i = core.item_add(self.c, "web", "Another change", actor="mark")["id"]
         core.done(self.c, i, output="done", actor="mark", ship_it=True)
         define.pipeline_add(self.c, "app", project="web", actor="mark")
@@ -522,33 +525,44 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('.dp-banner [data-relnow]'), "the banner's Release now");
   const out = { banner: q('.dp-banner [data-relnow]').closest(".dp-banner").textContent.replace(/\s+/g, " "),
-    separate: !!q('#dpList [data-dp-open="app"]') };
+    separate: !!q('#dpList [data-dp-open="app"]'), parts: q("#dpParts").textContent.replace(/\s+/g, " ") };
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q('.pl-next [data-relnow]'), "the Next bar's Release now");
-  const b = q('.pl-next [data-relnow]').getBoundingClientRect();
-  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  await until(() => q('#rlNext [data-relnow]'), "the Next release card's Release now");
+  const b = q('#rlNext [data-relnow]').getBoundingClientRect();
+  out.next = q("#rlNext").textContent.replace(/\s+/g, " ");
+  out.last = q("#rlLast").textContent.replace(/\s+/g, " ");
+  out.head = q("#dpHead").textContent.replace(/\s+/g, " ").trim();
   out.inView = b.bottom <= innerHeight && b.right <= innerWidth;
-  q('.pl-next [data-relnow]').click();
+  q('#rlNext [data-relnow]').click();
   await until(() => q('#relNowDlg:not(.hidden) [data-relgo]'), "the dialog");
   out.dlg = q("#relNowDlg").textContent.replace(/\s+/g, " ");
   q('#relNowDlg [data-relclose]').click();
+  q('.rl-more [data-dp-tab="controls"]').click();
+  await until(() => q('#dpStages [data-pl-stage]'), "Controls: the graph");
   out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
+  out.tabs = [...document.querySelectorAll('#plTabs button')].map(e => e.textContent.trim());
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
             r = self.drive(driver, "/", size=size)
-            self.assertIn("toolscaled-prod: 1 task wait for the next release", r["banner"], r)
+            self.assertIn("toolscaled-prod: 1 task · next in", r["banner"], r)
             self.assertFalse(r["separate"], r)
-            self.assertIn("Next: release 1 task", r["next"], r)
+            self.assertIn("Releases", r["parts"], r)
+            self.assertIn("Next release", r["next"], r)
+            self.assertIn("1 task · Report · next by itself", r["next"], r)
+            self.assertIn("Last release v1.2.0", r["last"], r)
+            self.assertIn("passed", r["last"], r)
+            self.assertEqual(r["head"], "Releases › toolscaled-prod", r)
             self.assertTrue(r["inView"], r)
-            self.assertIn("Release toolscaled-prod now?", r["dlg"], r)
+            self.assertIn("Release toolscaled-prod now", r["dlg"], r)
             self.assertEqual(r["steps"], ["holding", "deploy", "watch"], r)
+            self.assertEqual(r["tabs"], ["Release", "History", "Controls", "Audit"], r)
 
     def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
-        """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'): the Next bar names
-        the running release, its step and its time with a log link, and offers nothing that starts another release;
-        no count of stages, no paragraph under Versions in deploy, the stage's links are plain, and the holding card's
-        line is short. At 1500 and 390 px."""
+        """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'), #6486: the first
+        screen's release card says Releasing and lists each step of the deploy hook with its state and time (the
+        running one counts), and nothing that starts another release; no word on how MaximizePM works inside. At
+        1500 and 390 px."""
         core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
         core.project_add(self.c, "web", target="toolscaled-prod")
         for n in range(2):
@@ -570,25 +584,26 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q(".pl-next"), "the Next bar");
-  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " ").trim(), buttons: q(".pl-next").querySelectorAll("button").length,
+  await until(() => q("#rlLast .rl-step.running"), "the running step");
+  const steps = () => [...q("#rlLast").querySelectorAll(".rl-step")].map(e => e.textContent.replace(/\s+/g, " ").trim());
+  const out = { last: q("#rlLast").textContent.replace(/\s+/g, " "), steps: steps(),
+    buttons: [...q("#plBody").querySelectorAll("#rlNext button, #rlLast button")].length,
     note: q("#plNote").textContent.replace(/\s+/g, " ").trim() };
-  q('.pl-next [data-pl-stage="deploy"]').click();
-  await until(() => q("#plStageRuns .pl-runs"), "Versions in deploy");
-  out.runs = q("#plStageRuns").textContent.replace(/\s+/g, " ");
-  out.links = [...q("#plDetail").querySelectorAll(".pl-opts button")].map(b => [b.textContent.trim(), b.className]);
+  await sleep(1500);
+  out.steps2 = steps();
   out.page = q("#deploy-pipeline").textContent.replace(/\s+/g, " ");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
             r = self.drive(driver, "/", size=size)
-            self.assertRegex(r["next"], r"Releasing 9783eb1 · step test · 2m 0\ds · log · report", r)  # #6210: it counts
+            self.assertIn("Releasing", r["last"], r)
+            self.assertEqual(r["steps"][0], "Check passed 1s", r)
+            self.assertRegex(r["steps"][1], r"^Test running 2m 0\ds$", r)  # #6210: it counts
+            self.assertNotEqual(r["steps"][1], r["steps2"][1], r)
             self.assertEqual(r["buttons"], 0, r)  # nothing that starts another release
-            self.assertNotIn("stage", r["note"].replace("Hold all stages", ""), r)
-            self.assertNotIn("Each row is a release", r["runs"], r)
-            self.assertEqual([x[0] for x in r["links"]], ["The transition before it", "Send a version here…"], r)
-            self.assertTrue(all("plain" in x[1] and "warn" not in x[1] for x in r["links"]), r)
-            for words in ("starts an agent session", "as a pipeline", "Deploy now"):
+            self.assertEqual(r["note"], "Hold", r)
+            for words in ("starts an agent session", "as a pipeline", "Deploy now", "The transition before it",
+                          "Send a version here", "maxpm ", "forge", "deploy target"):
                 self.assertNotIn(words, r["page"], r)
 
     def test_a_running_release_moves_on_its_own_and_a_new_step_comes_in_place(self):
@@ -640,10 +655,12 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
+  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
+  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plDetail .pl-gantt .pl-seg.running'), "the running step");
   const g = q("#plDetail .pl-gantt"); g.__kept = 1;
   const seg = () => q('#plDetail .pl-gantt [data-pl-k^="1|test"] .pl-seg');
-  const tickText = () => q(".pl-next [data-pl-tick]").textContent;
+  const tickText = () => q("#plDetail [data-pl-tick]").textContent;
   const out = { t1: tickText(), w1: parseFloat(seg().style.width), passed1: parseFloat(q('#plDetail .pl-gantt .pl-seg.passed').style.width),
     moving: [...document.querySelectorAll("#plRow .pl-moving")].map(e => e.dataset.plStage || "→" + e.dataset.plArrow),
     transition: getComputedStyle(seg()).transitionProperty };
@@ -654,7 +671,7 @@ try {
   await until(() => q('#plDetail .pl-gantt [data-pl-k^="2|push"]'), "the new step");
   out.kept = q("#plDetail .pl-gantt").__kept === 1;
   out.test = seg().className;
-  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
+  out.next = q("#plDetail").textContent.replace(/\s+/g, " ");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1500,900", "390,844"):
@@ -668,7 +685,7 @@ try {
             self.assertTrue(r["keptBefore"], r)  # the reads each second draw no new bars
             self.assertTrue(r["kept"], r)  # the new step is patched into the same bars
             self.assertIn("passed", r["test"], r)
-            self.assertIn("step push", r["next"], r)
+            self.assertIn("push", r["next"], r)
 
     def test_the_window_of_a_transition_is_marked_on_a_week_calendar(self):
         """#6205 (mark 2026-11-19: 'probably a better way to do this is with a calander'): the Window of a transition
@@ -780,9 +797,9 @@ try {
         self.assertEqual(r["over"], 0, r)
 
     def test_a_stage_sends_its_version_here_directly_and_runs_the_whole_pipeline(self):
-        """#6146: a stage's 'Send a version here directly…' opens the Emergency tab's override with that stage; it
-        shows what it skips; after the override the card says 'not through the pipeline' and the stage offers
-        'Run the whole pipeline for <version>'."""
+        """#6146: the Emergency tab's override sends a version straight to a stage and shows what it skips; after the
+        override the card says 'Skipped stages' and the stage offers 'Run all' (#6486: the words of canvas
+        deploy-text-audit; the stage has no link to the override, the Emergency tab is the way)."""
         from river.pipeline import define, runner, operators
         core.register(self.c, "mark", human=True)
         define.pipeline_add(self.c, "app", project="site")
@@ -801,18 +818,23 @@ try {
   await until(() => q('#plRow [data-pl-stage="prod"]'), "the stages of app");
   const out = { card: q('#plRow [data-pl-stage="prod"]').textContent.replace(/\s+/g, " ") };
   q('#plRow [data-pl-stage="prod"]').click();
-  await until(() => q('[data-pl-whole]'), "Run the whole pipeline");
+  await until(() => q('[data-pl-whole]'), "Run all");
   out.whole = q('[data-pl-whole]').textContent.trim();
-  q('[data-em-preset="prod"]').click();
+  q('[data-dp-tab="emergency"]').click();
+  await until(() => q('[data-em-pick="override"]'), "the Emergency tab");
+  q('[data-em-pick="override"]').click();
   await until(() => q("#emOvStage"), "the override on the Emergency tab");
+  q("#emOvStage").value = "prod";
+  q("#emOvStage").dispatchEvent(new Event("change", { bubbles: true }));
+  await until(() => q(".dp-em-card ul") && q(".dp-em-card ul").textContent.includes("It skips"), "what it skips");
   out.stage = q("#emOvStage").value;
   out.acts = q(".dp-em-card ul").textContent.replace(/\s+/g, " ");
   out.go = q('[data-em-go="override"]').textContent.trim();
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         r = self.drive(driver, "/", size="1280,900")
-        self.assertIn("⚠ not through the pipeline", r["card"], r)
-        self.assertEqual(r["whole"], "Run the whole pipeline for fix9999", r)
+        self.assertIn("Skipped stages", r["card"], r)
+        self.assertEqual(r["whole"], "Run all", r)
         self.assertEqual(r["stage"], "prod", r)
         self.assertIn("It skips: build, test", r["acts"], r)
         self.assertTrue(r["go"].startswith("Send ") and r["go"].endswith(" to prod now"), r)
@@ -836,7 +858,7 @@ try {
   const out = { head: q("#dpHead").textContent, arrows: document.querySelectorAll("#plRow [data-pl-arrow]").length,
     hold: !!q("[data-pl-hold]") };
   q('#plRow [data-pl-stage="deploy"]').click();
-  await until(() => q("#plDetail").textContent.includes("Followed"), "the stage detail");
+  await until(() => q("#plDetail h3") && q("#plDetail h3").textContent.includes("deploy"), "the stage detail");
   out.buttons = [...q("#plDetail").querySelectorAll("button")].length;
   q('[data-dp-tab="emergency"]').click();
   await until(() => q(".em-picks"), "the Emergency tab");
@@ -844,7 +866,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         r = self.drive(driver, "/", size="1280,900")
-        self.assertIn("followed · read only", r["head"], r)
+        self.assertIn("Read only", r["head"], r)
         self.assertEqual((r["arrows"], r["hold"], r["buttons"]), (0, False, 0), r)
         self.assertEqual(r["picks"], ["agents", "revoke"], r)
 
@@ -876,7 +898,7 @@ try {
             r = self.drive(driver, "/", size=size)
             self.assertTrue(r["grid"] and r["below"] and r["sameCol"] and r["joinRow"], r)
             self.assertEqual(r["fans"], 4, r)  # two lines fan out to the branches, two fan in to the join
-            self.assertIn("⋈ every branch", r["join"], r)
+            self.assertIn("⋈ join", r["join"], r)
             self.assertFalse(r["over"], r)
             self.assertTrue(r["page"], r)
 
@@ -898,7 +920,7 @@ try {
   q('#dpList [data-dp-open="app"]').click();
   await until(() => q('#plRow [data-pl-stage="prod"]'), "the stages of app");
   const out = { card: q('#plRow [data-pl-stage="prod"]').textContent.replace(/\s+/g, " "),
-    build: q('#plRow [data-pl-stage="build"]').textContent.includes("✋"),
+    build: q('#plRow [data-pl-stage="build"]').textContent.includes("Manual"),
     run: q('#plRow [data-pl-run-stage="prod"]') && q('#plRow [data-pl-run-stage="prod"]').textContent.trim() };
   out.over = [...q("#plRow").querySelectorAll(".pl-stack, .pl-run")].filter(e => e.getBoundingClientRect().width > innerWidth)
     .map(e => e.className);
@@ -909,15 +931,15 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         r = self.drive(driver, "/", size="1280,900")
-        self.assertIn("✋ waits for Run", r["card"], r)
+        self.assertIn("Manual", r["card"], r)
         self.assertFalse(r["build"], r)
-        self.assertEqual(r["run"], "▶ Run run1234", r)
+        self.assertEqual(r["run"], "Run run1234", r)
         self.assertEqual(r["over"], [], r)
         self.assertEqual(self.c.execute("SELECT run_by FROM stage_runs WHERE id=?", (rid,)).fetchone()[0], "mark")
         rid = runner._queue(self.c, "app", "prod", "run5678")
         self.c.execute("UPDATE stage_runs SET entered_at=? WHERE id=?", (core.iso(core.now()), rid))
         r = self.drive(driver, "/", size="390,844")
-        self.assertEqual(r["run"], "▶ Run run5678", r)
+        self.assertEqual(r["run"], "Run run5678", r)
         self.assertEqual(r["over"], [], r)
 
     def test_the_emergency_tab_shows_what_each_action_acts_on_and_stops_the_pipeline(self):
@@ -1008,7 +1030,7 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="prod"]') && location.pathname === "/deploy", "Deploy: the target prod as a pipeline");
   q('#dpList [data-dp-open="prod"]').click();
-  await until(() => q("#targets").textContent.includes("prod") && location.pathname === "/deploy/pipeline/prod", "Deploy > prod: its release card");
+  await until(() => q("#rlNext") && location.pathname === "/deploy/pipeline/prod", "Deploy > prod: its release page");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="goals"]').click();
   await until(() => q('#goalCards [data-goalcard="launch"]') && q("#goalCards").textContent.includes("Done when: it answers"), "Plan > Goals: launch with its done-when");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="done"]').click();

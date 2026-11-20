@@ -26,10 +26,13 @@ import { drawEmergency } from "./emergency.js";
 import { definitionHead, openVersions } from "./defversions.js";
 import { runnersHtml, runnerClick } from "./runners.js";
 
-export const PARTS = [["pipelines", "Pipelines"], ["agents", "Agents"], ["runners", "Runners"],
-  ["where", "Where each version runs"], ["accounts", "Accounts"], ["audit", "Audit log"]];
-export const PAGE_TABS = [["stages", "Stages"], ["versions", "Versions"], ["triggers", "⚡ Triggers"],
-  ["emergency", "⚠ Emergency"], ["audit", "Audit log"]];
+export const PARTS = [["pipelines", "Releases"], ["agents", "Agents"], ["runners", "Runners"],
+  ["where", "Live"], ["accounts", "Accounts"], ["audit", "Audit"]];
+export const PAGE_TABS = [["stages", "Stages"], ["versions", "Versions"], ["triggers", "Triggers"],
+  ["emergency", "Emergency"], ["audit", "Audit"]];
+// A deploy target's page (#6486): its first screen is the release (views/release.js); More opens these, and the tab
+// row shows only while one of them is open.
+export const TARGET_TABS = [["stages", "Release"], ["versions", "History"], ["controls", "Controls"], ["audit", "Audit"]];
 
 // What Deploy shows: a part, or the page of one pipeline and its tab. The address sets it (fromUrl), and a click.
 export const D = { part: "pipelines", pipeline: null, tab: "stages" };
@@ -45,7 +48,7 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 // The part of the address after /deploy: [] or [<part>] or ["pipeline", <name>, <tab>].
 export function fromUrl(parts) {
   if (parts[0] === "pipeline" && parts[1]) {
-    return { part: null, pipeline: parts[1], tab: PAGE_TABS.some(([k]) => k === parts[2]) ? parts[2] : "stages" };
+    return { part: null, pipeline: parts[1], tab: [...PAGE_TABS, ...TARGET_TABS].some(([k]) => k === parts[2]) ? parts[2] : "stages" };
   }
   return { part: PARTS.some(([k]) => k === parts[0]) ? parts[0] : "pipelines", pipeline: null, tab: "stages" };
 }
@@ -88,7 +91,7 @@ function drawBadge() {
   const b = $("#deployBadge"), n = data ? data.count : 0;
   b.textContent = n ? String(n) : "";
   b.classList.toggle("hidden", !n);
-  b.title = n ? `${n} wait${n === 1 ? "s" : ""} for you` : "";
+  b.title = n ? `${n} waiting` : "";
 }
 
 function drawParts() {
@@ -135,23 +138,16 @@ function gateMark(s) {
 }
 function sourceChip(p) {
   // A followed pipeline (#6167): its outside system runs the flow; we read it.
-  return (p.followed ? chip("c-waiting", "followed · read only", "Its own system runs it") : "") + sourceOnly(p);
+  return (p.followed ? chip("c-waiting", "Read only", "Read only") : "") + sourceOnly(p);
 }
+// #6486: the Git host only, and a word when its token fails; the account and token are on Deploy > Accounts.
 function sourceOnly(p) {
   const s = p.source;
-  if (p.default) return "";  // the head says "deploy target" already
-  if (s.state === "local" && p.followed) return "";  // its events come in; "this computer" would be wrong (#6167)
-  if (s.state === "local") return `<span class="dp-src muted t-s">${esc(s.label)}</span>`;
-  const icon = { ok: "●", new: "○", bad: "✕", missing: "○" }[s.state];
-  // A plugin (#6159) may need no token, and its failed read may have another cause than a token.
-  const word = s.state === "bad" ? (s.plugin ? " · read failed" : " · token refused") : s.state === "missing" ? " · token not saved" : "";
-  const tip = s.secret ? "Token " + s.secret : s.plugin ? "No token needed" : "No token named";
-  // The account and the token (#6147): "GitHub · mhalstrom · token github-mhalstrom · read 2m ago".
-  const acct = s.owner ? " · " + esc(s.owner) : s.repo ? " · " + esc(s.repo) : "";
-  const tok = s.secret && !s.plugin ? ` · token <span class="mono">${esc(s.secret)}</span>` : "";
-  const read = s.state === "ok" && s.read_at ? ` · read ${esc(ago(s.read_at))}` : "";
-  return button(`${icon} ${esc(s.label)}${acct}${tok}${read}${word}`, { cls: "plain dp-src t-s"
-    + (s.state === "bad" || s.state === "missing" ? " dp-bad" : ""), data: { "dp-part": "accounts" }, title: tip });
+  if (p.default) return "";
+  if (s.state === "local") return p.followed ? "" : `<span class="dp-src muted t-s">${esc(s.label)}</span>`;
+  const word = s.state === "bad" ? (s.plugin ? " · refresh failed" : " · token refused") : s.state === "missing" ? " · token missing" : "";
+  return button(`${esc(s.label)}${word}`, { cls: "plain dp-src t-s"
+    + (s.state === "bad" || s.state === "missing" ? " dp-bad" : ""), data: { "dp-part": "accounts" }, title: "Accounts" });
 }
 
 function stripHtml(p) {
@@ -160,31 +156,31 @@ function stripHtml(p) {
     return (i ? `<span class="dp-arrow ${cls ? "dp-" + cls : ""}" title="${esc(title)}">${m}</span>` : "")
       + `<span class="dp-mini" title="${esc(s.name)}${s.tier ? " (" + esc(s.tier) + ")" : ""}: ${s.no_news ? "no news" : esc(s.state)}${s.version ? " · " + esc(short(s.version)) : ""}">
         <span class="dp-bar ${esc(barState(p, s))}"></span><span class="dp-mn">${esc(s.name)}</span>${stageMarks(s.work)}</span>`;
-  }).join("") || `<span class="muted t-s">no stages yet</span>`;
+  }).join("") || `<span class="muted t-s">No stages</span>`;
 }
 // #6183: a deploy target's one environment has the pipeline's own name: the row names it once, so the version and its
 // time keep their room.
 function liveHtml(p) {
   const live = p.envs.filter(e => e.rev);
   return live.length ? live.map(e => `<span class="dp-env">${e.name === p.name ? "" : `<b>${esc(e.name)}</b> `}<span class="pl-ver">${esc(short(e.rev))}</span>
-    ${e.since ? `<span class="muted">since ${esc(ago(e.since))}</span>` : ""}</span>`).join("") : `<span class="muted">runs nowhere yet</span>`;
+    ${e.since ? `<span class="muted">${esc(ago(e.since))}</span>` : ""}</span>`).join("") : `<span class="muted">Not live</span>`;
 }
 
 function bannersHtml() {
   const out = [];
   for (const p of data.pipelines) for (const w of p.waits) {
-    const what = `${esc(p.name)}: ${w.rev ? `<span class="pl-ver">${esc(short(w.rev))}</span> ` : ""}waits for your yes at ${esc(w.stage)}`;
-    const btns = (p.default ? (w.item ? button("Open", { kind: "primary", data: { "dp-card": w.item }, title: "Approve or decline" }) : "")
-      : button("Approve", { kind: "primary", data: { "dp-approve": p.name, stage: w.stage, rev: w.rev || "" }, title: "Let this version in" }))
-      + button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" });
-    out.push(`<div class="dp-banner dp-human"><span>✋ ${what}</span><span class="spacer"></span>${btns}</div>`);
+    const what = `${esc(p.name)}: approve ${w.rev ? `<span class="pl-ver">${esc(short(w.rev))}</span>` : ""}`;
+    const btns = (p.default ? (w.item ? button("Approve", { kind: "primary", data: { "dp-card": w.item }, title: "Approve" }) : "")
+      : button("Approve", { kind: "primary", data: { "dp-approve": p.name, stage: w.stage, rev: w.rev || "" }, title: "Approve" }))
+      + button("Open", { data: { "dp-open": p.name }, title: "Open" });
+    out.push(`<div class="dp-banner dp-human"><span>${what}</span><span class="spacer"></span>${btns}</div>`);
   }
   // #6189: a deploy target whose collected tasks wait (for its cadence, or for the release that runs): Release now.
   for (const p of data.pipelines) if (p.release) {
     const r = p.release, n = `${r.tasks} task${r.tasks === 1 ? "" : "s"}`;
-    out.push(`<div class="dp-banner"><span>📦 ${esc(p.name)}: ${n} wait for the next release${r.until ? `, due in ${esc(left(r.until))}`
-      : r.running ? ` after release #${r.running}` : ""}</span><span class="spacer"></span>${releaseButton(p)}
-      ${button("Pipeline", { data: { "dp-open": p.name }, title: "Open the pipeline" })}</div>`);
+    out.push(`<div class="dp-banner"><span>${esc(p.name)}: ${n}${r.until ? ` · next in ${esc(left(r.until))}`
+      : r.running ? ` · after #${r.running}` : ""}</span><span class="spacer"></span>${releaseButton(p)}
+      ${button("Open", { data: { "dp-open": p.name }, title: "Open" })}</div>`);
   }
   const seen = new Set();
   for (const p of data.pipelines) {
@@ -192,10 +188,9 @@ function bannersHtml() {
     if (!["bad", "missing"].includes(s.state) || seen.has(s.forge + "|" + s.secret)) continue;
     seen.add(s.forge + "|" + s.secret);
     const users = data.pipelines.filter(x => x.source.forge === s.forge && x.source.secret === s.secret).map(x => x.name);
-    const what = s.state === "bad" ? `${esc(s.label)} refuses the token ${esc(s.secret)}` : s.secret ? `The token ${esc(s.secret)} is not saved`
-      : `${esc(p.name)} names no token for ${esc(s.label)}`;
-    out.push(`<div class="dp-banner dp-warn"><span>✕ ${what}: ${esc(users.join(", "))} ${users.length === 1 ? "shows" : "show"} old data.</span>
-      <span class="spacer"></span>${button("Accounts", { data: { "dp-part": "accounts" }, title: "See the accounts" })}</div>`);
+    const what = `${esc(s.label)} token ${s.state === "bad" ? "refused" : "missing"}`;
+    out.push(`<div class="dp-banner dp-warn"><span>${what}: ${esc(users.join(", "))}</span>
+      <span class="spacer"></span>${button("Accounts", { data: { "dp-part": "accounts" }, title: "Accounts" })}</div>`);
   }
   return out.join("");
 }
@@ -209,13 +204,12 @@ function drawList(force) {
   if (s === sig && !force) return;
   sig = s;
   const html = bannersHtml(), rows = data.pipelines.map(p => button(`<span class="dp-row">
-      <span class="dp-head"><b class="dp-pname">${esc(p.name)}</b>${p.default ? `<span class="muted t-s">deploy target</span>` : ""}${sourceChip(p)}
-        ${p.held ? `<span class="t-s c-warn">⛔ held</span>` : ""}</span>
+      <span class="dp-head"><b class="dp-pname">${esc(p.name)}</b>${sourceChip(p)}
+        ${p.held ? `<span class="t-s c-warn">Held</span>` : ""}</span>
       <span class="dp-strip">${stripHtml(p)}</span>
       <span class="dp-live t-s">${liveHtml(p)}</span></span>`,
-    { kind: "card", cls: "dp-pipe", data: { "dp-open": p.name }, title: `Open ${p.name}` })).join("");
-  const body = rows || empty(`No pipeline yet. Ask the manager for one ("build, test, then beta, then prod after my yes"),
-    or give a project a deploy target.`);
+    { kind: "card", cls: "dp-pipe", data: { "dp-open": p.name }, title: "Open" })).join("");
+  const body = rows || empty("No releases yet.");
   $("#dpBanners").innerHTML = html;
   $("#dpList").innerHTML = body;
 }
@@ -240,14 +234,14 @@ function whereHtml() {
   const rows = data.pipelines.flatMap(p => p.envs.map(e => {
     const before = (e.history || []).filter(h => h.rev && h.rev !== e.rev).slice(0, 3).map(h => esc(short(h.rev))).join(", ");
     return `<tr>
-    <td>${button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open the pipeline" })}</td>
-    <td data-label="Environment">${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
-    <td class="mono" data-label="Version">${esc(short(e.rev)) || `<span class="muted">none yet</span>`}</td>
+    <td>${button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open" })}</td>
+    <td data-label="Environment">${esc(e.name)}</td>
+    <td class="mono" data-label="Version">${esc(short(e.rev)) || `<span class="muted">—</span>`}</td>
     <td data-label="Since">${e.since ? esc(ago(e.since)) : `<span class="muted">-</span>`}</td>
     <td class="t-s muted"${before ? ` data-label="Before"` : ""}>${before}</td></tr>`;
   }));
-  if (!rows.length) return empty("No environment yet: a pipeline's deploy stage names one.");
-  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Pipeline</th><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows.join("")}</table></div>`;
+  if (!rows.length) return empty("Nothing live yet.");
+  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Release</th><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows.join("")}</table></div>`;
 }
 
 // The accounts: views/accounts.js (#6147).
@@ -257,29 +251,32 @@ function accountsHtml() { return `<div class="dp-cards">${accountsView(data)}</d
 // ---- a pipeline's own page
 
 function drawPage(force) {
-  const p = pipe(D.pipeline);
-  const head = `${button("Pipelines ›", { cls: "plain", data: { "dp-part": "pipelines" }, title: "All pipelines" })}
-    <b class="dp-pname">${esc(D.pipeline)}</b>${p ? (p.default ? `<span class="muted t-s">deploy target</span>` : "")
-      + (p.project ? `<span class="muted t-s">project ${esc(p.project)}</span>` : "") + sourceChip(p) + definitionHead(p) : ""}`;
+  const p = pipe(D.pipeline), target = !!(p && p.default);
+  // #6486: the head names the release once; a target's account, project and definition are not its first screen.
+  const head = `${button("Releases ›", { cls: "plain", data: { "dp-part": "pipelines" }, title: "Releases" })}
+    <b class="dp-pname">${esc(D.pipeline)}</b>${p && !target ? sourceChip(p) + definitionHead(p) : ""}`;
   if ($("#dpHead").dataset.sig !== head) { $("#dpHead").innerHTML = head; $("#dpHead").dataset.sig = head; }
-  const tabs = PAGE_TABS.map(([k, n]) => button(n, { cls: "plan-vbtn" + (k === "emergency" ? " dp-em" : ""), pressed: D.tab === k,
+  const tabs = target && D.tab === "stages" ? "" : (target ? TARGET_TABS : PAGE_TABS).map(([k, n]) => button(n, {
+    cls: "plan-vbtn" + (k === "emergency" ? " dp-em" : ""), pressed: D.tab === k,
     data: { "dp-tab": k }, attrs: `role="tab" aria-selected="${D.tab === k}"` })).join("");
   if ($("#plTabs").dataset.sig !== tabs) { $("#plTabs").innerHTML = tabs; $("#plTabs").dataset.sig = tabs; strip($("#plTabs")); }
-  const stages = ["stages", "versions"].includes(D.tab);
+  $("#plTabs").classList.toggle("hidden", !tabs);
+  const stages = ["stages", "versions", "controls"].includes(D.tab);
   $("#dpStages").classList.toggle("hidden", !stages);
   $("#dpPage").classList.toggle("hidden", stages);
   showPipeline(D.pipeline, D.tab);
-  showTargets(D.tab === "stages" && p ? p.targets : []);
+  // The card of each target the pipeline names: a target's hooks and past releases are under Controls (#6486).
+  showTargets(p && (target ? D.tab === "controls" : D.tab === "stages") ? p.targets : []);
   if (stages) { pageSig = ""; return renderPipeline(force); }
   // #6176: a deploy target's pipeline has its controls too (fixed: an older server sends no controls)
   const fixed = p && p.default && !p.controls;
   if (D.tab === "audit") {
-    if (fixed) return setPage(empty("A deploy target keeps no audit log here: each release's history is on its items (Past deploys on the Stages tab)."), force);
+    if (fixed) return setPage(empty("No audit entries."), force);
     return drawAudit(D.pipeline, $("#dpPage"), force);
   }
   if (D.tab === "triggers" && p && !fixed) { pageSig = ""; return drawTriggers(D.pipeline, $("#dpPage"), force); }
   if (D.tab === "emergency" && p && !fixed) { pageSig = ""; return drawEmergency(D.pipeline, $("#dpPage"), force); }
-  setPage(!p ? empty(`No pipeline or deploy target ${esc(D.pipeline)}.`) : D.tab === "triggers" ? defaultTriggersHtml(p) : emergencyHtml(p), force);
+  setPage(!p ? empty(`No release ${esc(D.pipeline)}.`) : D.tab === "triggers" ? defaultTriggersHtml(p) : emergencyHtml(p), force);
 }
 function setPage(html, force) {
   const box = $("#dpPage");
@@ -287,9 +284,10 @@ function setPage(html, force) {
   pageSig = html; box.dataset.of = ""; box.innerHTML = html;
 }
 
-// A deploy target's Emergency tab: its release card has the actions. A pipeline's own: views/emergency.js (#6145).
+// A deploy target's Emergency tab of an older server: its release page has the actions. A pipeline's own:
+// views/emergency.js (#6145).
 function emergencyHtml(p) {
-  return empty(`${esc(p.name)} is a deploy target: its release card on the Stages tab has Release now and Deploy now. The emergency actions work on a pipeline of its own.`);
+  return empty(`${esc(p.name)}: use Release now or Hold.`);
 }
 
 // ---- clicks

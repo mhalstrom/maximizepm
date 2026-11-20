@@ -16,26 +16,30 @@ import { weekPickerHtml, wireWeekPicker } from "../components/weekPicker.js";
 import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, actions } from "../components/form.js";
-import { runsOut } from "./accounts.js";
 import { stageMarks } from "./agents.js";
 import { holdingCardHtml, holdingDetail } from "./holding.js";
 import { deployButtons } from "./targets.js";
+import { releasePage, targetOf } from "./release.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
+// The tabs that this view draws: stages (a target's first screen, views/release.js; a pipeline's graph), versions,
+// and controls (a target's graph of stages and transitions, behind More: #6486).
+const OWN_TABS = ["stages", "versions", "controls"];
+const graphTab = () => V.tab === "controls" || (V.tab === "stages" && !(V.data && V.data.default));
 let sig = "", runSig = "";
 const WORD = { passed: "passed", running: "running", failed: "failed", queued: "waiting", skipped: "skipped",
-  cancelled: "cancelled", stopped: "stopped", error: "error", none: "no run yet" };
+  cancelled: "cancelled", stopped: "stopped", error: "error", none: "no run" };
 // The mark of a transition: its mode when no control holds it, else the control (mark, word, chip color). The words
-// are what the step does (#6482, mark 2026-11-20: 'release or approve is fine'): a mode where the Git host starts the
-// stage by itself names that host (arrowMark).
-const MODE_MARK = { auto: ["→", "auto", ""], yes: ["✋", "approve", "c-human"], delay: ["⏱", "delay", ""],
-  release: ["📦", "release", "c-human"], forge: ["⎇", "runs it", ""] };
-const STATE_MARK = { disabled: ["⏸", "disabled", "c-waiting"], blocked: ["⛔", "blocked", "c-warn"],
-  fault: ["⛔", "fault", "c-warn"], frozen: ["❄", "frozen", "c-warn"], window: ["🕒", "closed", "c-human"],
-  delayed: ["⏱", "delayed", "c-waiting"] };
+// are what the step does (#6482, mark 2026-11-20: 'release or approve is fine'; #6486: canvas deploy-text-audit): a
+// mode where the Git host starts the stage by itself names that host (arrowMark).
+const MODE_MARK = { auto: ["→", "auto", ""], yes: ["✋", "Approve", "c-human"], delay: ["⏱", "delay", ""],
+  release: ["📦", "Release", "c-human"], forge: ["⎇", "", ""] };
+const STATE_MARK = { disabled: ["⏸", "Off", "c-waiting"], blocked: ["⛔", "Blocked", "c-warn"],
+  fault: ["⛔", "Blocked", "c-warn"], frozen: ["❄", "Frozen", "c-warn"], window: ["🕒", "Closed", "c-human"],
+  delayed: ["⏱", "Delayed", "c-waiting"] };
 const NEEDS_YES = ["yes", "release", "delay"];
 
-const st = (s, word) => `<span class="pl-st ${esc(s || "none")}">● ${esc(word || WORD[s] || s || "no run yet")}</span>`;
+const st = (s, word) => `<span class="pl-st ${esc(s || "none")}">● ${esc(word || WORD[s] || s || "no run")}</span>`;
 // The end of a run: a watch that failed before its window closed has its end ahead (#6181: "ended -68398s ago").
 const endText = (iso) => Date.parse(iso) > Date.now() ? `ends in ${left(iso)}` : ago(iso);
 const short = (rev) => rev && /^[0-9a-f]{12,}$/.test(rev) ? rev.slice(0, 7) : rev || "";
@@ -44,7 +48,7 @@ const secs = (n) => n == null ? "" : n < 90 ? `${Math.round(n)}s` : n < 5400 ? `
 // The pipeline and tab that the Deploy tab shows (views/deploy.js): another pipeline starts with no chosen stage.
 export function showPipeline(name, tab) {
   if (name !== V.name) { V.stage = null; V.arrow = null; V.run = null; V.version = null; V.data = null; sig = ""; runSig = ""; }
-  V.name = name; V.tab = tab; V.shown = !!name && ["stages", "versions"].includes(tab);
+  V.name = name; V.tab = tab; V.shown = !!name && OWN_TABS.includes(tab);
   pace();
 }
 export function hidePipeline() { V.shown = false; pace(); }
@@ -62,7 +66,7 @@ export async function renderPipeline(force) {
   catch (e) {
     if (V.name !== name) return;
     $("#plNote").textContent = ""; sig = "";
-    $("#plBody").innerHTML = empty(`No pipeline or deploy target ${esc(name)}: ${esc(e.message)}`);
+    $("#plBody").innerHTML = empty(esc(e.message));
     return;
   }
   if (V.name !== name || !V.shown) return;  // another pipeline or tab while the read ran
@@ -70,7 +74,8 @@ export async function renderPipeline(force) {
   if (!V.data.stages.some(s => s.name === V.stage)) V.stage = (V.data.stages.find(s => s.last_run && s.last_run.state === "failed")
     || V.data.stages.find(s => s.last_run && !s.holding) || V.data.stages[0] || {}).name || null;
   if (!V.data.stages.some(s => s.name === V.arrow)) V.arrow = null;
-  const s = JSON.stringify([V.name, V.data, V.stage, V.arrow, V.tab, V.filter]);
+  const T = D.default ? targetOf(D) : null;  // #6486: the release plan of the target, from the page's state
+  const s = JSON.stringify([V.name, V.data, V.stage, V.arrow, V.tab, V.filter, T && T.release, Math.floor(Date.now() / 60000)]);
   pace();
   if (s === sig && !force) return refreshRun(force);
   sig = s;
@@ -88,11 +93,11 @@ export function releaseButton(D) {
   const item = D.waits ? (D.waits[0] || {}).item : appr && appr.state === "queued" ? appr.item : null;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {}).item;
   // #6193: the yes in place (one confirm, then done on the person's approval item as them); the card for its details.
-  if (item) return button(`Approve and release${dep ? " #" + dep : ""}`, { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Give your yes" })
-    + button("Open the card", { data: { "dp-card": item }, title: "Approve or decline" });
+  if (item) return button("Approve", { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Approve" })
+    + button("Details", { data: { "dp-card": item }, title: "Details" });
   const r = D.release;
   return r ? button("Release now", { kind: "primary", data: { relnow: D.name, relshow: "1" },
-    title: "Start the release" }) : "";
+    title: "Release now" }) : "";
 }
 
 // Every release control of the page sits here, above the stages (#6189; manager-526c relaying mark 2026-11-19): Approve
@@ -143,11 +148,10 @@ function running(D) {
   const r = s.last_run, step = (r.step_list || []).find(x => x.state === "running");
   const what = r.version ? `<span class="pl-ver">${esc(short(r.version))}</span>` : r.item ? `#${r.item}` : esc(s.name);
   const bits = [`${D.default ? "Releasing" : "Running " + esc(s.name)} ${what}`];
-  if (step) bits.push(`step ${esc(step.name)}`);
+  if (step) bits.push(esc(step.name));
   if (r.started_at) bits.push(runFor(r.started_at));
-  const log = `<span class="link" data-pl-stage="${esc(s.name)}">log</span>`;
-  const report = D.default && r.item ? ` · <span class="link" data-report="${r.item}">report</span>` : "";
-  return `<div class="pl-next"><span class="t-m">${bits.join(" · ")} · ${log}${report}</span></div>`;
+  const report = D.default && r.item ? `<span class="spacer"></span><span class="link" data-report="${r.item}">Report</span>` : "";
+  return `<div class="pl-next"><span class="t-m">${bits.join(" · ")}</span>${report}</div>`;
 }
 
 // ---- progress that moves on its own (#6210, mark 2026-11-19 while release #6047 ran: 'animations/ updates that
@@ -177,7 +181,7 @@ function tick() {
 
 let fast = null, reading = false;
 function pace() {
-  const on = V.shown && V.tab === "stages" && !!V.data && !!runningStage(V.data);
+  const on = V.shown && ["stages", "controls"].includes(V.tab) && !!V.data && !!runningStage(V.data);
   if (on && !fast) fast = setInterval(() => {
     if (document.hidden) return;
     tick();
@@ -193,35 +197,33 @@ function nextBar(D) {
   if (run) return run;
   if (!D.default) {  // #6193: every pipeline names its next step
     const s = yesWaits(D), w = s && s.transition.waiting[0];
-    return s ? `<div class="pl-next"><span class="t-m">Next: <span class="pl-ver">${esc(short(w.rev))}</span> waits for your yes before ${esc(s.name)}.</span>
-      <span class="spacer"></span>${button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Let this version in" })}</div>` : "";
+    return s ? `<div class="pl-next"><span class="t-m">Approve <span class="pl-ver">${esc(short(w.rev))}</span></span>
+      <span class="spacer"></span>${button("Approve", { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Approve" })}</div>` : "";
   }
   const b = headControls(D);
   if (!b) return "";
   const appr = (D.stages.find(s => s.name === "approval") || {}).last_run || {}, R = D.release;
-  const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {});
   const text = appr.state === "queued" && appr.item
-    ? `Next: your yes for release${dep.item ? " #" + dep.item : ""}${appr.version ? ` (<span class="pl-ver">${esc(short(appr.version))}</span>)` : ""}.`
-    : R ? `Next: release ${releaseLine(D, (D.stages.find(s => s.holding) || {}).holding)}`  // #6198: the dialog's words
-    : "Next: the collected tasks can go out.";
-  const agent = R ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
-  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}${agent}</div>`;
+    ? `Approve${appr.version ? ` <span class="pl-ver">${esc(short(appr.version))}</span>` : ""}`
+    : R ? `Next release: ${releaseLine(D)}`  // #6198: the dialog's words
+    : "Next release";
+  return `<div class="pl-next"><span class="t-m">${text}</span><span class="spacer"></span>${b}</div>`;
 }
 
 function draw() {
   const D = V.data;
-  // #6183: Hold all stages stands at the end of the bar, not inside the line of text. #6209: no count of stages or
-  // environments (the graph shows them) and no words on what a target's pipeline is (the page's head names it).
-  const words = D.followed ? "Followed: its own system runs it" : "";  // #6167
-  const hold = (D.default && !D.controls) || D.followed ? "" : D.held_reason ? button("End the hold", { data: { "pl-unhold": "" }, title: "Stages start again" })
-    : button("Hold all stages", { kind: "warn", data: { "pl-hold": "" }, title: "Nothing new starts" });
+  // #6183: Hold stands at the end of the bar, not inside the line of text. #6486: the words of canvas
+  // deploy-text-audit (Hold, Resume, Read only, 'Held by <who>: <reason>').
+  const words = D.followed ? "Read only" : "";  // #6167
+  const hold = (D.default && !D.controls) || D.followed ? "" : D.held_reason ? button("Resume", { data: { "pl-unhold": "" }, title: "Resume" })
+    : button("Hold", { kind: "warn", data: { "pl-hold": "" }, title: "Hold" });
   $("#plNote").innerHTML = (words || hold ? `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>` : "")
-    + (D.held_reason ? `<div class="pl-banner">Every stage is held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}. Work that runs goes on; nothing new starts.</div>` : "");
+    + (D.held_reason ? `<div class="pl-banner">Held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}</div>` : "");
   const bars = $("#plDetail .pl-gantt");  // #6210: the step bars stay, patched in place
-  $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
+  $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : graphTab() ? stagesView(D) : releasePage(D);
   const fresh = $("#plDetail .pl-gantt");
   if (bars && fresh && sameSteps(bars, fresh)) { fresh.replaceWith(bars); syncGantt(bars, fresh); }
-  if (V.tab === "stages") fit();
+  if (graphTab()) fit();
   drawArrow();  // #6189: an open transition dialog shows the new state
 }
 
@@ -244,38 +246,36 @@ function stageCard(s) {
   const card = stageCardOnly(s);
   if (s.start !== "manual") return card;
   const w = s.waits_for_run;
-  return `<span class="pl-stack">${card}${w ? button(`▶ Run ${esc(short(w.rev))}`, { kind: "primary", cls: "pl-run",
-    data: { "pl-run-stage": s.name, rev: w.rev || "" }, title: `Start ${s.name}` }) : ""}</span>`;
+  return `<span class="pl-stack">${card}${w ? button(`Run ${esc(short(w.rev))}`, { kind: "primary", cls: "pl-run",
+    data: { "pl-run-stage": s.name, rev: w.rev || "" }, title: `Run ${s.name}` }) : ""}</span>`;
 }
 
 function stageCardOnly(s) {
   const D = V.data;
   if (s.holding) {  // the first stage: the commits that wait for the release (#6140, views/holding.js)
     return button(`<span class="pl-in">${holdingCardHtml(s.holding)}</span>`, { kind: "card", cls: "pl-stage pl-hold",
-      pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name }, title: "Commits before the release" });
+      pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name }, title: "Next release" });
   }
   if (tokenFails(D) && s.workflow && !s.run) {
     const r = s.last_run, read = D.account.read_at;
     return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
       <span class="pl-name">${esc(s.name)}</span><span class="pl-ver">${esc(short(r && r.version))}</span>
-      ${st("none", "no news")}<span class="pl-meta pl-more-line">${read ? "last read " + esc(ago(read)) : "not read yet"}</span></span>`,
+      ${st("none", "stale")}<span class="pl-meta pl-more-line">${read ? "read " + esc(ago(read)) : "unread"}</span></span>`,
       { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : ""), pressed: s.name === V.stage && !V.arrow, data: { "pl-stage": s.name },
-        title: "Workflow: " + s.workflow });
+        title: s.workflow });
   }
   const r = s.last_run, live = r && s.env && r.state === "passed";
   const stepDots = r && r.step_list ? r.step_list.map(x => x.state) : r ? Object.entries(r.steps || {}).flatMap(([k, n]) => Array(Math.min(n, 12)).fill(k)) : [];
-  const meta = !r ? "" : r.state === "queued" && r.gate_note ? esc(r.gate_note)
-    : r.ended_at ? esc(`${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}`)
-    : r.started_at ? `for ${runFor(r.started_at)}` : "";  // #6210: it counts each second
+  const meta = !r ? "" : r.ended_at ? esc(`${WORD[r.state] || r.state}${Date.parse(r.ended_at) > Date.now() ? "," : ""} ${endText(r.ended_at)}`)
+    : r.started_at ? runFor(r.started_at) : "";  // #6210: it counts each second
   const moving = r && r.state === "running";
   return button(`<span class="pl-in"><span class="pl-kind" title="${esc(s.kind)}${s.env ? " · " + esc(s.env) : ""}">${esc(s.kind)}${tierBadge(s)}${s.env ? " · " + esc(s.env) : ""}</span>
     <span class="pl-name">${esc(s.name)}</span>
     <span class="pl-ver">${esc(short(r && r.version))}</span>
     ${r ? st(r.state, live ? "live" : null) : st("none")}
     <span class="pl-meta pl-more-line">${meta}</span>
-    ${s.start === "manual" ? `<span class="pl-meta">✋ ${s.waits_for_run ? "waits for Run" : "starts manually"}</span>` : ""}
-    ${keysLine(s)}
-    ${s.override ? `<span class="pl-meta c-warn" title="Skipped: ${esc(s.override.skipped.join(", "))}">⚠ not through the pipeline</span>` : ""}
+    ${s.start === "manual" ? `<span class="pl-meta">Manual</span>` : ""}
+    ${s.override ? `<span class="pl-meta c-warn" title="${esc(s.override.skipped.join(", "))}">Skipped stages</span>` : ""}
     ${stepDots.length ? `<span class="pl-dots pl-more-line" aria-hidden="true">${stepDots.map(x => `<span class="pl-dot ${esc(x)}"></span>`).join("")}</span>` : ""}
     ${s.work && (s.work.faults.length || s.work.agents.length) ? `<span class="ag-marks">${stageMarks(s.work)}</span>` : ""}</span>`,
     { kind: "card", cls: "pl-stage" + (s.env ? " pl-env" : "") + (nextAt(V.data) === s.name ? " pl-waits" : "") + (moving ? " pl-moving" : ""),
@@ -285,11 +285,6 @@ function stageCardOnly(s) {
 
 // The keys a stage may read (#6153), by name only: the secrets of the credential sets granted to the stage or its
 // tier, and the names that the deployment system keeps for it (GitHub environment secrets, a Pulumi ESC environment).
-const keyNames = s => s.keys ? [...new Set([...s.keys.secrets, ...s.keys.kept.flatMap(x => x.names)])] : [];
-function keysLine(s) {
-  const names = keyNames(s);
-  return names.length ? `<span class="pl-meta pl-more-line">🔒 ${esc(names.join(", "))}</span>` : "";
-}
 function keysHtml(s) {
   const k = s.keys;
   if (!k) return "";
@@ -299,9 +294,7 @@ function keysHtml(s) {
       `MaximizePM <span class="muted t-s">set ${esc(x.set)}</span>`, x.by === "tier" ? `every ${s.tier} stage` : `only the ${s.name} stage`)))
     .concat(k.kept.flatMap(x => x.names.map(n => row(n, `${esc(x.kept_in)} <span class="muted t-s">${x.source === "person"
       ? "named by a person" : "read by " + esc(x.source)}</span>`, `the ${s.name} stage's own job there`))));
-  return `<div class="t-m"><b>Secrets this stage may read</b></div>` + (rows.length
-    ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Secret</th><th>Kept in</th><th>Who uses it</th></tr>${rows.join("")}</table></div>`
-    : `<div class="muted t-s">None: this stage reads no secret. Grant a set: <code>maxpm secret grant &lt;set&gt; --stage ${esc(V.name)}/${esc(s.name)}</code></div>`);
+  return rows.length ? `<div class="t-m"><b>Secrets</b></div><div class="pl-table"><table class="pl-blocks"><tr><th>Secret</th><th>Kept in</th><th>Who uses it</th></tr>${rows.join("")}</table></div>` : "";
 }
 
 // The mark and the words of a transition: [mark, short word, chip color].
@@ -309,10 +302,10 @@ function arrowMark(s) {
   const t = s.transition;
   if (t.state !== "open") return STATE_MARK[t.state] || ["⛔", t.state, "c-warn"];
   const m = MODE_MARK[t.mode] || MODE_MARK.auto;
-  if (t.mode === "yes") return [m[0], t.arg && t.arg !== "manager" ? `${t.arg} approves` : t.arg ? "manager approves" : "approve", m[2]];
-  // The Git host starts it (a push or a tag): into a deploy stage that is the release; else the host runs it.
-  if (t.mode === "forge") return s.kind === "deploy" || s.env ? ["📦", "release", ""]
-    : [m[0], `${(t.host || "the Git host").replace(/^the /, "")} ${m[1]}`, m[2]];
+  if (t.mode === "yes") return [m[0], t.arg ? t.arg : "Approve", m[2]];
+  // The Git host starts it (a push or a tag): into a deploy stage that is the release; else the host's name.
+  if (t.mode === "forge") return s.kind === "deploy" || s.env ? ["📦", "Release", ""]
+    : [m[0], (t.host || "the Git host").replace(/^the /, ""), m[2]];
   if (t.mode === "delay") return [m[0], t.arg, m[2]];
   return m;
 }
@@ -325,28 +318,30 @@ function arrowEl(s, i) {
   if (V.data && V.data.followed) return i ? `<div class="pl-gate"></div>` : "";  // #6167: no transition of ours
   const [m, word, cls] = arrowMark(s);
   const w = (t.waiting || [])[0];
-  const by = t.state !== "open" ? [t.set_by, t.until ? (t.until.startsWith("#") ? `until ${t.until} closes` : `${left(t.until)} left`) : ""]
+  const by = t.state !== "open" ? [t.set_by, t.until ? (t.until.startsWith("#") ? `until ${t.until}` : `${left(t.until)} left`) : ""]
     .filter(Boolean).join(" · ") : "";
   // A join (#6142): it lets a version in when it passed every branch; it names the branches a version still waits for.
-  const join = (t.from || []).length > 1 ? (t.join ? `⋈ ${short(t.join.rev)} waits for ${t.join.missing.join(", ")}` : "⋈ every branch") : "";
+  const join = (t.from || []).length > 1 ? (t.join ? `⋈ waits: ${t.join.missing.join(", ")}` : "⋈ join") : "";
   const passing = s.last_run && s.last_run.state === "running";  // #6210: a version passes into the stage that runs
   return `<div class="pl-gate">${button(`${chip(cls, `${esc(m)}<span class="pl-long"> ${esc(word)}</span>`)}
     ${join ? `<span class="pl-anote pl-join">${esc(join)}</span>` : ""}
-    ${by ? `<span class="pl-anote pl-long">${esc(by)}</span>` : ""}${w ? `<span class="pl-anote pl-ver pl-long">${esc(short(w.rev))} waits</span>` : ""}`,
+    ${by ? `<span class="pl-anote pl-long">${esc(by)}</span>` : ""}${w ? `<span class="pl-anote pl-ver pl-long">${esc(short(w.rev))}</span>` : ""}`,
     { kind: "card", cls: "pl-arrow" + (nextAt(V.data) === "→" + s.name ? " pl-waits" : "") + (passing ? " pl-moving" : ""),
-      pressed: V.arrow === s.name, data: { "pl-arrow": s.name }, title: `Transition into ${s.name}`,
+      pressed: V.arrow === s.name, data: { "pl-arrow": s.name }, title: s.name,
       attrs: passing ? `style="${phase()}"` : "" })}</div>`;
 }
 
 function stagesView(D) {
-  if (!D.stages.length) return empty(`Pipeline ${esc(D.name)} has no stages yet: maxpm pipeline stage ${esc(D.name)} &lt;stage&gt; --kind &lt;kind&gt;`);
+  if (!D.stages.length) return empty("No stages.");
   const L = layout(D.stages);
   const row = L.branched ? branchedRow(D.stages, L) : D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
+  // #6486: a target's graph is behind More (Controls); its first screen (views/release.js) names the next step and
+  // what is live, and its account is on Deploy > Accounts.
   return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row${L.branched ? " pl-grid" : ""}" id="plRow">${row}</div></div>
-    ${nextBar(D)}
+    ${D.default ? "" : nextBar(D)}
     <div class="pl-card" id="plDetail">${detail()}</div>
     <div id="plStageRuns"></div>
-    ${envTable(D)}${sourceCard(D)}`;
+    ${D.default ? "" : envTable(D)}`;
 }
 
 // Branches and joins (#6142, Decision 9): the place of each stage. Its column is the longest way from the first stage;
@@ -385,29 +380,13 @@ function branchedRow(stages, L) {
   return cells.join("");
 }
 
-// The forge's own words when it refuses the token, or that nobody saved it (#6147).
+// The Git host refuses the token, or nobody saved it (#6147): its words, and the way to Accounts.
 function tokenBanner(D) {
   if (!tokenFails(D)) return "";
   const a = D.account;
-  const why = a.state === "refused" ? `${a.error || a.label + " refuses the token " + a.secret}`
-    + (a.refused_since ? ` (since ${ago(a.refused_since)})` : "") : a.error;
-  return `<div class="pl-banner">✕ ${esc(why)}. This page shows what ${esc(a.label)} said before then; nothing new starts there until a token works. The manager knows.
-    ${a.secret ? `Save a new one: <code>maxpm secret put ${esc(a.secret)}</code>` : ""}</div>`;
-}
-
-// Where the pipeline's runs come from: the forge, the account, the token and when it runs out (#6147).
-function sourceCard(D) {
-  const a = D.account;
-  if (!a) return "";
-  const state = a.state === "refused" ? `<span class="c-warn">✕ refused</span>` : a.state === "missing" ? `<span class="c-warn">○ not saved</span>`
-    : a.read_at ? `● read ${esc(ago(a.read_at))}` : `<span class="muted">not read yet</span>`;
-  return `<div class="pl-card"><h3>Where its runs come from</h3><div class="pl-table"><table class="pl-blocks">
-    <tr><th>Git host</th><th>Account</th><th>Token</th><th>Last read</th><th>The token runs out</th></tr>
-    <tr><td data-label="Git host">${esc(a.label)} <span class="muted t-s">${esc(a.host)}</span></td>
-      <td data-label="Account">${esc(a.owner || "?")}${a.kind ? ` <span class="muted t-s">${esc(a.kind)}</span>` : ""}</td>
-      <td class="mono" data-label="Token">${esc(a.secret || "none named")}</td><td data-label="Last read">${state}</td>
-      <td class="${a.days_left != null && a.days_left <= 7 ? "c-warn" : ""}" data-label="Runs out">${esc(runsOut(a)) || `<span class="muted">-</span>`}</td></tr></table></div>
-    <div class="pl-bar">${button("All accounts", { data: { "dp-part": "accounts" }, title: "See the accounts" })}</div></div>`;
+  const why = a.state === "refused" ? a.error || "refused" : a.error || "missing";
+  return `<div class="pl-banner pl-bar"><span>${esc(a.label)} token error: ${esc(why)}</span>
+    ${button("Accounts", { cls: "plain", data: { "dp-part": "accounts" }, title: "Accounts" })}</div>`;
 }
 
 // Narrow cards first; when even those do not fit, the row scrolls and its right edge fades while more is there.
@@ -429,19 +408,11 @@ function sourceCan(D, s, action) {
   return ((D.source && D.source.actions) || []).includes(action);
 }
 
-// An action button, or the same button greyed out when the source does not do that action (its text goes in miss,
-// for the line under the bar).
-function srcButton(D, s, action, html, opts, miss) {
+// An action button, or the same button greyed out when the source does not do that action (#6486: its title says
+// so; no line under the bar).
+function srcButton(D, s, action, html, opts) {
   if (sourceCan(D, s, action)) return button(html, opts);
-  if (miss) miss.push(html);
-  return button(html, { ...opts, data: {}, disabled: true, title: "Source cannot do this" });
-}
-
-// The line under a bar of actions that names the greyed ones and the source.
-function missLine(D, miss) {
-  if (!miss.length) return "";
-  const src = D.source || {};
-  return `<div class="muted t-s">${miss.join(", ")}: not available for this source${src.name ? ` (${src.kind === "plugin" || src.kind === "missing" ? "plugin " : ""}${esc(src.name)})` : ""}</div>`;
+  return button(html, { ...opts, data: {}, disabled: true, title: "Not available" });
 }
 
 function envTable(D) {
@@ -449,12 +420,12 @@ function envTable(D) {
   const deployer = e => D.stages.find(s => s.kind === "deploy" && s.env === e.name);
   // #6187: on a phone each environment is a block with each cell under its name (pl-blocks), not four columns that
   // broke 'Environment' and 'Since' inside the word at 390 px; the versions before are a list with separators.
-  const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td data-label="Environment">${esc(e.name)}${e.target && e.target !== e.name ? ` <span class="muted t-s">target ${esc(e.target)}</span>` : ""}</td>
-    <td data-label="Version">${e.rev ? `<span class="mono">${esc(short(e.rev))}</span>` : `<span class="muted">none yet</span>`}</td><td class="pl-nowrap" data-label="Since">${e.since ? esc(ago(e.since)) : ""}</td>
+  const rows = D.envs.map(e => `<tr class="${e.rev ? "live" : ""}"><td data-label="Environment">${esc(e.name)}</td>
+    <td data-label="Version">${e.rev ? `<span class="mono">${esc(short(e.rev))}</span>` : `<span class="muted">—</span>`}</td><td class="pl-nowrap" data-label="Since">${e.since ? esc(ago(e.since)) : ""}</td>
     <td class="t-s muted" data-label="Before">${(e.history || []).slice(1, 4).filter(h => h.rev && h.rev !== e.rev).map(h => esc(short(h.rev))
-      + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + srcButton(D, deployer(e), "rollback", "Put back", { data: { "pl-rollback": e.name, rev: h.rev },
-        title: `Roll back to ${short(h.rev)}` }))).join(" · ")}</td></tr>`).join("");
-  return `<div class="pl-card"><h3>Where each version runs</h3><div class="pl-table"><table class="pl-blocks">
+      + (h.kind !== "deployed" ? " (" + esc(h.kind) + ")" : "") + (D.default ? "" : " " + srcButton(D, deployer(e), "rollback", "Roll back", { data: { "pl-rollback": e.name, rev: h.rev },
+        title: "Roll back" }))).join(" · ")}</td></tr>`).join("");
+  return `<div class="pl-card"><h3>Live</h3><div class="pl-table"><table class="pl-blocks">
     <tr><th>Environment</th><th>Version</th><th>Since</th><th>Before</th></tr>${rows}</table></div></div>`;
 }
 
@@ -478,6 +449,8 @@ async function refreshStageRuns(force) {
 }
 
 const RUNS_SHOWN = 5;  // the newest rows of Versions in <stage> before Show all (#6182)
+// A GitHub conclusion as the run's error says no more than its state (#6486: 'failure' and 'action_required' in red).
+const RAW_ERRORS = new Set(["failure", "action_required", "cancelled", "timed_out", "startup_failure", "stale"]);
 
 function stageRunsHtml(SR) {
   if (!SR.runs.length) return "";
@@ -497,14 +470,14 @@ function stageRunsHtml(SR) {
   const cells = list.map(r => {
     const b = [];
     if (back(r))
-      b.push(srcButton(D, s, "rollback", "Move back here", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: `Back to ${short(r.rev)}` }, miss));
+      b.push(srcButton(D, s, "rollback", "Roll back", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev }, title: "Roll back" }, miss));
     if (back(r) && (SR.branches || []).length)  // #6142: the same place of every branch
-      b.push(srcButton(D, s, "rollback", "Every branch", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Move every branch back" }, miss));
-    if (ours && r.run != null && busy(r)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop this run" }, miss));
+      b.push(srcButton(D, s, "rollback", "Roll back all", { kind: "warn", data: { "pl-moveback": SR.stage, rev: r.rev, branches: SR.branches.join(", ") }, title: "Roll back all" }, miss));
+    if (ours && r.run != null && busy(r)) b.push(srcButton(D, s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.run }, title: "Stop" }, miss));
     else if (again(r)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": SR.stage, rev: r.rev },
-      title: tg && SR.stage === "deploy" ? "A new release, pinned" : "Run this stage again" }, miss));
+      title: "Run again" }, miss));
     const when = r.started_at || r.queued_at;
-    const why = (r.by ? esc(r.by) + (r.why ? ": " : "") : "") + esc(r.why || "") + (r.errors ? `${r.by || r.why ? " · " : ""}<span class="c-warn">${esc(r.errors)}</span>` : "");
+    const why = r.errors && !RAW_ERRORS.has(r.errors) ? `<span class="c-warn">${esc(r.errors)}</span>` : "";
     return { r, b, why, when, task: tg && r.item ? `<span class="link" data-open="${r.item}">#${r.item}</span>` : "",
       ver: tg && !r.pinned ? `<span class="muted">not pinned</span>` : esc(short(r.rev)) };
   });
@@ -515,13 +488,12 @@ function stageRunsHtml(SR) {
       <td class="t-s muted">${r.seconds != null ? esc(secs(r.seconds)) : r.state === "running" && when ? runFor(when) : ""}</td>
       ${hasWhy ? `<td class="t-s pl-wide">${why}</td>` : ""}${hasTask ? `<td class="t-s">${task}</td>` : ""}
       ${hasActs ? `<td class="pl-wide"><span class="pl-bar">${b.join("")}</span></td>` : ""}</tr>`).join("");
-  const more = SR.runs.length > RUNS_SHOWN ? `<div class="t-s">${button(all ? "Show the newest " + RUNS_SHOWN : `Show all ${SR.runs.length}`,
-    { data: { "pl-allruns": SR.stage }, title: all ? "Fewer rows" : "Every run" })}</div>` : "";
-  return `<div class="pl-card"><h3>Versions in ${esc(SR.stage)}</h3>
-    <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Version</th><th>State</th><th>Took</th>
-      ${hasWhy ? "<th>Why, or who</th>" : ""}${hasTask ? "<th>Task</th>" : ""}${hasActs ? "<th>Actions</th>" : ""}</tr>${rows}</table></div>
-    ${more}
-    ${missLine(D, [...new Set(miss)])}</div>`;  // #6209: no paragraph on what a move back does (the guide holds it)
+  const more = SR.runs.length > RUNS_SHOWN ? `<div class="t-s">${button(all ? "Show " + RUNS_SHOWN : `Show all (${SR.runs.length})`,
+    { data: { "pl-allruns": SR.stage }, title: all ? "Fewer" : "All" })}</div>` : "";
+  return `<div class="pl-card"><h3>Recent runs</h3>
+    <div class="pl-table"><table class="pl-runs"><tr class="pl-th"><th>When</th><th>Commit</th><th>Status</th><th>Time</th>
+      ${hasWhy ? "<th>Error</th>" : ""}${hasTask ? "<th>Task</th>" : ""}${hasActs ? "<th>Actions</th>" : ""}</tr>${rows}</table></div>
+    ${more}</div>`;  // #6209, #6486: no paragraph, and no line on what the source cannot do (its buttons are grey)
 }
 
 async function refreshRun(force) {
@@ -624,22 +596,22 @@ function watchHtml(r) {
   const rows = (r.step_list || []).map(x => {
     const k = watchKey(r, x), open = WV.key === k, fails = x.fails || [];
     const failText = fails.map(f => `<div><span class="mono">${esc(when(f.at))}</span> ${esc(f.summary || "")}</div>`).join("")
-      + (x.failed > fails.length ? `<div class="muted">and ${x.failed - fails.length} more</div>` : "");
+      + (x.failed > fails.length ? `<div class="muted">+${x.failed - fails.length} more</div>` : "");
     const now = x.now && x.now !== x.state ? ` <span class="muted">now ${esc(WORD[x.now] || x.now)}</span>` : "";
     return `<tr class="clickrow" data-pl-check="${esc(k)}" aria-expanded="${open}"><td class="pl-cname"><span class="title">${esc(x.name)}</span></td>
       <td>${st(x.state)}${now}</td><td class="pl-n">${x.runs} run${x.runs === 1 ? "" : "s"}</td>
-      <td class="pl-n">${x.failed ? `<span class="c-warn">${x.failed} failed</span>` : "none failed"}</td>
+      <td class="pl-n">${x.failed ? `<span class="c-warn">${x.failed} failed</span>` : "0"}</td>
       <td class="t-s pl-wide">${failText}</td><td class="pl-open">${OPEN_MARK}</td></tr>`
       + (open ? `<tr class="pl-allruns"><td colspan="6">${allRuns()}</td></tr>` : "");
   }).join("");
-  return `<div class="pl-table"><table class="pl-checks"><tr class="pl-th"><th>Check</th><th>Last result</th><th>Runs</th>
-    <th>Failed</th><th>Failed runs, newest first</th><th></th></tr>${rows}</table></div>`;
+  return `<div class="pl-table"><table class="pl-checks"><tr class="pl-th"><th>Check</th><th>Status</th><th>Runs</th>
+    <th>Failed</th><th>Errors</th><th></th></tr>${rows}</table></div>`;
 }
 
 function allRuns() {
-  if (!WV.runs) return `<div class="muted t-s">Reading the runs…</div>`;
+  if (!WV.runs) return `<div class="muted t-s">Loading…</div>`;
   if (WV.runs.error) return `<div class="c-warn t-s">${esc(WV.runs.error)}</div>`;
-  if (!WV.runs.runs.length) return `<div class="muted t-s">No run in the watch.</div>`;
+  if (!WV.runs.runs.length) return `<div class="muted t-s">No runs.</div>`;
   return `<div class="pl-runlist t-s">${WV.runs.runs.map(x => `<div><span class="mono">${esc(when(x.at))}</span> ${st(x.state)}
     ${x.summary ? `<span class="muted">${esc(x.summary)}</span>` : ""}</div>`).join("")}</div>`;
 }
@@ -690,20 +662,20 @@ function drawArrow() {
   // one or two short lines, the buttons in plain words, the hold options as one quiet row; the guide explains the rest.
   const i = D.stages.indexOf(s), release = D.default && i > 0 && D.stages[i - 1].holding;
   const from = i > 0 ? D.stages[i - 1].name : "start";
-  const title = release ? `Release ${D.name}` : s.name === "approval" && releaseButton(D).includes("pl-yes") ? `Approve the release of ${D.name}`
+  const title = release ? `Release ${D.name}` : s.name === "approval" && releaseButton(D).includes("pl-yes") ? `Approve ${D.name}`
     : `${from} → ${s.name}`;
   arrowBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-arrowclose": "1" } })}</div>`
     + arrowNow(D, s, release) + arrowOptions(s);
 }
 
-// The release in one line: what goes out and when it goes out by itself (#6198).
+// The release in one line: what goes out and when it goes out by itself (#6198; #6486: '<n> tasks · Report · next
+// by itself <when>').
 function releaseLine(D, h) {
   const R = D.release, bits = [];
   if (R) bits.push(`${R.tasks} task${R.tasks === 1 ? "" : "s"}`);
   if (h && h.commits) bits.push(`${h.commits} commit${h.commits === 1 ? "" : "s"}`);
-  const report = R && R.deploy ? ` · <span class="link" data-report="${R.deploy}">report</span>` : "";
-  const by = R && R.until ? ` · goes out by itself ${esc(when(R.until))} (in ${esc(left(R.until))})`
-    : R && R.running ? ` · goes out after release #${R.running}` : "";
+  const report = R && R.deploy ? ` · <span class="link" data-report="${R.deploy}">Report</span>` : "";
+  const by = R && R.until ? ` · next by itself ${esc(when(R.until))}` : R && R.running ? ` · after #${R.running}` : "";
   return bits.length ? `${bits.join(", ")}${report}${by}` : "";
 }
 
@@ -712,16 +684,16 @@ function arrowNow(D, s, release) {
   if (!release) {
     const yes = D.default && s.name === "approval" ? releaseButton(D) : "";
     const t = s.transition, w = (t.waiting || [])[0];
-    const line = t.state !== "open" ? esc(t.state_text) : w ? `<span class="pl-ver">${esc(short(w.rev))}</span> waits here` : esc(t.text);
+    const line = t.state !== "open" ? esc(t.state_text) : w ? `<span class="pl-ver">${esc(short(w.rev))}</span>` : esc(t.text);
     return `<div class="t-m">${line}</div>` + (yes ? `<div class="pl-bar">${yes}</div>` : "");
   }
   const h = D.stages[D.stages.indexOf(s) - 1].holding || {}, hook = (D.stages.find(x => x.name === "deploy") || {}).run;
-  const line = releaseLine(D, h) || "Nothing waits for a release now.";
+  const line = releaseLine(D, h) || "Nothing queued.";
   const waitsYes = releaseButton(D).includes("pl-yes"), agent = !waitsYes && (D.release || h.commits)
-    ? button("Release with an agent…", { data: { relagent: D.name }, title: "An agent releases it" }) : "";
+    ? button("Release with agent", { data: { relagent: D.name }, title: "Release with agent" }) : "";
   const b = headControls(D) + agent;
   return `<div class="t-m">${line}</div>${b ? `<div class="pl-bar">${b}</div>` : ""}`
-    + (hook ? `<details class="t-s"><summary>What runs</summary><code>${esc(hook)}</code></details>` : "");
+    + (hook ? `<details class="t-s"><summary>Command</summary><code>${esc(hook)}</code></details>` : "");
 }
 
 // The hold options of a transition as one quiet row (#6198), each undone by the same place; the state line above
@@ -732,14 +704,14 @@ function arrowOptions(s) {
   const n = s.name, w = (t.waiting || [])[0], b = [];
   const o = (label, data, title, kind = "") => button(label, { kind, cls: kind ? "" : "plain", data, title });
   if (w && !D.default && NEEDS_YES.includes(t.mode) && !w.approved_by)
-    b.push(o(`Approve ${esc(short(w.rev))}`, { "pl-approve": n, rev: w.rev }, "Give its yes", "primary"));
-  b.push(t.block ? o("Unblock", { "pl-unblock": n }, "End the block") : o("Block", { "pl-block": n }, "Stop versions here"));
-  b.push(t.delay ? o("End the delay", { "pl-undelay": n }, "End the delay") : o("Delay", { "pl-delay": n }, "Hold for a time"));
-  b.push(t.disabled ? o("Enable", { "pl-enable": n }, "Let versions pass") : o("Disable", { "pl-disable": n }, "Until enabled"));
-  b.push(o("Freeze", { "pl-freeze": n }, "Stop for a period"));
-  if ((t.freezes || []).length) b.push(o("Unfreeze", { "pl-unfreeze": n }, "Remove the freezes"));
-  b.push(o("Window", { "pl-change": n }, "The standing rules"));
-  if (w && t.state !== "open" && !D.default) b.push(o(`Let ${esc(short(w.rev))} pass`, { "pl-pass": n, rev: w.rev }, "Past every control"));
+    b.push(o("Approve", { "pl-approve": n, rev: w.rev }, "Approve", "primary"));
+  b.push(t.block ? o("Unblock", { "pl-unblock": n }, "Unblock") : o("Block", { "pl-block": n }, "Block"));
+  b.push(t.delay ? o("Clear delay", { "pl-undelay": n }, "Clear delay") : o("Delay", { "pl-delay": n }, "Delay"));
+  b.push(t.disabled ? o("Enable", { "pl-enable": n }, "Enable") : o("Disable", { "pl-disable": n }, "Disable"));
+  b.push(o("Freeze", { "pl-freeze": n }, "Freeze"));
+  if ((t.freezes || []).length) b.push(o("Unfreeze", { "pl-unfreeze": n }, "Unfreeze"));
+  b.push(o("Window", { "pl-change": n }, "Window"));
+  if (w && t.state !== "open" && !D.default) b.push(o("Pass once", { "pl-pass": n, rev: w.rev }, "Pass once"));
   return `<div class="pl-opts t-s">${b.join("")}</div>`;
 }
 
@@ -748,46 +720,45 @@ function arrowDetail(s) {
   const from = (t.from || []).length ? t.from.join(" + ") : t.from ? "start" : i > 0 ? D.stages[i - 1].name : "start";  // #6142
   const [m, word, cls] = arrowMark(s);
   const row =(what, now, by) => `<tr><td><b>${esc(what)}</b></td><td>${now}</td><td class="t-s muted">${by}</td></tr>`;
-  const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : t.fixed || D.default ? "the deploy target" : "the start: automatic")];
-  if (t.window) rows.push(row("Time window", `${esc(t.window.text)} ${st(t.window.open ? "passed" : "queued", t.window.open ? "open now" : "closed now")}`,
+  const rows = [row("Mode", esc(t.text), t.mode_by ? setBy(t.mode_by, t.mode_at) : "")];
+  if (t.window) rows.push(row("Window", `${esc(t.window.text)} ${st(t.window.open ? "passed" : "queued", t.window.open ? "open" : "closed")}`,
     setBy(t.window.by, t.window.at) + (t.window.change ? ` · ${t.window.open ? "closes" : "opens"} ${esc(when(t.window.change))}` : "")));
   for (const f of t.freezes || []) rows.push(row("Freeze", `${esc(when(f.from))} to ${esc(when(f.to))}: ${esc(f.reason)}${f.now ? " " + st("failed", "now") : ""}`, setBy(f.by)));
-  if (t.fault_rule) rows.push(row("Fault rule", t.fault ? `blocked while <span class="link" data-open="${t.fault.id}">#${t.fault.id}</span> is open`
-    : "blocked while a fault of the pipeline is open; none is open", setBy(t.rule_by)));
+  if (t.fault_rule) rows.push(row("Fault rule", t.fault ? `blocked by <span class="link" data-open="${t.fault.id}">#${t.fault.id}</span>`
+    : "no fault", setBy(t.rule_by)));
   if (t.block) rows.push(row("Block", `<span class="c-warn">${esc(t.block.reason)}</span>`, setBy(t.block.by, t.block.at) + " · until "
-    + (t.block.until ? esc(when(t.block.until)) : t.block.item ? `<span class="link" data-open="${t.block.item}">#${t.block.item}</span> closes` : "someone unblocks it")));
+    + (t.block.until ? esc(when(t.block.until)) : t.block.item ? `<span class="link" data-open="${t.block.item}">#${t.block.item}</span>` : "unblocked")));
   if (t.delay) rows.push(row("Delay", esc(t.delay.reason), setBy(t.delay.by) + " · until " + esc(when(t.delay.until))));
-  if (t.disabled) rows.push(row("Disabled", esc(t.disabled.reason), setBy(t.disabled.by, t.disabled.at) + " · until someone enables it"));
-  const waits = (t.waiting || []).map(w => `<div class="t-m"><span class="pl-ver">${esc(short(w.rev))}</span> waits since ${esc(ago(w.since))}`
-    + (w.outside ? ` · asked by ${esc(w.outside)}${w.outside_at ? ", last " + esc(ago(w.outside_at)) : ""}` : "")  // #6164: an outside flow
-    + (w.approved_by ? ` · yes from ${esc(w.approved_by)}` : "") + (w.passed_by ? ` · let pass by ${esc(w.passed_by)}` : "")
+  if (t.disabled) rows.push(row("Disabled", esc(t.disabled.reason), setBy(t.disabled.by, t.disabled.at)));
+  const waits = (t.waiting || []).map(w => `<div class="t-m"><span class="pl-ver">${esc(short(w.rev))}</span> ${esc(ago(w.since))}`
+    + (w.outside ? ` · ${esc(w.outside)}${w.outside_at ? ", " + esc(ago(w.outside_at)) : ""}` : "")  // #6164: an outside flow
+    + (w.approved_by ? ` · approved by ${esc(w.approved_by)}` : "") + (w.passed_by ? ` · passed by ${esc(w.passed_by)}` : "")
     + (w.note ? `<div class="muted t-s">${esc(w.note)}</div>` : "") + `</div>`).join("");
-  return `<h3>The transition ${esc(from)} → ${esc(s.name)} ${chip(cls, `${esc(m)} ${esc(word)}`)}</h3>
-    <div class="t-m">${t.state === "open" ? "Open: " + esc(t.text) : esc(t.state_text)}</div>
-    ${waits || (D.default ? "" : `<div class="muted t-s">No version waits here now.</div>`)}
-    <div class="pl-table"><table class="pl-ctl"><tr><th>Control</th><th>Now</th><th>Set by, until</th></tr>${rows.join("")}</table></div>
+  return `<h3>${esc(from)} → ${esc(s.name)} ${chip(cls, `${esc(m)} ${esc(word)}`)}</h3>
+    <div class="t-m">${esc(t.state === "open" ? t.text : t.state_text)}</div>
+    ${waits || (D.default ? "" : `<div class="muted t-s">None waiting.</div>`)}
+    <div class="pl-table"><table class="pl-ctl"><tr><th>Control</th><th>Now</th><th>Set by</th></tr>${rows.join("")}</table></div>
     ${arrowActions(s, t)}`;  // #6209: no paragraph of explanation (the guide holds it)
 }
 
 function arrowActions(s, t) {
-  if (t.fixed || (V.data.default && !V.data.controls))
-    return `<div class="muted t-s">${t.fixed_why ? esc(t.fixed_why[0].toUpperCase() + t.fixed_why.slice(1)) + "." : "A deploy target's own steps decide this."}</div>`;
+  if (t.fixed || (V.data.default && !V.data.controls)) return "";
   const w = (t.waiting || [])[0], b = [], n = s.name;
   if (w && NEEDS_YES.includes(t.mode) && !w.approved_by)
-    b.push(button(`Approve ${esc(short(w.rev))}`, { kind: "primary", data: { "pl-approve": n, rev: w.rev }, title: "Give its yes" }));
-  b.push(t.block ? button("Unblock", { data: { "pl-unblock": n }, title: "End the block" })
-    : button("Block until…", { kind: "warn", data: { "pl-block": n }, title: "Stop versions here" }));
-  b.push(t.delay ? button("End the delay", { data: { "pl-undelay": n }, title: "End the delay" })
-    : button("Delay…", { data: { "pl-delay": n }, title: "Hold for a time" }));
-  b.push(t.disabled ? button("Enable", { data: { "pl-enable": n }, title: "Let versions pass" })
-    : button("Disable…", { data: { "pl-disable": n }, title: "Until enabled" }));
-  if (w && t.state !== "open") b.push(button(`Let ${esc(short(w.rev))} pass once…`, { data: { "pl-pass": n, rev: w.rev }, title: "Past every control" }));
-  b.push(button("Freeze…", { data: { "pl-freeze": n }, title: "Stop for a period" }));
-  if ((t.freezes || []).length) b.push(button("Remove the freezes", { data: { "pl-unfreeze": n }, title: "Remove the freezes" }));
-  b.push(button(V.data.default ? "Change the window…" : "Change the mode or the window…", { data: { "pl-change": n }, title: "The standing rules" }));
+    b.push(button("Approve", { kind: "primary", data: { "pl-approve": n, rev: w.rev }, title: "Approve" }));
+  b.push(t.block ? button("Unblock", { data: { "pl-unblock": n }, title: "Unblock" })
+    : button("Block", { kind: "warn", data: { "pl-block": n }, title: "Block" }));
+  b.push(t.delay ? button("Clear delay", { data: { "pl-undelay": n }, title: "Clear delay" })
+    : button("Delay", { data: { "pl-delay": n }, title: "Delay" }));
+  b.push(t.disabled ? button("Enable", { data: { "pl-enable": n }, title: "Enable" })
+    : button("Disable", { data: { "pl-disable": n }, title: "Disable" }));
+  if (w && t.state !== "open") b.push(button("Pass once", { data: { "pl-pass": n, rev: w.rev }, title: "Pass once" }));
+  b.push(button("Freeze", { data: { "pl-freeze": n }, title: "Freeze" }));
+  if ((t.freezes || []).length) b.push(button("Unfreeze", { data: { "pl-unfreeze": n }, title: "Unfreeze" }));
+  b.push(button("Edit window", { data: { "pl-change": n }, title: "Window" }));
   // #6176: a deploy target's arrow holds its release items, not versions: it names them.
   const holds = (t.holds || []).map(h => `<span class="link" data-open="${h.id}">#${h.id}</span> ${esc(h.kind)}`).join(", ");
-  return `<div class="pl-bar">${b.join("")}</div>${holds ? `<div class="t-s">It holds ${holds} now.</div>` : ""}`;
+  return `<div class="pl-bar">${b.join("")}</div>${holds ? `<div class="t-s">Holding: ${holds}</div>` : ""}`;
 }
 
 function detail() {
@@ -797,15 +768,15 @@ function detail() {
   if (s.holding) return holdingDetail(V.name);
   const r = V.run && (V.run.id == null || (s.last_run && V.run.id === s.last_run.id)) ? V.run : s.last_run;
   const head = `<h3>${esc(s.name)}${r && r.version ? ` · <span class="pl-ver">${esc(short(r.version))}</span>` : ""}</h3>`;
-  if (!r) return head + `<div class="muted t-s">No run of this stage yet.${s.run ? " It runs: " + esc(s.run) : ""}</div>` + keysHtml(s);
-  const when = r.started_at && r.state === "running" ? `running for ${runFor(r.started_at)}`  // #6210: it counts
-    : r.started_at ? `started ${esc(ago(r.started_at))}` : r.queued_at ? `waiting since ${esc(ago(r.queued_at))}` : "";
+  if (!r) return head + `<div class="muted t-s">No runs yet.</div>` + keysHtml(s);
+  const when = r.state === "running" && r.started_at ? runFor(r.started_at)  // #6210: it counts
+    : r.ended_at ? `${esc(WORD[r.state] || r.state)} ${esc(endText(r.ended_at))}`
+    : r.started_at ? `${esc(WORD[r.state] || r.state)} ${esc(ago(r.started_at))}` : r.queued_at ? `waiting ${esc(ago(r.queued_at))}` : "";
   const item = (r.item ? ` · <span class="link" data-open="${r.item}">#${r.item}</span>` : "")
-    + (r.fault_item ? ` · fault <span class="link" data-open="${r.fault_item}">#${r.fault_item}</span>` : "");
-  return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${r.ended_at ? ` · ${Date.parse(r.ended_at) > Date.now() ? "" : "ended "}${esc(endText(r.ended_at))}` : ""}${item}</span></div>`
-    + (r.gate_note && r.state === "queued" ? `<div class="t-s">At the transition: ${esc(r.gate_note)}</div>` : "")
+    + (r.fault_item ? ` · <span class="link" data-open="${r.fault_item}">fix #${r.fault_item}</span>` : "");
+  return head + `<div class="pl-bar">${st(r.state)}<span class="muted t-s">${when}${item}</span></div>`
     + stageActions(s, r)
-    + (r.errors ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
+    + (r.errors && !RAW_ERRORS.has(r.errors) ? `<div class="t-s c-warn">${esc(r.errors)}</div>` : "")
     + wavesHtml(s, r)
     + (r.watch_end ? watchHtml(r) : gantt(r.step_list || []))
     + (r.output ? `<pre class="pl-pre">${esc(r.output)}</pre>` : "")
@@ -830,40 +801,21 @@ function wavesHtml(s, r) {
 }
 
 // The actions on a stage (#6117): only a person or the manager acts; a default pipeline (a target's releases) has
-// its own actions on Releases. The controls before the stage are on its transition (#6139).
+// its own actions on its first screen (views/release.js). The controls before the stage are on its transition chip
+// (#6139), the override on the Emergency tab: no links here (#6486).
 function stageActions(s, r) {
-  if (V.data.default) return targetActions(s, r);
-  if (V.data.followed) return `<div class="muted t-s">Followed: its own system runs this stage. A trigger rule acts on its events (Triggers).</div>`;  // #6167
-  const rev = r && r.version, b = [], links = [];
-  if (s.transition) links.push(stageLink("The transition before it", { "pl-arrow": s.name }, "Its controls"));
+  if (V.data.default || V.data.followed) return "";  // #6167
+  const rev = r && r.version, b = [];
   const D = V.data, miss = [], ours = r && r.state === "queued" && !r.runner && (!r.source || r.source === "maxpm");
   if (r && ["running", "queued"].includes(r.state) && r.id != null)
-    b.push(srcButton(D, ours ? null : s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop this run" }, miss));
-  if (r && rev && !["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": s.name, rev }, title: "Run this stage again" }, miss));
-  // The override (#6146): a version came here past the stages before; run them for it, or send another one here.
-  if (s.override) b.push(button(`Run the whole pipeline for ${esc(short(s.override.rev))}`, { kind: "primary", data: { "pl-whole": s.override.rev }, title: "Run the skipped stages" }));
-  if ((s.prev || []).length || D.stages.indexOf(s) > 0) links.push(sendHere(s));
+    b.push(srcButton(D, ours ? null : s, "stop", "Stop", { kind: "warn", data: { "pl-stop": r.id }, title: "Stop" }, miss));
+  if (r && rev && !["running", "queued"].includes(r.state)) b.push(srcButton(D, s, "rerun", "Run again", { data: { "pl-rerun": s.name, rev }, title: "Run again" }, miss));
+  // The override (#6146): a version came here past the stages before; run them for it.
+  if (s.override) b.push(button("Run all", { kind: "primary", data: { "pl-whole": s.override.rev }, title: "Run all" }));
   const bad = r && r.tests ? (r.tests.failed || 0) + (r.tests.error || 0) : 0;
   if (bad && r.id != null && !["running", "queued"].includes(r.state))
-    b.push(srcButton(D, s, "rerun", `Run the ${bad} failed again`, { data: { "pl-refail": r.id }, title: "Only the failed tests" }, miss));
-  return (b.length ? `<div class="pl-bar">${b.join("")}</div>` : "") + linksRow(links) + missLine(D, miss);
-}
-
-// The ways to the transition and to the override of a stage are small plain links in one quiet row (#6209, mark
-// 2026-11-19: the outlined red 'Send a version here directly…' under a running deploy was too loud), as the hold
-// options of the transition dialog (arrowOptions).
-const stageLink = (label, data, title) => button(label, { cls: "plain", data, title });
-const sendHere = (s) => stageLink("Send a version here…", { "dp-tab": "emergency", "em-preset": s.name }, "Override");
-const linksRow = (links) => links.length ? `<div class="pl-opts t-s">${links.join("")}</div>` : "";
-
-// The actions on a stage of a deploy target (#6176): its transition, and for deploy a version sent there directly (a
-// deploy item that still waits for the person's yes); Versions in <stage> under it has Run again and Move back here.
-function targetActions(s, r) {
-  if (!V.data.controls) return "";
-  const links = [];
-  if (s.transition && !s.transition.fixed) links.push(stageLink("The transition before it", { "pl-arrow": s.name }, "Its controls"));
-  if (s.name === "deploy") links.push(sendHere(s));
-  return linksRow(links);
+    b.push(srcButton(D, s, "rerun", `Retry failed (${bad})`, { data: { "pl-refail": r.id }, title: "Retry failed" }, miss));
+  return b.length ? `<div class="pl-bar">${b.join("")}</div>` : "";
 }
 
 // The reason of a hold or a roll back: a small dialog (components/dialog.js). The Emergency tab asks with it too.
@@ -887,7 +839,7 @@ export function askForm(title, text, go, fields, then, needWhy = true) {
     : input({ id: "plF-" + f.id, value: f.value || "", placeholder: f.hint || null });
   askBox.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2>${iconButton("✕", "Close", { data: { "pl-askclose": "1" } })}</div>
     <p class="t-m">${esc(text)}</p>
-    <div class="form">${fields.map(f => field(esc(f.label), (f.before || "") + ctl(f))).join("")}${field(needWhy ? "Why?" : "Why? (optional)", textarea({ id: "plWhy", rows: 3 }, ""))}</div>
+    <div class="form">${fields.map(f => field(esc(f.label), (f.before || "") + ctl(f))).join("")}${field(needWhy ? "Reason" : "Note (optional)", textarea({ id: "plWhy", rows: 3 }, ""))}</div>
     ${actions(button("Cancel", { data: { "pl-askclose": "1" } }) + button(go, { kind: "primary", data: { "pl-askgo": "1" } }))}`;
   for (const f of fields) if (f.wire) f.wire(askBox, askBox.querySelector("#plF-" + f.id));  // #6205: a part on a field
   askDlg.open();
@@ -897,7 +849,7 @@ export function askForm(title, text, go, fields, then, needWhy = true) {
     if (!e.target.closest("[data-pl-askgo]")) return;
     const v = { why: (askBox.querySelector("#plWhy").value || "").trim() };
     for (const f of fields) v[f.id] = (askBox.querySelector("#plF-" + f.id).value || "").trim();
-    if (needWhy && !v.why) return toast("Say why", true);
+    if (needWhy && !v.why) return toast("Add a reason", true);
     askDlg.close();
     await then(v);
   };
@@ -909,29 +861,29 @@ function arrowAct(d) {
     || d.plUnfreeze || d.plChange;
   const s = V.data.stages.find(x => x.name === n), t = s && s.transition;
   if (!t) return;
-  const into = `the transition into ${n}`;
-  if (d.plBlock) return askForm(`Block ${into}?`, "No version passes until the time you give, until a task closes, or until someone unblocks it. A version you let pass on purpose still does.",
+  const into = n;
+  if (d.plBlock) return askForm(`Block ${into}`, "Blocks new runs until unblocked or time/task ends.",
     "Block", [{ id: "until", label: "Until", hint: "2h, fri 17:00, #<task>, or empty" }],
     (v) => doAct("pipeline_block", { stage: n, reason: v.why, ...(v.until.startsWith("#") ? { until_done: +v.until.slice(1) } : v.until ? { until: v.until } : {}) }));
   if (d.plUnblock) return doAct("pipeline_unblock", { stage: n });
-  if (d.plDelay) return askForm(`Delay ${into}?`, "No version passes before this time. Then the transition works as before.", "Delay",
-    [{ id: "until", label: "Until", hint: "2h, mon 09:00" }], (v) => v.until ? doAct("pipeline_delay", { stage: n, until: v.until, reason: v.why }) : toast("Say until when", true));
+  if (d.plDelay) return askForm(`Delay ${into}`, "Nothing passes before this time.", "Delay",
+    [{ id: "until", label: "Until", hint: "2h, mon 09:00" }], (v) => v.until ? doAct("pipeline_delay", { stage: n, until: v.until, reason: v.why }) : toast("Add a time", true));
   if (d.plUndelay) return doAct("pipeline_delay", { stage: n, until: "none" });
-  if (d.plDisable) return askForm(`Disable ${into}?`, "No version passes until a person or the manager enables it.", "Disable", [],
+  if (d.plDisable) return askForm(`Disable ${into}`, "Nothing passes until enabled.", "Disable", [],
     (v) => doAct("pipeline_disable", { stage: n, reason: v.why }));
   if (d.plEnable) return doAct("pipeline_enable", { stage: n });
-  if (d.plPass) return askForm(`Let ${short(d.rev)} pass once?`, "This one version passes every control of the transition now: the block, the fault rule, a freeze, the window, a delay. A yes that only a named person gives still waits for that person.",
-    "Let it pass", [], (v) => doAct("pipeline_pass", { stage: n, rev: d.rev, reason: v.why }));
-  if (d.plFreeze) return askForm(`Freeze ${into}?`, "No version passes in this period. To freeze every transition of the pipeline, run maxpm pipeline freeze with no stage.",
+  if (d.plPass) return askForm(`Pass ${short(d.rev)} once`, "Passes every control once. A named approver still decides.",
+    "Pass once", [], (v) => doAct("pipeline_pass", { stage: n, rev: d.rev, reason: v.why }));
+  if (d.plFreeze) return askForm(`Freeze ${into}`, "Freezes this step for the time range.",
     "Freeze", [{ id: "from", label: "From (empty: now)", hint: "wed 18:00, 2026-11-26T00:00" }, { id: "to", label: "To", hint: "mon 08:00, 3d" }],
-    (v) => v.to ? doAct("pipeline_freeze", { stage: n, from: v.from || null, to: v.to, reason: v.why }) : toast("Say until when", true));
+    (v) => v.to ? doAct("pipeline_freeze", { stage: n, from: v.from || null, to: v.to, reason: v.why }) : toast("Add a time", true));
   if (d.plUnfreeze) return doAct("pipeline_freeze", { stage: n, clear: true });
   const target = V.data.default;  // #6176: a deploy target's mode comes from the target
   const words = t.words === "forge" ? "host" : t.words;  // #6482: the page says host (parse_mode takes both)
   // #6205: the window is marked on a week calendar (components/weekPicker.js); its text stays under it.
-  return askForm(`Change ${into}`, (target ? "" : "The mode is how a version passes when nothing holds it. ") + "Mark the hours when versions may pass; none marked: at any time.",
+  return askForm(`Window: ${into}`, "None marked: any time.",
     "Save", [...(target ? [] : [{ id: "mode", label: "Mode", value: words, hint: "auto, yes mark, delay 10m, release" }]),
-      { id: "window", label: "When versions may pass", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00",
+      { id: "window", label: "Open hours", value: t.window ? t.window.text : "", hint: "mon-thu 09:00-17:00",
         before: weekPickerHtml(), wire: wireWeekPicker },
       { id: "fault", label: "Fault rule", options: [["on", "Block it"], ["off", "Let versions pass"]], value: t.fault_rule ? "on" : "off" }],
     (v) => {
@@ -957,8 +909,7 @@ function tests(r) {
   const skipped = all.filter(t => t.state === "skipped").length;
   const shown = V.filter === "failed" && bad.length ? bad : all;
   const suites = [...new Set(all.map(t => t.suite))];
-  return `<div class="pl-bar">${st(bad.length ? "failed" : "passed", `${bad.length} failed`)}${st("passed", `${all.length - bad.length - skipped} passed`)}${st("skipped", `${skipped} skipped`)}
-      <span class="muted t-s">from the test report (JUnit XML)</span></div>
+  return `<div class="pl-bar">${st(bad.length ? "failed" : "passed", `${bad.length} failed`)}${st("passed", `${all.length - bad.length - skipped} passed`)}${st("skipped", `${skipped} skipped`)}</div>
     ${suites.slice(0, 20).map(su => `<div class="pl-suite"><span class="pl-sname">${esc(su)}</span><span class="pl-dots">${all.filter(t => t.suite === su).map(t =>
       `<span class="pl-dot ${esc(t.state)}" title="${esc(t.name)}: ${esc(t.state)}"></span>`).join("")}</span></div>`).join("")}
     <div class="pl-bar">${button(`Failed (${bad.length})`, { pressed: V.filter === "failed", data: { "pl-filter": "failed" } })}${button(`All ${all.length}`,
@@ -966,22 +917,22 @@ function tests(r) {
     <div class="pl-table"><table class="pl-tests"><tr class="pl-th"><th>Test</th><th>Result</th><th>Time</th><th>Message</th></tr>
       ${shown.slice(0, 500).map(t => `<tr><td class="mono">${esc(t.suite)}.${esc(t.name)}</td><td>${st(t.state)}</td><td>${esc(secs(t.seconds))}</td>
         <td class="t-s">${esc(t.message || "")}</td></tr>`).join("")}</table></div>
-    ${r.prompt ? `<div class="pl-card"><h3>Prompt to analyze the failures</h3><pre class="pl-pre">${esc(r.prompt)}</pre>
-      <div class="pl-bar">${button("Start a session", { kind: "primary", data: { "pl-fix": r.id, start: 1 }, title: "Fix it now" })}${button("Add a fix task",
-        { data: { "pl-fix": r.id }, title: "Queue a fix" })}${button("Copy", { data: { "pl-copy": 1 }, title: "Copy the prompt" })}</div></div>` : ""}`;
+    ${r.prompt ? `<div class="pl-card"><h3>Fix prompt</h3><pre class="pl-pre">${esc(r.prompt)}</pre>
+      <div class="pl-bar">${button("Fix now", { kind: "primary", data: { "pl-fix": r.id, start: 1 }, title: "Fix now" })}${button("Add fix",
+        { data: { "pl-fix": r.id }, title: "Add fix" })}${button("Copy", { data: { "pl-copy": 1 }, title: "Copy" })}</div></div>` : ""}`;
 }
 
 // ---- the versions in each stage
 
 function versionsView(D) {
-  if (!D.versions.length) return empty("No version went through this pipeline yet.");
+  if (!D.versions.length) return empty("No releases yet.");
   const names = D.stages.map(s => s.name);
   const live = new Set(D.envs.map(e => e.rev).filter(Boolean));
   const cell = (c) => c ? st(c.state) : `<span class="muted">·</span>`;
   return `<div class="pl-table"><table class="pl-vtable"><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
     ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${v.deploy
-        ? `<span class="link" data-report="${v.deploy}" title="The release report">${esc(short(v.rev))}</span>`
-        : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Its tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
+        ? `<span class="link" data-report="${v.deploy}" title="Report">${esc(short(v.rev))}</span>`
+        : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
       ${names.map(n => `<td>${cell(v.stages[n])}</td>`).join("")}</tr>`).join("")}</table></div>
     <div id="plTasks"></div>`;
 }
@@ -993,24 +944,25 @@ async function drawTasks(rev) {
   let T;
   try { T = await getJson(`api/pipeline-version?pipeline=${encodeURIComponent(V.name)}&rev=${encodeURIComponent(rev)}`); }
   catch (e) { box.innerHTML = `<div class="muted t-s">${esc(e.message)}</div>`; return; }
-  box.innerHTML = `<div class="pl-card"><h3>Tasks of ${esc(short(rev))}${T.base ? ` <span class="muted t-s">since ${esc(short(T.base))}</span>` : ""}</h3>
+  box.innerHTML = `<div class="pl-card"><h3>Tasks in ${esc(short(rev))}</h3>
     ${T.tasks.length ? T.tasks.map(t => `<div class="t-m"><span class="link" data-open="${t.id}">#${t.id}</span> ${esc(t.title)}
-      <span class="muted t-s">${esc(t.status)}</span></div>`).join("") : `<div class="muted t-s">No commit of this version names a task.</div>`}</div>`;
+      <span class="muted t-s">${esc(t.status)}</span></div>`).join("") : `<div class="muted t-s">No linked tasks.</div>`}</div>`;
 }
 
 // ---- clicks
 
-// Approve and release (#6193): the person's yes on the release's approval item, from the graph's Next bar, the chip's
-// dialog or the Deploy list, after one confirm; the same 'done' that the approval card sends (waitDialog.js), as them.
+// Approve (#6193): the person's yes on the release's approval item, from the release card, the graph's Next bar, the
+// chip's dialog or the Deploy list, after one confirm; the same 'done' that the approval card sends (waitDialog.js),
+// as them.
 document.addEventListener("click", (e) => {
   const y = e.target.closest("[data-pl-yes]");
   if (!y) return;
-  const id = +y.dataset.plYes, dep = y.dataset.dep;
+  const id = +y.dataset.plYes, dep = y.dataset.dep, ver = y.dataset.ver;
   if (!actor()) return toast("Choose your name in 'You are' first", true);
-  askForm(`Approve release${dep ? " #" + dep : ""}?`, "After your yes it goes to production through its deploy hook.",
-    "Approve and release", [], async (v) => {
+  askForm(`Approve release${dep ? " #" + dep : ""}`, `Publishes ${ver || "it"} to GitHub.`,
+    "Approve", [], async (v) => {
       try { await act("done", { id, output: v.why || "Approved from the Deploy tab" }); } catch (err) { return; }
-      toast(`Release${dep ? " #" + dep : ""} approved: it goes out now`);
+      toast("Approved");
       if (V.shown) { if (dep && V.data && V.data.default) pickStage(V.name, "deploy"); renderPipeline(true); }
     }, false);
 });
@@ -1033,22 +985,22 @@ $("#dpStages").addEventListener("click", (e) => {
   const a = e.target.closest("[data-pl-hold],[data-pl-unhold],[data-pl-approve],[data-pl-stop],[data-pl-rerun],[data-pl-refail],[data-pl-rollback],[data-pl-moveback]");
   if (a) {
     const d = a.dataset;
-    if (d.plMoveback && d.branches) return askReason(`Move every branch back to ${short(d.rev)}?`,
-      `${d.plMoveback} and ${d.branches} run again with this version where it passed, and the transition into each is blocked until someone unblocks it. A branch where it never passed stays as it is.`,
-      "Move back every branch", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason, every_branch: true }));
-    if (d.plMoveback) return askReason(`Move ${d.plMoveback} back to ${short(d.rev)}?`,
-      `The stage runs again with this version, as one more run, and the transition into ${d.plMoveback} is blocked until someone unblocks it, so no newer version comes by itself.`,
-      "Move back", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason }));
-    if (d.plHold !== undefined) return askReason("Hold every stage?",
-      "Nothing new starts in any stage. Work that runs goes on to its end.", "Hold",
+    if (d.plMoveback && d.branches) return askReason(`Roll back all to ${short(d.rev)}`,
+      "Runs it on every branch and blocks newer versions.",
+      "Roll back", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason, every_branch: true }));
+    if (d.plMoveback) return askReason(`Roll back ${d.plMoveback} to ${short(d.rev)}`,
+      `Runs ${short(d.rev)} and blocks newer versions.`,
+      "Roll back", (reason) => doAct("pipeline_move_back", { stage: d.plMoveback, rev: d.rev, reason }));
+    if (d.plHold !== undefined) return askReason("Hold releases",
+      "Stops new releases. Running ones finish.", "Hold",
       (reason) => doAct("pipeline_hold", { stage: null, reason }));
     if (d.plUnhold !== undefined) return doAct("pipeline_unhold", { stage: d.plUnhold || null });
     if (d.plApprove) return doAct("pipeline_approve", { stage: d.plApprove, rev: d.rev });
     if (d.plStop) return doAct("pipeline_stop", { run: +d.plStop });
     if (d.plRerun) return doAct("pipeline_rerun", { stage: d.plRerun, rev: d.rev });
     if (d.plRefail) return doAct("pipeline_rerun_failed", { run: +d.plRefail });
-    if (d.plRollback) return askReason(`Put ${short(d.rev)} back on ${d.plRollback}?`,
-      "Its deploy stage runs with this version, and the transition into it is blocked until you unblock it, so no newer version comes by itself.",
+    if (d.plRollback) return askReason(`Roll back ${d.plRollback} to ${short(d.rev)}`,
+      `Runs ${short(d.rev)} and blocks newer versions.`,
       "Roll back", (reason) => doAct("pipeline_rollback", { env: d.plRollback, rev: d.rev, reason }));
   }
   const run = e.target.closest("[data-pl-run-stage]");  // Run: a stage that starts manually (#6138)

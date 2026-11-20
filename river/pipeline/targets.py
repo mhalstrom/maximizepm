@@ -388,14 +388,60 @@ def default_pipeline(conn, name, watch_history=True):
                         "rev": d["cut_rev"] or f"deploy #{d['id']}"} for d in done[:5]]}
     project = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id "
                            "LIMIT 1", (name, f"deploy-{name}")).fetchone()  # not the deploy project of the target
+    checks = release_checks(conn, name)
     return {"name": name, "project": project["name"] if project else None, "default": True, "stages": stages,
-            "checks": release_checks(conn, name),
+            "checks": checks, "latest": latest_release(conn, name, releases, deps, checks),  # #6486
             "controls": True,  # #6176: its arrows, operators, emergency actions, triggers and audit log act
             "held_reason": own["held_reason"] if own else None, "held_by": own["held_by"] if own else None,
             "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
                                          "version": next(iter(r["runs"].values()))["version"],
                                          "stages": {k: {"state": v["state"], "item": v["item"]}
                                                     for k, v in r["runs"].items()}} for r in releases]}
+
+
+_GH_RELEASE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/releases/tag/[\w.+-]+")
+_TAG = re.compile(r"\bv\d+\.\d+\.\d+\b")
+
+
+def _release_link(conn, dep_id, checks):
+    """The version tag and the GitHub release page of one release (#6486): a release page that the hook printed, else
+    the newest tag vX.Y.Z it printed, on the repository of the target's GitHub checks."""
+    texts = [r[0] or "" for r in conn.execute("SELECT output FROM hook_runs WHERE deploy_id=? ORDER BY id DESC",
+                                              (dep_id,))]
+    texts += [r[0] or "" for r in conn.execute(
+        "SELECT s.note FROM hook_steps s JOIN hook_runs h ON h.id=s.hook_run WHERE h.deploy_id=? ORDER BY s.id DESC",
+        (dep_id,))]
+    texts.append((conn.execute("SELECT output FROM items WHERE id=?", (dep_id,)).fetchone() or [""])[0] or "")
+    url = next((m.group(0) for x in texts for m in [_GH_RELEASE.search(x)] if m), None)
+    tag = url.rsplit("/", 1)[1] if url else next((m.group(0) for x in texts for m in [_TAG.search(x)] if m), None)
+    if tag and not url:
+        repo = next((c.get("repo") for c in checks if c.get("repo")), None)
+        url = f"https://github.com/{repo}/releases/tag/{tag}" if repo else None
+    return tag, url
+
+
+def latest_release(conn, name, releases, deps, checks):
+    """The release that runs now, or the last one that ran (#6486, mark 2026-11-20: 'I can't figure out how to use
+    it'): the newest release that is not dropped and has started (a hook ran, it was cut, or it is done), with its
+    stage runs and their steps, its fix item while it waits on one, its version tag and the GitHub release page. The
+    release card on top of a target's page reads it; None when no release ran yet."""
+    by_id = {d["id"]: d for d in deps}
+    for r in releases:
+        d = by_id.get(r["deploy"])
+        if not d or d["status"] == "dropped":
+            continue
+        dep_run = r["runs"].get("deploy") or {}
+        started = d["status"] == "done" or d["cut_at"] or dep_run.get("step_list") or dep_run.get("state") in (
+            "running", "failed")
+        if not started:
+            continue
+        fix = conn.execute("SELECT id, status, title FROM items WHERE found_during=? AND title LIKE 'Fix the failed "
+                           "deploy%' ORDER BY id DESC LIMIT 1", (d["id"],)).fetchone()
+        tag, url = _release_link(conn, d["id"], checks)
+        return {"deploy": d["id"], "status": d["status"], "closed_at": d["closed_at"], "runs": r["runs"],
+                "fix": dict(fix) if fix and fix["status"] not in core.CLOSED_STATES else None,
+                "tag": tag, "url": url}
+    return None
 
 
 def default_list(conn):
@@ -442,7 +488,8 @@ def release_checks(conn, target):
                 run = conn.execute(f"SELECT * FROM stage_runs WHERE stage_id=? AND key IN ({marks}) "
                                    "ORDER BY queued_at DESC, id DESC LIMIT 1", (stage["id"], *keys)).fetchone()
             out.append({"name": stage["name"], "source": "GitHub", "workflow": stage["workflow"],
-                        "branch": branch, "last_run": store._run_dict(conn, run), "error": p["poll_error"]})
+                        "branch": branch, "repo": p["repo"] if p["forge"] == "github" else None,
+                        "last_run": store._run_dict(conn, run), "error": p["poll_error"]})
     return out
 
 
