@@ -1468,8 +1468,8 @@ SHARED_INSTRUCTIONS = "AGENTS.md"
 
 def replaced_files():
     """[(old, label)]: the instruction file that an agent read before it read SHARED_INSTRUCTIONS (SETUP["replaces"]),
-    and that agent's label, one entry per file, in registry order; [('CLAUDE.md', 'Claude Code')] with the built-in
-    agents (#6024). maxpm init moves the rules of each one into SHARED_INSTRUCTIONS and deletes it."""
+    and that agent's label, one entry per file, in registry order. maxpm init moves the rules of each one into
+    SHARED_INSTRUCTIONS and deletes it."""
     out, seen = [], set()
     for m in ids():
         a = load()[m]

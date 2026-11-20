@@ -6011,13 +6011,15 @@ def _block_state(path):
     return "current" if AGENT_SNIPPET in text else "old" if core.names_product(text) else "missing"
 
 
-def _empty_old_files(folder):
-    """The old instruction files of a folder (CLAUDE.md, agents.replaced_files) that hold no rules of their own: the
-    setup guide's Update deletes them (#6024)."""
-    from . import agents
-    from .cli import _old_rules
-    return [n for n, _ in agents.replaced_files() if Path(folder, n).is_file()
-            and not _old_rules(Path(folder, n).read_text(errors="replace", encoding="utf-8"))]
+def _setup_folder(path, projects, shared):
+    from .cli import instructions_layout, legacy_instructions
+    exists = Path(path).is_dir()
+    old = list(legacy_instructions(path)) if exists else []
+    return {"path": path, "projects": projects, "exists": exists,
+            "agents_md": _block_state(Path(path, shared)),
+            "empty_old": [p.name for p, _, rules in old if not rules],
+            "old_with_rules": [p.name for p, _, rules in old if rules],
+            "layout": instructions_layout(path) if exists else None}
 
 
 def _tailnet_status(conn):
@@ -6094,7 +6096,7 @@ def setup_status(conn):
     from .browser import chrome_path
     from . import notify
     from . import agents as adapters
-    from .cli import instructions_layout
+    from .cli import agy_instruction_warnings
     shared = adapters.SHARED_INSTRUCTIONS
     folders = {}
     for p in core.project_list(conn):
@@ -6117,11 +6119,8 @@ def setup_status(conn):
         jobs = {}
     return {
         "done": core.setting(conn, "setup_done") == "on",
-        "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
-                     "agents_md": _block_state(Path(d, shared)),
-                     "empty_old": _empty_old_files(d) if Path(d).is_dir() else [],
-                     "layout": instructions_layout(d) if Path(d).is_dir() else None}
-                    for d, names in folders.items()],
+        "folders": [_setup_folder(d, names, shared) for d, names in folders.items()],
+        "agy_instruction_warnings": agy_instruction_warnings(d for d in folders if Path(d).is_dir()),
         "projects_without_folder": [p["name"] for p in core.project_list(conn) if not p["path"]],
         "people": [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")],
         "claude_home": Path("~/.claude").expanduser().is_dir(),
@@ -6155,7 +6154,7 @@ def setup_status(conn):
 
 def setup_block(conn, path, move=None):
     """Add or update the work queue block for every agent in a registered project folder (maxpm init):
-    AGENTS.md holds it; move=True first moves the rules in CLAUDE.md to AGENTS.md and deletes CLAUDE.md."""
+    AGENTS.md holds it; move=True first moves the rules from old instruction files and deletes those files."""
     from .cli import setup_instructions
     folder = Path(path).expanduser().resolve()
     if folder not in {Path(p["path"]).resolve() for p in core.project_list(conn) if p["path"]}:
@@ -6169,11 +6168,12 @@ def folder_add(conn, path, name=None, description="", move=None, actor=None, cre
     """Add a project folder from the page: what maxpm init does in that folder, without a terminal. The
     project is created (default name: the folder's) or linked; a project linked to another folder that
     still exists is refused (only the user moves it: maxpm project path --move). Then the agent block
-    goes in AGENTS.md; move is the choice for the rules of an old CLAUDE.md (None: ask).
+    goes in AGENTS.md; move is the choice for the rules in old instruction files (None: ask).
     A folder that does not exist (#6236): without create, the answer is {missing: True, path} (no error), and the
     form asks whether to make it; with create, MaximizePM makes it (mkdir -p), then adds it. A path that MaximizePM
     may not make (a folder of the system, a parent this user cannot write) is refused before the question."""
-    from .cli import link_folder, setup_instructions, instructions_layout, folder_project_name
+    from .cli import agy_instruction_warnings, link_folder, setup_instructions, instructions_layout
+    from .cli import folder_project_name, legacy_instructions
     if not (path or "").strip():
         raise RiverError("choose a folder")
     folder = Path(path.strip()).expanduser()
@@ -6198,6 +6198,8 @@ def folder_add(conn, path, name=None, description="", move=None, actor=None, cre
     name, linked_here, lines = link_folder(conn, folder, name, description.strip(), actor)
     lines += setup_instructions(folder, move)
     return {"project": name or linked_here[0], "path": str(folder), "lines": lines,
+            "old_with_rules": [p.name for p, _, rules in legacy_instructions(folder) if rules],
+            "agy_instruction_warnings": agy_instruction_warnings([folder]),
             "layout": instructions_layout(folder), "default_name": folder_project_name(folder)}
 
 

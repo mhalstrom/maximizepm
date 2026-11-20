@@ -11,6 +11,7 @@ import { drawBell, wireBell } from "./components/notifyBell.js";
 import { drawPause, wirePause } from "./components/pauseButton.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
+import { button } from "./components/button.js";
 import { openInPanel, onPanel, onPageView, pageView, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { browserOpens, openBrowser } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
@@ -292,7 +293,8 @@ async function refresh() {
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
   const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), anyStarted()]);
-  if (setupDialog.isOpen() && firstRun !== setupSig && !$("#setupSteps").contains(document.activeElement)) openSetup();
+  if (setupDialog.isOpen() && firstRun !== setupSig && !$("#setupSteps").contains(document.activeElement)
+      && !$("#setupSteps [data-ff-move]")) openSetup();
   setupSig = firstRun;
 }
 
@@ -633,7 +635,8 @@ let setupSig = "";
 let setupPoll = false;
 setInterval(() => {
   const f = document.activeElement;
-  if (setupPoll && setupDialog.isOpen() && !document.hidden && !(f && $("#setupSteps").contains(f) && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName))) openSetup();
+  if (setupPoll && setupDialog.isOpen() && !document.hidden && !$("#setupSteps [data-ff-move]")
+      && !(f && $("#setupSteps").contains(f) && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName))) openSetup();
 }, 3000);
 function closeSetup() { setupDialog.close(); }
 // A remote host (#5882): the last result of Set up and of an agent sign-in there, so a new draw of the guide keeps them.
@@ -715,19 +718,19 @@ function renderSetup(st) {
       : "Every agent session runs in tmux, a program for terminals. One click opens a Terminal window that installs Homebrew first (type your Mac password there), then tmux.",
     (st.tmux_click ? `<button class="btn primary" data-su="tmux">Install tmux</button>` : "")
       + `<button class="btn" data-su="recheck">Check again</button>`));
-  // One instructions file for every agent: AGENTS.md holds the rules; an old CLAUDE.md gives its rules to it (#6024).
   const blocks = st.folders.filter(f => f.exists && (f.agents_md !== "current" || (f.empty_old || []).length));
-  const layouts = { claude_only: "its CLAUDE.md has rules that Codex and other agents don't read",
-    both: "its CLAUDE.md has rules that Codex and other agents don't read" };
+  const ruleFiles = f => (f.old_with_rules || []).join(" and ");
   out.push(step(st.folders.length > 0 && blocks.length === 0, "Add a project folder",
     st.folders.length ? st.folders.map(f => `<div title="${esc(f.path)}">${esc(f.path.replace(/^\/(Users|home)\/[^/]+/, "~"))} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
-      + (!f.exists ? " · folder not found" : layouts[f.layout] ? " · " + esc(layouts[f.layout]) : "")
-      + (layouts[f.layout] ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
-          title="Move to AGENTS.md">Share them with every agent</button>` : "")
+      + (!f.exists ? " · folder not found" : ruleFiles(f) ? " · Rules in " + esc(ruleFiles(f)) : "")
+      + (ruleFiles(f) ? " " + button("Move rules to AGENTS.md", { data: { su: "block", move: "1", path: f.path } }) : "")
       + `</div>`).join("")
       + `<details style="margin-top:6px"><summary>Add another folder</summary>${folderForm()}</details>`
       : "The folder of something you're building. Agents you start work in it." + folderForm(),
     blocks.map(f => `<button class="btn" data-su="block" data-path="${esc(f.path)}">Update ${esc(f.path.split("/").pop())}</button>`).join("")));
+  for (const warning of st.agy_instruction_warnings || []) {
+    out.push(`<div class="sub">${esc(warning).replaceAll("/", "/<wbr>")}</div>`);
+  }
   // An agent the Start button can open: installed here, and on the Start button's list.
   // Choose an agent (#6239): every agent with its state from a real check (a green check: the program is on this
   // computer; an empty circle: it is not, with Install), Claude Code and Codex first, the others under More agents.

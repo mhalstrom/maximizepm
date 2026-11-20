@@ -1403,7 +1403,7 @@ class Setup(Env):
         # #6024: Claude Code reads AGENTS.md too; CLAUDE.md is only the old file whose rules maxpm init moves.
         self.assertEqual(agents.get("claude").setup["instructions"], "AGENTS.md")
         self.assertEqual(agents.get("codex").setup["instructions"], "AGENTS.md")
-        self.assertEqual(agents.replaced_files(), [("CLAUDE.md", "Claude Code")])
+        self.assertEqual(agents.replaced_files(), [("CLAUDE.md", "Claude Code"), ("GEMINI.md", "Antigravity CLI")])
         self.assertEqual(cli._old_rules("@AGENTS.md\n" + cli.AGENT_SNIPPET), "")
         self.assertEqual(cli._old_rules("# rules\n@AGENTS.md\n"), "# rules")
         self.assertIn("maxpm init --move", cli.move_hint("CLAUDE.md"))

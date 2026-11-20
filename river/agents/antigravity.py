@@ -1092,11 +1092,26 @@ def read_commands(folder):
 SETUP = {
     # agy reads AGENTS.md (and GEMINI.md) in the project folder and each folder above it.
     "instructions": "AGENTS.md",
+    "replaces": "GEMINI.md",
     # Skills for agy alone; ~/.gemini/config/skills holds skills for the Antigravity app too.
     "skills_dir": "~/.gemini/antigravity-cli/skills",
     "voice": "/voice dictates a prompt or talks with agy by voice.",
     "open_link": None,
 }
+
+
+def global_instructions():
+    return Path.home() / ".gemini" / SETUP["replaces"]
+
+
+def extra_instruction_files(folders):
+    """The additional instruction files agy reads from these folders, their parents and the user's home."""
+    paths = []
+    for folder in folders:
+        folder = Path(folder).resolve()
+        paths.extend(d / SETUP["replaces"] for d in (folder, *folder.parents))
+    return [p for p in dict.fromkeys([*paths, global_instructions()]) if p.is_file()]
+
 
 # 12. Update (#6430): agy --print answers one request and exits. Homebrew's cask antigravity-cli has the newest version
 # also for an agy from Google's script.

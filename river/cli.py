@@ -69,8 +69,8 @@ SETUP = """Setting up agents to use MaximizePM
 
 """ + "\n".join("     " + line for line in AGENT_SNIPPET.splitlines()) + """
 
-   Or let maxpm add it:  maxpm init   (AGENTS.md holds the rules and the block;
-   the rules of an old CLAUDE.md move into it, and CLAUDE.md is deleted)
+   Or run maxpm init. It puts the work queue block in AGENTS.md and can
+   move rules from CLAUDE.md and GEMINI.md into AGENTS.md.
 
 3. Claude Code only, optional: install the skills so they load when needed:
      ln -s <repo>/skills/maxpm ~/.claude/skills/maxpm
@@ -2329,8 +2329,9 @@ def build_parser(only=None):
     x.add_argument("--description", default="", help="what the project covers, for agents")
     x.add_argument("--file", action="append", help="add the block to this file only (repeatable)")
     x.add_argument("--move", action="store_true", default=None,
-                   help="move the rules in CLAUDE.md to AGENTS.md and delete CLAUDE.md (the default with no terminal)")
-    x.add_argument("--no-move", dest="move", action="store_false", help="keep CLAUDE.md as it is")
+                   help="move the rules from CLAUDE.md and GEMINI.md to AGENTS.md and delete the old files "
+                        "(the default with no terminal)")
+    x.add_argument("--no-move", dest="move", action="store_false", help="keep old instruction files that hold rules")
 
     x = sub.add_parser("go", help="start or continue an agent session: name, role, item, briefing")
     x.add_argument("--project", help="project name(s) when this folder is not linked")
@@ -4137,7 +4138,7 @@ def _append_block(f):
 
 
 def _old_rules(text):
-    """The rules of an old instruction file (CLAUDE.md, #6024): its text without the work queue block and without a
+    """The rules of an old instruction file: its text without the work queue block and without a
     line that imports AGENTS.md (@AGENTS.md, which maxpm init wrote there before)."""
     from . import agents
     line = "@" + agents.SHARED_INSTRUCTIONS
@@ -4149,22 +4150,34 @@ def _only_block(text):
     return not text.replace(OLD_SNIPPET, "").replace(AGENT_SNIPPET, "").strip()
 
 
+def legacy_instructions(folder):
+    """The project instruction files setup can move, with the agent label and the rules each holds."""
+    from . import agents
+    from .agents import antigravity
+    global_file = antigravity.global_instructions().resolve()
+    for name, label in agents.replaced_files():
+        path = Path(folder, name)
+        if path.is_file() and path.resolve() != global_file:
+            yield path, label, _old_rules(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def agy_instruction_warnings(folders):
+    from .agents import antigravity
+    return [f"agy also reads this file: {path}" for path in antigravity.extra_instruction_files(folders)]
+
+
 def instructions_layout(folder):
-    """How a folder's agent instructions are laid out. AGENTS.md is the one file of every agent; CLAUDE.md is the old
-    file of Claude Code (the adapters give the names: agents.SHARED_INSTRUCTIONS, agents.replaced_files):
-    none: no rules (no file, or only the work queue block or the line @AGENTS.md).  agents_only: the rules are in
-    AGENTS.md.  claude_only: the rules are in CLAUDE.md, and AGENTS.md has none.  both: each file holds rules."""
+    """Whether the shared file and any legacy file hold rules. The legacy-only value is named claude_only."""
     from . import agents
     a = Path(folder, agents.SHARED_INSTRUCTIONS)
     at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else None
-    old = [Path(folder, f) for f, _ in agents.replaced_files()]
-    c_rules = any(f.exists() and _old_rules(f.read_text(errors="replace", encoding="utf-8")) for f in old)
+    old_rules = any(rules for _, _, rules in legacy_instructions(folder))
     a_rules = at is not None and not _only_block(at)
-    return "both" if c_rules and a_rules else "claude_only" if c_rules else "agents_only" if a_rules else "none"
+    return "both" if old_rules and a_rules else "claude_only" if old_rules else "agents_only" if a_rules else "none"
 
 
 def move_hint(old):
-    """The choice that maxpm init names when an old instruction file (CLAUDE.md) holds rules of a folder."""
+    """The choice that maxpm init names when an old instruction file holds rules of a folder."""
     from . import agents
     shared = agents.SHARED_INSTRUCTIONS
     return (f"{old} holds rules of this folder. Every agent reads {shared}; to keep the rules in that one file: "
@@ -4176,11 +4189,10 @@ def _paragraphs(text):
     return [p.strip("\n") for p in re.split(r"\n[ \t]*\n", text) if p.strip()]
 
 
-def _move_rules(old, a):
+def _move_rules(old, a, rules):
     """Move the rules of the old instruction file old into AGENTS.md a: each paragraph that a does not hold yet
     (the same words, whitespace aside) goes after a's own rules, before its work queue block when it holds only that
     block. Returns the line that says what moved."""
-    rules = _old_rules(old.read_text(errors="replace", encoding="utf-8"))
     at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else ""
     have = {" ".join(p.split()) for p in _paragraphs(at)}
     new = [p for p in _paragraphs(rules) if " ".join(p.split()) not in have]
@@ -4196,31 +4208,28 @@ def _move_rules(old, a):
 
 
 def setup_instructions(folder, move=None):
-    """_setup_shared, then the advice that ends the lines of a folder whose CLAUDE.md keeps its rules (move not
-    True)."""
+    """Set up the shared instructions and report files that still supply separate rules."""
     main, note = _setup_shared(folder, move)
-    return main + note
+    return main + note + agy_instruction_warnings([folder])
 
 
 def _setup_shared(folder, move=None):
     """Put the rules of a folder and the work queue block in the one file that every agent reads, AGENTS.md (#6024).
 
-    An old instruction file (CLAUDE.md, agents.replaced_files) that holds no rules (only the block or the line
+    An old instruction file that holds no rules (only the block or the line
     @AGENTS.md) is deleted. One that holds rules: move=True moves them into AGENTS.md and deletes it; move=False keeps
     it as it is; move=None keeps it and says the choice. Returns (one line per change, the closing advice)."""
     from . import agents
     folder = Path(folder)
     a = folder / agents.SHARED_INSTRUCTIONS
     out, note = [], []
-    for name, label in agents.replaced_files():
-        c = folder / name
-        if not c.exists():
-            continue
-        if not _old_rules(c.read_text(errors="replace", encoding="utf-8")):
+    for c, label, rules in legacy_instructions(folder):
+        name = c.name
+        if not rules:
             c.unlink()
             out.append(f"{name}: deleted (it held no rules of its own); {label} reads {a.name}")
         elif move:
-            out.append(_move_rules(c, a))
+            out.append(_move_rules(c, a, rules))
             c.unlink()
             out.append(f"{name}: deleted; {label} reads {a.name}")
         else:
@@ -4267,17 +4276,18 @@ def init_folder(args):
     conn = core.connect()
     here = Path.cwd()
     name, linked_here, lines = link_folder(conn, here, args.project, args.description, args.actor)
-    # AGENTS.md for every agent (Claude Code, Codex, OpenCode, ...); an old CLAUDE.md gives its rules to it (#6024).
+    # AGENTS.md holds the rules shared by all agents.
     if args.file:
         lines += [_append_block(Path(f)) for f in args.file]
     else:
         move = args.move
-        if move is None and instructions_layout(here) in ("claude_only", "both") and sys.stdin.isatty():
-            from . import agents
-            olds = " and ".join(f for f, _ in agents.replaced_files() if (here / f).exists())
-            ans = input(f"{olds} holds rules of this folder. Move them to {agents.SHARED_INSTRUCTIONS}, which every "
-                        f"agent reads, and delete {olds}? [Y/n] ")
-            move = ans.strip().lower() in ("", "y", "yes")
+        if move is None and sys.stdin.isatty():
+            olds = [path.name for path, _, rules in legacy_instructions(here) if rules]
+            if olds:
+                from . import agents
+                ans = input(f"Move the rules from {' and '.join(olds)} to {agents.SHARED_INSTRUCTIONS}, which every "
+                            "agent reads, and delete the old files? [Y/n] ")
+                move = ans.strip().lower() in ("", "y", "yes")
         lines += setup_instructions(here, True if move is None else move)
     shown = name or linked_here[0]
     from . import agents

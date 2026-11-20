@@ -4690,6 +4690,43 @@ class SetupGuide(unittest.TestCase):
         self.assertIn("No tabs.", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
+    def test_setup_moves_both_legacy_files_and_warns_about_other_gemini_files(self):
+        root = Path(self.dir.name).resolve()
+        folder = Path(self.folder).resolve()
+        gemini = folder / "GEMINI.md"
+        claude = folder / "CLAUDE.md"
+        parent = root / "GEMINI.md"
+        global_file = root / ".gemini" / "GEMINI.md"
+        global_file.parent.mkdir()
+        parent.write_text("Parent rule.\n", encoding="utf-8")
+        global_file.write_text("Global rule.\n", encoding="utf-8")
+        gemini.write_text("Gemini rule.\n\n@AGENTS.md\n", encoding="utf-8")
+        claude.write_text("Claude rule.\n", encoding="utf-8")
+        from river.agents import antigravity
+        with mock.patch.object(antigravity, "global_instructions", return_value=global_file):
+            added = server.folder_add(self.c, str(folder))
+            self.assertCountEqual(added["old_with_rules"], ["GEMINI.md", "CLAUDE.md"])
+            self.assertIn(f"agy also reads this file: {gemini}", added["agy_instruction_warnings"])
+            kept = server.folder_add(self.c, str(folder), move=False)
+            self.assertEqual(kept["old_with_rules"], added["old_with_rules"])
+            self.assertTrue(gemini.is_file())
+            server.setup_block(self.c, str(folder), move=True)
+            status = server.setup_status(self.c)
+            self.assertEqual(status["folders"][0]["old_with_rules"], [])
+            self.assertNotIn(f"agy also reads this file: {gemini}", status["agy_instruction_warnings"])
+            for path in (parent, global_file):
+                self.assertIn(f"agy also reads this file: {path}", status["agy_instruction_warnings"])
+            from river.cli import setup_instructions
+            setup_instructions(global_file.parent, move=True)
+        self.assertFalse(gemini.exists())
+        self.assertFalse(claude.exists())
+        rules = (folder / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("Gemini rule.", rules)
+        self.assertIn("Claude rule.", rules)
+        self.assertNotIn("@AGENTS.md", rules)
+        self.assertEqual(parent.read_text(encoding="utf-8"), "Parent rule.\n")
+        self.assertEqual(global_file.read_text(encoding="utf-8"), "Global rule.\n")
+
     def test_the_apps_own_tmux_comes_first_and_runs_its_own_server(self):
         """#6237: the app carries tmux in river-app/tmux/bin; MaximizePM uses it before any other, and every tmux
         command for it names the server maximizepm (-L), so the person's own tmux stays apart. With no app tmux, the

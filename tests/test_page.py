@@ -126,6 +126,44 @@ try {
         self.assertEqual(self.drive(driver, "/", size="390,844"), {"w": 390, "h": 844, "phone": True})
         self.assertEqual(self.drive(driver, "/", size="1280,900")["w"], 1280)
 
+    def test_setup_can_move_gemini_rules_on_desktop_and_phone(self):
+        driver = r'''
+try {
+  await until(() => window.__appReady && q("#openSetup"), "the setup guide control");
+  q("#openSetup").click();
+  await until(() => q("#setupSteps .folderForm"), "the folder form");
+  const form = q("#setupSteps .folderForm");
+  const details = form.closest("details");
+  if (details) details.open = true;
+  const field = form.querySelector('[data-ff="path"]');
+  field.focus();
+  field.value = PROJECT;
+  form.querySelector("[data-ff-go]").click();
+  await until(() => form.querySelector('[data-ff-move="1"]'), "the rules choice");
+  const move = form.querySelector('[data-ff-move="1"]');
+  check(form.textContent.includes("GEMINI.md"), "the file to move is named");
+  check(move.getBoundingClientRect().right <= innerWidth, "the move button fits");
+  move.click();
+  await until(() => !form.isConnected && q("#setupSteps").textContent.includes(PARENT_WARNING)
+    && !q("#setupSteps").textContent.includes(PROJECT_WARNING), "only the parent warning remains");
+  post({width: innerWidth});
+} catch (e) { post({error: String(e.stack || e)}); }
+'''
+        parent = Path(self.dir.name).resolve()
+        (parent / "GEMINI.md").write_text("Parent rule.\n", encoding="utf-8")
+        core.config_set(self.c, "setup_done", "on")
+        for width in (390, 1280):
+            with self.subTest(width=width):
+                folder = parent / f"rules-{width}"
+                folder.mkdir()
+                (folder / "GEMINI.md").write_text("Project rule.\n", encoding="utf-8")
+                js = (driver.replace("PROJECT_WARNING", json.dumps(f"agy also reads this file: {folder / 'GEMINI.md'}"))
+                      .replace("PARENT_WARNING", json.dumps(f"agy also reads this file: {parent / 'GEMINI.md'}"))
+                      .replace("PROJECT", json.dumps(str(folder))))
+                self.assertEqual(self.drive(js, size=f"{width},844"), {"width": width})
+                self.assertFalse((folder / "GEMINI.md").exists())
+                self.assertIn("Project rule.", (folder / "AGENTS.md").read_text(encoding="utf-8"))
+
     def test_the_item_drawer_fits_a_390_px_screen(self):
         """#5701: at 390 px (a real phone frame) no part of the item drawer, its buttons, its fields and a long
         message text, reaches past the right edge of the screen."""

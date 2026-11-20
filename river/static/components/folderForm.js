@@ -68,19 +68,18 @@ export function wireFolderForms(onAdded) {
         const yes = out.querySelector("[data-ff-create]"); if (yes) yes.focus();
         return;
       }
-      // An old CLAUDE.md holds rules of this folder: ask once whether to move them to AGENTS.md, which every agent reads.
-      const old = r.layout === "claude_only" || r.layout === "both";
-      out.innerHTML = old
-        ? `Added <b>${esc(r.project)}</b>. This folder's CLAUDE.md has rules that Codex and other agents do not read.
-           <button class="btn" data-ff-move="1">Share them with every agent</button><button class="btn" data-ff-move="0">Keep CLAUDE.md as it is</button>`
+      const old = (r.old_with_rules || []).join(" and ");
+      const choosing = old && move === undefined;
+      out.innerHTML = choosing
+        ? `Added <b>${esc(r.project)}</b>. Move the rules from ${esc(old)} to AGENTS.md and delete the old files?
+           ${button("Move rules", { data: { "ff-move": "1" } })}${button("Keep files", { data: { "ff-move": "0" } })}`
         : `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
-      // Keep the fields while the CLAUDE.md choice is open: its buttons send the same folder again.
-      if (!(old && move === undefined)) {
+      out.innerHTML += (r.agy_instruction_warnings || []).map(w => `<div>${esc(w).replaceAll("/", "/<wbr>")}</div>`).join("");
+      if (!choosing) {
         for (const k of ["path", "name", "description"]) form.querySelector(`[data-ff="${k}"]`).value = "";
-        if (move !== undefined) out.innerHTML = `Added <b>${esc(r.project)}</b> (${esc(r.path)}). Agents started there now use the queue.`;
+        if (onAdded) onAdded(r);
       }
       toast(`Added the folder for ${r.project}`);
-      if (onAdded) onAdded(r);
     } catch (err) { /* act shows the error */ } finally { go.disabled = false; }
   });
 }

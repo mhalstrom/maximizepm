@@ -4201,7 +4201,7 @@ class AgentBlock(unittest.TestCase):
             cli.setup_instructions(d)  # nothing yet: AGENTS.md holds the block
             self.assertEqual((c.exists(), a.read_text(encoding="utf-8")), (False, cli.AGENT_SNIPPET))
             self.assertEqual(cli.instructions_layout(d), "none")
-            self.assertEqual(cli.setup_instructions(d), ["AGENTS.md: already has the work queue block"])
+            self.assertEqual(cli.setup_instructions(d)[0], "AGENTS.md: already has the work queue block")
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("# Rules\n\nPush to main deploys.\n", encoding="utf-8")
@@ -4231,7 +4231,7 @@ class AgentBlock(unittest.TestCase):
             c.write_text("claude rules\n", encoding="utf-8")
             lines = cli.setup_instructions(d, move=False)  # keep it as it is
             self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("claude rules\n", cli.AGENT_SNIPPET))
-            self.assertIn("CLAUDE.md: kept as it is", lines[-1])
+            self.assertTrue(any(line.startswith("CLAUDE.md: kept as it is") for line in lines))
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             c.write_text("@AGENTS.md\n" + cli.AGENT_SNIPPET, encoding="utf-8")  # what an older maxpm init made
