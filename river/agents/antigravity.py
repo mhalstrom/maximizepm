@@ -218,12 +218,19 @@ DENY_TMUX = ["command(tmux kill-server)", "command(tmux -L maximizepm kill-serve
 # a Claude session. An allow rule passes the command before that check. Measured with agy 1.5.13 on 2026-11-20 while
 # the Gemini quota was spent: chains of these commands, also with BypassSandbox and after a maxpm command, ran with no
 # question; 'echo hi > <file outside the workspace>' with BypassSandbox still asked, so a redirect is not allowed.
-READ_COMMANDS = ["git status", "git log", "git diff", "git show", "git remote -v", "ls", "pwd", "cat", "head", "tail",
-                 "wc", "grep", "echo"]
+# Not git diff, git log or git show (#6405): each takes --output=<file>, and with command(git diff) in allow agy 1.5.13
+# let 'git diff --output=<file outside the workspace>' with BypassSandbox (and in accept-edits) write the file with no
+# question; deny wildcards like command(*--output*) did not match.
+READ_COMMANDS = ["git status", "git remote -v", "ls", "pwd", "cat", "head", "tail", "wc", "grep", "echo"]
 ALLOW = ["command(maxpm)"] + [f"command({c})" for c in READ_COMMANDS]
 SETTINGS_JSON = json.dumps({"permissions": {"allow": ALLOW, "deny": DENY_TMUX}}, separators=(",", ":"))
 # The --settings of older starts, which parse_command reads back too.
-_OLD_SETTINGS = (json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":")),)
+_OLD_SETTINGS = (
+    json.dumps({"permissions": {"allow": ["command(maxpm)"], "deny": DENY_TMUX}}, separators=(",", ":")),
+    json.dumps({"permissions": {"allow": ["command(maxpm)"] + [f"command({c})" for c in (
+        "git status", "git log", "git diff", "git show", "git remote -v", "ls", "pwd", "cat", "head", "tail",
+        "wc", "grep", "echo")], "deny": DENY_TMUX}}, separators=(",", ":")),
+)
 
 
 def session_settings(read_dirs=(), secret_files=()):
