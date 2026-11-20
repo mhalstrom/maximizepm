@@ -194,7 +194,7 @@ def parse_command(words):
 # The session id: the SessionStart hook reports it (maxpm report --session-id, with the resume command). Grok also sets
 # GROK_SESSION_ID in the commands its tools run (Grok 1.0.77; it sets GROK_AGENT there too, but a person may set that
 # one to pick an agent).
-IDENTITY = {"source": "hook", "env": None, "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "hook", "env": None, "pane": None, "url": None,
             "inside_env": ["GROK_SESSION_ID"]}
 
 STATE = {"state": "hook", "session_id": "hook"}

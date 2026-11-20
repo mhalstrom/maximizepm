@@ -88,7 +88,6 @@ LAUNCH = {
 IDENTITY = {
     "source": "hook",  # the state extension reports ctx.sessionManager.getSessionId() on session_start
     "env": None,
-    "log_glob": "~/.pi/agent/sessions/*/*.jsonl",
     "pane": None,
     "url": None,
     "inside_env": ["PI_CODING_AGENT"],

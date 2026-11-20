@@ -327,8 +327,7 @@ class Setup(Home):
 
     def test_agy_reads_agents_md_itself(self):
         a = agents.get("antigravity")
-        self.assertEqual((a.setup["instructions"], a.setup["import"]), ("AGENTS.md", None))
-        self.assertEqual(agents.import_files(), [])  # no agent needs a file of its own that imports AGENTS.md
+        self.assertEqual(a.setup["instructions"], "AGENTS.md")
 
 
 if __name__ == "__main__":

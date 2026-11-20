@@ -100,7 +100,6 @@ LAUNCH = {
 IDENTITY = {
     "source": "env",  # each shell command of the session has CURSOR_CONVERSATION_ID
     "env": "CURSOR_CONVERSATION_ID",
-    "log_glob": "~/.cursor/projects/*/agent-transcripts/*/*.jsonl",
     "pane": None,
     "url": None,
     "inside_env": ["CURSOR_AGENT"],  # Cursor sets CURSOR_AGENT=1 for the commands it runs

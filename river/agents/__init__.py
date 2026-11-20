@@ -269,9 +269,6 @@ FIRST_PROMPTS = ("argv", "paste")
 # 5. Session identity. IDENTITY = {
 #      "source":     how MaximizePM learns the session's id after the start: one of IDENTITY_SOURCES,
 #      "env":        the variable that holds it ("env" source), or None,
-#      "log_glob":   the glob of the new log file in a known folder ("log" source; ~ expands), or None; with the
-#                    "log" source, the module's session_from_log(folder, env) gives the id to a command inside the
-#                    agent (core.session_from_env, #5819),
 #      "pane":       a regex whose group 1 is the id in the pane's text ("pane" source), or None,
 #      "url":        its web link with {id} ("https://.../{id}"), or one link for every session (Codex's web app), or None,
 #      "inside_env": the variables that tell that a command runs inside this agent (CLAUDECODE, CODEX_THREAD_ID);
@@ -290,8 +287,8 @@ FIRST_PROMPTS = ("argv", "paste")
 # finds the chat before the session's first maxpm command (#5280).
 # With source "env" and CHAT["ref"] "session", each maxpm command records the id it finds in "env" for the acting
 # agent (core.session_from_env, agent_sessions): the Sessions tab then finds the agent's chat log by it (#5212).
-IDENTITY_SOURCES = ("hook", "env", "log", "pane")
-IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
+IDENTITY_SOURCES = ("hook", "env", "pane")
+IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "pane": (str, type(None)),
                  "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None)),
                  "process": (str, type(None))}
 IDENTITY_PROCESS = ("ancestor", "terminal", "nearest_terminal")
@@ -399,11 +396,6 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      (OpenCode: "Allow once   Always allow   Reject      ⇆ select  enter confirm"); Left and Right
 #                      move in it. Its selected option shows by colour only, so the page takes the first one as
 #                      selected (OpenCode selects it at each new request). "": no such menu (#5281),
-#      "behind":       a regex of a question that the CLI draws under another question while the keys answer the one
-#                      above it (#5818); the page then reads the question above. "": none,
-#      "header":       a regex of the line above a tool question that names the tool (group 1) and what it runs or
-#                      changes (group 2, optional), such as "? Shell  touch notes.txt" (#5817). "": the built-in
-#                      reading (a line that starts with command, file, edit, fetch or tool),
 #      "fixed":        a regex of a question (its text or an option) that takes only one of its options, no typed text,
 #                      when it has no "tell_instead" option: the question card then has no Other (#5904). "": none,
 #      "ask":          a regex of the first line of the CLI's own question dialog (Claude Code's AskUserQuestion: its
@@ -423,7 +415,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "behind": str, "header": str, "fixed": str, "ask": str, "ask_form": str}
+               "fixed": str, "ask": str, "ask_form": str}
 ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity")
 DETECT_LAYOUT = {
     "menu": "❯›",
@@ -439,8 +431,6 @@ DETECT_LAYOUT = {
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"
             r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
     "row": "",
-    "behind": "",
-    "header": "",
     # The trust question of each CLI (Claude Code's 'Yes, I trust this folder', Codex, Antigravity CLI, Cursor,
     # Copilot, Grok, Pi): its Esc exits the CLI, so the card offers no Other there (#5904).
     "fixed": r"(?i)\btrust\b",
@@ -485,8 +475,6 @@ COMMAND_PAGES = ("usage",)
 
 # 11. Setup (#5184). SETUP = {
 #      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md),
-#      "import":       the line with {file} by which its instruction file imports another one ("@{file}"), or None;
-#                      an agent whose file is not SHARED_INSTRUCTIONS and that has it reads AGENTS.md through it,
 #      "replaces":     the instruction file it read before, whose rules maxpm init moves into SHARED_INSTRUCTIONS and
 #                      then deletes (Claude Code: CLAUDE.md, #6024), or None,
 #      "skills_dir":   the folder of its skills (~ expands), or None,
@@ -497,7 +485,7 @@ COMMAND_PAGES = ("usage",)
 #    }
 # write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
 # mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
-SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "replaces": (str, type(None)),
+SETUP_KEYS = {"instructions": str, "replaces": (str, type(None)),
               "skills_dir": (str, type(None)),
               "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
               "no_link": (str, type(None))}
@@ -1144,7 +1132,7 @@ def by_exe(exe):
 # ---------------------------------------------------------------------------------------------------------------
 
 # The instruction file that most agents read in a project folder (Claude Code, Codex, Antigravity CLI, OpenCode, Amp
-# and others). An agent with its own file and an import line (SETUP["import"]) reads it through that line.
+# and others).
 SHARED_INSTRUCTIONS = "AGENTS.md"
 
 
@@ -1159,21 +1147,6 @@ def replaced_files():
         if old and old != SHARED_INSTRUCTIONS and old not in seen:
             seen.add(old)
             out.append((old, a.label))
-    return out
-
-
-def import_files():
-    """[(own, line, label)] for every agent whose own instruction file reads SHARED_INSTRUCTIONS through an import line
-    (SETUP["import"]), one entry per file, in registry order, such as ('OWN.md', '@AGENTS.md', '<label>') (#5218); none
-    with the built-in agents. maxpm init writes each of them."""
-    out, seen = [], set()
-    for m in ids():
-        a = load()[m]
-        st = a.setup or {}
-        own = st.get("instructions")
-        if st.get("import") and own not in (None, SHARED_INSTRUCTIONS) and own not in seen:
-            seen.add(own)
-            out.append((own, st["import"].format(file=SHARED_INSTRUCTIONS), a.label))
     return out
 
 
@@ -1231,7 +1204,7 @@ def is_tier1(name):
 
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
-           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files", "import_files",
+           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "replaced_files",
            "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe", "TIER1", "is_tier1"]
 
 

@@ -93,7 +93,6 @@ SESSION_ID = r"ses_[A-Za-z0-9]{8,64}"
 IDENTITY = {
     "source": "hook",  # the plugin reports the session that the pane shows, with --session-id
     "env": None,
-    "log_glob": None,
     "pane": None,
     "url": None,
     "inside_env": ["OPENCODE_SESSION_ID"],  # its shell tool sets it for each command

@@ -104,7 +104,7 @@ EFFORT = {
 
 LAUNCH = {"resume": True}  # no session name, no system prompt flag, no hooks file, no extra folders, no fork
 
-IDENTITY = {"source": "env", "env": "AMP_CURRENT_THREAD_ID", "log_glob": None, "pane": None,
+IDENTITY = {"source": "env", "env": "AMP_CURRENT_THREAD_ID", "pane": None,
             "url": "https://ampcode.com/threads/{id}", "inside_env": ["AMP_CURRENT_THREAD_ID"]}
 
 _THREAD = re.compile(r"T-[0-9A-Za-z][0-9A-Za-z-]{7,63}\Z")

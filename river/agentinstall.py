@@ -13,7 +13,6 @@ the panes, so the Start button finds what the guide found."""
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -22,7 +21,7 @@ from pathlib import Path
 from .core import RiverError
 
 # platform -> how its vendor installs it. install: the shell command; cask: the Homebrew cask that install_command uses
-# in place of install on a computer with Homebrew (optional); needs: a program it needs (npm), or None;
+# in place of install on a computer with Homebrew (optional);
 # signin: the CLI's own sign-in command, or None (it asks at its first start, or uses a key in the environment);
 # status: the command that exits 0 when signed in, or None (no vendor documents one); dirs: where it goes.
 # Sources (read 2026-11-19): code.claude.com/docs/en/setup and cli-reference; github.com/openai/codex README and
@@ -31,38 +30,38 @@ from .core import RiverError
 # opencode.ai README (sst/opencode dev); github.com/block/goose README; aider.chat/docs/install.html;
 # ampcode.com/docs/cli; cursor.com/docs/cli/installation; pi-mono coding-agent README; hermes-agent README.
 METHODS = {
-    "claude-code": {"install": "curl -fsSL https://claude.ai/install.sh | bash", "needs": None,
+    "claude-code": {"install": "curl -fsSL https://claude.ai/install.sh | bash",
                     "signin": "claude auth login", "status": ["auth", "status"], "dirs": ["~/.local/bin"]},
-    "codex": {"install": "curl -fsSL https://chatgpt.com/codex/install.sh | sh", "needs": None,
+    "codex": {"install": "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
               # --device-auth: a link and a code that work in any browser, also on the phone (codex login alone waits
               # for a browser on this computer)
               "signin": "codex login --device-auth", "status": ["login", "status"], "dirs": ["~/.local/bin", "~/.codex/bin"]},
-    "copilot": {"install": "curl -fsSL https://gh.io/copilot-install | bash", "needs": None,
+    "copilot": {"install": "curl -fsSL https://gh.io/copilot-install | bash",
                 "signin": None, "status": None, "dirs": ["~/.local/bin"]},  # sign-in: /login inside copilot
     # Antigravity CLI (#6248), Google's coding agent: one Go program, agy. Google's script puts it in
     # ~/.local/bin (antigravity.google/docs/getting-started); on a Mac with Homebrew the cask antigravity-cli puts it
     # in Homebrew's bin, and brew upgrades it. It has no sign-in command: agy with no arguments asks for the sign-in
     # (Google OAuth, or a Google Cloud project) at its first start, and agy models exits 1 ("Please sign in to view
     # available models") until then, 0 after (measured with agy 1.5.13, about one second).
-    "antigravity": {"install": "curl -fsSL https://antigravity.google/cli/install.sh | bash", "needs": None,
+    "antigravity": {"install": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
                     "cask": "antigravity-cli", "signin": "agy", "status": ["models"], "dirs": ["~/.local/bin"]},
-    "opencode": {"install": "curl -fsSL https://opencode.ai/v2/install | bash", "needs": None,
+    "opencode": {"install": "curl -fsSL https://opencode.ai/v2/install | bash",
                  "signin": None, "status": None, "dirs": ["~/.opencode/bin"]},
     "goose": {"install": "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh"
-                         " | CONFIGURE=false bash", "needs": None, "signin": "goose configure", "status": None,
+                         " | CONFIGURE=false bash", "signin": "goose configure", "status": None,
               "dirs": ["~/.local/bin"]},
-    "aider": {"install": "curl -LsSf https://aider.chat/install.sh | sh", "needs": None,
+    "aider": {"install": "curl -LsSf https://aider.chat/install.sh | sh",
               "signin": None, "status": None, "dirs": ["~/.local/bin"]},  # API keys in the environment
-    "amp": {"install": "curl -fsSL https://ampcode.com/install.sh | bash", "needs": None,
+    "amp": {"install": "curl -fsSL https://ampcode.com/install.sh | bash",
             "signin": "amp login", "status": None, "dirs": ["~/.local/bin", "~/.amp/bin"]},
-    "cursor": {"install": "curl https://cursor.com/install -fsS | bash", "needs": None,
+    "cursor": {"install": "curl https://cursor.com/install -fsS | bash",
                "signin": "cursor-agent login", "status": None, "dirs": ["~/.local/bin"]},
-    "pi": {"install": "curl -fsSL https://pi.dev/install.sh | sh", "needs": None,
+    "pi": {"install": "curl -fsSL https://pi.dev/install.sh | sh",
            "signin": None, "status": None, "dirs": ["~/.local/bin"]},  # sign-in: /login inside pi
-    "hermes": {"install": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash", "needs": None,
+    "hermes": {"install": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
                "signin": "hermes setup --portal", "status": None, "dirs": ["~/.local/bin", "~/.hermes/bin"]},
     # Two programs are named grok (xAI's Grok Build, the community grok-cli); this is xAI's own.
-    "grok": {"install": "curl -fsSL https://x.ai/cli/install.sh | bash", "needs": None,
+    "grok": {"install": "curl -fsSL https://x.ai/cli/install.sh | bash",
              "signin": "grok login --device-auth", "status": None, "dirs": ["~/.local/bin", "~/.grok/bin"]},
 }
 # Where installers put programs, besides each method's dirs: Homebrew, the system, npm's and bun's global bins.
@@ -194,9 +193,6 @@ def run(conn, platform, kind, who):
     label = core.platform_spec(platform)["label"]
     if kind == "install":
         cmd = install_command(platform)
-        if m["needs"] and not find([m["needs"]], server._login_shell_which([m["needs"]]))[m["needs"]]:
-            raise RiverError(f"{label} installs with {m['needs']}, which is not on this computer: install Node.js "
-                             f"first (nodejs.org), then install {label}")
     elif kind == "signin":
         cmd = m["signin"]
         if not cmd:
@@ -232,7 +228,3 @@ def run(conn, platform, kind, who):
 def _q(text):
     import shlex
     return shlex.quote(text)
-
-
-def npm_found(found=None):
-    return bool(find(["npm"], found)["npm"]) or bool(shutil.which("npm"))

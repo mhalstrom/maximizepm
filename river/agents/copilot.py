@@ -82,7 +82,7 @@ EFFORT = {
 LAUNCH = {"session_name": True, "extra_dirs": True, "resume": True}
 
 # The hook reports the id (sessionStart); COPILOT_CLI is set in the environment of its hooks and commands.
-IDENTITY = {"source": "hook", "env": None, "log_glob": None, "pane": None,
+IDENTITY = {"source": "hook", "env": None, "pane": None,
             "url": None, "inside_env": ["COPILOT_CLI"]}
 
 

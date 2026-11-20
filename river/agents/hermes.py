@@ -219,7 +219,7 @@ def parse_command(words):
 # The first process above a maxpm command of a Hermes session is that shared gateway (a Python with no terminal,
 # started once for every session), not the CLI in the pane: MaximizePM records it only when it runs on a terminal, so
 # the busy checks and maxpm stop --kill never act on the gateway (#5247).
-IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "pane": None, "url": None,
             "inside_env": ["HERMES_SESSION_ID"], "process": "terminal"}
 
 # The variables of MaximizePM that a maxpm command inside Hermes needs, for terminal.client_env_passthrough. Hermes

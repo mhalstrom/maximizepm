@@ -239,7 +239,6 @@ def parse_command(words):
 IDENTITY = {
     "source": "pane",
     "env": None,
-    "log_glob": None,
     # The header that goose prints at each start and resume: "   \____)    20261111_1 · /Users/me/work".
     "pane": r"\\____\)\s+(" + SESSION_ID + r")\s+·",
     "url": None,

@@ -242,7 +242,6 @@ IDENTITY = {
     "source": "env",
     "env": SESSION_ENV,
     "id_pattern": r"[A-Za-z0-9][\w.-]{0,127}",
-    "log_glob": None,
     "pane": None,
     "url": None,
     "inside_env": [SESSION_ENV],

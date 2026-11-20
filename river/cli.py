@@ -4143,30 +4143,10 @@ def _move_rules(old, a):
 
 
 def setup_instructions(folder, move=None):
-    """_setup_shared, and the instruction file of every agent that imports AGENTS.md (_setup_importers), whose lines
-    come before the advice that ends the lines of a folder whose CLAUDE.md keeps its rules (move not True)."""
+    """_setup_shared, then the advice that ends the lines of a folder whose CLAUDE.md keeps its rules (move not
+    True)."""
     main, note = _setup_shared(folder, move)
-    return main + _setup_importers(folder) + note
-
-
-def _setup_importers(folder):
-    """The own instruction file of each agent that imports AGENTS.md (SETUP["import"], #5218): missing, or
-    holding only the work queue block, it becomes the one import line; holding its own rules, it gets the work queue
-    block, and nothing else of it changes. Returns one line per change."""
-    from . import agents
-    out = []
-    for own, line, label in agents.import_files():
-        f = Path(folder) / own
-        text = f.read_text(errors="replace", encoding="utf-8") if f.exists() else None
-        if text is not None and any(x.strip() == line for x in text.splitlines()):
-            continue
-        if text is None or _only_block(text):
-            f.write_text(line + "\n", encoding="utf-8")
-            out.append(f"{own}: {'created as' if text is None else 'now'} the one line {line}, so {label} reads "
-                       f"{agents.SHARED_INSTRUCTIONS} too")
-        else:
-            out.append(_append_block(f))
-    return out
+    return main + note
 
 
 def _setup_shared(folder, move=None):

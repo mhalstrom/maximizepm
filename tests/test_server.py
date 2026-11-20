@@ -4529,7 +4529,7 @@ class SetupGuide(unittest.TestCase):
         clis = {a["label"]: a for a in server.setup_status(self.c)["agent_clis"]}
         claude, codex, agy = clis["Claude Code"], clis["Codex"], clis["Antigravity CLI"]
         self.assertEqual((claude["found"], claude["added"], claude["main"]), (False, True, True))
-        self.assertEqual(claude["install"], {"command": "curl -fsSL https://claude.ai/install.sh | bash", "missing": None})
+        self.assertEqual(claude["install"], {"command": "curl -fsSL https://claude.ai/install.sh | bash"})
         self.assertTrue(claude["signin"])
         self.assertEqual((codex["found"], codex["path"], codex["added"], codex["main"]),
                          (True, os.path.join(b, "codex"), False, True))

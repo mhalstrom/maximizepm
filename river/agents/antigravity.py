@@ -308,7 +308,7 @@ def parse_command(words):
 
 # Measured in a shell command of agy 1.5.13: ANTIGRAVITY_AGENT=1, ANTIGRAVITY_CONVERSATION_ID=<uuid> (also
 # ANTIGRAVITY_TRAJECTORY_ID, ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_PROJECT_ID). No web link for a local conversation.
-IDENTITY = {"source": "env", "env": "ANTIGRAVITY_CONVERSATION_ID", "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "env", "env": "ANTIGRAVITY_CONVERSATION_ID", "pane": None, "url": None,
             "inside_env": ["ANTIGRAVITY_AGENT"],
             "id_pattern": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
 
@@ -671,7 +671,6 @@ def read_commands(folder):
 SETUP = {
     # agy reads AGENTS.md (and GEMINI.md) in the project folder and each folder above it.
     "instructions": "AGENTS.md",
-    "import": None,
     # Skills for agy alone; ~/.gemini/config/skills holds skills for the Antigravity app too.
     "skills_dir": "~/.gemini/antigravity-cli/skills",
     "voice": "/voice dictates a prompt or talks with agy by voice.",

@@ -2374,8 +2374,6 @@ def _layout(detect=None):
                                "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
-                               "behind": d["behind"] and re.compile(d["behind"]),
-                               "header": d["header"] and re.compile(d["header"]),
                                "fixed": d["fixed"] and re.compile(d["fixed"]),
                                "ask": d["ask"] and re.compile(d["ask"]), "ask_form": d["ask_form"]}
     return got
@@ -2855,26 +2853,7 @@ def _prompt_found(tail, rx, layout=None):
         return None  # more under it: the spinner, the input box, the status line, or the next tool call
     if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
         return None
-    if lay.get("behind") and parts["question"] and lay["behind"].search(parts["question"]):
-        return _prompt_above(tail, parts, rx, lay) or parts
     return parts
-
-
-def _prompt_above(tail, parts, rx, lay):
-    """The prompt that shows above a 'behind' question's box (DETECT['behind']), or None (#5818): a CLI that draws
-    one question under a waiting tool question, while Enter answers the tool question. Read from the lower one, the
-    page's 'Yes' would have allowed the command."""
-    rows = list(getattr(tail, "above", ())) + list(tail)
-    n = len(rows) - len(tail) + parts["start"]
-    framed = re.compile(f"^\\s*[{lay['box']}]")
-    while n > 0 and framed.match(rows[n - 1]) and not _CORNER.match(rows[n]):
-        n -= 1
-    rows = rows[:n]
-    if not rows:
-        return None
-    up = _Tail(rows[-PROMPT_LINES:])
-    up.above = rows[-PROMPT_LINES - PROMPT_ABOVE:-PROMPT_LINES] if len(rows) > PROMPT_LINES else []
-    return _prompt_found(up, rx, lay)
 
 
 def _footer(line, layout=None):
@@ -2887,16 +2866,10 @@ def _prompt_command(lines, layout=None):
     """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
     command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
-    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it.
-    An adapter's DETECT['header'] reads both from the header line itself ('? Shell  touch notes.txt', #5817)."""
+    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
     lay = layout or _layout()
     rule = lay["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
-    if lay.get("header"):
-        m = next((m for m in map(lay["header"].match, reversed(lines)) if m), None)
-        if m:
-            cmd = m.group(2).strip() if m.re.groups >= 2 and m.group(2) else None
-            return {"tool": m.group(1).strip(), "command": cmd and cmd[:200], "why": why}
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
                  and len(lines[n].strip()) < 60), None)
@@ -5476,17 +5449,14 @@ def host_signin_op(conn, args, who=None):
 
 def _agent_cli(conn, label, exe, cmd, term, have, jobs):
     """One agent of the setup guide's Choose an agent (#6239). signed_in: True or False from the CLI's own status
-    command, None when it has none; install.needs: a program the install needs that is not on this computer."""
+    command, None when it has none."""
     platform = cmd[1:] if cmd.startswith("@") else None
     m = agentinstall.METHODS.get(platform) or {}
     path = term.get(exe)
-    needs = m.get("needs")
     return {"label": label, "platform": platform, "found": bool(path), "path": path,
             "added": label in have or exe in have, "command": _shown_cmd(conn, cmd),
             "main": core._adapters().is_tier1(platform),  # the tier 1 agents come first; others under More agents
-            "install": {"command": agentinstall.install_command(platform),
-                        "missing": needs if needs and not term.get(needs) else None}
-            if m.get("install") else None,
+            "install": {"command": agentinstall.install_command(platform)} if m.get("install") else None,
             "signin": bool(m.get("signin")),
             "signed_in": agentinstall.signed_in(platform, path) if path else None,
             "jobs": jobs.get(platform) or {}}
@@ -5521,7 +5491,7 @@ def setup_status(conn):
     have = {label for label, _ in agents} | {core.entry_exe(c) for _, c in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
     # Agents start in a new tmux pane, whose login shell must find their programs.
-    exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents} | {"npm"})
+    exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents})
     # Also where the installers put programs (#6239): an app started from Finder has a short PATH, and a login shell
     # that does not load a profile file misses ~/.local/bin and Homebrew's bin.
     term = agentinstall.find(exes, _login_shell_which(exes))

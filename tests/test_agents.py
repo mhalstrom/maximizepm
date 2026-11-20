@@ -142,7 +142,7 @@ class Contract(Env):
                     "flag": ["--thinking", "{value}"], "live": None, "read": None},
             LAUNCH={"session_name": True, "fork": False, "background": True},
             build_command=lambda name, folder, model, effort, settings, prompt: ["pi", "--model", model, prompt],
-            IDENTITY={"source": "env", "env": "PI_SESSION", "log_glob": None, "pane": None, "url": None,
+            IDENTITY={"source": "env", "env": "PI_SESSION", "pane": None, "url": None,
                       "inside_env": ["PI_SESSION"]},
             CHAT={"compressed": False, "file_tools": ["write"]},
             chat_path=lambda ref, folder: f"/logs/{ref}.jsonl",
@@ -1245,20 +1245,6 @@ class Setup(Env):
         self.assertEqual(cli._old_rules("@AGENTS.md\n" + cli.AGENT_SNIPPET), "")
         self.assertEqual(cli._old_rules("# rules\n@AGENTS.md\n"), "# rules")
         self.assertIn("maxpm init --move", cli.move_hint("CLAUDE.md"))
-
-    def test_a_user_adapter_with_its_own_file_name_changes_what_init_writes(self):
-        # A user module that replaces claude with another file name: init and the layout follow it.
-        self.user_module("claude", """
-            DESCRIBE = {"id": "claude", "label": "Claude Code", "exe": "claude", "family": "claude"}
-            SETUP = {"instructions": "CLAUDE.local.md", "import": "@{file}"}
-        """)
-        d = Path(self.tmp.name, "proj")
-        d.mkdir()
-        lines = cli.setup_instructions(d)
-        self.assertEqual((d / "CLAUDE.local.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
-        self.assertFalse((d / "CLAUDE.md").exists())
-        self.assertTrue(any("CLAUDE.local.md: created" in x for x in lines))
-        self.assertEqual(cli.instructions_layout(d), "none")
 
     def test_the_voice_text_comes_from_the_adapter(self):
         self.assertEqual(sessions.provider("claude-code")["voice_cli"], agents.get("claude").setup["voice"])

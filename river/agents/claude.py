@@ -35,7 +35,7 @@ EFFORT = {
 LAUNCH = {"session_name": True, "system_prompt_file": True, "hooks_file": True, "fork": True, "resume": True,
           "autocompact": True, "background": True, "mcp_config": True}
 
-IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "log_glob": None, "pane": None, "url": None,
+IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "pane": None, "url": None,
             "inside_env": ["CLAUDECODE"],
             # its session ids are UUIDs (core._SESSION_ID_RE): the name of its transcript, <id>.jsonl
             "id_pattern": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
@@ -771,7 +771,6 @@ SETUP = {
     # Claude Code reads AGENTS.md of the folder (checked in Claude Code 2.1.325), so a folder keeps its rules in that
     # one file for every agent; maxpm init moves the rules of an old CLAUDE.md into it and deletes it (#6024).
     "instructions": "AGENTS.md",
-    "import": None,
     "replaces": "CLAUDE.md",
     "skills_dir": "~/.claude/skills",
     # Voice (#4626): Claude Code records the microphone of the computer it runs on and takes no audio from outside

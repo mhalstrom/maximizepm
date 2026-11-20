@@ -41,7 +41,7 @@ EFFORT = {
 LAUNCH = {"extra_dirs": True, "resume": True}
 
 # A Codex session records no task link: its web link is Codex's web app (core.CODEX_WEB).
-IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "log_glob": None, "pane": None, "url": "https://chatgpt.com/codex",
+IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "pane": None, "url": "https://chatgpt.com/codex",
             "inside_env": ["CODEX_THREAD_ID", "CODEX_SANDBOX"]}
 
 
@@ -508,7 +508,6 @@ def read_commands(folder):
 
 SETUP = {
     "instructions": "AGENTS.md",
-    "import": None,
     "skills_dir": None,
     # Voice (#4626): checked in Codex 0.159.1; it takes no audio from outside, so the page dictates (#5107).
     "voice": ("/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with "

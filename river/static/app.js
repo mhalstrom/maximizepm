@@ -738,12 +738,11 @@ function renderSetup(st) {
     if (job) btns.push(`<button class="btn" data-su="job" data-pane="${esc(job.pane)}" data-name="${esc(job.name)}">${job.running ? "Show" : "Show the window"}</button>`);
     if (a.found && !a.added) btns.push(`<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="Add to Start button">Add</button>`);
     if (a.found && a.signin && a.signed_in !== true) btns.push(`<button class="btn${a.signed_in === false ? " primary" : ""}" data-su="signin" data-platform="${esc(a.platform)}">Sign in</button>`);
-    if (!a.found && a.install && !a.install.missing && !(job && job.running))
+    if (!a.found && a.install && !(job && job.running))
       btns.push(`<button class="btn${a.main && !ready.length ? " primary" : ""}" data-su="install" data-platform="${esc(a.platform)}" title="${esc(a.install.command)}">Install</button>`);
     const state = job && job.running ? (job === a.jobs.install ? "installing…" : "signing in…")
       : !a.found && job && job === a.jobs.install && job.exit ? `the install stopped (exit ${job.exit}): Show has its output`
       : a.found ? [a.added ? "on the Start button" : "installed", a.signed_in === true ? "signed in" : a.signed_in === false ? "not signed in" : ""].filter(Boolean).join(", ")
-      : a.install && a.install.missing ? `needs ${a.install.missing === "npm" ? "Node.js" : esc(a.install.missing)} first`
       : "not installed";
     const tail = job && job.tail.length ? `<div class="su-tail">${job.tail.map(esc).join("<br>")}</div>` : "";
     return `<div class="su-agent"><span class="su-am ${a.found ? "ok" : "no"}" aria-hidden="true">${a.found ? "✓" : "○"}</span>
