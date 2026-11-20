@@ -695,6 +695,10 @@ DEFAULT_SETTINGS = {
     # its limit starts again on the first other agent of the list that is not at its limit, and a launch whose agent
     # is at its limit takes that one. One ordered list, comma separated.
     "agent_order": "antigravity, claude-code",
+    # When no session of Claude Code or Antigravity runs, maxpm serve opens it in a hidden tmux pane, types /usage,
+    # reads the remaining usage, and closes it (#6364): at most once in usage_probe_every for each agent, and not while
+    # a reading is newer than that. 0s: never.
+    "usage_probe_every": "30m",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
     # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
     # deployer a deploy item, an expert an expert-tier task; the manager has no item.
@@ -3185,7 +3189,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days"):
+            "prompt_wait", "prompt_end", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):

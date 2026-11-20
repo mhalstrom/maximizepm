@@ -596,6 +596,7 @@ def loop(stop, interval_s=None):
                 vault.grant_summary,  # once a day: the manager's credential grants, to the person (#5828)
                 cost.watch,  # cost_limit set: one alert at 80% and at 100% of each limit in its period (#5857)
                 core.record_log_limits,  # the plan limits an agent wrote to its newest log (Codex), for the page (#6348)
+                server.probe_usage,  # Claude Code and agy with no session: /usage in a hidden pane (#6364)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices

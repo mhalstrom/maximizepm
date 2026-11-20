@@ -385,5 +385,100 @@ class LimitStopHandbackAndRestart(unittest.TestCase):
         self.assertIn("uncommitted work", launched[0][0]["custom_prompt"])
 
 
+class UsageProbe(unittest.TestCase):
+    """#6364: with no session of Claude Code or agy, maxpm serve opens the agent in a hidden pane, types /usage, reads
+    the limits, closes the screen with Esc and ends the pane."""
+    CLAUDE_IDLE = ["╭" + "─" * 40, "│ ❯                    │", "❯ ", "  ? for shortcuts"]
+    CLAUDE_USAGE = ["  Settings  Status   Config   Usage   Stats", "  Current week (all models)",
+                    "  ███████████                                        22% used",
+                    "  Resets Nov 25 at 11:59pm (America/Los_Angeles)"]
+    AGY_IDLE = ["? for shortcuts"]
+    AGY_USAGE = ["└ Models & Quota", "GEMINI MODELS", "  Five Hour Limit Remaining",
+                 "    [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0.00%", "    Refreshes in 2h 31m"]
+
+    def setUp(self):
+        import json
+        import os
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "test.db"
+        self.conn = _db(self.tmp.name)
+        claude_json = Path(self.tmp.name) / "claude.json"
+        folder = self.conn.execute("SELECT path FROM projects WHERE name='app'").fetchone()["path"]
+        claude_json.write_text(json.dumps({"projects": {folder: {"hasTrustDialogAccepted": True}}}))
+        self.calls, self.screens = [], {"claude": (self.CLAUDE_IDLE, self.CLAUDE_USAGE),
+                                        "antigravity": (self.AGY_IDLE, self.AGY_USAGE)}
+        self.typed = {}  # pane -> what was typed
+        for k, v in {"TMUX_RUNNER": self._tmux, "PROBE_POLL": 0, "PROBE_SYNC": True, "PROBE_EXE": lambda e: True,
+                     "PROBE": {"running": False, "at": {}}, "CLAUDE_JSON": str(claude_json)}.items():
+            p = mock.patch.object(server, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"MAXPM_DB": str(self.db)})
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+
+    def _tmux(self, args):
+        self.calls.append(args)
+        if args[0] == "has-session":
+            return None
+        if args[0] in ("new-session", "new-window"):
+            name = args[args.index("-n") + 1]
+            pane = f"%{name}"
+            self.typed[pane] = ""
+            return pane
+        pane = args[args.index("-t") + 1] if "-t" in args else None
+        if args[0] == "send-keys" and "-l" in args:
+            self.typed[pane] += args[-1] + "\n"
+            return ""
+        if args[0] == "capture-pane":
+            aid = pane.split("-", 1)[1]
+            idle, usage = self.screens[aid]
+            return "\n".join(usage if "/usage" in self.typed[pane] else idle)
+        return ""
+
+    def test_reads_both_agents_and_closes_their_panes(self):
+        got = server.probe_usage(self.conn)
+        self.assertEqual(got, ["claude", "antigravity"])
+        rows = {r["agent_type"]: r for r in core.agent_limits_list(self.conn)}
+        self.assertEqual((rows["claude"]["remaining_pct"], rows["claude"]["source"]), (78.0, "probe"))
+        self.assertTrue(rows["antigravity"]["limited"])
+        self.assertFalse(rows["codex"]["known"])  # Codex: its log, not a probe
+        for pane in ("%usage-claude", "%usage-antigravity"):
+            line = self.typed[pane].splitlines()[0]
+            self.assertIn("env -u MAXPM_AGENT -u MAXPM_FOCUS -u MAXPM_TOKEN", line)
+            self.assertIn(f"MAXPM_DB={self.db}", line)
+            keys = [c for c in self.calls if pane in c]
+            self.assertEqual(keys[-2], ["send-keys", "-t", pane, "Escape"])  # Esc closes /usage (p137)
+            self.assertEqual(keys[-1][:3], ["kill-pane", "-t", pane])
+        self.assertIn("claude --setting-sources user --strict-mcp-config", self.typed["%usage-claude"])
+        self.assertIn("trustedWorkspaces", self.typed["%usage-antigravity"])
+        self.assertTrue(all(c[c.index("-s") + 1] == server.PROBE_SESSION for c in self.calls if c[0] == "new-session"))
+        # Within usage_probe_every: no probe again.
+        self.assertEqual(server.probe_usage(self.conn), [])
+
+    def test_no_probe_while_a_session_runs_when_off_or_without_a_trusted_folder(self):
+        core.register(self.conn, "cc1")
+        self.conn.execute("UPDATE agents SET agent_type='claude-code' WHERE name='cc1'")
+        self.conn.commit()
+        self.assertEqual([a for a, _ in server.usage_probes_due(self.conn)], ["antigravity"])
+        core.unregister(self.conn, "cc1")
+        server.CLAUDE_JSON = str(Path(self.tmp.name) / "none.json")
+        self.assertEqual([a for a, _ in server.usage_probes_due(self.conn)], ["antigravity"])
+        core.config_set(self.conn, "usage_probe_every", "0s")
+        self.assertEqual(server.probe_usage(self.conn), [])
+        self.assertEqual(self.calls, [])
+
+    def test_a_question_at_the_start_gets_no_answer(self):
+        self.screens["claude"] = (["Do you trust the files in this folder?", "❯ 1. Yes, I trust this folder",
+                                   "  2. No, exit"], self.CLAUDE_USAGE)
+        got = server.probe_one(self.conn, "claude", Path(self.tmp.name))
+        self.assertIn("asks first", got["error"])
+        self.assertNotIn("/usage", self.typed["%usage-claude"])
+        self.assertEqual(self.calls[-1][:3], ["kill-pane", "-t", "%usage-claude"])
+        self.assertFalse(core.agent_limit_status(self.conn, "claude"))
+
+
 if __name__ == "__main__":
     unittest.main()

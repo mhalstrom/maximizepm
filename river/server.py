@@ -3245,6 +3245,185 @@ def _handle_limit_stops(conn, limit_hits):
     return out
 
 
+# The agents whose usage maxpm serve reads when no session of them runs (#6364). They write no limits to a log (Codex
+# does: record_log_limits reads it), so serve opens the agent in a hidden tmux pane, types its usage command, reads the
+# screen with the adapter's screen_limits, closes it with Esc (p137) and ends the pane. "args": the flags of that
+# start. Claude Code loads only the person's own settings (no project hooks) and no MCP servers; agy trusts the folder
+# for this start only (trust_workspace). Neither start installs anything in the agent's home (p140).
+USAGE_PROBES = {
+    "claude": {"args": ["--setting-sources", "user", "--strict-mcp-config"], "command": "/usage"},
+    "antigravity": {"args": [], "command": "/usage"},
+}
+PROBE_SESSION = "maxpm-usage"  # the tmux session of the probe panes: not the maxpm session, so no view or tidy sees them
+PROBE = {"running": False, "at": {}}  # whether a probe thread runs now, and when serve probed each agent last
+PROBE_START_MAX = 60  # seconds for the agent's input line to show
+PROBE_READ_MAX = 30  # seconds for its usage screen to show the limits
+PROBE_POLL = 1.0  # seconds between two looks at the pane (tests: 0)
+PROBE_SYNC = False  # tests: run the probes in the pass, not in a thread
+PROBE_EXE = None  # tests: a function (exe) -> whether the agent CLI is installed
+
+
+def _probe_exe(exe):
+    """Whether the agent CLI is installed, on the PATH that the panes get (_tmux_env)."""
+    import shutil
+    if PROBE_EXE is not None:
+        return PROBE_EXE(exe)
+    return bool(exe) and shutil.which(exe, path=_tmux_env().get("PATH")) is not None
+
+
+def _probe_folder(conn, aid):
+    """The folder where the probe starts the agent: a project folder of this queue, by rank. Claude Code asks first
+    whether it may trust a folder, and the answer would go into its settings file: only a folder it trusts already
+    (claude_untrusted False). agy trusts the folder for this start only; with no project folder, the queue's own."""
+    for r in conn.execute("SELECT path FROM projects WHERE archived=0 AND path IS NOT NULL AND path != '' "
+                          "ORDER BY rank, id"):
+        p = Path(r["path"]).expanduser()
+        if p.is_dir() and (aid != "claude" or claude_untrusted(p) is False):
+            return p
+    return None if aid == "claude" else Path(core.river_dir())
+
+
+def usage_probes_due(conn, every=None):
+    """[(adapter id, folder)] of the agents that probe_usage reads now: a probe of USAGE_PROBES whose adapter reads
+    the screen, whose CLI is installed, with no live session of it (its own screen shows /usage when a person asks),
+    and with no reading and no probe within usage_probe_every."""
+    every = every or core.parse_duration(core.setting(conn, "usage_probe_every"))
+    live = {core._limit_adapter_id(r["agent_type"])
+            for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND agent_type IS NOT NULL")
+            if core._agent_state(conn, r) not in ("gone", "stopped")}
+    t, out = core.now(), []
+    for aid in USAGE_PROBES:
+        ad = core._adapters().find(aid)
+        if ad is None or not ad.has("screen_limits") or aid in live:
+            continue
+        last = PROBE["at"].get(aid)
+        if last and t - last < every:
+            continue
+        st = core.agent_limit_status(conn, aid)
+        try:
+            if st and st.get("updated_at") and t - core.parse_iso(st["updated_at"]) < every:
+                continue
+        except (ValueError, TypeError):
+            pass
+        if not _probe_exe(ad.describe.get("exe")):
+            continue
+        folder = _probe_folder(conn, aid)
+        if folder is not None:
+            out.append((aid, folder))
+    return out
+
+
+def probe_usage(conn):
+    """A pass of maxpm serve (#6364): read the usage of Claude Code and Antigravity when no session of them runs, at
+    most once in usage_probe_every (0s: never) for each. The probes run one after the other in a thread of their own,
+    so the pass does not wait for an agent to start. Returns the adapter ids it probes."""
+    every = core.parse_duration(core.setting(conn, "usage_probe_every"))
+    if not every.total_seconds() or PROBE["running"]:
+        return []
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        return []
+    if core.net_down(conn):  # offline: the usage screen cannot load
+        return []
+    due = usage_probes_due(conn, every)
+    if not due:
+        return []
+    t = core.now()
+    for aid, _ in due:  # also a probe that fails waits usage_probe_every before the next
+        PROBE["at"][aid] = t
+    PROBE["running"] = True
+
+    def run():
+        c = core.connect()
+        try:
+            for aid, folder in due:
+                try:
+                    got = probe_one(c, aid, folder)
+                except Exception as e:  # noqa: BLE001 - one agent's probe, not the loop
+                    got = {"error": f"{type(e).__name__}: {e}"}
+                if got.get("error"):
+                    print(f"maxpm serve: usage of {aid}: {got['error']}", file=sys.stderr, flush=True)
+        finally:
+            c.close()
+            PROBE["running"] = False
+
+    if PROBE_SYNC:
+        run()
+    else:
+        threading.Thread(target=run, name="maxpm-usage-probe", daemon=True).start()
+    return [aid for aid, _ in due]
+
+
+def _probe_lines(pane):
+    """The plain lines that the probe pane shows now, or None when it is gone."""
+    out = _tmux("capture-pane", "-p", "-t", pane, check=False)
+    return None if out is None else _plain(out).splitlines()
+
+
+def probe_one(conn, aid, folder):
+    """Open the agent `aid` in `folder` in a hidden pane, wait for its input line, type its usage command, read the
+    limits with screen_limits, close the screen with Esc, and end the pane. The pane runs with MAXPM_DB of this queue
+    and no MAXPM_AGENT, MAXPM_FOCUS or token, so no maxpm hook registers it. Records the reading (source 'probe').
+    Returns {"windows": [...]} or {"error": "<why>"}."""
+    import shlex
+    ad = core._adapters().find(aid)
+    spec = USAGE_PROBES[aid]
+    det = ad.detect or {}
+    idle_rx = re.compile(det["idle"]) if det.get("idle") else None
+    blocked = [re.compile(p) for p in det.get("blocked") or ()]
+    cmd = ad.trust_workspace(str(folder), shlex.join([ad.describe["exe"], *spec["args"]]), {})
+    line = (f"cd {shlex.quote(str(folder))} && env -u MAXPM_AGENT -u MAXPM_FOCUS -u {core.TOKEN_ENV} "
+            f"MAXPM_DB={shlex.quote(str(core.db_path()))} {cmd}")
+    new = ["-c", str(folder), "-P", "-F", "#{pane_id}"]
+    if _tmux("has-session", "-t", "=" + PROBE_SESSION, check=False) is None:
+        pane = _tmux("new-session", "-d", "-s", PROBE_SESSION, "-n", f"usage-{aid}", "-x", "200", "-y", "50", *new)
+    else:
+        pane = _tmux("new-window", "-d", "-t", f"={PROBE_SESSION}:", "-n", f"usage-{aid}", *new)
+    pane = (pane or "").strip()
+    if not pane:
+        return {"error": "tmux opened no pane"}
+    try:
+        _tmux("send-keys", "-t", pane, "-l", line)
+        _tmux("send-keys", "-t", pane, "Enter")
+        end = time.monotonic() + PROBE_START_MAX
+        while True:
+            if time.monotonic() > end:
+                return {"error": f"its input line did not show within {PROBE_START_MAX}s"}
+            time.sleep(PROBE_POLL)
+            lines = _probe_lines(pane)
+            if lines is None:
+                return {"error": "the pane closed"}
+            tail = [x for x in lines if x.strip()][-PROMPT_LINES:]
+            ask = next((x for x in tail if any(rx.search(x) for rx in blocked)), None)
+            if ask:  # a trust, sign-in or setup question: the probe answers nothing
+                return {"error": f"it asks first: {ask.strip()[:120]}"}
+            if idle_rx and any(idle_rx.search(x) for x in tail):
+                break
+        _tmux("send-keys", "-t", pane, "-l", spec["command"])
+        time.sleep(PROBE_POLL)
+        _tmux("send-keys", "-t", pane, "Enter")
+        end, prev, wins = time.monotonic() + PROBE_READ_MAX, None, None
+        while True:
+            if time.monotonic() > end:
+                return {"error": f"its usage screen showed no limits within {PROBE_READ_MAX}s"}
+            time.sleep(PROBE_POLL)
+            lines = _probe_lines(pane)
+            if lines is None:
+                return {"error": "the pane closed"}
+            wins = ad.screen_limits(lines)
+            # Two equal looks: the screen has loaded (Claude Code fills its sections after a moment). A relative reset
+            # time ('Refreshes in 2h 31m') moves between two looks, so it is no part of the comparison.
+            sig = wins and [(w.get("name"), w.get("used_percent")) for w in wins]
+            if sig and sig == prev:
+                break
+            prev = sig
+        _tmux("send-keys", "-t", pane, "Escape")  # close the usage screen with Esc (p137)
+    finally:
+        _tmux("kill-pane", "-t", pane, check=False)
+    at_lim = any((w.get("used_percent") or 0) >= 100 for w in wins)
+    core.record_agent_limit(conn, aid, limited=at_lim, windows=wins, source="probe")
+    return {"windows": wins}
+
+
 def _pane_session_id(conn, agent, pane, ad):
     """The session id of an agent whose adapter reads it from the pane (IDENTITY source 'pane': Goose prints it in its
     header at each start and resume), recorded as maxpm report --session-id does (core.record_session); None for
