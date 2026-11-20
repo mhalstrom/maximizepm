@@ -1,6 +1,7 @@
 // Builds the tmux the packaged app carries (#6237), so a person who installs the app needs no tmux: every agent
-// session starts in a tmux pane. Pinned source releases (by sha256) of tmux, libevent and utf8proc; libevent and
-// utf8proc are linked in statically, so the program needs only the libraries of macOS (libncurses, libSystem).
+// session starts in a tmux pane. Pinned source releases (by sha256) of tmux, libevent, utf8proc and jemalloc; the
+// three libraries are linked in statically, so the program needs only the libraries of macOS (libncurses, libSystem).
+// tmux 3.8 on macOS asks for jemalloc, because the calloc of macOS does not always zero memory (its configure).
 // Run before electron-builder (npm run dist does). Usage: node scripts/build-tmux.js [mac-arm64] [mac-x64]
 // (default: both; a Mac with either chip builds both). Needs the Xcode command line tools (clang, make).
 // Result: build/tmux/<os>-<arch>/tmux with bin/tmux and LICENSES/, which electron-builder copies to river-app/tmux.
@@ -17,12 +18,17 @@ const SOURCES = {
     dir: "libevent-2.1.13-stable", sha256: "f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c", license: "LICENSE" },
   utf8proc: { url: "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.12.0.tar.gz", dir: "utf8proc-2.12.0",
     sha256: "f564011d38b2888d583d510b08e69ffa15aa117155db1b9b49ef1dfe1fa25111", license: "LICENSE.md" },
+  jemalloc: { url: "https://github.com/jemalloc/jemalloc/releases/download/5.3.1/jemalloc-5.3.1.tar.bz2", dir: "jemalloc-5.3.1",
+    sha256: "3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92", license: "COPYING" },
 };
+// jemalloc's page size, fixed because a build for the other chip cannot measure it: 16 KB, the page of Apple silicon.
+// A larger page than the system's works (Intel Macs and Rosetta have 4 KB); a smaller one stops the program.
+const LG_PAGE = 14;
 const ARCHES = { "mac-arm64": { arch: "arm64", host: "aarch64-apple-darwin" },
   "mac-x64": { arch: "x86_64", host: "x86_64-apple-darwin" } };
 const MIN_MACOS = "12.0";  // the oldest macOS that Electron 45 runs on
 // The stamp of a finished build: the pins and the flags; a change of either builds again.
-const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color"])).digest("hex");
+const STAMP = crypto.createHash("sha256").update(JSON.stringify([SOURCES, MIN_MACOS, "screen-256color", LG_PAGE])).digest("hex");
 
 const top = path.join(__dirname, "..", "build", "tmux");
 
@@ -56,7 +62,7 @@ function buildOne(key) {
   const work = path.join(top, "work", key), prefix = path.join(work, "prefix");
   fs.rmSync(work, { recursive: true, force: true });
   fs.mkdirSync(prefix, { recursive: true });
-  for (const name of Object.keys(SOURCES)) sh("tar", ["-xzf", source(name)], { cwd: work });
+  for (const name of Object.keys(SOURCES)) sh("tar", ["-xf", source(name)], { cwd: work });  // .tar.gz and .tar.bz2
   const flags = `-arch ${a.arch} -mmacosx-version-min=${MIN_MACOS} -O2`;
   const env = { ...process.env, CC: "clang", CFLAGS: flags, MACOSX_DEPLOYMENT_TARGET: MIN_MACOS,
     // No pkg-config: the libraries come from the prefix only, never from Homebrew's.
@@ -77,9 +83,19 @@ function buildOne(key) {
   // Only the static libraries are in the prefix, so -levent_core and -lutf8proc link them in.
   for (const f of fs.readdirSync(path.join(prefix, "lib"))) if (f.endsWith(".dylib")) fs.rmSync(path.join(prefix, "lib", f));
 
+  // jemalloc: only the static library and the headers (its docs need tools a Mac may not have). On macOS it registers
+  // itself as the default malloc zone, so malloc and calloc of tmux and its libraries use it.
+  const j = path.join(work, SOURCES.jemalloc.dir);
+  sh("./configure", [...host, `--prefix=${prefix}`, `--with-lg-page=${LG_PAGE}`, "--disable-cxx", "--disable-shared",
+    "--disable-dependency-tracking"], { cwd: j, env });
+  sh("make", ["-j8", "build_lib_static"], { cwd: j, env });
+  sh("make", ["install_lib_static", "install_include"], { cwd: j, env });
+
   const t = path.join(work, SOURCES.tmux.dir);
-  sh("./configure", [...host, `--prefix=${prefix}`, "--enable-utf8proc", "--with-TERM=screen-256color",
-    "--disable-dependency-tracking"], { cwd: t, env });
+  // tmux finds jemalloc only with pkg-config: these two variables stand in for it (the static library by its path).
+  sh("./configure", [...host, `--prefix=${prefix}`, "--enable-utf8proc", "--enable-jemalloc", "--with-TERM=screen-256color",
+    "--disable-dependency-tracking"], { cwd: t, env: { ...env, JEMALLOC_CFLAGS: `-I${prefix}/include`,
+      JEMALLOC_LIBS: path.join(prefix, "lib", "libjemalloc.a") } });
   sh("make", ["-j8"], { cwd: t, env });
 
   // The program may use only the libraries every Mac has.
@@ -89,6 +105,12 @@ function buildOne(key) {
   if (outside.length) throw new Error(`tmux ${key} links libraries a Mac does not have: ${outside.join(", ")}`);
   const kind = execFileSync("lipo", ["-archs", exe], { encoding: "utf8" }).trim();
   if (kind !== a.arch) throw new Error(`tmux ${key} is built for ${kind}, not ${a.arch}`);
+  // The build for this Mac's own chip starts (jemalloc's page size, the libraries): tmux -V prints its version.
+  if ((process.arch === "arm64" ? "arm64" : "x86_64") === a.arch) {
+    const v = execFileSync(exe, ["-V"], { encoding: "utf8" }).trim();
+    if (!v.startsWith("tmux ")) throw new Error(`tmux ${key} -V printed ${v}`);
+    console.log(`tmux ${key}: ${v} starts`);
+  }
 
   fs.rmSync(out, { recursive: true, force: true });
   const bin = path.join(out, "tmux", "bin"), lic = path.join(out, "tmux", "LICENSES");
