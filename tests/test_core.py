@@ -15581,6 +15581,27 @@ class Proof(Base):
         core.claim(self.c, q, "w")
         self.assertEqual(self.done(q)[0], 0)
 
+    def test_shot_already_in_proof_folder_keeps_the_file(self):
+        # #6285: a --shot whose source is already in proof/<id>/ closes the item instead of raising SameFileError.
+        with open(os.path.join(self.repo, "app.css"), "w") as f:
+            f.write("body {}\n")
+        self.git("add", "app.css")
+        self.git("commit", "-q", "-m", "Style tweak")
+        sha = self.git("rev-parse", "--short", "HEAD")
+        x = core.item_add(self.c, "web", "Check layout", touches="river/static/app.css")["id"]
+        core.claim(self.c, x, "w")
+        kept = os.path.join(self.dir.name, "proof", str(x), "shot.png")
+        os.makedirs(os.path.dirname(kept), exist_ok=True)
+        data = b"\x89PNG already in proof"
+        with open(kept, "wb") as f:
+            f.write(data)
+        code, text = self.done(x, "--commit", sha, "--test", "npm test", "--result", "ok", "--shot", kept)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(core._item(self.c, x)["status"], "done")
+        with open(kept, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertIn(f"shot: {kept}", text)
+
 
 class FullQuestion(Base):
     """#5987 (mark 2026-11-15: a later mention without the text made him search or ask): every text that names an

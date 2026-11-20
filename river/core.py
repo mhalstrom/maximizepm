@@ -16754,7 +16754,8 @@ def _proof_shots(conn, item_id, shots):
             raise RiverError(f"--shot {s} has {size} bytes; at most {PROOF_SHOT_MAX} (a short video, or a screenshot)")
         dest = db_path().expanduser().parent / "proof" / str(int(item_id)) / Path(s).name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(p, dest)
+        if not (dest.exists() and os.path.samefile(p, dest)):  # #6285: keep a shot already in the proof folder
+            shutil.copyfile(p, dest)
         out.append({"file": str(dest), "name": Path(s).name, "bytes": size})
     return out
 
