@@ -289,7 +289,7 @@ def _tag_run(conn, dep, hooks, after):
         m = _DRAFT.search(h["output"] or "")
         if m:
             break
-    draft = m.group(1) if m else None
+    draft = m.group(1) if m and dep["status"] != "done" else None  # out: its draft page is gone (the release card links it)
     yes = core._approvals(conn, dep["id"])
     a = yes[0] if yes else None
     steps = _steps(conn, after)
