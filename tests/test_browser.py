@@ -1138,11 +1138,29 @@ class Passkey(Base):
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<title>Passkey</title>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
         b = browser.get("web", "ag1")
         self.addCleanup(b.close)
         kinds = []
         b.passkey = kinds.append
-        b.open("https://example.com/")
+        b.open(f"http://127.0.0.1:{port}/")
         got = b.evaluate("""(async () => { const t = Date.now(); try {
             await navigator.credentials.get({publicKey: {challenge: new Uint8Array(16), timeout: 60000}});
             return 'credential'; } catch (e) { return e.name + ' ' + (Date.now() - t < 1000); } })()""", 10)

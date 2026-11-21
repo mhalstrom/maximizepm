@@ -494,10 +494,16 @@ def _checkout(folder):
 
 
 def _one_user(script):
-    """The job's script for a test that runs as one user: no change of user, and no check that the agent's user
-    cannot read the job's environment (here it is the same user)."""
-    assert agent_job._DROP in script and '"/proc/$$/environ"' in script
-    return script.replace(agent_job._DROP, "pass").replace('"/proc/$$/environ"', '"/nonexistent/environ"')
+    """The job's script for a test that runs as one user: no change of user, no chown or /etc/passwd edit when the
+    test runs as root, and no check that the agent's user cannot read the job's environment (here it is the same
+    user)."""
+    chown = 'chown -R "$MAXPM_UID:$MAXPM_UID" "$WORK" 2>/dev/null'
+    is_root = '[ "$(id -u)" = 0 ]'
+    assert agent_job._DROP in script and '"/proc/$$/environ"' in script and chown in script and is_root in script
+    return (script.replace(agent_job._DROP, "pass")
+            .replace('"/proc/$$/environ"', '"/nonexistent/environ"')
+            .replace(chown, ":")
+            .replace(is_root, "false"))
 
 
 class PulumiAgentJob(Base):

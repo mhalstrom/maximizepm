@@ -89,6 +89,7 @@ class ServeWrites(unittest.TestCase):
                          "WHERE k.name='plan'").fetchone()[0]
         self.assertEqual(text, "# The plan\n")
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores read-only file modes")
     def test_serve_writes_a_queue_this_process_cannot_write_reads_and_refuses_a_write(self):
         serve = core.connect(self.db)  # serve's connection keeps the queue open (its WAL files stay)
         self.addCleanup(serve.close)
@@ -140,6 +141,7 @@ class ServeWritesCommands(unittest.TestCase):
                           ["report", "--state", "idle", "--hook", "x"]):
                 self.assertIsNone(client.run_remote(words, self.env), words)
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores read-only file modes")
     def test_serve_writes_review_pass_runs_here_and_records_through_serve(self):
         serve = core.connect(self.db)
         self.addCleanup(serve.close)
@@ -374,6 +376,7 @@ class ServeWritesPolls(unittest.TestCase):
         self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "sent\n", ""))
         self.assertEqual(tokens, ["t1", "t1", "t1", "t2"])
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores read-only file modes")
     def test_serve_writes_a_write_on_a_readonly_db_retries_connection_refused(self):
         # #6475: inside a sandbox (read-only queue), a brief connection refused during serve exec retries instead of
         # falling back locally and failing with 'only maxpm serve writes the queue'.
