@@ -6792,8 +6792,8 @@ class OpsPage(unittest.TestCase):
 
     def test_the_buttons_add_pause_resume_accept_and_reject(self):
         r = server.OPS["ops_add"](self.c, {"scope": "project:shop", "form": "url",
-                                           "fields": {"url": "https://shop.example/health", "severity": "page"}}, "mark")
-        self.assertEqual((r["check"]["name"], r["check"]["severity"]), ("shop-example", "page"))  # named from the host
+                                           "fields": {"url": "https://shop.example/health", "severity": "note"}}, "mark")
+        self.assertEqual((r["check"]["name"], r["check"]["severity"]), ("shop-example", "note"))  # named from the host
         with self.assertRaisesRegex(RiverError, "name the check"):
             server.OPS["ops_add"](self.c, {"scope": "shop", "form": "beat", "fields": {"period": "1d"}}, "mark")
         server.OPS["ops_add"](self.c, {"scope": "shop", "form": "beat", "name": "backup", "fields": {"period": "1d"}}, "mark")

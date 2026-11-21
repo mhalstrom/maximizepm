@@ -6,7 +6,7 @@
       "name": "serve",
       "form": "plugin",
       "command": "maxpm ops probe serve",
-      "every": "1m", "fail_after": 2, "recover_after": 2, "timeout": "30s", "severity": "page",
+      "every": "1m", "fail_after": 2, "recover_after": 2, "timeout": "30s", "severity": "item",
       "outside": true,
       "repair": "maxpm serve --kick",
       "runbook": "maxpm serve runs the page, the relay, every pass of the loop (sessions, reviews, deploys, notices) and the other checks; when it is down, no session starts. The watchdog runs this check with no serve, and its repair (maxpm serve --kick) restarts serve through its login agent, launchd or systemd (maxpm serve --install-login, or the desktop app's Keep MaximizePM running in the background), or stops the serve of the open desktop app, which starts it again. With no login agent and the app closed, the person stopped serve on purpose: the watchdog runs this check not at all. Read $MAXPM_QUEUE_DIR/serve.log (launchd's output of serve) and serve-loop.json (the last pass and its error). A loop that is late with a port that answers: a pass hangs; read locked.log for a lock held long."
@@ -15,7 +15,7 @@
       "name": "relay",
       "form": "plugin",
       "command": "maxpm ops probe relay",
-      "every": "1m", "fail_after": 5, "recover_after": 2, "timeout": "30s", "severity": "page",
+      "every": "1m", "fail_after": 5, "recover_after": 2, "timeout": "30s", "severity": "item",
       "outside": true,
       "repair": "maxpm serve --kick",
       "runbook": "The relay carries the page to the person's phone. It runs inside maxpm serve and reconnects by itself; this check fails after 5 minutes not connected. relay-state.json beside the queue has the state and the last error. An error that names the token or the plan needs the person (maxpm connect, the account page); a network error heals by itself, and the repair restarts serve once the fault holds."

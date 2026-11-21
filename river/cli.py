@@ -1631,8 +1631,8 @@ def build_parser(only=None):
         x.add_argument("--recover-after", dest="recover_after", type=int, help="passed runs in a row before a fault "
                        "counts as healed" + (f" (default {d['recover_after']})" if add else ""))
         x.add_argument("--timeout", help="the time limit of one run" + (f" (default {d['timeout']})" if add else ""))
-        x.add_argument("--severity", choices=core.OPS_SEVERITIES, help="page: it may reach the phone; item: an item "
-                       "and the manager; note: a line on the page" + (f" (default {d['severity']})" if add else ""))
+        x.add_argument("--severity", choices=core.OPS_SEVERITIES, help="item: an item and the manager; note: a line "
+                       "on the page" + (f" (default {d['severity']})" if add else ""))
         x.add_argument("--runbook", help="for the agent that investigates a fault: where to look, what is normal")
         x.add_argument("--subject", choices=("on", "off"), help="cmd, log, plugin: each line of the output names a "
                        "subject, and each subject has its own fault")
@@ -3403,12 +3403,11 @@ def _run_words(words, rec):
         print(json.dumps(res) if args.json else "\n".join(visual.lines(res)))
         return res["status"]
     if args.cmd == "ops" and args.ocmd == "check":  # the watchdog (#5441): no activity, no footer; its log is the output
-        from . import login, notify
+        from . import login
         conn = core.connect()
         try:
             core.adopt_login_path(conn, max_age=24 * 3600)  # launchd's short PATH: the checks need a terminal's (#5611)
-            res = core.ops_outside(conn, lambda title, body: notify.direct(conn, title, body),
-                                   serve_wanted=login.serve_wanted())
+            res = core.ops_outside(conn, serve_wanted=login.serve_wanted())
         finally:
             conn.close()
         print(json.dumps(res) if args.json else "\n".join(ops_outside_lines(res)), flush=True)
@@ -4530,7 +4529,6 @@ def _setup_ask_check(conn, scope, form, actor, ask, yes, say):
         name = ask("  a name is needed. Which job reports? Its short name")
     if form != "beat":
         fields["every"] = ask("How often should it run?", core.OPS_DEFAULTS["every"])
-    fields["severity"] = "page" if yes("Should a fault of this check be able to reach your phone?", False) else "item"
     kind, sc = core._ops_scope(conn, scope)
     why = None
     why_not = core.may_set_check(conn, actor, dict(core._ops_build(form, fields), scope_kind=kind, scope=sc))
@@ -7786,13 +7784,13 @@ def render_ops_profile(a, res):
 
 def ops_outside_lines(res):
     """The lines of one pass of the watchdog, for its log: a line for each check that failed, changed its state,
-    ran its repair or sent a notice."""
+    or ran its repair."""
     out = []
     for r in res:
         if "error" in r or "skipped" in r:
             out.append(f"{core.iso(core.now())} {r['check']}: {r.get('error') or r.get('skipped')}")
             continue
-        if r["status"] == "ok" and not (r.get("changes") or r.get("repair") or r.get("notice")):
+        if r["status"] == "ok" and not (r.get("changes") or r.get("repair")):
             continue  # a pass that only passed writes no line: the log stays small
         line = f"{core.iso(core.now())} {r['check']}: {r['status']}"
         line += "".join(f"; {ch['to']}" for ch in r.get("changes") or [])
@@ -7802,10 +7800,6 @@ def ops_outside_lines(res):
                                              f"exit {rp['exit_code']}")
         elif "repair_limit" in r:
             line += f"; no repair: {r['repair_limit']} ran in the window"
-        if r.get("notice"):
-            sent = r["notice"]["sent"]
-            line += "; notice " + (", ".join(f"{x['channel']} {'sent' if x['ok'] else x['error']}" for x in sent)
-                                   or "on no channel (notify_channels is empty)")
         out.append(line)
     return out
 

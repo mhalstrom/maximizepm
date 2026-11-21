@@ -412,19 +412,11 @@ DEFAULT_SETTINGS = {
     # The watchdog (#5441, decisions 1 A and 5 A of #5337): a launchd job (maxpm serve --install-watchdog) runs
     # maxpm ops check --outside every minute, also when maxpm serve is down. It runs the checks marked outside (a
     # check of serve itself, of the relay). When one is in fault and its last run failed, it starts the check's repair,
-    # at most ops_outside_repair_max times in ops_outside_repair_window for the check; then it stops repairing and
-    # sends a notice itself on notify_channels, because serve, which sends the other notices, may be down. A check
-    # in fault with no repair sends the notice at once. A check of severity note sends none.
+    # at most ops_outside_repair_max times in ops_outside_repair_window for the check; then it stops repairing, and
+    # the fault item stays for the manager. MaximizePM rings no phone for a fault (mark 2026-11-21, #6648): paging
+    # belongs to another tool, which ops_deadman_url can feed.
     "ops_outside_repair_max": "3",
     "ops_outside_repair_window": "30m",
-    # Paging (#5434, mark 2026-11-15 on #5339): when a fault of a check of severity page reaches the person on
-    # notify_channels (ntfy, mac), set for all projects or per project (a profile carries it). untaken (the default,
-    # A): a fault whose last run still failed ops_page_after after it began, while no session holds its fault item
-    # and the manager answered none of its alerts. every (B): every such fault at once. main:<check>[,<check>] (C):
-    # only those checks, at once. A notice also goes when a paged check works again. Nothing goes while the bell
-    # (notifications) is off. The watchdog pages its outside checks by its own rule.
-    "ops_page": "untaken",
-    "ops_page_after": "15m",
     # A shell command of a session that matches push_guard (a push, a merge of a pull request, a launch) is refused
     # while the session has an unread alert or holds an item that someone blocked (#5381: the rule 'read the inbox
     # before a push' in text failed ten times). The session reads its inbox, then runs the command again. Add a
@@ -1621,7 +1613,7 @@ CREATE TABLE IF NOT EXISTS checks (
   fail_after    INTEGER NOT NULL,        -- failed runs in a row before it is a fault
   recover_after INTEGER NOT NULL,        -- passed runs in a row before a fault counts as healed
   timeout       TEXT NOT NULL,           -- a duration: the time limit of one run
-  severity      TEXT NOT NULL,           -- page, item, or note
+  severity      TEXT NOT NULL,           -- item or note
   runbook       TEXT,                    -- for the agent that investigates a fault
   subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
   repair        TEXT,                    -- a command that fixes a known fault
@@ -2437,6 +2429,10 @@ def _migrate(conn):
     )""")
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
+    # MaximizePM rings no phone for a fault (#6650): a check of severity page opens an item like the others.
+    conn.execute(f"DELETE FROM settings WHERE key IN ({','.join('?' * len(OPS_GONE_SETTINGS))})", OPS_GONE_SETTINGS)
+    if conn.execute("SELECT 1 FROM checks WHERE severity='page' LIMIT 1").fetchone():
+        conn.execute("UPDATE checks SET severity='item' WHERE severity='page'")
     # The scope of a session (#5973).
     if "scope" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:
         for c in ("scope", "scope_by", "scope_at", "scope_told"):
@@ -3302,7 +3298,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "deps_timeout", "similar_days", "usage_probe_every"):
+            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "deps_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free",
@@ -3315,8 +3311,6 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         if value.strip() and not re.match(r"^https?://\S+$", value.strip()):
             raise RiverError("ops_deadman_url is the ping address of a heartbeat service, http:// or https://, or "
                              "empty for no beat")
-    elif key == "ops_page":
-        ops_page_rule(value)
     elif key == "model_prices":
         parse_prices(value)
     elif key == "similar_min":
@@ -5834,7 +5828,10 @@ OPS_FORMS = {
 OPS_FORM_FIELDS = {"url": ("url", "statuses", "body"), "beat": ("period",), "cmd": ("command",),
                    "log": ("command", "pattern", "limit", "window", "normal"), "plugin": ("command",)}
 OPS_COMMAND_FORMS = ("cmd", "log", "plugin")  # they run a command outside the sandbox (decision 2 of #5380)
-OPS_SEVERITIES = ("page", "item", "note")
+OPS_SEVERITIES = ("item", "note")
+# The settings of paging, which went with the page severity (mark 2026-11-21, #6650): _migrate deletes them, and a
+# profile that carries one applies without it.
+OPS_GONE_SETTINGS = ("ops_page", "ops_page_after")
 # What a check watches (#5509). app: the project itself (the default). dependency: an outside vendor; while it is in
 # fault, the faults of the other checks of the project are of the kind outside dependency. capacity (a disk, memory,
 # a quota) and service (a process, a container, the database service): a lower layer; a fault of it that came first
@@ -6000,8 +5997,8 @@ def _ops_build(form, fields, old=None):
         if col[k] < 1:
             raise RiverError(f"--{k.replace('_', '-')} is at least 1")
     if col["severity"] not in OPS_SEVERITIES:
-        raise RiverError(f"no severity {col['severity']!r}: page (it may reach the phone), item (an item and the "
-                         f"manager), or note (a line on the page)")
+        raise RiverError(f"no severity {col['severity']!r}: item (an item and the manager), or note (a line on the "
+                         f"page)")
     for k in ("runbook", "repair"):
         v = fields.get(k)
         col[k] = (v.strip() or None) if v is not None else old.get(k)
@@ -6146,9 +6143,9 @@ def ops_edit(conn, scope, name, fields=None, form=None, actor=None):
 #
 #   {"maxpm_ops_profile": 1,
 #    "scope": "target:web",                          the project or target (apply --scope names another)
-#    "settings": {"ops_page": "..."},                optional: settings of the scope, only keys that start with ops_
+#    "settings": {"ops_fix_max": "2"},               optional: settings of the scope, only keys that start with ops_
 #    "checks": [{"name": "home", "form": "url", "url": "https://...", "statuses": "200-399", "body": "Welcome",
-#                "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "page",
+#                "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "item",
 #                "runbook": "...", "repair": "...", "subject": true, "outside": true}, ...]}
 #
 # A check holds its name, its form, the settings of the form (OPS_FORM_FIELDS) and the common fields; a field it
@@ -6236,10 +6233,12 @@ def _ops_profile_read(profile):
                              f"{', '.join(sorted(_OPS_CHECK_KEYS))}")
         if "form" not in c:
             raise RiverError(f"check {c['name']} has no form: one of {', '.join(OPS_FORMS)}")
+        if c.get("severity") == "page":  # a profile saved before the page severity went (#6650)
+            c["severity"] = "item"
     settings = profile.get("settings") or {}
     if not isinstance(settings, dict) or any(not str(k).startswith("ops_") for k in settings):
-        raise RiverError("\"settings\" holds only settings whose names start with ops_ (for example ops_page)")
-    return checks, {str(k): str(v) for k, v in settings.items()}
+        raise RiverError("\"settings\" holds only settings whose names start with ops_ (for example ops_fix_max)")
+    return checks, {str(k): str(v) for k, v in settings.items() if k not in OPS_GONE_SETTINGS}
 
 
 def ops_profile_apply(conn, profile, scope=None, yes=False, actor=None):
@@ -8864,21 +8863,9 @@ def ops_close_lost(conn, running=(), at=None, outside=None):
 # minute (maxpm serve --install-watchdog). It needs no maxpm serve: it runs the checks marked outside in its own
 # process, one after the other, and writes their runs, states and fault items to the queue as serve does. It starts a
 # check's repair itself (it restarts only local serve and the relay, never production: the repair is the person's
-# or the manager's command), at most ops_outside_repair_max times in ops_outside_repair_window, and then it sends a
-# notice on notify_channels itself, because serve, which sends the other notices, may be the thing that is down.
+# or the manager's command), at most ops_outside_repair_max times in ops_outside_repair_window. Then it stops, and the
+# fault item stays for the manager, as for every other check: MaximizePM rings no phone (mark 2026-11-21, #6648).
 OPS_OUTSIDE_SLACK = timedelta(seconds=10)
-_OPS_PAGE_STATES = ("fault", "paged", "page-ended")
-
-
-def _ops_page_last(conn, c, subjects=False):
-    """The newest of the check's fault, paged (a notice of the fault went out) and page-ended (a notice of the
-    recovery went out) events, or None. subjects: a fault of one of its subjects counts too."""
-    keys = "(key=? OR substr(key, 1, ?)=?)" if subjects else "key=?"
-    args = (c["key"], len(c["key"]) + 1, c["key"] + ":") if subjects else (c["key"],)
-    r = conn.execute(f"SELECT state FROM ops_events WHERE check_id=? AND {keys} AND state IN "
-                     f"({','.join('?' * len(_OPS_PAGE_STATES))}) ORDER BY id DESC LIMIT 1",
-                     (c["id"], *args, *_OPS_PAGE_STATES)).fetchone()
-    return r["state"] if r else None
 
 
 def _ops_outside_repairs(conn, c, at, pid):
@@ -8904,8 +8891,8 @@ def _ops_run_broken(conn, run_id):
     return None
 
 
-def _ops_outside_one(conn, c, notice, at=None):
-    """Run one outside check, then repair or send a notice as the rules say. Returns what it did."""
+def _ops_outside_one(conn, c, at=None):
+    """Run one outside check, then repair it as the rules say. Returns what it did."""
     run = ops_start(conn, c, at)
     if run is None:
         return {"check": f"{c['scope']}/{c['name']}", "skipped": "a run of it is open"}
@@ -8937,25 +8924,6 @@ def _ops_outside_one(conn, c, notice, at=None):
             rec["repair"]["n"] = n + 1
             return rec
         rec["repair_limit"] = n
-    if c["severity"] == "note" or notice is None:
-        return rec
-    last = _ops_page_last(conn, c)
-    if c["state"] == "fault" and failed and last in (None, "fault"):
-        what = (f"the check itself cannot run ({broken}), so the watchdog starts no repair: a person fixes the check"
-                if broken else
-                f"the watchdog ran its repair {rec['repair_limit']} times in {window} (ops_outside_repair_max {most}) "
-                f"and stopped: a person looks now"
-                if "repair_limit" in rec else "it has no repair command: a person looks now")
-        items = _ops_fault_items(conn, c)
-        title = (f"MaximizePM: the check {c['scope']}/{c['name']} cannot run" if broken else
-                 f"MaximizePM: {c['scope']}/{c['name']} is down")
-        body = (f"{c['key']}: {_ops_last_summary(conn, c)}. {what}."
-                + (f" Item #{items[0]['id']}." if items else "") + f" Runs: maxpm ops history {c['scope']} {c['name']}")
-        rec["notice"] = _ops_notice(conn, c, "paged", title, body, notice, t)
-    elif c["state"] in ("healthy", "recovered") and last == "paged":
-        title = f"MaximizePM: {c['scope']}/{c['name']} works again"
-        body = f"{c['key']} passed again: {_ops_last_summary(conn, c)}. Close its item with the cause."
-        rec["notice"] = _ops_notice(conn, c, "page-ended", title, body, notice, t)
     return rec
 
 
@@ -8964,30 +8932,10 @@ def _ops_scope_project_id(conn, c):
     return r["id"] if r else None
 
 
-def _ops_last_summary(conn, c):
-    r = conn.execute("SELECT status, summary FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL ORDER BY id DESC "
-                     "LIMIT 1", (c["id"],)).fetchone()
-    return (r["summary"] or r["status"]) if r else "no run"
-
-
-def _ops_notice(conn, c, state, title, body, notice, at, actor="watchdog"):
-    """Send one notice through notice(title, body) -> [{"channel", "ok", "error"}]; when one channel took it,
-    record it (state paged or page-ended), so the next pass does not send it again. When none did, the next pass
-    tries again."""
-    sent = notice(title, body)
-    ok = [x["channel"] for x in sent if x.get("ok")]
-    if ok:
-        with tx(conn):
-            conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
-                         (c["id"], c["key"], state, iso(at), actor, f"notice on {', '.join(ok)}: {title}"))
-    return {"title": title, "body": body, "sent": sent}
-
-
-def ops_outside(conn, notice=None, at=None, serve_wanted=True):
+def ops_outside(conn, at=None, serve_wanted=True):
     """One pass of the watchdog (maxpm ops check --outside): close the lost runs of the outside checks, then run
-    each one that is due. notice(title, body) sends a notice on every channel of notify_channels (notify.direct);
-    None sends none. serve_wanted False (login.serve_wanted, #5649): the person stopped maxpm serve on purpose (quit
-    the desktop app), so the checks of maxpm's own probes, which need serve, do not run: no repair, no notice.
+    each one that is due. serve_wanted False (login.serve_wanted, #5649): the person stopped maxpm serve on purpose
+    (quit the desktop app), so the checks of maxpm's own probes, which need serve, do not run: no repair.
     Returns one result for each check that ran."""
     ops_close_lost(conn, at=at, outside=True)
     out = []
@@ -8995,111 +8943,9 @@ def ops_outside(conn, notice=None, at=None, serve_wanted=True):
         if not serve_wanted and str(c["config"].get("command") or "").startswith("maxpm ops probe "):
             continue
         try:
-            out.append(_ops_outside_one(conn, c, notice, at))
+            out.append(_ops_outside_one(conn, c, at))
         except Exception as e:  # one check that fails does not stop the others; the run stays open, then lost
             out.append({"check": f"{c['scope']}/{c['name']}", "error": f"{type(e).__name__}: {e}"})
-    return out
-
-
-# ---- paging (#5434, mark 2026-11-15 on #5339): a fault of a check of severity page reaches the person on
-# notify_channels by the rule ops_page, the project's own value or the default for all. maxpm serve runs ops_pages in
-# each pass of its loop (notify.ops_pages); the watchdog pages its outside checks itself (_ops_outside_one).
-
-
-def ops_page_rule(value):
-    """The rule of ops_page as (mode, checks): ("untaken", ()), ("every", ()) or ("main", names). Raises RiverError
-    for any other value."""
-    v = (value or "").strip()
-    if v in ("untaken", "every"):
-        return v, ()
-    if v.startswith("main:"):
-        names = tuple(n.strip() for n in v[5:].split(",") if n.strip())
-        if names and all(_OPS_NAME.match(n) for n in names):
-            return "main", names
-    raise RiverError(f"ops_page is untaken (a fault that does not heal and that nobody took in ops_page_after), every "
-                     f"(each fault at once), or main:<check>[,<check>] (only those checks, at once); not {value!r}")
-
-
-def _ops_page_items(conn, c):
-    """The open items that hold the faults of a check: its own; when it has none, the storm item of its scope."""
-    items = _ops_fault_items(conn, c)
-    if items:
-        return items
-    storm = f"ops:{c['scope']}: "
-    st = conn.execute("SELECT * FROM items WHERE kind='operational' AND substr(title, 1, ?)=? AND title LIKE "
-                      "'% checks failing' AND status IN ('open','in_progress','held') ORDER BY id DESC LIMIT 1",
-                      (len(storm), storm)).fetchone()
-    return [st] if st else []
-
-
-def _ops_taken(conn, items):
-    """Who took one of these fault items, as a short text, or None: a session that holds it, or the receiver of an
-    alert of MaximizePM about it who answered (accepted, declined, answered, or replied)."""
-    for it in items:
-        if it["status"] in ("in_progress", "held") and it["assignee"]:
-            return f"{it['assignee']} holds #{it['id']}"
-    ids = [it["id"] for it in items]
-    if not ids:
-        return None
-    r = conn.execute(f"SELECT m.item_id, m.to_agent FROM messages m WHERE m.kind='alert' AND m.from_agent='maxpm' AND "
-                     f"m.item_id IN ({','.join('?' * len(ids))}) AND (m.state IN ('accepted','declined','answered') OR "
-                     f"EXISTS (SELECT 1 FROM messages x WHERE x.reply_to=m.id AND x.from_agent=m.to_agent)) "
-                     f"ORDER BY m.id LIMIT 1", ids).fetchone()
-    return f"{r['to_agent']} answered the alert about #{r['item_id']}" if r else None
-
-
-def ops_pages(conn, notice, at=None):
-    """One pass of paging (#5434): each check of severity page that maxpm serve runs sends a notice through
-    notice(title, body) once for each fault that meets the rule ops_page of its project, and once when a paged check
-    works again. A fault whose last run passed heals, and pages nothing. Returns what it sent or tried."""
-    if not notices_on(conn):  # the bell is off (#6001): nothing goes, and nothing waits to go later
-        return []
-    at = at or now()
-    out = []
-    for row in conn.execute("SELECT * FROM checks WHERE severity='page' AND outside=0 ORDER BY id").fetchall():
-        c = _ops_row(row)
-        keys = ([c["key"]] if c["state"] == "fault" else []) + [
-            r["key"] for r in conn.execute("SELECT DISTINCT key FROM ops_events WHERE check_id=? AND substr(key, 1, ?)=?",
-                                           (c["id"], len(c["key"]) + 1, c["key"] + ":"))
-            if _ops_subject_state(conn, c["id"], r["key"]) == "fault"]
-        last = _ops_page_last(conn, c, subjects=True)
-        if not keys:
-            if last == "paged" and c["state"] in ("healthy", "recovered"):
-                out.append(_ops_notice(conn, c, "page-ended", f"MaximizePM: {c['scope']}/{c['name']} works again",
-                                       f"{c['key']} passed again: {_ops_last_summary(conn, c)}. Close its item with "
-                                       f"the cause.", notice, at, actor="maxpm"))
-            continue
-        if last != "fault":  # paged for this fault already
-            continue
-        run = conn.execute("SELECT status FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL ORDER BY id DESC "
-                           "LIMIT 1", (c["id"],)).fetchone()
-        if run is None or run["status"] not in OPS_FAILED:
-            continue
-        pid = _ops_scope_project_id(conn, c)
-        try:
-            mode, names = ops_page_rule(setting(conn, "ops_page", project_id=pid))
-        except RiverError:
-            mode, names = ops_page_rule(DEFAULT_SETTINGS["ops_page"])
-        items = _ops_page_items(conn, c)
-        if mode == "main" and c["name"] not in names:
-            continue
-        why = {"every": "ops_page every: each fault at once",
-               "main": f"ops_page main: {c['name']} is a main service"}.get(mode)
-        if mode == "untaken":
-            since = conn.execute("SELECT MAX(at) t FROM ops_events WHERE check_id=? AND state='fault' AND "
-                                 "(key=? OR substr(key, 1, ?)=?)", (c["id"], c["key"], len(c["key"]) + 1,
-                                                                    c["key"] + ":")).fetchone()["t"]
-            after = setting(conn, "ops_page_after", project_id=pid)
-            if since and at - parse_iso(since) < parse_duration(after):
-                continue
-            if _ops_taken(conn, items):
-                continue
-            why = (f"in fault since {show_time(since)}" if since else "in fault") + \
-                f", and nobody took it in {after} (ops_page untaken)"
-        body = (f"{', '.join(keys)}: {_ops_last_summary(conn, c)}. {why}."
-                + (f" Item #{items[0]['id']}." if items else "") + f" Runs: maxpm ops history {c['scope']} {c['name']}")
-        out.append(_ops_notice(conn, c, "paged", f"MaximizePM: {c['scope']}/{c['name']} is down", body, notice, at,
-                               actor="maxpm"))
     return out
 
 

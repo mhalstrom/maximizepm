@@ -21,8 +21,9 @@ code. A project sets its own checks, settings and system description.
   and after each release of its target at once. `fail_after` failed runs in a
   row make a fault; `recover_after` passes end it. Before a new fault opens an
   item, the check runs once more at once (`ops_confirm`).
-- **Severity**: `page` (the fault may reach the person's phone), `item` (an
-  item and an alert to the manager), `note` (a note to the manager, no item).
+- **Severity**: `item` (an item and an alert to the manager), `note` (a note
+  to the manager, no item). MaximizePM rings no phone for a fault: an outside
+  service that gets the beat of `ops_deadman_url` can.
 - **Fault item**: one operational item for each fault (title
   `ops:<scope>:<check>`), with the evidence. Later runs add notes to it; a
   fault that comes back within a day opens the same item again; more than 3
@@ -91,7 +92,7 @@ steps. In order:
 - `maxpm ops setup <project>`: a guided start. It asks what to watch, runs each
   new check once before it keeps it, sends a test notice, and sets the outside
   switch.
-- `maxpm ops add <project|target> <name> url --url <address> [--severity page]`
+- `maxpm ops add <project|target> <name> url --url <address> [--severity note]`
 - `maxpm ops add <scope> <name> beat --period 1d`; the job then runs `maxpm ops beat`.
 - `maxpm ops add <scope> <name> plugin --command "maxpm ops logs --file <path>"`: new log lines against a pattern.
 - `maxpm ops probe <name>`: MaximizePM's own checks (idle work, stuck sessions,
@@ -105,15 +106,9 @@ steps. In order:
 
 - The manager gets an alert for each new fault item and each fault that comes
   back.
-- A check of severity `page` reaches the person on `notify_channels` (ntfy,
-  mac) by `ops_page`: `untaken` (the default) when the fault does not heal and
-  nobody took it in `ops_page_after` (15m): no session holds its item and the
-  manager answered none of its alerts; `every` at once; `main:<check>,...` only
-  those checks, at once. A second notice says when it works again. Nothing
-  goes while the person turned notices off.
 - The watchdog (`maxpm serve --install-watchdog`) runs the checks marked
-  `--outside on` every minute, also when serve is down. It repairs, then sends
-  the notice itself.
+  `--outside on` every minute, also when serve is down. It repairs; the fault
+  item stays for the manager.
 - `ops_deadman_url`: serve sends a beat to an outside heartbeat service, which
   tells the person when this computer or serve is gone.
 

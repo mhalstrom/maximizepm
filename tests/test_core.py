@@ -1967,7 +1967,7 @@ class Plan(Base):
         text = out.getvalue()
         self.assertTrue(text.startswith("# MaximizePM operations"), text[:80])
         for part in ("## The parts", "## Who may do what", "## When you hold a fault item", "## Writing a check script",
-                     "maxpm ops cause <id>", "ops_page"):
+                     "maxpm ops cause <id>", "ops_deadman_url"):
             self.assertIn(part, text)
         self.assertIn("`maxpm guide ops`", (cli.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8"))
 
@@ -12203,7 +12203,7 @@ class OpsSelf(Base):
         checks = {c["name"]: c for c in core.ops_list(self.c, "maximizepm")["checks"]}
         self.assertEqual(set(checks), {c["name"] for c in prof["checks"]})
         self.assertEqual(sorted(n for n, c in checks.items() if c["outside"]), ["relay", "serve"])
-        self.assertEqual({checks[n]["severity"] for n in ("serve", "relay")}, {"page"})
+        self.assertEqual({checks[n]["severity"] for n in ("serve", "relay")}, {"item"})  # no paging (#6650)
         for c in checks.values():
             self.assertTrue(c["runbook"], c["name"])
             if c["outside"]:
@@ -12768,7 +12768,7 @@ class Ops(Base):
                          ("5m", 3, 2, "30s", "item"))
         self.assertEqual(self.history(), ["ops check site/home added: url GET https://example.com/ (200-399); every "
                                           "5m, fault after 3, item"])
-        core.ops_add(self.c, "prod", "beat", "beat", {"period": "1h", "severity": "page"}, actor="dev")
+        core.ops_add(self.c, "prod", "beat", "beat", {"period": "1h", "severity": "note"}, actor="dev")
         self.assertEqual([(x["scope"], x["name"]) for x in core.ops_list(self.c)["checks"]],
                          [("site", "home"), ("prod", "beat")])
         self.assertEqual([x["name"] for x in core.ops_list(self.c, "prod")["checks"]], ["beat"])
@@ -13517,7 +13517,7 @@ class Ops(Base):
     # A profile: every check of a project or a deploy target, and its ops_* settings, as one JSON file (#5436).
     PROFILE = {"maxpm_ops_profile": 1, "scope": "project:site", "checks": [
         {"name": "home", "form": "url", "url": "https://example.com/", "body": "Welcome", "every": "1m",
-         "timeout": "10s", "severity": "page", "runbook": "the site is down: read the server log"},
+         "timeout": "10s", "severity": "note", "runbook": "the site is down: read the server log"},
         {"name": "nightly", "form": "beat", "period": "26h"},
         {"name": "errors", "form": "log", "command": "tail -n 500 app.log", "pattern": "ERROR", "limit": 5,
          "subject": True, "repair": "restart-app"}]}
@@ -13533,7 +13533,7 @@ class Ops(Base):
              "window": "15m", "every": "5m", "fail_after": 3, "recover_after": 2, "timeout": "30s",
              "severity": "item", "repair": "restart-app", "subject": True},
             {"name": "home", "form": "url", "url": "https://example.com/", "statuses": "200-399", "body": "Welcome",
-             "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "page",
+             "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "note",
              "runbook": "the site is down: read the server log"},
             {"name": "nightly", "form": "beat", "period": "26h", "every": "5m", "fail_after": 3, "recover_after": 2,
              "timeout": "30s", "severity": "item"}]})
@@ -13600,14 +13600,14 @@ class Ops(Base):
             core.ops_profile_apply(self.c, {"maxpm_ops_profile": 1, "checks": []}, actor="mark")
 
     def test_the_settings_of_the_scope_go_with_the_profile(self):
-        p = {"maxpm_ops_profile": 1, "scope": "site", "checks": [], "settings": {"ops_page": "every"}}
-        self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {"ops_page": "every"})
+        p = {"maxpm_ops_profile": 1, "scope": "site", "checks": [], "settings": {"ops_fix_max": "1"}}
+        self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {"ops_fix_max": "1"})
         core.ops_profile_apply(self.c, p, yes=True, actor="mark")
-        self.assertEqual(core.setting(self.c, "ops_page", project_id=core._project(self.c, "site")["id"]), "every")
-        self.assertEqual(core.ops_profile_export(self.c, "site")["settings"], {"ops_page": "every"})
+        self.assertEqual(core.setting(self.c, "ops_fix_max", project_id=core._project(self.c, "site")["id"]), "1")
+        self.assertEqual(core.ops_profile_export(self.c, "site")["settings"], {"ops_fix_max": "1"})
         self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {})
-        p["settings"]["ops_page"] = "always"
-        with self.assertRaisesRegex(RiverError, "ops_page is untaken"):
+        p["settings"]["ops_fix_max"] = "many"
+        with self.assertRaises(RiverError):
             core.ops_profile_apply(self.c, p, yes=True, actor="mark")
 
     def test_the_command_line_exports_to_a_file_and_applies_it_with_yes(self):
@@ -13786,8 +13786,8 @@ class Ops(Base):
 
     def test_setup_asks_one_question_at_a_time_in_a_terminal(self):
         answers = ["1",                                    # site
-                   "1", "https://example.com/", "", "", "", "y", "",     # url: address, body, name, every, phone, keep
-                   "2", "", "nightly-backup", "", "",       # beat: period, name, phone, keep
+                   "1", "https://example.com/", "", "", "", "",     # url: address, body, name, every, keep
+                   "2", "", "nightly-backup", "",           # beat: period, name, keep
                    "",                                      # no more checks
                    "n",                                     # no ntfy now
                    ""]                                      # no outside switch
@@ -13800,12 +13800,10 @@ class Ops(Base):
             "Which text must the page hold? (Enter: none, a good HTTP status is enough) ",
             "A short name for this check [example-com] ",
             "How often should it run? [5m] ",
-            "Should a fault of this check be able to reach your phone? (y/N) ",
             "Keep this check? (Y/n) ",
             "Which one? (1-4, Enter: no more checks) ",
             "How long may the job go without a report? (for example 1h or 1d) [1d] ",
             "Which job reports? Its short name, for example nightly-backup ",
-            "Should a fault of this check be able to reach your phone? (y/N) ",
             "Keep this check? (Y/n) ",
             "Which one? (1-4, Enter: no more checks) ",
             "Set up notices to your phone now (the free ntfy app)? (Y/n) ",
@@ -13814,93 +13812,47 @@ class Ops(Base):
         self.assertIn("passed: HTTP 200", out)
         checks = {x["name"]: x for x in core.ops_list(self.c, "site")["checks"]}
         self.assertEqual((checks["example-com"]["severity"], checks["nightly-backup"]["config"]),
-                         ("page", {"period": "1d"}))
+                         ("item", {"period": "1d"}))
         self.assertIn("kept nightly-backup: beat a beat at least every 1d", out)
         self.assertIn("maxpm ops beat site nightly-backup", out)
 
     def test_setup_offers_a_proposal_when_the_person_at_the_terminal_is_an_agent(self):
-        answers = ["3", "check_jobs", "", "", "", "y", "the nightly jobs fail with no word", "", "n", ""]
+        answers = ["3", "check_jobs", "", "", "y", "the nightly jobs fail with no word", "", "n", ""]
         _, out, asked = self.setup_run("--as", "dev", "ops", "setup", "site", answers=answers)
         self.assertIn("dev is an agent; only a person or the manager sets", out)
-        self.assertEqual(asked[5:7], ["Propose it to the manager instead? (Y/n) ",
+        self.assertEqual(asked[4:6], ["Propose it to the manager instead? (Y/n) ",
                                       "Why is it needed? (one line for the manager) "])
         self.assertIn("proposed check_jobs to the manager", out)
         self.assertEqual([p["name"] for p in core.ops_proposals(self.c, "site")], ["check_jobs"])
 
-    # ---- paging (#5434): ops_page untaken (the default), every, main:<check>
+    # ---- no paging (#6650, mark 2026-11-21): the page severity and its settings ops_page, ops_page_after are gone
 
-    def page_check(self, name="api", severity="page"):
-        core.ops_add(self.c, "site", name, "plugin", {"command": f"check_{name}", "every": "1m", "fail_after": 1,
-                                                      "severity": severity}, actor="mark")
-
-    def pages(self, at):
-        sent = []
-
-        def notice(title, body):
-            sent.append((title, body))
-            return [{"channel": "ntfy", "ok": True, "error": None}]
-        core.ops_pages(self.c, notice, at)
-        return sent
-
-    def test_a_page_fault_that_does_not_heal_and_that_nobody_took_pages_after_ops_page_after_once(self):
-        self.page_check()
-        t = core.now()
-        r = self.run_at("site", "api", t, self.proc(2, "API CRITICAL - no answer"))
-        [x] = [i for i in r["items"] if i["action"] == "opened"]
-        self.assertEqual(self.pages(t + timedelta(minutes=14)), [])  # the manager has 15 minutes
-        [(title, body)] = self.pages(t + timedelta(minutes=15))
-        self.assertEqual(title, "MaximizePM: site/api is down")
-        self.assertIn("ops:site:api: API CRITICAL - no answer. in fault since", body)
-        self.assertIn(f"nobody took it in 15m (ops_page untaken). Item #{x['item']}.", body)
-        self.assertEqual(self.pages(t + timedelta(minutes=16)), [])  # one page for one fault
-        for i in (17, 18):
-            self.run_at("site", "api", t + timedelta(minutes=i), self.proc(0, "API OK"))
-        [(title, _)] = self.pages(t + timedelta(minutes=19))
-        self.assertEqual(title, "MaximizePM: site/api works again")
-        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
-
-    def test_no_page_when_a_session_holds_the_fault_item_or_the_manager_answered_its_alert_or_it_heals(self):
-        self.page_check()
-        t = core.now()
-        r = self.run_at("site", "api", t, self.proc(2, "API CRITICAL"))
-        item = [i for i in r["items"] if i["action"] == "opened"][0]["item"]
-        core.claim(self.c, item, "dev")
-        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
-        core.release(self.c, item, actor="dev")
-        alert = self.c.execute("SELECT id FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
-                               (item,)).fetchone()["id"]
-        core.decline_message(self.c, alert, note="a known restart; it heals by itself", actor="boss")
-        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
-        self.c.execute("UPDATE messages SET state='read' WHERE id=?", (alert,))  # read is not an answer
-        self.c.execute("DELETE FROM messages WHERE reply_to=?", (alert,))
+    def test_a_queue_that_set_paging_keeps_working_its_page_checks_open_items(self):
+        core.ops_add(self.c, "site", "api", "plugin", {"command": "check_api", "every": "1m", "fail_after": 1},
+                     actor="mark")
+        pid = core._project(self.c, "site")["id"]
+        self.c.execute("UPDATE checks SET severity='page'")
+        self.c.executemany("INSERT INTO settings(scope,key,value) VALUES (?,?,?)",
+                           [("global", "ops_page", "every"), (f"project:{pid}", "ops_page_after", "5m")])
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # as an older maxpm left the queue
         self.c.commit()
-        self.run_at("site", "api", t + timedelta(minutes=19), self.proc(0, "API OK"))  # heals: one pass of 2
-        self.assertEqual(self.pages(t + timedelta(minutes=20)), [])
-        self.run_at("site", "api", t + timedelta(minutes=21), self.proc(2, "API CRITICAL"))
-        self.assertEqual(len(self.pages(t + timedelta(minutes=22))), 1)
-
-    def test_ops_page_every_and_main_page_at_once_and_the_bell_off_sends_nothing(self):
-        with self.assertRaisesRegex(RiverError, "ops_page is untaken .* not 'main'"):
-            core.config_set(self.c, "ops_page", "main", project="site")
-        core.config_set(self.c, "ops_page", "every", project="site")
-        self.page_check("api")
-        self.page_check("db")
-        self.page_check("docs", severity="item")
-        t = core.now()
-        for name in ("api", "db", "docs"):
-            self.run_at("site", name, t, self.proc(2, "CRITICAL"))
-        self.assertEqual(sorted(x[0] for x in self.pages(t)), ["MaximizePM: site/api is down",
-                                                               "MaximizePM: site/db is down"])
-        core.config_set(self.c, "ops_page", "main:db", project="site")
-        self.c.execute("DELETE FROM ops_events WHERE state='paged'")
-        self.c.commit()
-        [(title, body)] = self.pages(t)
-        self.assertEqual(title, "MaximizePM: site/db is down")
-        self.assertIn("ops_page main: db is a main service", body)
-        self.c.execute("DELETE FROM ops_events WHERE state='paged'")
-        self.c.commit()
-        core.config_set(self.c, "notifications", "off")
-        self.assertEqual(self.pages(t), [])
+        self.c.close()
+        self.c = core.connect(os.path.join(self.dir.name, "t.db"))
+        self.assertEqual(self.c.execute("SELECT severity FROM checks").fetchone()["severity"], "item")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM settings WHERE key LIKE 'ops_page%'").fetchone()["n"], 0)
+        core.config_list(self.c)
+        with self.assertRaisesRegex(RiverError, "ops_page"):
+            core.config_set(self.c, "ops_page", "every")
+        with self.assertRaises(RiverError):
+            core.ops_add(self.c, "site", "db", "plugin", {"command": "check_db", "severity": "page"}, actor="mark")
+        r = self.run_at("site", "api", core.now(), self.proc(2, "API CRITICAL"))
+        self.assertEqual([i["action"] for i in r["items"]], ["opened"])
+        # A profile saved before #6650 applies: its page checks become item checks, its paging settings go.
+        p = {"maxpm_ops_profile": 1, "scope": "site", "settings": {"ops_page": "every", "ops_fix_max": "1"},
+             "checks": [{"name": "api", "form": "plugin", "command": "check_api", "every": "1m", "fail_after": 1,
+                         "severity": "page"}]}
+        res = core.ops_profile_apply(self.c, p, yes=True, actor="mark")
+        self.assertEqual((res["same"], res["settings"]), (["api"], {"ops_fix_max": "1"}))
 
 
 class OpsNoise(Base):
@@ -14303,7 +14255,7 @@ class OpsKindRelease(ReleaseBase):
 
 class OpsOutside(Base):
     """The watchdog (#5441): checks marked outside run in maxpm ops check --outside, with no maxpm serve; it repairs
-    a fault at most ops_outside_repair_max times in ops_outside_repair_window, then sends a notice itself."""
+    a fault at most ops_outside_repair_max times in ops_outside_repair_window, then stops; it rings no phone (#6650)."""
 
     def setUp(self):
         super().setUp()
@@ -14321,12 +14273,6 @@ class OpsOutside(Base):
         p = mock.patch.object(core, "OPS_RUNNER", runner)
         p.start()
         self.addCleanup(p.stop)
-        self.sent = []
-        self.channel_ok = True
-
-    def notice(self, title, body):
-        self.sent.append((title, body))
-        return [{"channel": "ntfy", "ok": self.channel_ok, "error": None if self.channel_ok else "down"}]
 
     def add(self, **kw):
         fields = {"command": "check_serve", "every": "1m", "timeout": "10s", "fail_after": 2, "outside": True,
@@ -14351,80 +14297,57 @@ class OpsOutside(Base):
 
     def test_a_serve_stopped_on_purpose_runs_none_of_the_checks_that_need_serve(self):
         # #5649: the person quit the desktop app and no login agent runs serve: maxpm's own probes do not run, so
-        # no repair and no notice; a check of the person's own still runs.
+        # no repair; a check of the person's own still runs.
         self.check_code = 0
         self.add(command="maxpm ops probe serve")
         core.ops_add(self.c, "maxpm", "site", "plugin", {"command": "check_site", "every": "1m", "timeout": "10s",
                                                          "outside": True}, actor="mark")
         t = core.now()
         for i in range(4):
-            res = core.ops_outside(self.c, self.notice, t + timedelta(minutes=i), serve_wanted=False)
+            res = core.ops_outside(self.c, t + timedelta(minutes=i), serve_wanted=False)
             self.assertEqual([r["check"] for r in res], ["maxpm/site"])
         self.assertEqual(self.calls, ["check_site"] * 4)
         # The app opens again: the serve check is due at once.
-        res = core.ops_outside(self.c, self.notice, t + timedelta(minutes=4))
+        res = core.ops_outside(self.c, t + timedelta(minutes=4))
         self.assertIn("maxpm/serve", [r["check"] for r in res])
 
     def test_a_run_one_second_early_is_due_in_the_watchdog(self):
         self.add()
         t = core.now()
-        core.ops_outside(self.c, self.notice, t)
-        self.assertEqual(len(core.ops_outside(self.c, self.notice, t + timedelta(seconds=59))), 1)
-        self.assertEqual(core.ops_outside(self.c, self.notice, t + timedelta(seconds=70)), [])  # the last ran at 59 s
+        core.ops_outside(self.c, t)
+        self.assertEqual(len(core.ops_outside(self.c, t + timedelta(seconds=59))), 1)
+        self.assertEqual(core.ops_outside(self.c, t + timedelta(seconds=70)), [])  # the last ran at 59 s
 
-    def test_three_repairs_in_the_window_then_one_notice_then_one_when_it_works_again(self):
+    def test_three_repairs_in_the_window_then_the_fault_item_stays_for_the_manager(self):
         self.add()
         t = core.now()
 
         def at(i):
-            return core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))[0]
+            return core.ops_outside(self.c, t + timedelta(minutes=i))[0]
         r = at(0)
         self.assertEqual((r["changes"][0]["to"], "repair" in r), ("failing", False))
         reps = [at(i).get("repair", {}).get("n") for i in (1, 2, 3)]
         self.assertEqual(reps, [1, 2, 3])
         self.assertEqual(self.calls.count("restart serve"), 3)
-        self.assertEqual(self.sent, [])  # the watchdog repairs before it asks a person
         r = at(4)
         self.assertEqual(r["repair_limit"], 3)
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0][0], "MaximizePM: maxpm/serve is down")
-        self.assertIn("ran its repair 3 times in 30m (ops_outside_repair_max 3) and stopped", self.sent[0][1])
+        self.assertNotIn("notice", r)
         item = [x for x in core.item_list(self.c, project="maxpm") if x["title"].startswith("ops:maxpm:serve ")][0]
-        self.assertIn(f"Item #{item['id']}", self.sent[0][1])
         at(5)
-        self.assertEqual(len(self.sent), 1)  # one notice for one fault
         self.assertEqual(self.calls.count("restart serve"), 3)
         notes = [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? ORDER BY id", (item["id"],))]
         self.assertEqual(len([n for n in notes if n.startswith("ops repair started: restart serve (the watchdog")]), 3)
         self.check_code = 0
         at(6)
-        self.assertEqual(len(self.sent), 1)  # one pass is not a recovery (recover_after 2)
         at(7)
-        self.assertEqual(self.sent[1][0], "MaximizePM: maxpm/serve works again")
-        at(8)
-        self.assertEqual(len(self.sent), 2)
         states = [r[0] for r in self.c.execute("SELECT state FROM ops_events ORDER BY id")]
-        self.assertEqual([s for s in states if s in ("fault", "repair", "paged", "page-ended", "recovered")],
-                         ["fault", "repair", "repair", "repair", "paged", "recovered", "page-ended"])
+        self.assertEqual([s for s in states if s in ("fault", "repair", "recovered")],
+                         ["fault", "repair", "repair", "repair", "recovered"])
         # After the window, the watchdog repairs again.
         self.check_code = 2
         at(40)
         r = at(41)
         self.assertEqual(r["repair"]["n"], 1)
-
-    def test_a_fault_with_no_repair_sends_its_notice_at_once_and_again_when_no_channel_took_it(self):
-        self.add(repair="")
-        t = core.now()
-        self.channel_ok = False
-        core.ops_outside(self.c, self.notice, t)
-        r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=1))[0]
-        self.assertIn("it has no repair command", r["notice"]["body"])
-        core.ops_outside(self.c, self.notice, t + timedelta(minutes=2))
-        self.assertEqual(len(self.sent), 2)  # not recorded: tried again
-        self.channel_ok = True
-        core.ops_outside(self.c, self.notice, t + timedelta(minutes=3))
-        core.ops_outside(self.c, self.notice, t + timedelta(minutes=4))
-        self.assertEqual(len(self.sent), 3)
 
     def test_a_check_whose_command_is_not_found_is_broken_and_starts_no_repair(self):
         # #5544: the watchdog's PATH lacked the maxpm folder, so 'maxpm ops probe serve' ended with exit 127; that
@@ -14433,35 +14356,26 @@ class OpsOutside(Base):
         self.check_code = 127
         t = core.now()
         for i in range(3):
-            r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))[0]
+            r = core.ops_outside(self.c, t + timedelta(minutes=i))[0]
         self.assertNotIn("restart serve", self.calls)
         self.assertEqual(r["broken"], "exit 127: command not found")
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0][0], "MaximizePM: the check maxpm/serve cannot run")
-        self.assertIn("so the watchdog starts no repair", self.sent[0][1])
         # The command is found again and the service is down: the repair runs as before.
         self.check_code = 2
-        r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=3))[0]
+        r = core.ops_outside(self.c, t + timedelta(minutes=3))[0]
         self.assertEqual(r["repair"]["n"], 1)
 
-    def test_a_check_of_severity_note_sends_no_notice(self):
-        self.add(repair="", severity="note")
-        t = core.now()
-        for i in range(4):
-            core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))
-        self.assertEqual(self.sent, [])
-
-    def test_maxpm_ops_check_outside_sends_on_the_channels_of_the_queue(self):
+    def test_maxpm_ops_check_outside_opens_the_fault_item_and_sends_no_notice(self):
+        # #6650: paging is not MaximizePM's job; the fault of an outside check opens its item like every other check.
         from river import cli
         self.add(repair="", fail_after=1)
         core.config_set(self.c, "notify_channels", "log")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(cli.run(["ops", "check", "--outside"]), 0)
-        self.assertIn("maxpm/serve: critical; fault; notice log sent", out.getvalue())
-        log = os.path.join(self.dir.name, "notifications.log")
-        with open(log, encoding="utf-8") as f:
-            self.assertEqual(json.loads(f.readline())["title"], "MaximizePM: maxpm/serve is down")
+        self.assertIn("maxpm/serve: critical; fault", out.getvalue())
+        self.assertNotIn("notice", out.getvalue())
+        self.assertTrue([x for x in core.item_list(self.c, project="maxpm") if x["title"].startswith("ops:maxpm:serve ")])
+        self.assertFalse(os.path.exists(os.path.join(self.dir.name, "notifications.log")))
 
 
 class OpsCron(Base):
