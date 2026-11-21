@@ -536,7 +536,7 @@ subfolder each had a distinct codeword in AGENTS.md.
 | Antigravity CLI 1.5.13 model | Project root | Subfolder |
 |---|---|---|
 | Gemini 4 Neon high | Pass | Pass |
-| Claude Opus 5.5 medium | Quota limit | Pending |
+| Claude Opus 5.5 medium | Pass | Pass |
 
 ## Slash commands on the page (#5224)
 
