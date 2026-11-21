@@ -1105,6 +1105,25 @@ class ProviderSlots(unittest.TestCase):
             with self.assertRaises(core.RiverError):
                 server.start_fresh(self.conn, d, "test")
 
+    def test_a_sessions_explicit_agent_counts_against_its_max(self):
+        """#6585: the manager followed the watch's hint '--agent "Antigravity CLI"' and ran 5 agy sessions where
+        agent_order allowed 2. A session's --agent now waits at the limit; a person's still starts."""
+        core.config_set(self.conn, "agent_order", "antigravity max 1, claude-code")
+        core.register(self.conn, "manager-1")
+        core.register(self.conn, "mark", human=True)
+        a, b = (core.item_add(self.conn, "app", f"Build part {n}")["id"] for n in (1, 2))
+        self.assertEqual(self._dispatch(a)[1], "antigravity")
+        with self.assertRaises(core.RiverError) as cm:
+            core.launch_target(self.conn, item=b, agent="Antigravity", actor="manager-1")
+        self.assertIn("1 of 1 session", str(cm.exception))
+        self.assertIn("Leave out --agent", str(cm.exception))
+        # Without --agent the list picks the next provider with a free slot.
+        self.assertEqual(core.launch_target(self.conn, item=b, actor="manager-1")["platform"], "claude-code")
+        # A person (by name, or with no name) still starts the agent past its max.
+        self.assertEqual(core.launch_target(self.conn, item=b, agent="Antigravity", actor="mark")["platform"],
+                         "antigravity")
+        self.assertEqual(core.launch_target(self.conn, item=b, agent="Antigravity")["platform"], "antigravity")
+
     def test_global_default_agent_gives_way_to_the_list_and_an_items_own_agent_does_not(self):
         core.config_set(self.conn, "default_agent", "codex")
         it = core.item_add(self.conn, "app", "Build feature")["id"]

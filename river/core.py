@@ -730,8 +730,9 @@ DEFAULT_SETTINGS = {
     # (agy's Gemini and Claude models): "antigravity model gemini-4-neon effort medium max 2, antigravity model
     # claude-opus-5-5, claude-code model opus". A launch that names no agent takes the first entry with a free slot
     # and usage left for its model, and runs that model and effort; an entry at its limit of sessions or of usage is
-    # skipped. A session that stops at its usage limit starts again on the next entry down. An explicit --agent still
-    # wins. Empty: the launch_agents entries in their order, with no limits, and default_agent picks first. With a list,
+    # skipped. A session that stops at its usage limit starts again on the next entry down. A person's --agent still
+    # wins; a session's --agent (the manager's) waits while that agent's entry is full (#6585). Empty: the
+    # launch_agents entries in their order, with no limits, and default_agent picks first. With a list,
     # a global default_agent gives way to it. An entry with no model runs the agent's own (agy_model, ...).
     "agent_order": "",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
@@ -4345,12 +4346,13 @@ def _limit_what(lim):
     return f"{lim['label']} ({lim['reason']})" if lim.get("model") else lim["label"]
 
 
-def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, model=None, fits=None):
+def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, model=None, fits=None, person=True):
     """The launch entry and provider entry a new session starts (#6348, #6361, #6370). `agent`: a launch_agents
     label, or None. `model`: the launch's model when it is known (a model group at its limit counts only for a model
     of that group). fits(model, platform): whether an entry's model fits the item's limits; an entry that does not
     is skipped.
-    - explicit (--agent, the dialog's choice): that agent; refused only when it is at its usage limit.
+    - explicit (--agent, the dialog's choice): that agent; refused when it is at its usage limit, and (slots, not
+      person: an agent or the manager chose it) when its entry in agent_order has no free slot (#6585).
     - None, and agent_order is set: the first entry of the list with a free slot and usage left for its model.
     - None with no agent_order (the first launch entry), or a preference (the item's agent, a role's): that agent's
       entry, unless it is at its usage limit or (slots) has no free slot; then the first such entry of the list.
@@ -4414,6 +4416,12 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
             if lim:
                 raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
                                  + (" or model" if lim.get("model") else "") + " or wait until it resets")
+            # #6585: an agent's or the manager's --agent counts against the entry's max in agent_order: the manager
+            # named Antigravity and ran 5 sessions where agent_order allowed 2. A person's choice still starts.
+            slot = ent or (_entry_for(conn, mine, aid, check_model) if mine else None)
+            if slots and not person and slot is not None and slot["full"]:
+                raise RiverError(f"{slot['name']} has {_slots_text(slot)} (agent_order); the work starts when one "
+                                 f"ends. Leave out --agent so that agent_order picks a provider with a free slot")
             if ent and ent["model"]:
                 return {**none, "label": agent, "model": ent["model"], "effort": ent["effort"], "pos": ent["pos"],
                         "note": note}
@@ -24492,8 +24500,11 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         return model_check(ladder, m, top["min_model"], top["max_model"],
                            platform_spec(plat_)["family"] if plat_ else None)[0]
     preferred = agent
+    # #6585: a person (no name, or a person's name) may start an agent past its agent_order max; a session may not.
+    who = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
     got = pick_provider(conn, agent, project_id=p["id"], explicit=explicit_agent,
-                        model=model if model_explicit else own_model, fits=fits)
+                        model=model if model_explicit else own_model, fits=fits,
+                        person=who is None or who["kind"] == "human")
     agent, fallback_why = got["label"], got["note"]
     if auto_agent and preferred is not None and agent != preferred:
         model = effort = None  # chosen for the preferred agent: the new one takes the item's own or its default

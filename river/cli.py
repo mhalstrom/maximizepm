@@ -5666,7 +5666,8 @@ def _findings_lines(f, r):
         t = x.get("agent_type")
         out.append(f"  NO {t.upper() + ' ' if t else ''}AGENT in {x['project']}: {x['ready']} ready"
                    + (f" for {t}" if t else "") + f", top #{x['top']['id']} {_cut(x['top']['title'], 40)}."
-                   + (f"  {r} launch --item {x['top']['id']}" + (f" --agent \"{x['launch']}\"" if x.get("launch") else
+                   # #6585: no --agent in the hint: the launch picks the agent by agent_order and its limits.
+                   + (f"  {r} launch --item {x['top']['id']}" + ("" if x.get("launch") else
                       f"  (no launch_agents entry runs {t}: add one)") if t else f"  {r} launch --project {x['project']}"))
     for x in f["targets"]:
         out.append(f"  TARGET {x['target']}: owner {x['owner']} is {x['state']}.  {r} target give {x['target']} --to <agent>")
