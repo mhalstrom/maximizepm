@@ -1675,6 +1675,7 @@ CREATE TABLE IF NOT EXISTS triggers (
   condition     TEXT NOT NULL DEFAULT 'state',  -- one of TRIGGER_CONDITIONS
   arrival       TEXT NOT NULL DEFAULT 'poll',   -- one of TRIGGER_ARRIVALS
   priority      INTEGER,                 -- of its event's item; none: by condition (trigger_priority)
+  escalate_after TEXT,                   -- duration: alert holder (else manager) when an event item stays open (#6649)
   form          TEXT NOT NULL DEFAULT '',  -- a poll: one of OPS_FORMS; a push: ''
   config        TEXT NOT NULL DEFAULT '{}',  -- the settings of the form as JSON (OPS_FORM_FIELDS)
   every         TEXT NOT NULL DEFAULT '5m',  -- a duration: how often it runs
@@ -1709,6 +1710,10 @@ CREATE TABLE IF NOT EXISTS trigger_events (
   last_at     TEXT NOT NULL,             -- the last time the id came
   repeats     INTEGER NOT NULL DEFAULT 0,
   item_id     INTEGER,                   -- the item the event opened (#6627)
+  result      TEXT,                      -- the output/note when the item closed (#6627)
+  result_at   TEXT,                      -- when the item closed
+  result_status TEXT,                    -- done or dropped
+  escalated_at TEXT,                     -- last time-based escalation alert (#6649)
   UNIQUE (trigger_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS trigger_events_time ON trigger_events(trigger_id, received_at);
@@ -2503,7 +2508,7 @@ _CHECKS_VIEW = (
     "AS runbook, "
     "t.subject, NULLIF(p.repair, '') AS repair, t.layer, t.cron, t.outside, t.errors, t.paused_until, t.last_beat, "
     "t.state, t.created_by, t.created_at, t.changed_by, t.changed_at, t.area_id, t.playbook_id, t.condition, "
-    "t.arrival, t.priority FROM triggers t LEFT JOIN ops_playbooks p ON p.id = t.playbook_id "
+    "t.arrival, t.priority, t.escalate_after FROM triggers t LEFT JOIN ops_playbooks p ON p.id = t.playbook_id "
     "WHERE t.condition = 'state' AND t.arrival = 'poll'")
 
 
@@ -2604,6 +2609,14 @@ def _migrate(conn):
         conn.execute("ALTER TABLE secrets ADD COLUMN fail_at TEXT")
         conn.execute("ALTER TABLE secrets ADD COLUMN fail_why TEXT")
     # The checks table of an older queue moves into triggers (#6625); a column it lacks takes the default there.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='triggers'").fetchone():
+        if "escalate_after" not in {r["name"] for r in conn.execute("PRAGMA table_info(triggers)")}:
+            conn.execute("ALTER TABLE triggers ADD COLUMN escalate_after TEXT")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trigger_events'").fetchone():
+        ecols = {r["name"] for r in conn.execute("PRAGMA table_info(trigger_events)")}
+        for c in ("result", "result_at", "result_status", "escalated_at"):
+            if c not in ecols:
+                conn.execute(f"ALTER TABLE trigger_events ADD COLUMN {c} TEXT")
     _migrate_triggers(conn)
     if conn.execute("SELECT 1 FROM triggers WHERE severity='page' LIMIT 1").fetchone():  # #6650
         conn.execute("UPDATE triggers SET severity='item' WHERE severity='page'")
@@ -8438,14 +8451,16 @@ def ops_repair_start(conn, c, reason, actor=None):
             held = ", ".join(f"#{r['id']}" + (f" (held by {r['assignee']})" if r["assignee"] else "") for r in items)
             raise RiverError(f"only the session that holds a fault item of {c['scope']}/{c['name']} starts its repair"
                              + (f" ({held})" if held else " (it has no open fault item)") + f"; else {how}")
-        most = int(setting(conn, "ops_repair_max") or 0)
-        win = parse_duration(setting(conn, "ops_repair_window"))
-        n = conn.execute("SELECT COUNT(*) n FROM ops_events WHERE check_id=? AND state='repair' AND at>=?",
-                         (c["id"], iso(now() - win))).fetchone()["n"]
-        if n >= most:
-            raise RiverError(f"the repair of {c['scope']}/{c['name']} ran {n} times in {setting(conn, 'ops_repair_window')} "
-                             f"(ops_repair_max {most}): the next one needs a person. Write what you found on the item, "
-                             f"then {how}")
+        from . import operations
+        if not operations.playbook_has_custom_limits(conn, check=c):
+            most = int(setting(conn, "ops_repair_max") or 0)
+            win = parse_duration(setting(conn, "ops_repair_window"))
+            n = conn.execute("SELECT COUNT(*) n FROM ops_events WHERE check_id=? AND state='repair' AND at>=?",
+                             (c["id"], iso(now() - win))).fetchone()["n"]
+            if n >= most:
+                raise RiverError(f"the repair of {c['scope']}/{c['name']} ran {n} times in {setting(conn, 'ops_repair_window')} "
+                                 f"(ops_repair_max {most}): the next one needs a person. Write what you found on the item, "
+                                 f"then {how}")
     it = (mine or items or [None])[0]
     with tx(conn):
         conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
@@ -8491,12 +8506,18 @@ def fault_key(item):
     return t.split(" ", 1)[0]
 
 
-def investigations_live(conn):
-    """The fault items that an investigation works on now: held by a live session, or reserved for one."""
+def investigations_live(conn, project_id=None):
+    """The fault or trigger-event items that an investigation works on now: held by a live session, or reserved for
+    one. project_id (#6643): count only that project's operations sessions."""
     t = iso(now())
     n = 0
-    for r in conn.execute("SELECT i.status, i.assignee, i.reserved_for, i.reserved_until FROM items i WHERE "
-                          "i.kind='operational' AND i.title LIKE 'ops:%' AND i.status IN ('open','in_progress','held')"):
+    sql = ("SELECT i.status, i.assignee, i.reserved_for, i.reserved_until FROM items i WHERE "
+           "i.kind='operational' AND i.title LIKE 'ops:%' AND i.status IN ('open','in_progress','held')")
+    params = ()
+    if project_id is not None:
+        sql += " AND i.project_id=?"
+        params = (project_id,)
+    for r in conn.execute(sql, params):
         who = r["assignee"] if r["status"] != "open" else (r["reserved_for"] if (r["reserved_until"] or "") > t else None)
         a = conn.execute("SELECT * FROM agents WHERE name=?", (who,)).fetchone() if who else None
         if a is not None and _agent_state(conn, a) not in ("gone", "stopped"):
@@ -8590,12 +8611,15 @@ def _ops_cause_proven(conn, item_id):
 
 def _fault_refusal(conn, actor, what):
     """#5965 (global policy g7): a session that holds a fault item investigates; it changes nothing in production.
+    mark 2026-11-21 (#6645): applies only when the playbook sets no limits (default: investigate and propose only);
+    a playbook whose limits the person wrote governs what the agent may do alone.
     Why it may not do `what` (ship, cut a release, release now, deploy, change a hook) while it holds one, or None."""
     if not actor:
         return None
+    from . import operations
     for r in conn.execute("SELECT id, title, kind FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                           "AND kind='operational' AND title LIKE 'ops:%' ORDER BY id", (actor,)):
-        if fault_key(r):
+        if fault_key(r) and not operations.playbook_has_custom_limits(conn, item=dict(r)):
             return (f"refused: you hold the fault #{r['id']}, and a session on a fault investigates and changes "
                     f"nothing in production (policy g7), so it may not {what}. Write the cause (maxpm ops cause "
                     f"{r['id']} ...) and add the fix as an item (maxpm add \"<fix>\" --found-during {r['id']}): it goes "
@@ -8605,17 +8629,21 @@ def _fault_refusal(conn, actor, what):
 
 def _ops_fix_refusal(conn, actor, doer, found_during, blocks):
     """Why an agent may not add this item yet: it is a fix of a fault item whose cause has no proof (#5513). A
-    person's item (a person's step), MaximizePM itself, a person and the manager may add one."""
+    person's item (a person's step), MaximizePM itself, a person and the manager may add one. Non-state trigger
+    events (#6627) and playbooks with custom limits (#6645) are not held by check-proof rules."""
     if doer == "human" or not actor or actor == "maxpm":
         return None
     r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone()
     if r is None or r["kind"] == "human" or r["role"] == "manager":
         return None
+    from . import operations
     for fid in (found_during, blocks):
         if fid is None:
             continue
         f = conn.execute("SELECT id, title, kind FROM items WHERE id=?", (fid,)).fetchone()
-        if f and fault_key(f) and not _ops_cause_proven(conn, f["id"]):
+        if (f and fault_key(f) and not _ops_cause_proven(conn, f["id"])
+                and not operations.is_non_state_event_item(conn, f["id"])
+                and not operations.playbook_has_custom_limits(conn, item=dict(f))):
             return (f"refused: #{f['id']} is a fault, and its cause has no proof yet. State it first, with a proof "
                     f"that MaximizePM runs: maxpm ops cause {f['id']} --cause \"<what went wrong>\" --proof \"<a check "
                     f"or a command>\" [--expect \"<what it gives>\"] --action \"<what fixes it>\"; then add the fix")
@@ -8662,14 +8690,19 @@ def ops_fault_brief(conn, item):
     scope, name = parts[1], (parts[2] if len(parts) > 2 else "")
     rows = conn.execute("SELECT * FROM checks WHERE scope=? AND name=?", (scope, name)).fetchall() if name else \
         conn.execute("SELECT * FROM checks WHERE scope=? AND state IN ('failing','fault') ORDER BY name", (scope,)).fetchall()
+    from . import operations
     checks = []
     for r in rows:
         c = _ops_row(r)
         runs = [dict(x) for x in conn.execute("SELECT status, summary, ended_at FROM ops_runs WHERE check_id=? AND "
                                               "ended_at IS NOT NULL ORDER BY id DESC LIMIT 3", (c["id"],))]
+        pb = operations.playbook_for(conn, c)
         checks.append({"scope": c["scope"], "name": c["name"], "form": c["form"], "state": c["state"],
                        "subject": parts[3] if len(parts) > 3 else None, "runbook": c.get("runbook"),
-                       "repair": bool(c.get("repair")), "runs": runs})
+                       "repair": bool(c.get("repair")), "runs": runs,
+                       "playbook": {"name": pb["name"], "knowledge": pb["knowledge"], "tools": pb["tools"],
+                                    "limits": pb["limits"], "done_means": pb["done_means"],
+                                    "custom_limits": operations.playbook_has_custom_limits(conn, check=c)}})
     return {"key": key, "storm": not name, "checks": checks}
 
 
@@ -17996,9 +18029,13 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
             _record_takeover(conn, it, "done" if status == "done" else "dropped", note, actor)
         if it["assignee"] and actor and it["assignee"] != actor:
             raise RiverError(f"item {item_id} is held by {it['assignee']}; ask them, or release it first")
+        closed_at = iso(now())
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
                      "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
-                     "WHERE id=?", (status, iso(now()), output, it["id"]))
+                     "WHERE id=?", (status, closed_at, output, it["id"]))
+        # Record the result back on any trigger events handled by this item (#6627).
+        conn.execute("UPDATE trigger_events SET result=?, result_at=?, result_status=? WHERE item_id=?",
+                     (output or note or status, closed_at, status, it["id"]))
         if choice is not None:
             conn.execute("UPDATE items SET choice=? WHERE id=?", (choice, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
@@ -24706,6 +24743,10 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     if got["effort"] and (effort is None or auto_agent) and top.get("effort_from") != "item":
         effort = got["effort"]
     p = start_folder(conn, p, folder, actor)
+    from . import operations
+    pb_dir = operations.workdir_for_item(conn, top["id"])
+    if pb_dir and os.path.isdir(pb_dir):
+        p = dict(p, path=pb_dir)
     plat = _launch_platform(conn, p["id"], agent)
     if model:
         # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
@@ -25813,8 +25854,13 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
             names.append(it["project"])
         brief["policies"] = policies_for(conn, names, brief["role"], cwd)
         brief["read_dirs"] = _go_read_dirs(conn, brief)
-        if it and fault_key(it):
-            brief["fault"] = ops_fault_brief(conn, it)  # an investigation (#5432)
+        if it:
+            from . import operations
+            ev_brief = operations.event_brief(conn, it)
+            if ev_brief:
+                brief["ops_event"] = ev_brief
+            if fault_key(it) and (not ev_brief or ev_brief.get("condition") == "state"):
+                brief["fault"] = ops_fault_brief(conn, it)  # an investigation (#5432)
     if brief.get("agent"):
         brief["unchanged"] = _go_once(conn, brief)
     return brief

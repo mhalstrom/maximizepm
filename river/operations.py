@@ -326,6 +326,58 @@ def playbook_for(conn, t):
     return b
 
 
+def playbook_has_custom_limits(conn, item=None, check=None):
+    """True when the trigger's playbook has limits that a person explicitly wrote (#6645: rule g7 and ops_repair_max
+    apply only when a playbook sets no limits)."""
+    t = check
+    if t is None and item is not None:
+        iid = item["id"] if isinstance(item, dict) else item
+        r = conn.execute("SELECT t.* FROM trigger_events e JOIN triggers t ON t.id=e.trigger_id WHERE e.item_id=? "
+                         "ORDER BY e.id LIMIT 1", (iid,)).fetchone()
+        if r is not None:
+            t = dict(r)
+        else:
+            key = core.fault_key(item) if isinstance(item, dict) else None
+            if key:
+                parts = key.split(":")
+                if len(parts) >= 3 and parts[2]:
+                    r = conn.execute("SELECT * FROM triggers WHERE scope=? AND name=? LIMIT 1",
+                                     (parts[1], parts[2])).fetchone()
+                    if r is not None:
+                        t = dict(r)
+    if not t or not t.get("playbook_id"):
+        return False
+    r = conn.execute("SELECT limits FROM ops_playbooks WHERE id=?", (t["playbook_id"],)).fetchone()
+    lim = (r["limits"] or "").strip() if r else ""
+    return bool(lim and lim != core.OPS_NO_LIMITS)
+
+
+def is_non_state_event_item(conn, item_id):
+    """True when item_id was opened by a time or event trigger (not a state check)."""
+    r = conn.execute("SELECT t.condition FROM trigger_events e JOIN triggers t ON t.id=e.trigger_id WHERE e.item_id=? "
+                     "LIMIT 1", (item_id,)).fetchone()
+    return bool(r and r["condition"] != "state")
+
+
+def workdir_for_item(conn, item_id):
+    """The playbook or area folder for an operations item, or None."""
+    r = conn.execute("SELECT t.* FROM trigger_events e JOIN triggers t ON t.id=e.trigger_id WHERE e.item_id=? "
+                     "ORDER BY e.id LIMIT 1", (item_id,)).fetchone()
+    t = dict(r) if r is not None else None
+    if t is None:
+        it = conn.execute("SELECT id, title, kind FROM items WHERE id=?", (item_id,)).fetchone()
+        key = core.fault_key(it) if it is not None else None
+        if key:
+            parts = key.split(":")
+            if len(parts) >= 3 and parts[2]:
+                r = conn.execute("SELECT * FROM triggers WHERE scope=? AND name=? LIMIT 1",
+                                 (parts[1], parts[2])).fetchone()
+                t = dict(r) if r is not None else None
+    if t is None:
+        return None
+    return playbook_for(conn, t).get("workdir")
+
+
 # ---- triggers
 
 def _trigger(conn, scope, name):
@@ -359,7 +411,7 @@ def _trigger_brief(conn, r):
 
 
 def trigger_add(conn, project, name, condition, arrival, area=None, playbook=None, priority=None, command=None,
-                every=None, cron=None, timeout=None, actor=None):
+                every=None, cron=None, timeout=None, actor=None, escalate_after=None):
     """maxpm ops trigger add: a time or an event trigger of an area (a state trigger is a check: maxpm ops add). A
     poll trigger has a routine, a script that MaximizePM runs (decision 5); a push trigger has none (its address and
     secret come with #6628). The trigger is stored now; MaximizePM runs a time or event routine from #6626 on."""
@@ -377,6 +429,7 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
     if arrival == "push" and (command or every or cron):
         raise RiverError("a push trigger has no routine: the outside system posts its events to it")
     _priority(priority)
+    esc = _escalate_after(escalate_after)
     with tx(conn):
         _need(conn, actor, "adds a trigger")
         p = core._project(conn, project)
@@ -394,9 +447,9 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
             col = core._ops_build("cmd", {"command": command, "every": every, "cron": cron, "timeout": timeout})
         pid, area_id = core._trigger_home(conn, kind, scope, actor, a["name"] if a else None)
         tid = conn.execute(
-            "INSERT INTO triggers(scope_kind,scope,name,area_id,condition,arrival,priority,form,config,every,timeout,"
-            "cron,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (kind, scope, name, area_id, condition, arrival, priority, col["form"], json.dumps(col["config"]),
+            "INSERT INTO triggers(scope_kind,scope,name,area_id,condition,arrival,priority,escalate_after,form,config,"
+            "every,timeout,cron,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (kind, scope, name, area_id, condition, arrival, priority, esc, col["form"], json.dumps(col["config"]),
              col["every"], col["timeout"], col.get("cron"), actor, iso(now()))).lastrowid
         core._trigger_playbook(conn, tid, pid, name, None, None, playbook, actor)
         _event(conn, None, actor, f"ops trigger {scope}/{name} added: {condition}, {arrival}"
@@ -409,13 +462,24 @@ def _priority(priority):
         raise RiverError("--priority is 0 to 4 (0 is the highest); none: by its condition")
 
 
-def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, actor=None):
-    """maxpm ops trigger edit: another area of the same scope, another playbook of the project, or its own priority
-    (-1: by its condition again). The routine of a check: maxpm ops edit."""
-    if area is None and playbook is None and priority is None:
-        raise RiverError("give a change: --area, --playbook or --priority")
+def _escalate_after(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in ("off", "none"):
+        return None
+    core.parse_duration(s)
+    return s
+
+
+def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, actor=None, escalate_after=None):
+    """maxpm ops trigger edit: another area of the same scope, another playbook of the project, its own priority
+    (-1: by its condition again), or its escalate-after duration ('off' clears it). The routine of a check: maxpm ops edit."""
+    if area is None and playbook is None and priority is None and escalate_after is None:
+        raise RiverError("give a change: --area, --playbook, --priority or --escalate-after")
     if priority is not None and priority != -1:
         _priority(priority)
+    esc = _escalate_after(escalate_after) if escalate_after is not None else None
     with tx(conn):
         _need(conn, actor, "changes a trigger")
         t = _trigger(conn, scope, name)
@@ -430,6 +494,9 @@ def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, act
         if priority is not None:
             conn.execute("UPDATE triggers SET priority=? WHERE id=?", (None if priority == -1 else priority, t["id"]))
             changed.append("priority")
+        if escalate_after is not None:
+            conn.execute("UPDATE triggers SET escalate_after=? WHERE id=?", (esc, t["id"]))
+            changed.append("escalate_after")
         conn.execute("UPDATE triggers SET changed_by=?, changed_at=? WHERE id=?", (actor, iso(now()), t["id"]))
         _event(conn, None, actor, f"ops trigger {t['scope']}/{name} changed ({', '.join(changed) or 'nothing'})")
     return {"trigger": trigger_show(conn, f"{t['scope_kind']}:{t['scope']}", name), "changed": "changed"}
@@ -489,15 +556,176 @@ def trigger_event(conn, trigger_id, event, at=None):
     return {"event": _event_row(conn.execute("SELECT * FROM trigger_events WHERE id=?", (rid,)).fetchone()), "new": True}
 
 
+def _escalate(conn, item_id, text, actor="maxpm"):
+    """Escalate an event item (#6649, mark 2026-11-21): alert the live agent holding it; when nobody holds it,
+    alert the active manager. No outside tool, no phone."""
+    it = conn.execute("SELECT id, status, assignee FROM items WHERE id=?", (item_id,)).fetchone()
+    if it and it["assignee"] and it["status"] in ("in_progress", "held"):
+        a = conn.execute("SELECT * FROM agents WHERE name=?", (it["assignee"],)).fetchone()
+        if a is not None and core._agent_state(conn, a) not in ("gone", "stopped"):
+            with tx(conn):
+                core._send(conn, "alert", actor, text, to=it["assignee"], item_id=item_id)
+            return it["assignee"]
+    m = core.active_manager(conn)
+    if m:
+        with tx(conn):
+            core._send(conn, "alert", actor, text, to=m, item_id=item_id, level=core.WAKE_LEVEL)
+        return m
+    return None
+
+
+def handle_event(conn, trigger_id, event, at=None, actor=None):
+    """Record and handle one event of a trigger (#6627): the shared path for poll (#6626), push (#6628) and
+    maxpm ops events add.
+    - Repeat of an id whose item is open: add a note on that item and escalate (alert holder, else manager).
+    - Repeat of an id whose item is closed: count only; no second item.
+    - Many new events of one trigger within ops_storm_window (> ops_storm_count): share one storm item.
+    - Otherwise: open one operational item with the trigger's priority and playbook's model/effort.
+    Returns {"event", "new", "item", "action", "escalated_to"}."""
+    at_dt = at or now()
+    t_row = conn.execute("SELECT * FROM triggers WHERE id=?", (trigger_id,)).fetchone()
+    if t_row is None:
+        raise RiverError(f"no trigger {trigger_id}")
+    t = dict(t_row)
+    with tx(conn):
+        res = trigger_event(conn, trigger_id, event, at=at_dt)
+        ev = res["event"]
+        _event(conn, None, actor or "maxpm", f"ops trigger {t['scope']}/{t['name']}: event {ev['event_id']} "
+               + ("received" if res["new"] else f"repeated ({ev['repeats']}x)") + f": {ev['title']}")
+    if not res["new"]:
+        it = conn.execute("SELECT id, status, title FROM items WHERE id=?", (ev["item_id"],)).fetchone() \
+            if ev.get("item_id") else None
+        if it and it["status"] in ("open", "in_progress", "held"):
+            core._ops_note(conn, it["id"],
+                           f"ops event {ev['event_id']} repeated ({ev['repeats']}x) at {core.show_time(iso(at_dt))}: "
+                           f"{ev['title']}", at_dt, force=True)
+            to = _escalate(conn, it["id"],
+                           f"repeat of event {ev['event_id']} ({ev['repeats']}x) on {t['scope']}/{t['name']}: "
+                           f"#{it['id']} {ev['title']}")
+            return {"event": ev, "new": False, "item": it["id"], "action": "repeat-note", "escalated_to": to}
+        return {"event": ev, "new": False, "item": ev.get("item_id"), "action": "repeat-closed", "escalated_to": None}
+    project = core._ops_project(conn, t)
+    pid = core._project(conn, project)["id"]
+    pb = playbook_for(conn, t)
+    key = f"ops:{t['scope']}:{t['name']}"
+    models = {k: pb[k] for k in ("model", "effort") if pb.get(k)} or None
+    win_str = core.setting(conn, "ops_storm_window", project_id=pid)
+    window = core.parse_duration(win_str)
+    storm_count = int(core.setting(conn, "ops_storm_count", project_id=pid) or 3)
+    recent = conn.execute("SELECT id, event_id, title FROM trigger_events WHERE trigger_id=? AND received_at>=? "
+                          "ORDER BY id", (trigger_id, iso(at_dt - window))).fetchall()
+    if len(recent) > storm_count:
+        storm_prefix = f"{key} storm:"
+        st = conn.execute("SELECT id, title FROM items WHERE kind='operational' AND status IN ('open','in_progress',"
+                          "'held') AND substr(title, 1, ?)=? ORDER BY id DESC LIMIT 1",
+                          (len(storm_prefix), storm_prefix)).fetchone()
+        if st:
+            with tx(conn):
+                conn.execute("UPDATE trigger_events SET item_id=? WHERE id=?", (st["id"], ev["id"]))
+            ev["item_id"] = st["id"]
+            core._ops_note(conn, st["id"],
+                           f"ops storm event e{ev['id']} [{ev['event_id']}] at {core.show_time(iso(at_dt))}: "
+                           f"{ev['title']}", at_dt, force=True)
+            to = _escalate(conn, st["id"],
+                           f"storm on {t['scope']}/{t['name']}: new event {ev['event_id']} ({ev['title']}) "
+                           f"joined #{st['id']}")
+            return {"event": ev, "new": True, "item": st["id"], "action": "storm-note", "escalated_to": to}
+        ev_list = ", ".join(f"{r['event_id']}: {r['title'][:60]}" for r in recent[-10:])
+        ctx = (f"{len(recent)} events arrived on trigger {t['scope']}/{t['name']} within {win_str} "
+               f"(ops_storm_count {storm_count}), so one item holds them. Recent events: {ev_list}. "
+               f"Playbook: {pb['name']}. Full playbook and event data are in the go briefing.")
+        r = core.item_add(conn, project, f"{storm_prefix} {len(recent)} events in {win_str}"[:300],
+                          priority=core.trigger_priority(t), doer="ai", actor="maxpm", context=ctx,
+                          goals=[], kind="operational", short=f"{t['name']}: {len(recent)} events"[:60],
+                          models=models)
+        with tx(conn):
+            conn.execute("UPDATE trigger_events SET item_id=? WHERE id=?", (r["id"], ev["id"]))
+        ev["item_id"] = r["id"]
+        to = _escalate(conn, r["id"],
+                       f"storm on {t['scope']}/{t['name']}: {len(recent)} events in {win_str}: #{r['id']}")
+        return {"event": ev, "new": True, "item": r["id"], "action": "storm", "escalated_to": to}
+    ctx = (f"Trigger {t['scope']}/{t['name']} ({t['condition']}, {t['arrival']}), playbook {pb['name']}. "
+           f"Event e{ev['id']} (id {ev['event_id']}): {ev['title']}. "
+           f"Read the playbook and untrusted event data in the go briefing (or maxpm ops events show e{ev['id']}).")
+    r = core.item_add(conn, project, f"{key} {ev['title']}"[:300],
+                      priority=core.trigger_priority(t), doer="ai", actor="maxpm", context=ctx,
+                      goals=[], kind="operational", short=f"{t['name']}: {ev['title']}"[:60],
+                      models=models)
+    with tx(conn):
+        conn.execute("UPDATE trigger_events SET item_id=? WHERE id=?", (r["id"], ev["id"]))
+    ev["item_id"] = r["id"]
+    return {"event": ev, "new": True, "item": r["id"], "action": "opened", "escalated_to": None}
+
+
+def escalate_due(conn, at=None):
+    """Escalate open event items whose trigger's escalate_after duration has passed (#6649): alert the holder,
+    else the active manager. Called from server.ops_watch."""
+    at_dt = at or now()
+    out = []
+    seen = set()
+    rows = conn.execute(
+        "SELECT e.id, e.event_id, e.title, e.received_at, e.escalated_at, e.item_id, "
+        "t.scope, t.name AS trigger_name, t.escalate_after, i.status, i.title AS item_title "
+        "FROM trigger_events e JOIN triggers t ON t.id=e.trigger_id JOIN items i ON i.id=e.item_id "
+        "WHERE t.escalate_after IS NOT NULL AND t.escalate_after != '' "
+        "AND i.status IN ('open','in_progress','held') ORDER BY e.id").fetchall()
+    for r in rows:
+        if r["item_id"] in seen:
+            continue
+        limit = core.parse_duration(r["escalate_after"])
+        if at_dt - core.parse_iso(r["received_at"]) < limit:
+            continue
+        if r["escalated_at"] and at_dt - core.parse_iso(r["escalated_at"]) < limit:
+            continue
+        seen.add(r["item_id"])
+        age = core._short(at_dt - core.parse_iso(r["received_at"]))
+        to = _escalate(conn, r["item_id"],
+                       f"event e{r['id']} ({r['scope']}/{r['trigger_name']}) has been open for {age} "
+                       f"(escalate_after {r['escalate_after']}): #{r['item_id']} {r['title']}")
+        with tx(conn):
+            conn.execute("UPDATE trigger_events SET escalated_at=? WHERE item_id=?", (iso(at_dt), r["item_id"]))
+        out.append({"item": r["item_id"], "trigger": f"{r['scope']}/{r['trigger_name']}", "to": to})
+    return out
+
+
+def event_brief(conn, item):
+    """The playbook and untrusted event data for the go briefing of a trigger event item (#6627)."""
+    iid = item["id"] if isinstance(item, dict) else item
+    rows = conn.execute("SELECT * FROM trigger_events WHERE item_id=? ORDER BY id", (iid,)).fetchall()
+    if not rows:
+        return None
+    t_row = conn.execute("SELECT * FROM triggers WHERE id=?", (rows[0]["trigger_id"],)).fetchone()
+    if t_row is None:
+        return None
+    t = dict(t_row)
+    pb = playbook_for(conn, t)
+    a = conn.execute("SELECT name, place FROM ops_areas WHERE id=?", (t.get("area_id"),)).fetchone() \
+        if t.get("area_id") else None
+    return {
+        "trigger": f"{t['scope']}/{t['name']}",
+        "condition": t["condition"],
+        "arrival": t["arrival"],
+        "area": a["name"] if a else None,
+        "place": a["place"] if a else None,
+        "playbook": {
+            "name": pb["name"],
+            "knowledge": pb["knowledge"],
+            "done_means": pb["done_means"],
+            "tools": pb["tools"],
+            "limits": pb["limits"],
+            "custom_limits": playbook_has_custom_limits(conn, check=t),
+            "workdir": pb["workdir"],
+            "repair": bool(pb.get("repair")),
+        },
+        "events": [_event_row(r) for r in rows],
+    }
+
+
 def events_add(conn, scope, name, event, actor=None):
     """maxpm ops events add: give a trigger one event by hand (a test of its playbook, an event a person saw)."""
-    with tx(conn):
-        _need(conn, actor, "gives a trigger an event")
-        t = _trigger(conn, scope, name)
-        res = trigger_event(conn, t["id"], event)
-        e = res["event"]
-        _event(conn, None, actor, f"ops trigger {t['scope']}/{name}: event {e['event_id']} "
-                                  + ("received" if res["new"] else f"repeated ({e['repeats']}x)") + f": {e['title']}")
+    _need(conn, actor, "gives a trigger an event")
+    t = _trigger(conn, scope, name)
+    res = handle_event(conn, t["id"], event, actor=actor)
     return dict(res, trigger=f"{t['scope']}/{name}")
 
 

@@ -1882,11 +1882,14 @@ def browser_sweep(conn):
 
 
 def ops_watch(conn):
-    """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open, then
-    start each check that is due (core.ops_due), at most OPS_MAX_RUNNING at the same time. Returns the run ids."""
+    """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open,
+    escalate overdue trigger event items, then start each check that is due (core.ops_due), at most OPS_MAX_RUNNING
+    at the same time. Returns the run ids."""
     for r in core.ops_close_lost(conn, running=set(OPS_RUNNING)):
         if r.get("status") == "cut":  # a restart of serve cut it (#5627): it runs again below, with no fault
             print(f"ops {r['key']}: a stop of maxpm serve cut run {r['run']}; it runs again now", flush=True)
+    from . import operations
+    operations.escalate_due(conn)
     started = []
     if core.net_down(conn):  # #6099: the checks wait until the network of this computer is back (core.net_watch)
         return started
@@ -4405,8 +4408,8 @@ def auto_operational(conn, runner=None):
             continue
         fault = core.fault_key(dict(r)) is not None
         if fault:
-            most = int(core.setting(conn, "ops_max_investigations") or 0)
-            if core.investigations_live(conn) >= most:
+            most = int(core.setting(conn, "ops_max_investigations", project_id=a["project_id"]) or 0)
+            if core.investigations_live(conn, project_id=a["project_id"]) >= most:
                 out["failed"][a["id"]] = f"ops_max_investigations {most}"
                 continue
         waiting = core.waiting_agent_for(conn, a["project"], a["id"])
