@@ -36,7 +36,7 @@ const check = (v, what) => { if (!v) throw new Error(what); };
 const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON.stringify(o));
 '''
 
-    def drive(self, driver, path="/", steps=None, size=None, flags=()):
+    def drive(self, driver, path="/", steps=None, size=None, flags=(), before=""):
         """Run driver (a module) on every page the browser loads, from path; it posts its result to /__result.
         steps: name -> function that the driver runs on the server side with fetch("/__step/<name>")."""
         import subprocess
@@ -48,7 +48,12 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         window, frame = _chrome_window(size)
         got, result = threading.Event(), {}
         tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
-        fast_poll = b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);})();</script>'
+        fast_poll = (b'<script>(()=>{const s=window.setInterval;window.setInterval=(f,m,...a)=>s(f,m===3000?150:m,...a);'
+                     b'window.__pageErrors=[];'
+                     b'window.addEventListener("error",e=>{if(!/ResizeObserver loop/.test(e.message))window.__pageErrors.push(String(e.message));});'
+                     b'window.addEventListener("unhandledrejection",e=>window.__pageErrors.push(String(e.reason&&(e.reason.stack||e.reason))));'
+                     b'})();</script>'
+                     + (f"<script>{before}</script>".encode() if before else b""))
         drive = (b'<script type="module">import "./app.js"; window.__appReady = true;</script>'
                  b'<script type="module" src="/__drive.js"></script>')
 
@@ -557,6 +562,43 @@ try {
             self.assertIn("Release toolscaled-prod now", r["dlg"], r)
             self.assertEqual(r["steps"], ["holding", "deploy", "watch"], r)
             self.assertEqual(r["tabs"], ["Release", "History", "Controls", "Audit"], r)
+
+    def test_direct_load_of_target_release_page_draws_before_state_loads(self):
+        """#6521: opening /deploy/pipeline/<target> directly runs renderPipeline before /api/state sets S;
+        targetOf must tolerate S === null so the page draws at once with no TypeError."""
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "toolscaled-prod", "deploys the app", None)
+        core.project_add(self.c, "web", target="toolscaled-prod")
+        core.target_cadence(self.c, "toolscaled-prod", "1w", "mark")
+        i = core.item_add(self.c, "web", "A change", actor="mark")["id"]
+        core.done(self.c, i, output="done", actor="mark", ship_it=True)
+        self.c.commit()
+        before = r'''(() => {
+          const orig = window.fetch;
+          window.__stateResolved = false;
+          window.fetch = (u, ...a) => String(u).includes("api/state")
+            ? new Promise(r => setTimeout(() => r(orig(u, ...a).then(res => { window.__stateResolved = true; return res; })), 400))
+            : orig(u, ...a);
+        })();'''
+        driver = r'''
+try {
+  await until(() => q("#rlNext"), "the target release page");
+  const drewBeforeState = !window.__stateResolved;
+  await until(() => window.__stateResolved, "api/state");
+  await sleep(100);
+  post({
+    drewBeforeState,
+    next: q("#rlNext").textContent.replace(/\s+/g, " "),
+    body: q("#plBody").textContent.replace(/\s+/g, " "),
+    errors: window.__pageErrors,
+  });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/deploy/pipeline/toolscaled-prod", size="1500,900", before=before)
+        self.assertTrue(r["drewBeforeState"], r)
+        self.assertEqual(r["errors"], [], r)
+        self.assertIn("Next release", r["next"], r)
+        self.assertIn("1 task", r["next"], r)
+        self.assertIn("No releases yet.", r["body"], r)
 
     def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
         """#6209 (mark 2026-11-19 on maximizepm-github while its release ran: 'fix the wordy text'), #6486: the first

@@ -28,7 +28,7 @@ const report = (id) => link(`data-report="${id}"`, "Report");
 const github = (url) => url ? `<a class="link" href="${esc(url)}" target="_blank" rel="noopener">GitHub</a>` : "";
 const label = (name) => { const s = String(name || "").replace(/[-_]/g, " "); return s.charAt(0).toUpperCase() + s.slice(1); };
 
-export const targetOf = (D) => (S.targets || []).find(t => t.name === D.name) || null;
+export const targetOf = (D) => ((S && S.targets) || []).find(t => t.name === D.name) || null;
 
 // The steps of a release in their order: the deploy hook's, the person's yes, the publish run's, then the watch. A
 // step that ran again (the hook runs again after a fix) shows once, as its newest run.
