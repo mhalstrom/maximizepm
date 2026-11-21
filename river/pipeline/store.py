@@ -560,7 +560,10 @@ def versions(conn, name, limit=20):
     vs = [dict(v) for v in conn.execute(
         "SELECT v.id, v.rev, v.ref, v.title, MAX(r.id) last FROM pipeline_versions v JOIN stage_runs r "
         "ON r.version_id=v.id WHERE v.pipeline_id=? GROUP BY v.id ORDER BY last DESC LIMIT ?", (pid, limit))]
+    from . import deps
+    kinds = deps.rev_kinds(conn, pid)  # #6603: a version that a dependency release made
     for v in vs:
+        v["kind"] = kinds.get(v["rev"], "code")
         v["stages"] = {r["stage"]: {"run": r["id"], "state": r["state"]} for r in conn.execute(
             "SELECT s.name stage, r.id, r.state FROM stage_runs r JOIN pipeline_stages s ON s.id=r.stage_id "
             "WHERE r.id IN (SELECT MAX(id) FROM stage_runs WHERE version_id=? GROUP BY stage_id)", (v["id"],))}

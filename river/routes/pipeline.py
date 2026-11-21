@@ -62,8 +62,10 @@ def pipeline(conn, path):
         name = names[0] if names else name
         p = targets.default_pipeline(conn, name)
         work = (_links().stage_work(conn, name, defaults={name: p}).get(name) or {})
-        p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"]} for r in p.pop("releases")]
+        p["versions"] = [{"rev": r["version"], "deploy": r["deploy"], "stages": r["stages"],
+                          "kind": r.get("kind") or "code"} for r in p.pop("releases")]
         p["release"] = _release_now(conn, name)  # #6189: the head's Release now
+    p["deps"] = _deps_head(conn, name)  # #6603: the head's dependency release
     _with_holding(conn, name, p["stages"])
     from ..pipeline import keys  # #6153: the keys each stage may read, by name (a target's default pipeline: none)
     cards = keys.for_cards(conn, name) if not p.get("default") else {}
@@ -171,6 +173,9 @@ OPS = {
     # #6140: the release after holding: the reviewed commits, all of them, or up to one commit
     "pipeline_release": lambda c, a, who: targets.release(c, a["pipeline"], a.get("upto") or None, bool(a.get("all")),
                                                           who),
+    # #6603: a release of a kind (code, deps), as maxpm pipeline start --kind
+    "pipeline_start_kind": lambda c, a, who: _deps().start_kind(c, a["pipeline"], a.get("kind") or "code",
+                                                                a.get("rev") or None, who),
     # #6148: a person adds a forge token on the page (checked with the forge before it is saved), or has a session
     # make it in the project's browser
     "pipeline_token_add": lambda c, a, who: _accounts().add_token(c, a.get("forge"), a.get("token"), a.get("name"),
@@ -189,6 +194,15 @@ OPS = {
 def _runners():
     from .. import runners
     return runners
+
+
+def _deps():
+    from ..pipeline import deps
+    return deps
+
+
+def _deps_head(conn, name):
+    return _deps().head(conn, name)
 
 
 def _transitions():

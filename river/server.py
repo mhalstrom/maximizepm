@@ -1801,6 +1801,10 @@ def restart_blocked(conn):
     stages = pipeline_runner.running_text()  # #6114: a restart would end the stage's command
     if stages:
         return stages
+    from .pipeline import deps as pipeline_deps
+    updates = pipeline_deps.running_text()  # #6603: a restart would end a dependency update halfway
+    if updates:
+        return updates
     from . import agentupdate
     ups = agentupdate.running_text()  # #6430: a restart would end an agent CLI's update halfway
     if ups:

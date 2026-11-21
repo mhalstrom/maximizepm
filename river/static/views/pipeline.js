@@ -19,7 +19,7 @@ import { field, input, select, textarea, actions } from "../components/form.js";
 import { stageMarks } from "./agents.js";
 import { holdingCardHtml, holdingDetail } from "./holding.js";
 import { deployButtons } from "./targets.js";
-import { releasePage, targetOf } from "./release.js";
+import { releasePage, targetOf, depsControl } from "./release.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
 // The tabs that this view draws: stages (a target's first screen, views/release.js; a pipeline's graph), versions,
@@ -119,7 +119,8 @@ function headControls(D) {
       data: { "hd-release": "reviewed", "hd-pipe": D.name, sha: r.upto, n: r.reviewed }, title: "Release the reviewed ones" }) : "",
     button(`Release all ${h.commits}`, { data: { "hd-release": "all", "hd-pipe": D.name, sha: r.last, n: h.commits }, title: "Every commit in holding" })].join("") : "";
   // #6209: no Deploy now while a release runs: it would start another one.
-  return first + hold + (D.default && !first && !hold && !running(D) ? deployButtons(D.name) : "");
+  // #6603: the dependency release (release.js depsControl), beside the code release controls
+  return first + hold + (D.default && !first && !hold && !running(D) ? deployButtons(D.name) : "") + depsControl(D);
 }
 
 // The next step of a deploy target, right under the graph (#6189, mark 2026-11-19: 'its still not obvious how to do
@@ -205,8 +206,10 @@ function nextBar(D) {
   if (run) return run;
   if (!D.default) {  // #6193: every pipeline names its next step
     const s = yesWaits(D), w = s && s.transition.waiting[0];
+    const deps = depsControl(D);  // #6603: a pipeline of its own starts its dependency release here
     return s ? `<div class="pl-next"><span class="t-m">Approve <span class="pl-ver">${esc(short(w.rev))}</span></span>
-      <span class="spacer"></span>${button("Approve", { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Approve" })}</div>` : "";
+      <span class="spacer"></span>${button("Approve", { kind: "primary", data: { "pl-approve": s.name, rev: w.rev }, title: "Approve" })}</div>`
+      : deps ? `<div class="pl-next"><span class="t-m">Dependencies</span><span class="spacer"></span>${deps}</div>` : "";
   }
   const b = headControls(D);
   if (!b) return "";
@@ -934,6 +937,9 @@ function tests(r) {
 
 // ---- the versions in each stage
 
+// The kind of a version (#6603): a dependency release says so; a code release, the usual one, shows "code".
+const kindChip = (v) => " " + (v.kind === "deps" ? chip("c-goal", "deps", "Dependency release") : chip("c-p", "code", "Code release"));
+
 function versionsView(D) {
   if (!D.versions.length) return empty("No releases yet.");
   const names = D.stages.map(s => s.name);
@@ -942,7 +948,7 @@ function versionsView(D) {
   return `<div class="pl-table"><table class="pl-vtable"><tr><th>Version</th>${names.map(n => `<th>${esc(n)}</th>`).join("")}</tr>
     ${D.versions.map(v => `<tr class="${live.has(v.rev) ? "live" : ""}"><td class="mono">${v.deploy
         ? `<span class="link" data-report="${v.deploy}" title="Report">${esc(short(v.rev))}</span>`
-        : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Tasks", pressed: V.version === v.rev })}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
+        : button(esc(short(v.rev)), { cls: "plain", data: { "pl-version": v.rev }, title: "Tasks", pressed: V.version === v.rev })}${kindChip(v)}${v.title ? ` <span class="muted t-s">${esc(v.title)}</span>` : ""}</td>
       ${names.map(n => `<td>${cell(v.stages[n])}</td>`).join("")}</tr>`).join("")}</table></div>
     <div id="plTasks"></div>`;
 }
@@ -974,6 +980,21 @@ document.addEventListener("click", (e) => {
       try { await act("done", { id, output: v.why || "Approved from the Deploy tab" }); } catch (err) { return; }
       toast("Approved");
       if (V.shown) { if (dep && V.data && V.data.default) pickStage(V.name, "deploy"); renderPipeline(true); }
+    }, false);
+});
+
+// Dependency release (#6603): one confirm, then maxpm pipeline start <name> --kind deps as the person.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pl-deps]");
+  if (!b) return;
+  const name = b.dataset.plDeps;
+  if (!actor()) return toast("Choose your name in 'You are' first", true);
+  askForm(`Dependency release of ${name}`, "Updates only the dependencies of the last release, then releases it the usual way.",
+    "Start", [], async () => {
+      let r;
+      try { r = await act("pipeline_start_kind", { pipeline: name, kind: "deps" }); } catch (err) { return; }
+      toast((r && r.text) || "Dependency release started");
+      if (V.shown) renderPipeline(true);
     }, false);
 });
 

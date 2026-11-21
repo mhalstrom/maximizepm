@@ -959,6 +959,48 @@ cadence and its earlier release still decide when it may go. On the page the
 word is release, never cut. Name your task in each commit message
 (`(#<id>)`), so holding links the commit to it.
 
+## Code releases and dependency releases
+
+Every pipeline has two kinds of release, and each one starts on its own:
+
+- **code**: a commit of main, as above (`maxpm pipeline start <name>`, or
+  the release from holding).
+- **deps**: the commit that the pipeline released last, plus only an update
+  of its dependency files. No code of main that the pipeline did not release
+  goes with it.
+
+```
+maxpm pipeline deps <name> --cmd "cargo update" --cmd "npm update --prefix frontend" --on
+maxpm pipeline deps <name>                      # its commands, files, and last updates
+maxpm pipeline start <name> --kind deps         # start one now (Dependency release on the page)
+maxpm schedule add <project> "Weekly dependencies" --cron "0 6 * * 1" --pipeline <name> --kind deps
+```
+
+- Only a person or the manager sets the commands (one per ecosystem; put the
+  audit fix first), turns the kind on or off, and adds a schedule. A person,
+  the manager, or the target owner starts one.
+- `maxpm serve` runs the commands in order in a worktree at the last release
+  (`deps_timeout`, 30m). It commits the dependency files they changed (lock
+  files and manifests; `--files` sets other patterns) on the branch
+  `maxpm/deps/<pipeline>-<run>`. A command that changes another file fails
+  the update. No change: nothing is released.
+- A deploy target in mode deploy: a release item pinned at that commit. It
+  has the same release-cut hook, review, person's yes and deploy hook as a
+  code release. The hooks get `MAXPM_RELEASE_KIND=deps` and
+  `MAXPM_DEPS_BASE` (the last release): the pin is not on main, so a hook
+  that checks for main must accept it.
+- A deploy target in mode push: a task tests the commit and pushes it.
+- A pipeline of its own: the commit goes into the first stage as a version.
+- After the update, a task brings it into main (a cherry-pick), and every open
+  code release of the target waits on that task. When main changed the same
+  file, take main's file and run the update commands again on main; never
+  merge a lock file's text by hand.
+- A failed update adds a task for an agent with the output. A commit made
+  by hand on top of the last release goes out with `maxpm pipeline start
+  <name> --kind deps --rev <commit>`.
+- The pipeline page, `maxpm pipeline show` and the versions list say the kind
+  of each version.
+
 ## Runners: agents with no person
 
 A runner is a server where a rule's agent works with no person, no terminal

@@ -672,6 +672,10 @@ DEFAULT_SETTINGS = {
     # The command of a pipeline stage that maxpm serve runs (river/pipeline/runner.py, #6114) stops at stage_timeout,
     # with every process it started, and the stage fails (0s: no limit). Set it on the pipeline's project.
     "stage_timeout": "2h",
+    # The dependency update of a dependency release (maxpm pipeline start <p> --kind deps, #6603) stops at
+    # deps_timeout, with every process its commands started, and the update fails (0s: no limit). Set it on the
+    # pipeline's project.
+    "deps_timeout": "30m",
     # A person's list gets an operational cleanup task (maxpm serve, #4973) when it holds list_cleanup_min open items
     # older than list_cleanup_after; at most one such task for a person in each list_cleanup_after. 0s: never.
     "list_cleanup_after": "7d",
@@ -1647,7 +1651,9 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_due    TEXT,                      -- the due time of the newest item it added
   last_item   INTEGER,                   -- that item
   created_by  TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  pipeline    TEXT,                      -- #6603: at each due time, start a release of this pipeline, not an item
+  release_kind TEXT                      -- #6603: that release's kind: code or deps (pipeline/deps.py)
 );
 
 -- The cause of a fault in a fixed form (#5513): what the investigating agent states, the proof MaximizePM ran and
@@ -2488,6 +2494,10 @@ def _migrate(conn):
     # Cron schedules (#5506): a check's cron expression; a run after a stop records the times that passed.
     if "cron" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
         conn.execute("ALTER TABLE checks ADD COLUMN cron TEXT")
+    scols = {r["name"] for r in conn.execute("PRAGMA table_info(schedules)")}
+    for c in ("pipeline", "release_kind"):  # #6603: a schedule that starts a release of a pipeline
+        if c not in scols:
+            conn.execute(f"ALTER TABLE schedules ADD COLUMN {c} TEXT")
     if "subjects" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN subjects TEXT")
     if "missed" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
@@ -3289,7 +3299,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "similar_days", "usage_probe_every"):
+            "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_page_after", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "deps_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free",
@@ -7054,9 +7064,19 @@ def _schedule_row(conn, r, at=None):
 
 
 def schedule_add(conn, project, title, cron=None, yearly=None, lead="0s", doer="any", priority=2, context="",
-                 actor=None):
+                 actor=None, pipeline=None, release_kind=None):
     """maxpm schedule add: a repeating obligation of a project. cron (five fields) or yearly (MM-DD, due by the end
-    of that day) names its due times; each item comes `lead` before its due time."""
+    of that day) names its due times; each item comes `lead` before its due time. pipeline (#6603): at each due time
+    a release of that pipeline starts instead (release_kind code or deps); only a person or the manager sets that."""
+    if release_kind and not pipeline:
+        raise RiverError("--kind names the kind of a release: name its pipeline too (--pipeline <name>)")
+    if pipeline:
+        why = _lead_refusal(conn, actor, "schedules a release")
+        if why:
+            raise RiverError(why)
+        from .pipeline import store
+        store._pipeline(conn, pipeline)
+        release_kind = release_kind or "code"
     if bool(cron) == bool(yearly):
         raise RiverError("name when it is due: --cron '<five fields>' or --yearly MM-DD (one of them)")
     expr = (cron or "").strip() or _yearly_cron(yearly)
@@ -7068,13 +7088,15 @@ def schedule_add(conn, project, title, cron=None, yearly=None, lead="0s", doer="
         raise RiverError("a schedule needs a title: the title of each item it adds")
     with tx(conn):
         p = _project(conn, project)
-        cur = conn.execute("INSERT INTO schedules(project_id,title,cron,lead,doer,priority,context,created_by,created_at)"
-                           " VALUES (?,?,?,?,?,?,?,?,?)", (p["id"], title.strip(), expr, lead or "0s", doer,
-                                                            int(priority), context or "", actor, iso(now())))
+        cur = conn.execute("INSERT INTO schedules(project_id,title,cron,lead,doer,priority,context,created_by,created_at,"
+                           "pipeline,release_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           (p["id"], title.strip(), expr, lead or "0s", doer, int(priority), context or "", actor,
+                            iso(now()), pipeline or None, release_kind or None))
         r = conn.execute("SELECT * FROM schedules WHERE id=?", (cur.lastrowid,)).fetchone()
         d = _schedule_row(conn, r)
-        _event(conn, None, actor, f"schedule s{r['id']} added to {p['name']}: {title.strip()!r} at cron '{expr}', lead "
-                                  f"{lead or '0s'}, doer {doer}")
+        _event(conn, None, actor, f"schedule s{r['id']} added to {p['name']}: {title.strip()!r} at cron '{expr}', "
+                                  + (f"a {release_kind} release of pipeline {pipeline}" if pipeline else
+                                     f"lead {lead or '0s'}, doer {doer}"))
     return {"changed": "added", "schedule": d}
 
 
@@ -7126,6 +7148,18 @@ def schedule_due(conn, at=None):
             moved = conn.execute("UPDATE schedules SET last_due=? WHERE id=? AND last_due IS ?",
                                  (iso(due), r["id"], r["last_due"])).rowcount
         if not moved:
+            continue
+        if r["pipeline"]:  # #6603: a release of a pipeline, by maxpm; a refusal goes in the history, not in an item
+            from .pipeline import deps
+            try:
+                res = deps.start_kind(conn, r["pipeline"], r["release_kind"] or "code", None, "maxpm")
+                said = res.get("text") or f"started a {res.get('kind', 'code')} release of {r['pipeline']}"
+            except RiverError as e:
+                res, said = None, f"no {r['release_kind'] or 'code'} release of {r['pipeline']} started: {e}"
+            with tx(conn):
+                _event(conn, None, "maxpm", f"schedule s{r['id']}: {said}")
+            out.append({"schedule": r["id"], "item": None, "due": iso(due), "missed": missed, "release": res,
+                        "said": said})
             continue
         it = item_add(conn, project, r["title"], priority=r["priority"], doer=r["doer"], context=context,
                       actor="maxpm")
@@ -9731,6 +9765,11 @@ def hook_results(conn, token, cwd=None):
     return sorted(out, key=lambda h: h["id"])
 
 
+def _pipeline_deps():
+    from .pipeline import deps
+    return deps
+
+
 def run_hooks(conn, cwd=None, token=None, orphans=False, sandbox=False):
     """Run the hooks that wait, one after the other, and return their results: those of the events that this
     command caused (token: another thread's, for maxpm serve); with orphans, those that waited
@@ -9777,6 +9816,10 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     env = {**os.environ, "MAXPM_EVENT": event, "MAXPM_TARGET": target, "MAXPM_REV": run["rev"] or "",
            "MAXPM_ITEM": str(run["item_id"] or ""), "MAXPM_DEPLOY": str(run["deploy_id"] or ""),
            "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", ""),
+           # #6603: code, or deps: the pin is the last release plus only an update of its dependency files, and it is
+           # not on main (pipeline/deps.py); MAXPM_DEPS_BASE is that last release
+           "MAXPM_RELEASE_KIND": _pipeline_deps().kind_of_deploy(conn, run["deploy_id"]),
+           "MAXPM_DEPS_BASE": _pipeline_deps().base_of_deploy(conn, run["deploy_id"]),
            # #6213: the person's yes on the prepared release (a draft): the deploy hook now finishes it
            "MAXPM_APPROVED": str(run["item_id"]) if _run_approved(run) else ""}
 
@@ -10760,7 +10803,9 @@ def target_cut(conn, name, rev=None, actor=None):
         name = tg["name"]
         plan = release_plan(conn, name)
         who = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
-        if actor and actor != tg["owner"] and not (who and (who["kind"] == "human" or who["role"] == "manager")):
+        # "maxpm": a schedule that a person or the manager set (#6603, maxpm schedule add --pipeline)
+        if actor and actor not in (tg["owner"], "maxpm") and not (who and (who["kind"] == "human"
+                                                                           or who["role"] == "manager")):
             raise RiverError(f"refused: the target owner ({tg['owner'] or 'nobody'}), the manager, or a person cuts a "
                              f"release of {name}" + ("" if tg["owner"] else f"; take the target first: maxpm target own {name}"))
         rev = (rev or "").strip() or None

@@ -792,6 +792,7 @@ def loop(stop, interval_s=None):
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
             from . import cost, diskguard, runners, scratch, server, space, vault
             from .pipeline import runner as pipeline_runner
+            from .pipeline import deps as pipeline_deps
             from .routes import canvas as canvas_routes
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
@@ -813,6 +814,7 @@ def loop(stop, interval_s=None):
                 server.revive_sessions,  # a session whose process ended with no stop resumes in a pane (#5061)
                 server.fresh_sessions,  # work for an agent idle at its prompt goes to a fresh session
                 server.end_quiet,  # an expert after expert_idle_end, a session with no item after session_idle_end (#5903)
+                pipeline_deps.serve_pass,  # dependency updates, each in a thread; code releases wait on their merge (#6603)
                 server.auto_release,  # a ready review gets a reviewer, a ready deploy its deployer
                 server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done

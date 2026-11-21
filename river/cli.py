@@ -1591,6 +1591,8 @@ def build_parser(only=None):
     x.add_argument("--doer", choices=core.DOERS, default="any", help="who does each item (default any)")
     x.add_argument("-p", "--priority", type=int, default=2, choices=range(5), help="0 highest, 4 lowest (default 2)")
     x.add_argument("--context", default="", help="why, where, and what to do: it goes into each item")
+    x.add_argument("--pipeline", help="at each due time, start a release of this pipeline instead of an item (#6603)")
+    x.add_argument("--kind", choices=("code", "deps"), help="with --pipeline: the kind of the release (default code)")
     x = scs.add_parser("list", help="the schedules, and when each one adds its next item")
     x.add_argument("--project")
     x = scs.add_parser("rm", help="remove a schedule; the items it added stay")
@@ -1989,8 +1991,21 @@ def build_parser(only=None):
     x.add_argument("--project", help="a new pipeline: its project"); x.add_argument("--off", action="store_true",
                                                                                    help="control its flow here again")
     x = pls.add_parser("start", help="send a version (a commit; the project folder's HEAD when none) into the first "
-                       "stage: maxpm serve runs each stage in order, each one after its gate opens")
-    x.add_argument("name"); x.add_argument("--rev")
+                       "stage: maxpm serve runs each stage in order, each one after its gate opens. --kind deps: a "
+                       "dependency release (the last release plus only a dependency update; maxpm pipeline deps)")
+    x.add_argument("name"); x.add_argument("--rev", help="code: the commit; deps: a dependency update made by hand "
+                                                         "on top of the last release")
+    x.add_argument("--kind", choices=("code", "deps"), default="code",
+                   help="code (the project's main, the default) or deps (the last release plus a dependency update)")
+    # #6603: the dependency release of a pipeline: its update commands, its switch, its files
+    x = pls.add_parser("deps", help="the dependency release of a pipeline: the update commands (one per ecosystem, "
+                       "the audit fix first), on or off, and the files an update may change; with no option: show it")
+    x.add_argument("name")
+    x.add_argument("--cmd", dest="deps_cmd", action="append", help="an update command, run in a worktree at the last release (repeat "
+                   "it; the list replaces the old one; --cmd '' clears it)")
+    x.add_argument("--on", action="store_true", help="the dependency release may start")
+    x.add_argument("--off", action="store_true", help="no dependency release starts")
+    x.add_argument("--files", help="comma-separated file patterns an update may change ('' : the default list)")
     x = pls.add_parser("forge", aliases=["host"], help="where the pipeline's workflows run: github (MaximizePM reads its runs every "
                        "minute and starts a gated workflow after the gate), an installed plugin (maxpm pipeline "
                        "plugins), or none (the stages run here)")
@@ -4805,7 +4820,8 @@ def dispatch(conn, a, actor):
     if c == "schedule":
         if a.schcmd == "add":
             return core.schedule_add(conn, a.project, a.title, cron=a.cron, yearly=a.yearly, lead=a.lead, doer=a.doer,
-                                     priority=a.priority, context=a.context, actor=actor)
+                                     priority=a.priority, context=a.context, actor=actor, pipeline=a.pipeline,
+                                     release_kind=a.kind)
         if a.schcmd == "list":
             return core.schedule_list(conn, a.project)
         return core.schedule_rm(conn, a.id, actor)
@@ -7921,6 +7937,10 @@ def _schedule_line(x):
     nxt = (f"next due {core.show_time(x['next_due'], zone)}" + (
         f", its item comes {core.show_time(x['next_add'], zone)}" if x["next_add"] != x["next_due"] else "")
            if x["next_due"] else "no due time within 5 years")
+    if x.get("pipeline"):  # #6603: it starts a release, not an item
+        nxt = nxt.replace("its item comes", "it starts")
+        return (f"s{x['id']} {x['project']}: {x['title']}  [cron '{x['cron']}', starts a "
+                f"{x.get('release_kind') or 'code'} release of pipeline {x['pipeline']}]; {nxt}")
     return (f"s{x['id']} {x['project']}: {x['title']}  [cron '{x['cron']}', lead {x['lead']}, doer {x['doer']}, "
             f"P{x['priority']}]; {nxt}" + (f"; last item #{x['last_item']}" if x.get("last_item") else ""))
 
@@ -8121,8 +8141,13 @@ def _pipeline_cmd(conn, a, actor):
                 return targets.default_pipeline(conn, names[0])
             if names:
                 raise RiverError(f"GitHub checks for {a.name} appear on these deploy targets: {', '.join(names)}")
-            return store.show(conn, a.name)
-        return targets.default_pipeline(conn, a.name)
+            out = store.show(conn, a.name)
+            out["versions"] = store.versions(conn, a.name, 10)  # #6603: with the kind of each
+        else:
+            out = targets.default_pipeline(conn, a.name)
+        from .pipeline import deps
+        out["deps"] = deps.head(conn, a.name)
+        return out
     if sub == "env":
         return define.env_set(conn, a.name, a.env, a.target, a.url, a.notes, a.remove, actor)
     if sub == "stage":
@@ -8144,8 +8169,13 @@ def _pipeline_cmd(conn, a, actor):
             return versions.show(conn, a.name, a.show)
         return versions.listing(conn, a.name)
     if sub == "start":
-        from .pipeline import runner
-        return runner.start(conn, a.name, a.rev, actor)
+        from .pipeline import deps
+        return deps.start_kind(conn, a.name, a.kind, a.rev, actor)
+    if sub == "deps":
+        from .pipeline import deps
+        if a.on and a.off:
+            raise RiverError("--on or --off, not both")
+        return deps.configure(conn, a.name, a.deps_cmd, True if a.on else False if a.off else None, a.files, actor)
     if sub == "approve":
         from .pipeline import runner
         return runner.approve(conn, a.name, a.stage, a.rev, actor)
@@ -8699,10 +8729,33 @@ def render_pipeline(a, res):
               + (f"; {res['held']}: the transition into it is blocked until maxpm pipeline unblock {res['pipeline']} "
                  f"{res['stage']}" if res.get("held") else ""))
         return
+    if sub == "start" and res.get("kind") == "deps":
+        print(f"pipeline {res['pipeline']}: {res['text']}. maxpm serve runs the update commands in a worktree of its "
+              f"own; follow it: maxpm pipeline deps {res['pipeline']}")
+        return
     if sub == "start":
+        if res.get("item") and res.get("run") is None:  # a deploy target: its release from holding was cut
+            print(f"pipeline {res['pipeline']}: code release #{res['item']} cut at {res['version'] or 'HEAD'}; it goes "
+                  f"out the way every release does. Follow it: maxpm pipeline show {res['pipeline']}")
+            return
         print(f"pipeline {res['pipeline']}: version {res['version']} waits at stage {res['stage']} (run #{res['run']});"
               f" maxpm serve runs each stage when the transition into it lets the version in. Follow it: maxpm "
               f"pipeline show {res['pipeline']}")
+        return
+    if sub == "deps":
+        mode = {"deploy": "a release item pinned at the update, through review, yes and deploy hook",
+                "push": "a task that tests the update and pushes it", "own": "a version at the first stage"}
+        print(f"pipeline {res['pipeline']}: dependency release {'on' if res['on'] else 'off'} "
+              f"({mode.get(res['mode'], res['mode'])})")
+        print("  commands: " + ("; ".join(res["commands"]) or "none (maxpm pipeline deps "
+                                f"{res['pipeline']} --cmd \"<update command>\")"))
+        print("  files:    " + ", ".join(res["files"]) + ("" if res["own_files"] else " (the default)"))
+        for r in res.get("runs") or []:
+            print(f"  u{r['id']} {r['state']:<9} {r['created_at'][:16]} on {r['base_label'] or ''} {r['base'][:12]}"
+                  + (f" -> {r['rev'][:12]} ({', '.join(r['files'])})" if r.get("rev") else "")
+                  + (f" release #{r['deploy_id']}" if r.get("deploy_id") else "")
+                  + (f" into main #{r['item_id']}" if r.get("item_id") else "")
+                  + (f": {r['errors']}" if r.get("errors") else "") + (f" fix #{r['fix_id']}" if r.get("fix_id") else ""))
         return
     if sub == "approve":
         print(f"pipeline {res['pipeline']}: version {res['version']} has the yes of the transition into stage "
@@ -8767,6 +8820,19 @@ def render_pipeline(a, res):
     for e in res["envs"]:
         print(f"  env {e['name']}: " + (f"{e['rev']} since {e['since']}" if e["rev"] else "no version yet")
               + (f"  (target {e['target']})" if e["target"] else ""))
+    # #6603: the kind of each version: a code release, or a dependency release
+    rows = [(f"release #{r['deploy']}", r.get("version"), r.get("status"), r.get("kind")) for r in res.get("releases") or []] \
+        or [(f"version {(v['rev'] or '')[:12]}", None, None, v.get("kind")) for v in res.get("versions") or []]
+    if rows:
+        print("  versions (newest first):")
+        for label, rev, status, kind in rows[:10]:
+            print(f"    {label}  {'dependency release' if kind == 'deps' else 'code release'}"
+                  + (f", {rev[:12]}" if rev and not rev.startswith("deploy #") else "") + (f", {status}" if status else ""))
+    d = res.get("deps")
+    if d:
+        last = d.get("last")
+        print(f"  dependency release: {'on' if d['on'] else 'off'}" + (
+            f"; last u{last['id']} {last['state']}" if last else "") + f" (maxpm pipeline deps {res['name']})")
 
 
 def _runner_cmd(conn, a, actor):

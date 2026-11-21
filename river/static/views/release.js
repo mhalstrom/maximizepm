@@ -127,6 +127,28 @@ function moreRow(D) {
     ${b("Audit", { "dp-tab": "audit" })}${D.release ? b("Release with agent", { relagent: D.name }) : ""}</div>`;
 }
 
+// The dependency release (#6603, mark 2026-11-21: 'trigger deployments for each of these cases independently'): the
+// last release plus only a dependency update. Its button when the pipeline has it on and nothing runs, and the state
+// of the last update as a line. "" when the pipeline does not have it.
+export function depsControl(D) {
+  const d = D.deps;
+  if (!d) return "";
+  const l = d.last, busy = l && (l.state === "queued" || l.state === "running");
+  const runs = (D.stages || []).some(s => !s.holding && s.last_run && s.last_run.state === "running");
+  const rev = l && l.rev ? l.rev.slice(0, 7) : "";
+  const said = !l ? "" : busy ? "Dependency update runs" : l.state === "failed" ? `Dependency update failed${l.fix ? ` (#${l.fix})` : ""}`
+    : l.state === "unchanged" ? "Dependencies up to date" : `Dependency update ${rev}`;
+  const line = said ? `<span class="muted t-s" title="${esc(l.errors || "")}">${esc(said)} · ${esc(ago(l.at))}</span>` : "";
+  const go = d.on && !busy && !runs ? button("Dependency release", { data: { "pl-deps": D.name }, title: "Update dependencies only" }) : "";
+  return go + line;
+}
+
+function depsCard(D) {
+  const c = depsControl(D);
+  return c ? `<section class="pl-card rl-card" id="rlDeps"><div class="rl-head"><h3>Dependencies</h3><span class="spacer"></span></div>
+    <div class="t-m">${c}</div></section>` : "";
+}
+
 export function releasePage(D) {
-  return `<div class="rl">${nextCard(D)}${lastCard(D)}${testsCard(D)}${moreRow(D)}</div>`;
+  return `<div class="rl">${nextCard(D)}${depsCard(D)}${lastCard(D)}${testsCard(D)}${moreRow(D)}</div>`;
 }

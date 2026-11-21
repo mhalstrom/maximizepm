@@ -36,6 +36,7 @@ COMMANDS = {
                "summary": ANY},  # #6493: report.summary_set lets a session write only the summary task it holds
     "pipeline": {"add": LEAD, "env": LEAD, "stage": LEAD, "gate": LEAD, "list": ANY, "show": ANY, "export": ANY,
                  "history": ANY, "start": ANY, "approve": LEAD, "run": ANY, "forge": LEAD, "host": LEAD, "rerun": LEAD,
+                 "deps": ANY,  # #6603: a change takes a person or the manager (deps.configure)
                  "stop": LEAD, "hold": LEAD, "unhold": LEAD, "rollback": LEAD, "rerun-failed": LEAD,
                  "fix": ANY, "version": ANY, "item": ANY,  # #6113, #6114, #6116
                  "transition": LEAD, "block": LEAD, "unblock": LEAD, "delay": LEAD, "disable": LEAD,
@@ -114,6 +115,7 @@ OPS = {op: ANY for op in (
     "pipeline_fix", "pipeline_correct",
     "pipeline_operators", "pipeline_emergency",  # #6145: the functions check a person, or the pipeline's operators
     "pipeline_run_stage",  # #6138: the same
+    "pipeline_start_kind",  # #6603: as maxpm pipeline start; deps.start and target_cut check who starts it
     "pipeline_definition_back")}  # #6143: versions.restore takes a person or the manager
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "session_kill_command", "prompt_approve", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",

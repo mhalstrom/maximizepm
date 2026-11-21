@@ -43,9 +43,13 @@ CREATE TABLE IF NOT EXISTS pipelines (
   agent_job       TEXT,                  -- #6173: JSON settings of its agent job in Pulumi Deployments (maxpm runner
                                          -- pulumi): stack, env, branch, cli, test, max_minutes, max_cost, allow.
                                          -- Readers: agent_job.queue, open_runs, stop
-  target          TEXT                   -- #6176: the deploy target whose controls this row holds (its transitions,
+  target          TEXT,                  -- #6176: the deploy target whose controls this row holds (its transitions,
                                          -- operators, triggers, audit log); its runs come from the target's release
                                          -- items (targets.py), never from stage_runs. Readers: target_flow.py
+  deps_on         INTEGER,               -- #6603: 1: the dependency release may start (maxpm pipeline deps --on)
+  deps_cmds       TEXT,                  -- #6603: JSON list of the dependency update commands, one per ecosystem
+  deps_files      TEXT                   -- #6603: JSON list of the file patterns an update may change; NULL: the
+                                         -- default (deps.DEFAULT_FILES). Readers: deps.py
 );
 
 -- The versions that a person or the manager sent to a stage of a deploy target's pipeline on purpose (#6176): a run
@@ -553,6 +557,31 @@ CREATE TABLE IF NOT EXISTS pipeline_kept_keys (
   by           TEXT,
   PRIMARY KEY (pipeline_id, stage, kept_in)
 );
+
+-- The dependency releases of a pipeline (#6603, mark 2026-11-21: 'independently update the dependencies ... as well
+-- as the code'): one update of its dependency files on top of the commit that the pipeline released last, made by the
+-- commands of pipelines.deps_cmds in a worktree of its own. Writer: deps.py. Readers: deps.py (the serve pass, the
+-- starts, the items it makes), targets.release_runs and store.versions (the kind of each version), the page head.
+CREATE TABLE IF NOT EXISTS deps_runs (
+  id           INTEGER PRIMARY KEY,
+  pipeline_id  INTEGER NOT NULL,
+  base         TEXT NOT NULL,            -- the commit the update starts from (the last release)
+  base_label   TEXT,                     -- what that commit is: 'the pin of release #12'
+  state        TEXT NOT NULL,            -- queued, running, passed, unchanged, failed
+  rev          TEXT,                     -- the commit of the update (passed)
+  branch       TEXT,                     -- the branch that keeps it: maxpm/deps/<pipeline>-<id>
+  files        TEXT,                     -- JSON list of the dependency files it changed
+  output       TEXT,                     -- the last lines of the commands
+  errors       TEXT,                     -- why it failed
+  deploy_id    INTEGER,                  -- the release item of a deploy target (kind deploy)
+  item_id      INTEGER,                  -- the task that brings the update into main (a push target: pushes it)
+  fix_id       INTEGER,                  -- the task for an agent after a failed update
+  by_hand      INTEGER,                  -- 1: a person or an agent made the commit (maxpm pipeline start --rev)
+  started_by   TEXT,
+  created_at   TEXT NOT NULL,
+  started_at   TEXT,
+  ended_at     TEXT
+);
 """
 
 # The rule each pipeline starts with (#6150): what MaximizePM did for every pipeline before rules (#6118). The
@@ -577,6 +606,10 @@ def migrate(conn):
     for c in ("followed_by", "followed_at", "agent_job", "target"):  # #6167; #6173; #6176: a deploy target's controls
         if c not in cols:
             conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} TEXT")
+    # #6603: the dependency release: on or off, its commands (a JSON list, one per ecosystem), its file patterns
+    for c, t in (("deps_on", "INTEGER"), ("deps_cmds", "TEXT"), ("deps_files", "TEXT")):
+        if c not in cols:
+            conn.execute(f"ALTER TABLE pipelines ADD COLUMN {c} {t}")
     tcols = {r["name"] for r in conn.execute("PRAGMA table_info(pipeline_triggers)")}
     if tcols and "command" not in tcols:  # #6167: a rule that runs a hook command
         conn.execute("ALTER TABLE pipeline_triggers ADD COLUMN command TEXT")

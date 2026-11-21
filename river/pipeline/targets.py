@@ -388,10 +388,13 @@ def release_runs(conn, name, deps=None, watch_history=True):
     done = [d for d in deps if d["status"] == "done" and d["closed_at"]]
     out = []
     newest_watch = done[0]["id"] if done else None
+    from . import deps as dep_kinds
+    kinds = dep_kinds.deploy_kinds(conn, name)  # #6603: a dependency release, else a code release
     for d in deps:
         later = [x["closed_at"] for x in done if x["closed_at"] > (d["closed_at"] or "")]
         watch_checks = checks if watch_history or d["id"] == newest_watch else None
         out.append({"deploy": d["id"], "status": d["status"], "closed_at": d["closed_at"], "cut_rev": d["cut_rev"],
+                    "kind": kinds.get(d["id"], "code"),
                     "runs": _release(conn, t, d, min(later) if later else None, reviews, approval, watch_checks)})
     return out
 
@@ -454,7 +457,7 @@ def default_pipeline(conn, name, watch_history=True):
             "checks": checks, "latest": latest_release(conn, name, releases, deps, checks),  # #6486
             "controls": True,  # #6176: its arrows, operators, emergency actions, triggers and audit log act
             "held_reason": own["held_reason"] if own else None, "held_by": own["held_by"] if own else None,
-            "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"],
+            "envs": [env], "releases": [{"deploy": r["deploy"], "status": r["status"], "kind": r["kind"],
                                          "version": next(iter(r["runs"].values()))["version"],
                                          "stages": {k: {"state": v["state"], "item": v["item"]}
                                                     for k, v in r["runs"].items()}} for r in releases]}
