@@ -106,7 +106,7 @@ OPS = {op: ANY for op in (
     "canvas_accept", "canvas_edit_html", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
     "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "item_reply", "launch_agent", "message_read", "move",
-    "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_repair",
+    "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_playbook_edit", "ops_repair",
     "ops_run", "ops_trigger_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
@@ -119,7 +119,11 @@ OPS = {op: ANY for op in (
     "pipeline_definition_back")}  # #6143: versions.restore takes a person or the manager
 OPS.update({op: LEAD for op in (
     "agent_interrupt", "session_kill_command", "prompt_approve", "relay", "release_summary", "config_set", "config_unset", "expert_end", "expert_fresh", "goal_edit", "goal_rank",
-    "goal_reopen", "kill_agent", "ops_accept", "ops_reject", "policy_add", "policy_edit", "policy_retire",
+    "goal_reopen", "kill_agent", "ops_accept", "ops_reject",
+    # The Operations tab (#6629): areas, triggers and their secrets decide what starts sessions; a playbook's add and
+    # the decision on a proposed change too. An agent's playbook edit is a proposal (ANY, below).
+    "ops_area_add", "ops_area_edit", "ops_playbook_add", "ops_playbook_decide", "ops_trigger_add", "ops_trigger_edit",
+    "ops_trigger_rotate", "policy_add", "policy_edit", "policy_retire",
     "project_add", "project_archive", "project_describe", "project_rank", "project_restore", "queue_add",
     "start_expert", "stop_agent", "target_cadence", "target_cut", "target_hook", "tmux_tidy", "folder_add", "pause",
     "resume", "pipeline_hold", "pipeline_unhold", "pipeline_approve", "pipeline_rerun", "pipeline_rerun_failed",

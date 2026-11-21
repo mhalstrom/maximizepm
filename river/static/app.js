@@ -36,6 +36,7 @@ import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
 import * as ops from "./views/ops.js";
 import * as deploy from "./views/deploy.js";
+import { renderOperations } from "./views/operations.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
 import * as settings from "./views/settings.js";
@@ -287,7 +288,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); ops.renderOps(false); deploy.renderDeploy(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); ops.renderOps(false); deploy.renderDeploy(false); renderOperations(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -422,7 +423,7 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["sessions", "plan", "deploy", "settings", "terminal"];
+const TABS = ["sessions", "plan", "deploy", "operations", "settings", "terminal"];  // operations: #6629
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
 //   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
@@ -505,6 +506,7 @@ function setTab(name, push = true) {
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   deploy.renderDeploy(tab === "deploy");  // shown: it reads and draws; hidden: its pipeline stops reading
+  renderOperations(true);  // it reads only while it shows
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
   return renderGraph(false);  // the same graph keeps its drawing (#5556)
 }

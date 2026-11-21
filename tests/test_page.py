@@ -2639,7 +2639,8 @@ try {
   post({ path: location.pathname, tab: q("#tabName").textContent, tabs: [...document.querySelectorAll("nav button")].map(b => b.dataset.tab) });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/?as=mark"), {"path": "/you", "tab": "Sessions",
-                                                           "tabs": ["sessions", "plan", "deploy", "terminal"]})
+                                                           "tabs": ["sessions", "plan", "deploy", "operations",
+                                                                    "terminal"]})  # operations: #6629
 
     def test_the_work_controls_of_the_sessions_list(self):
         """#5102 step 2 (design #4657): Start an agent at the top of the list; All (#5886: Active | All at the right of
@@ -2787,7 +2788,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 4, "scrim": True,  # Deploy: #6136
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 5, "scrim": True,  # Deploy: #6136, Operations: #6629
                                "picked": "Plan false false true", "menu": True, "closed": True,
                                "settings": "Settings true false", "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,

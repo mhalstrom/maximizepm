@@ -57,8 +57,8 @@ def static_file(path, root=None):
 # The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
 # with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
 # its relative addresses (app.js, api/state) work at any depth, here and on the relay's tunnel.
-PAGE_VIEWS = ("sessions", "you", "plan", "deploy", "artifacts", "settings", "terminal", "cost",
-              "browsers")  # cost: #5857, browsers: #5879, deploy: #6136
+PAGE_VIEWS = ("sessions", "you", "plan", "deploy", "operations", "artifacts", "settings", "terminal", "cost",
+              "browsers")  # cost: #5857, browsers: #5879, deploy: #6136, operations: #6629
 # The tabs before Sessions and Plan (#5102, design #4657): nothing forwards; each answers "not found" with a link to /.
 OLD_VIEWS = ("board", "projects", "targets", "capacity", "graph", "done")
 OLD_VIEW_PAGE = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'>"
@@ -7075,10 +7075,10 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import (artifacts, browser, canvas, changes, cost, done, pipeline, projects, secrets, sessions,
-                         settings, targets, terminal, you)
+    from .routes import (artifacts, browser, canvas, changes, cost, done, operations, pipeline, projects, secrets,
+                         sessions, settings, targets, terminal, you)
     views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser, secrets, changes,
-             cost, pipeline)
+             cost, pipeline, operations)  # operations: the Operations tab (#6629)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key

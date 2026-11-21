@@ -1224,3 +1224,147 @@ def push_receive(conn, push_id, secret, event, at=None):
     return 200, {"ok": True, "trigger": f"{t['scope']}/{t['name']}", "id": f"e{ev['id']}",
                  "event_id": ev["event_id"], "new": res["new"], "action": res["action"],
                  "item": res["item"], "escalated_to": res["escalated_to"]}
+
+
+# ---- the Operations tab (#6629)
+
+def _items_state(conn, ids):
+    """{item id: (status, assignee)} of the items that events opened, in one read."""
+    ids = sorted({i for i in ids if i})
+    if not ids:
+        return {}
+    rows = conn.execute(f"SELECT id, status, assignee FROM items WHERE id IN ({','.join('?' * len(ids))})", ids)
+    return {r["id"]: {"status": r["status"], "assignee": r["assignee"]} for r in rows}
+
+
+def _tab_trigger(t, cfg, push=None):
+    """The fields of a trigger that a row of the Operations tab shows: its condition, how its events come, its
+    playbook, and (filled by the caller) its last event."""
+    return {"id": t["id"], "scope_kind": t["scope_kind"], "scope": t["scope"], "name": t["name"],
+            "condition": t["condition"], "arrival": t["arrival"], "form": t["form"], "every": t["every"],
+            "cron": t["cron"], "timeout": t["timeout"], "state": t["state"], "paused_until": t["paused_until"],
+            "priority": t["priority"], "priority_used": core.trigger_priority(t), "escalate_after": t["escalate_after"],
+            "routine": cfg.get("command") or cfg.get("url") or cfg.get("path") or None, "title": cfg.get("title"),
+            "push": push, "playbook_id": t["playbook_id"], "last": None, "events": 0}
+
+
+def tab_view(conn):
+    """GET /api/operations: the Operations tab in one read (mark 2026-11-21: projects, then areas, then triggers;
+    playbooks at the project level, each with the triggers that use it). A fixed number of queries for the whole
+    queue, so the page reads it in a few ms (policy p147). Each trigger has its last event: for a time or an event
+    trigger its last row of trigger_events, for a state trigger (a check) its last detection."""
+    projects = [dict(r) for r in conn.execute(
+        "SELECT id, name, target, rank FROM projects WHERE archived=0 ORDER BY rank, name")]
+    by_pid = {p["id"]: p for p in projects}
+    for p in projects:
+        p.update(areas=[], playbooks=[])
+    areas = {}
+    for r in conn.execute("SELECT * FROM ops_areas ORDER BY name"):
+        a = dict(r)
+        if a["project_id"] in by_pid:
+            a["triggers"] = []
+            areas[a["id"]] = a
+            by_pid[a["project_id"]]["areas"].append(a)
+    books, default_of = {}, {}
+    for r in conn.execute("SELECT * FROM ops_playbooks ORDER BY is_default DESC, name"):
+        b = dict(r)
+        if b["project_id"] not in by_pid:
+            continue
+        b["triggers"], b["proposals"] = [], []
+        books[b["id"]] = b
+        by_pid[b["project_id"]]["playbooks"].append(b)
+        if b["is_default"]:
+            default_of[b["project_id"]] = b
+    for r in conn.execute("SELECT * FROM ops_playbook_proposals WHERE state='open' ORDER BY id"):
+        if r["playbook_id"] in books:
+            books[r["playbook_id"]]["proposals"].append(
+                {"ref": f"p{r['id']}", "knowledge": r["knowledge"], "done_means": r["done_means"], "why": r["why"],
+                 "item_id": r["item_id"], "by": r["proposed_by"], "at": r["proposed_at"]})
+    last_ev, counts = {}, {}
+    for r in conn.execute("SELECT trigger_id, COUNT(*) n FROM trigger_events GROUP BY trigger_id"):
+        counts[r["trigger_id"]] = r["n"]
+    for r in conn.execute("SELECT * FROM (SELECT id, trigger_id, event_id, title, last_at, repeats, item_id, "
+                          "result_status, ROW_NUMBER() OVER (PARTITION BY trigger_id ORDER BY last_at DESC, id DESC) rn "
+                          "FROM trigger_events) WHERE rn=1"):
+        last_ev[r["trigger_id"]] = {"ref": f"e{r['id']}", "event_id": r["event_id"], "title": r["title"],
+                                    "at": r["last_at"], "repeats": r["repeats"], "item_id": r["item_id"]}
+    for r in conn.execute("SELECT check_id, COUNT(*) n FROM ops_detections GROUP BY check_id"):
+        counts.setdefault(r["check_id"], 0)
+        counts[r["check_id"]] += r["n"]
+    last_det = {}
+    for r in conn.execute("SELECT * FROM (SELECT id, check_id, subject, status, kind, summary, last_seen, count, "
+                          "item_id, ROW_NUMBER() OVER (PARTITION BY check_id ORDER BY last_seen DESC, id DESC) rn "
+                          "FROM ops_detections) WHERE rn=1"):
+        last_det[r["check_id"]] = {"ref": f"d{r['id']}", "event_id": r["subject"] or "", "status": r["status"],
+                                   "title": r["summary"] or r["status"], "at": r["last_seen"],
+                                   "repeats": max(0, (r["count"] or 1) - 1), "item_id": r["item_id"], "kind": r["kind"]}
+    unplaced = []
+    for r in conn.execute("SELECT * FROM triggers ORDER BY name"):
+        t = dict(r)
+        cfg = json.loads(t["config"] or "{}")
+        push = None
+        if t["arrival"] == "push":
+            addr = push_address(cfg["push_id"]) if cfg.get("push_id") else None
+            push = {"url": addr["url"] if addr else None, "via": addr["via"] if addr else None,
+                    "secret_prefix": cfg.get("secret_prefix"), "bad_secrets": int(cfg.get("bad_secrets") or 0)}
+        row = _tab_trigger(t, cfg, push)
+        row["last"] = (last_det if t["condition"] == "state" else last_ev).get(t["id"])
+        row["events"] = counts.get(t["id"], 0)
+        a = areas.get(t["area_id"])
+        if a is None:
+            unplaced.append(row)
+            continue
+        row["area"] = a["name"]
+        row["project"] = by_pid[a["project_id"]]["name"]
+        b = books.get(t["playbook_id"]) or default_of.get(a["project_id"])
+        row["playbook"] = b["name"] if b else None
+        if b:
+            b["triggers"].append({"scope": t["scope"], "scope_kind": t["scope_kind"], "name": t["name"],
+                                  "area": a["name"]})
+        a["triggers"].append(row)
+    state = _items_state(conn, [x["last"]["item_id"] for a in areas.values() for x in a["triggers"] if x["last"]]
+                         + [x["last"]["item_id"] for x in unplaced if x["last"]])
+    for x in [x for a in areas.values() for x in a["triggers"]] + unplaced:
+        if x["last"] and x["last"]["item_id"] in state:
+            x["last"]["item"] = state[x["last"]["item_id"]]
+    for p in projects:
+        p.pop("rank", None)
+        for b in p["playbooks"]:
+            b.pop("project_id", None)
+        for a in p["areas"]:
+            a.pop("project_id", None)
+    targets = [r["name"] for r in conn.execute("SELECT name FROM targets ORDER BY name")]
+    return {"projects": projects, "unplaced": unplaced, "targets": targets,
+            "conditions": core.TRIGGER_CONDITIONS, "arrivals": core.TRIGGER_ARRIVALS,
+            "defaults": {"knowledge": core.OPS_DEFAULT_KNOWLEDGE, "done_means": core.OPS_DEFAULT_DONE,
+                         "tools": core.OPS_NO_TOOLS, "limits": core.OPS_NO_LIMITS,
+                         "general": core.OPS_GENERAL_AREA}}
+
+
+def tab_trigger(conn, scope, name, n=30):
+    """GET /api/operations/trigger: one trigger for its dialog on the Operations tab, with its playbook (each default
+    filled in) and its last n events, newest first. A state trigger's events are its detections (one per subject,
+    with the count of runs that found it); a time or an event trigger's are its rows of trigger_events."""
+    t = trigger_show(conn, scope, name, n=0)
+    if t["condition"] == "state":
+        rows = [{"ref": f"d{r['id']}", "event_id": r["subject"] or "", "title": r["summary"] or r["status"],
+                 "first_at": r["first_seen"], "at": r["last_seen"], "repeats": max(0, (r["count"] or 1) - 1),
+                 "item_id": r["item_id"], "status": r["status"], "kind": r["kind"]}
+                for r in conn.execute("SELECT * FROM ops_detections WHERE check_id=? ORDER BY last_seen DESC, id DESC "
+                                      "LIMIT ?", (t["id"], n))]
+    else:
+        rows = []
+        for r in conn.execute("SELECT * FROM trigger_events WHERE trigger_id=? ORDER BY last_at DESC, id DESC LIMIT ?",
+                              (t["id"], n)):
+            d = _event_row(r)
+            rows.append({"ref": f"e{d['id']}", "event_id": d["event_id"], "title": d["title"],
+                         "first_at": d["received_at"], "at": d["last_at"], "repeats": d["repeats"],
+                         "item_id": d["item_id"], "result": d["result"], "result_status": d["result_status"],
+                         "link": (d["data"] or {}).get("link") or (d["data"] or {}).get("url")})
+    state = _items_state(conn, [r["item_id"] for r in rows])
+    for r in rows:
+        if r["item_id"] in state:
+            r["item"] = state[r["item_id"]]
+    t.pop("event_list", None)
+    t["event_rows"] = rows
+    return t

@@ -1,0 +1,15 @@
+<!-- The Operations tab (#6629; canvas operations-tab, layout mark 2026-11-21): each project, its areas, and each
+     area's triggers with their condition, arrival, playbook and last event; the project's playbooks, each with the
+     triggers that use it. A trigger opens its dialog with its events. Add and edit forms for areas, triggers and
+     playbooks. views/operations.js draws it from GET api/operations. maxpm serve puts it into index.html, at
+     view: operations. -->
+<section id="tab-operations" class="hidden">
+  <div class="plan-bar op-bar">
+    <select id="opProject" aria-label="Project" title="Project"></select>
+    <span class="spacer"></span>
+    <button class="btn" type="button" id="opAddArea" title="Add an area">Add area</button>
+    <button class="btn" type="button" id="opAddBook" title="Add a playbook">Add playbook</button>
+    <button class="btn primary" type="button" id="opAddTrigger" title="Add a trigger">Add trigger</button>
+  </div>
+  <div id="opBody"></div>
+</section>

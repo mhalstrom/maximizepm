@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from river import core, server
+from river import core, operations, server
 from river.core import RiverError
 from tests import own_sleep, timing
 
@@ -6825,6 +6825,118 @@ class OpsPage(unittest.TestCase):
             self.assertIn(part, page)
         js = (server.STATIC / "views" / "plan.js").read_text(encoding="utf-8")
         self.assertIn('["ops", "Operations"]', js)
+
+
+class OperationsTab(unittest.TestCase):
+    """The Operations tab (#6629): GET /api/operations (projects, areas, triggers with their last event, playbooks
+    with the triggers that use them), GET /api/operations/trigger, and the ops of its forms."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.project_add(self.c, "blog")
+        core.target_add(self.c, "web")
+        core.project_target(self.c, "shop", "web")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+
+    get = HealthApi.get
+
+    def test_the_tab_reads_projects_areas_triggers_and_playbooks_in_one_read(self):
+        core.ops_add(self.c, "shop", "home", "url", {"url": "https://shop.example/"}, actor="mark")
+        server.OPS["ops_area_add"](self.c, {"project": "shop", "name": "prod", "description": "the shop's servers",
+                                            "place": "prod.example"}, "mark")
+        server.OPS["ops_playbook_add"](self.c, {"project": "shop", "name": "tickets", "knowledge": "Read the ticket.",
+                                                "done_means": "The ticket has an answer."}, "mark")
+        server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "tickets", "condition": "event",
+                                               "arrival": "poll", "area": "prod", "playbook": "tickets",
+                                               "command": "echo", "every": "10m"}, "mark")
+        r = server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "hooks", "condition": "event",
+                                                   "arrival": "push", "priority": "0"}, "mark")
+        self.assertTrue(r["secret"])  # shown once, when it is made
+        server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "weekly", "condition": "time",
+                                               "arrival": "poll", "cron": "0 9 * * mon", "title": "Update"}, "mark")
+        ev = operations.events_add(self.c, "shop", "tickets", {"id": "T-1", "title": "A refund fails"}, actor="mark")
+        code, body = self.get("/api/operations")
+        self.assertEqual(code, 200)
+        self.assertNotIn("secret_hash", json.dumps(body))
+        self.assertNotIn(r["secret"], json.dumps(body))
+        shop = next(p for p in body["projects"] if p["name"] == "shop")
+        areas = {a["name"]: [t["name"] for t in a["triggers"]] for a in shop["areas"]}
+        self.assertEqual(areas, {"general": ["home", "hooks", "weekly"], "prod": ["tickets"]})
+        trig = {t["name"]: t for a in shop["areas"] for t in a["triggers"]}
+        self.assertEqual((trig["tickets"]["last"]["title"], trig["tickets"]["last"]["item_id"], trig["tickets"]["events"]),
+                         ("A refund fails", ev["item"], 1))
+        self.assertEqual(trig["tickets"]["last"]["item"]["status"], "open")
+        self.assertEqual((trig["tickets"]["playbook"], trig["home"]["playbook"]), ("tickets", "default"))
+        self.assertEqual((trig["hooks"]["priority"], trig["weekly"]["priority_used"]), (0, 2))
+        self.assertTrue(trig["hooks"]["push"]["url"].endswith("/api/ops/push/" + json.loads(
+            self.c.execute("SELECT config FROM triggers WHERE name='hooks'").fetchone()[0])["push_id"]))
+        self.assertEqual((trig["weekly"]["cron"], trig["weekly"]["title"], trig["tickets"]["routine"]),
+                         ("0 9 * * mon", "Update", "echo"))
+        books = {b["name"]: [t["name"] for t in b["triggers"]] for b in shop["playbooks"]}
+        self.assertEqual(books, {"default": ["home", "hooks", "weekly"], "tickets": ["tickets"]})
+        blog = next(p for p in body["projects"] if p["name"] == "blog")
+        self.assertEqual((blog["areas"], blog["playbooks"]), ([], []))
+        code, one = self.get("/api/operations/trigger?scope=project:shop&name=tickets")
+        self.assertEqual(code, 200)
+        self.assertEqual([(e["event_id"], e["item_id"]) for e in one["event_rows"]], [("T-1", ev["item"])])
+        self.assertEqual(one["playbook_used"]["knowledge"], "Read the ticket.")
+        code, _ = self.get("/api/operations/trigger?scope=project:shop&name=nope")
+        self.assertEqual(code, 404)
+
+    def test_the_forms_change_areas_playbooks_and_triggers(self):
+        server.OPS["ops_area_add"](self.c, {"project": "shop", "name": "prod"}, "mark")
+        r = server.OPS["ops_area_edit"](self.c, {"project": "shop", "name": "prod", "new_name": "prod-eu",
+                                                 "description": "EU", "place": ""}, "mark")
+        self.assertEqual((r["area"]["name"], r["area"]["description"], r["area"]["place"]), ("prod-eu", "EU", None))
+        server.OPS["ops_playbook_add"](self.c, {"project": "shop", "name": "tickets", "knowledge": "K",
+                                                "done_means": "D"}, "mark")
+        # The page sends only the changed fields: the manager may change the knowledge, not the tools.
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        r = server.OPS["ops_playbook_edit"](self.c, {"project": "shop", "name": "tickets", "knowledge": "K2"}, "boss")
+        self.assertEqual(r["playbook"]["knowledge"], "K2")
+        with self.assertRaisesRegex(RiverError, "only a person sets the tools"):
+            server.OPS["ops_playbook_edit"](self.c, {"project": "shop", "name": "tickets", "tools": "gh"}, "boss")
+        r = server.OPS["ops_playbook_edit"](self.c, {"project": "shop", "name": "tickets", "knowledge": "K3",
+                                                     "why": "it missed the logs"}, "w")
+        self.assertEqual(r["changed"], "proposed")
+        ref = f"p{r['proposal']['id']}"
+        server.OPS["ops_playbook_decide"](self.c, {"ref": ref, "accept": True}, "mark")
+        self.assertEqual(operations.playbook_show(self.c, "shop", "tickets")["knowledge"], "K3")
+        server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "tickets", "condition": "event",
+                                               "arrival": "poll", "area": "prod-eu", "command": "echo"}, "mark")
+        # The edit form sends every field it shows; the same values change nothing.
+        same = {"scope": "project:shop", "name": "tickets", "area": "prod-eu", "playbook": "default", "priority": "",
+                "escalate_after": "", "command": "echo", "every": "5m", "cron": "", "timeout": "30s"}
+        self.assertEqual(server.OPS["ops_trigger_edit"](self.c, same, "mark"), {"changed": "nothing"})
+        r = server.OPS["ops_trigger_edit"](self.c, dict(same, playbook="tickets", priority="3", escalate_after="2h",
+                                                        every="15m"), "mark")
+        t = r["trigger"]
+        self.assertEqual((t["playbook"], t["priority"], t["escalate_after"], t["every"]), ("tickets", 3, "2h", "15m"))
+        r = server.OPS["ops_trigger_edit"](self.c, dict(same, playbook="tickets", every="15m"), "mark")
+        self.assertEqual((r["trigger"]["priority"], r["trigger"]["escalate_after"]), (None, None))
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "x", "condition": "event",
+                                                   "arrival": "push"}, "w")
+        server.OPS["ops_trigger_add"](self.c, {"project": "shop", "name": "hooks", "condition": "event",
+                                               "arrival": "push"}, "mark")
+        r = server.OPS["ops_trigger_rotate"](self.c, {"scope": "project:shop", "name": "hooks"}, "mark")
+        self.assertEqual((r["changed"], r["trigger"]["push"]["secret_prefix"]), ("rotated", r["secret"][:6]))
+
+    def test_the_page_has_the_tab_next_to_deploy(self):
+        page = server.page_html("/operations").decode()
+        for part in ('id="tab-operations"', 'data-tab="operations"', 'href="views/operations.css"', 'id="opAddTrigger"'):
+            self.assertIn(part, page)
+        self.assertLess(page.index('data-tab="deploy"'), page.index('data-tab="operations"'))
+        self.assertLess(page.index('data-tab="operations"'), page.index('data-tab="terminal"'))
 
 
 class Ops(unittest.TestCase):

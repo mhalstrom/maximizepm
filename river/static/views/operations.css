@@ -1,0 +1,39 @@
+/* The Operations tab (#6629). A project is a panel; an area a block in it; a trigger a row that opens its dialog.
+   Colors and sizes are the tokens of app.css. */
+.op-bar select { width: auto; max-width: 100%; }
+.op-area { border-top: var(--hair) solid var(--line); padding: var(--sp-4) 0 var(--sp-3); }
+.op-area:first-of-type { border-top: 0; padding-top: 0; }
+.op-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.op-head .spacer { flex: 1; }
+.op-desc { margin-top: var(--sp-1); overflow-wrap: anywhere; }
+.op-list { margin-top: var(--sp-3); }
+.op-row { display: flex; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-3) var(--sp-2);
+  border-radius: var(--r-s); border-top: var(--hair) solid var(--line); }
+.op-row:first-child { border-top: 0; }
+.op-main { flex: 1; min-width: 0; }
+.op-main .op-head .title { font-weight: 600; overflow-wrap: anywhere; }
+.op-line { margin-top: var(--sp-1); overflow-wrap: anywhere; }
+.op-line .mono, .op-kv .mono { word-break: break-all; }
+.op-h { font-size: var(--fs-m); font-weight: 600; margin: var(--sp-5) 0 var(--sp-1); color: var(--muted); }
+.op-none { margin-top: var(--sp-5); }
+.op-box { --dlg-w: var(--w-dlg-m); }
+.op-kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--sp-2) var(--sp-5); margin: 0 0 var(--sp-5); }
+.op-kv dt { color: var(--muted); }
+.op-kv dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.op-text { white-space: pre-wrap; }
+.op-secret { display: block; padding: var(--sp-3); background: var(--bg); border: var(--hair) solid var(--line);
+  border-radius: var(--r-s); word-break: break-all; margin: var(--sp-3) 0; }
+.op-events { width: 100%; border-collapse: collapse; }
+.op-events th, .op-events td { text-align: left; padding: var(--sp-2) var(--sp-3) var(--sp-2) 0; vertical-align: top;
+  border-top: var(--hair) solid var(--line); }
+.op-events td { overflow-wrap: anywhere; }
+.op-prop { border-top: var(--hair) solid var(--line); padding: var(--sp-3) 0; }
+.op-form-note { margin: 0 0 var(--sp-3); }
+@media (max-width: 759px) {
+  .op-bar select { flex-basis: 100%; }
+  .op-kv { grid-template-columns: 1fr; gap: var(--sp-0); }
+  .op-kv dd { margin-bottom: var(--sp-3); }
+  .op-events tr { display: block; border-top: var(--hair) solid var(--line); padding: var(--sp-2) 0; }
+  .op-events th { display: none; }
+  .op-events td { display: block; border-top: 0; padding: var(--sp-0) 0; }
+}
