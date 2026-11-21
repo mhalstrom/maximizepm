@@ -10,7 +10,7 @@ import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle, ge
 import { chip } from "../components/chip.js";
 import { appendEntries, prependEntries, agePending, wireCopy, plainText, drawWaiting, placeReports } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
-import { openWaiting, closeWaiting, hideDocked, dockedShows } from "../components/waitDialog.js";
+import { openWaiting, closeWaiting, hideDocked, dockedShows, promptFromEvent } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
@@ -734,7 +734,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const all = waitsOf(s);
     for (const w of all) seenWait.add(s.name + "\x1f" + waitKey(w));
     openWaiting(s, { onSent: sentTurn, onAsk: askNext(s.name), dock: true, focus,
-                     extra: all.filter(w => w.kind === "card").map(w => fromEvent(w.e)) });
+                     extra: all.filter(w => w.kind === "card").map(w =>
+                       w.e.decision && w.e.decision.kind === "terminal_prompt" ? promptFromEvent(w.e) : fromEvent(w.e)) });
   };
   $("#sessWait").addEventListener("click", (e) => {
     const t = e.target.closest("[data-term]");

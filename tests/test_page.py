@@ -1806,6 +1806,51 @@ try {
         for size in ("1280,900", "390,844"):
             self.assertEqual(self.drive(driver, "/sessions/ag", size=size), {"ok": True})
 
+    def test_a_forwarded_terminal_prompt_opens_as_a_select_dialog_on_desktop_and_phone(self):
+        """#6551 (policy p57): a forwarded terminal prompt opens as a select dialog modal on desktop and 390 px phone,
+        shows the full command and every choice (including always-allow with its scope line), and answers the pane."""
+        core.config_set(self.c, "setup_done", "on")
+        core.config_set(self.c, "prompt_wait", "0s")
+        core.register(self.c, "mgr")
+        core._set_role_note(self.c, "mgr", "manager", None)
+        self.addCleanup(server.PROMPTS.clear)
+        from tests.test_view_sessions import PERMISSION
+        driver = r'''
+try {
+  await until(() => window.__appReady && q("#sessYouRow [data-you]"), "app ready");
+  q("#sessYouRow [data-you]").click();
+  await until(() => !q("#sessYou").classList.contains("hidden") && document.querySelectorAll("#needsYou [data-nyt]").length >= 1, "needs-you lists the forwarded prompt");
+  q("#needsYou [data-nyt] .t").click();
+  await until(() => !q("#waitDlg").classList.contains("hidden") && q("#waitList .wchoices"), "select dialog modal opens");
+  check(q("#waitList .wcmd").textContent.includes("git push origin main"), "full command is shown");
+  const btns = [...document.querySelectorAll("#waitList .wchoice-btn")];
+  check(btns.length === 3, "all three choices shown as buttons, got " + btns.length);
+  const scope = q("#waitList .wchoice-scope");
+  check(scope && scope.textContent.includes("git push commands in /work"), "always-allow scope line shown under button");
+  if (window.innerWidth <= 400) {
+    for (const b of btns) {
+      const r = b.getBoundingClientRect();
+      check(r.height >= 44, "phone tap height >= 44, got " + r.height);
+      check(r.right <= window.innerWidth + 1, "fits 390 px phone width");
+    }
+  }
+  btns[0].click();
+  await until(() => q("#waitDlg").classList.contains("hidden"), "dialog closes after pick");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1280,900", "390,844"):
+            server.PROMPTS.clear()
+            self.pane["screen"] = PERMISSION
+            self.pane["keys"].clear()
+            server.watch_prompts(self.c)
+            alert = self.c.execute(
+                "SELECT id FROM messages WHERE from_agent='ag' AND to_agent='mark' AND read_at IS NULL ORDER BY id DESC"
+            ).fetchone()
+            core.forward(self.c, msg_id=alert["id"], actor="mgr")
+            self.assertEqual(self.drive(driver, "/", size=size), {"ok": True})
+            self.assertEqual(self.pane["keys"], ["Enter"])
+
     def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
         """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
         side panel shows its address to copy in place of a frame; on the computer of maxpm serve it is a frame."""

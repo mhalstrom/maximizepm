@@ -2850,7 +2850,8 @@ def _prompt_parts(tail, layout=None):
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
             "row": row is not None,
             "top": top, "end": end if options else None, "frame_end": frame_end if options else None, "lines": lines,
-            **_prompt_command(lines[:qat] if qat is not None else [], lay)}
+            **_prompt_command(lines[:qat] if qat is not None else [], lay,
+                              after_q=lines[qat + 1:top] if qat is not None else None)}
 
 
 def _row_question(tail, lines, row, framed):
@@ -2951,29 +2952,120 @@ def _footer(line, layout=None):
     return not line.strip() or bool(lay["rule"].match(line) or lay["hint"].search(line))
 
 
-def _prompt_command(lines, layout=None):
-    """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
-    command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
-    mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
-    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
+def _prompt_command(lines, layout=None, after_q=None):
+    """What a permission prompt asks to run, from the lines above its question (and for Codex, the `$ <cmd>` lines
+    between the question and its options): {"tool": the header ("Bash command (unsandboxed)"), "command": the
+    command's first line (at most 200 chars), "command_full": the full command text across lines, "why": a line that
+    says why it asks (auto mode's "held this command for the server-side classifier to review")}, each None when the
+    lines lack it. Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line
+    under it; Antigravity CLI puts 'Requesting permission for:' above the command."""
     lay = layout or _layout()
     rule = lay["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
                  and len(lines[n].strip()) < 60), None)
-    if head is None:
-        return {"tool": None, "command": None, "why": why}
-    below = lines[head + 1:]
-    rules = [n for n, x in enumerate(below) if rule.match(x)]
-    body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not rule.match(x)]
-    # Antigravity CLI puts the label 'Requesting permission for:' over the command (#6248).
-    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")
-            and x.strip() != "Requesting permission for:"]
+    tool, body, rules = None, [], []
+    if head is not None:
+        tool = lines[head].strip()
+        below = lines[head + 1:]
+        rules = [n for n, x in enumerate(below) if rule.match(x)]
+        body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not rule.match(x)]
+        # Antigravity CLI puts the label 'Requesting permission for:' over the command (#6248).
+        body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")
+                and x.strip() != "Requesting permission for:"]
+    else:
+        # Antigravity CLI when 'Command' scrolled above the tail: 'Requesting permission for:' still names the command.
+        req = next((n for n in range(len(lines) - 1, -1, -1)
+                    if lines[n].strip() == "Requesting permission for:"), None)
+        if req is not None:
+            tool = "Command"
+            body = [x.strip() for x in lines[req + 1:]
+                    if x.strip() and not rule.match(x) and x.strip() != why and not x.strip().startswith("Tip:")]
+    if not body and after_q:
+        # Codex puts the command between 'Would you like to run the following command?' and its menu, with '$ '.
+        start = next((n for n, x in enumerate(after_q) if re.match(r"^\$\s+\S", x.strip())), None)
+        if start is not None:
+            tool = tool or "Command"
+            for x in after_q[start:]:
+                s = x.strip()
+                if not s or rule.match(x) or re.match(r"^(?:Reason|Why):", s, re.I):
+                    break
+                body.append(re.sub(r"^\$\s+", "", s) if not body else s)
     cmd = body[0] if body else None
+    cmd_full = "\n".join(body) if body else None
     if cmd and len(body) > 1 and len(rules) >= 2:
         cmd += " …"  # a command of more lines: the first one names it
-    return {"tool": lines[head].strip(), "command": cmd and cmd[:200], "why": why}
+    return {"tool": tool, "command": cmd and cmd[:200], "command_full": cmd_full, "why": why}
+
+
+_CHOICE_NUM = re.compile(r"^(\d+)\.\s+(.+)$")
+_ALWAYS_ALLOW = re.compile(
+    r"^(Yes,?\s*(?:and\s+)?(?:don'?t\s+ask\s+again|always\s+allow|allow\s+all(?:\s+\w+)?))"
+    r"(?:\s+(?:for\s+)?(.+))?$",
+    re.I,
+)
+_ALWAYS_ANY = re.compile(r"\b(?:don'?t\s+ask\s+again|always\s+allow|allow\s+all)\b", re.I)
+
+
+def prompt_choices(options, tell=None):
+    """Structured choices of a terminal prompt (#6551), from _prompt_parts' [(text, selected)]:
+    [{index, key, label, text, selected, always_allow, scope, tell}]. When an option is an 'always allow' / 'don't ask
+    again' choice, always_allow is True and scope holds the exact scope the agent names (for the line under its button
+    in the select dialog; agents and the manager never pick it, while the person may)."""
+    out = []
+    for i, item in enumerate(options or ()):
+        raw, sel = item if isinstance(item, tuple) else (str(item), False)
+        m = _CHOICE_NUM.match(raw.strip())
+        key, body = (m.group(1), m.group(2).strip()) if m else (str(i + 1), raw.strip())
+        am = _ALWAYS_ALLOW.match(body)
+        if am:
+            always = True
+            label = am.group(1).strip()
+            rest = (am.group(2) or "").strip()
+            if rest and re.search(r"allow\s+all\s+\w+$", label, re.I) and re.match(r"^(?:during|in|for)\b", rest, re.I):
+                what = re.search(r"allow\s+(all\s+\w+)$", label, re.I).group(1)
+                scope = f"{what} {rest}"
+            else:
+                scope = rest or body
+        elif _ALWAYS_ANY.search(body):
+            always, label, scope = True, body, body
+        else:
+            always, label, scope = False, body, ""
+        out.append({
+            "index": i, "key": key, "label": label, "text": raw, "selected": bool(sel),
+            "always_allow": always, "scope": scope, "tell": tell is not None and i == tell,
+        })
+    return out
+
+
+def prompt_payload(agent, parts, pane=None, layout=None, tail=None):
+    """Structured prompt payload stored on a terminal prompt alert (messages.decision, #6551) so the page and phone
+    open it as a select dialog modal with the full command and every choice."""
+    lay = layout or _layout()
+    options = [o[0] for o in parts["options"]]
+    tell = next((n for n, o in enumerate(options) if lay["tell"].search(o)), None)
+    fixed = tell is None and bool(lay["fixed"]) and any(lay["fixed"].search(x)
+                                                         for x in [parts["question"] or "", *options])
+    selected = next((n for n, o in enumerate(parts["options"]) if o[1]), 0)
+    sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
+    return {
+        "kind": "terminal_prompt",
+        "agent": agent,
+        "pane": pane,
+        "question": parts["question"],
+        "tool": parts["tool"],
+        "command": parts.get("command_full") or parts["command"],
+        "why": parts["why"],
+        "sig": sig,
+        "selected": selected,
+        "tell": tell,
+        "fixed": fixed,
+        "row": parts["row"],
+        "keys": hint_keys(parts["hint"]) if options else [],
+        "choices": prompt_choices(parts["options"], tell=tell),
+        "lines": list(tail[parts["start"]:]) if tail is not None else [],
+    }
 
 
 def _keys_for(n, at):
@@ -3052,7 +3144,7 @@ def watch_prompts(conn):
     {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty), and
     "processes": {agent: pid} when it recorded the agent CLI process of a pane (_pane_process, #5907)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states, ids, procs, asks, whys, limit_hits = {}, {}, {}, {}, {}, {}, {}
+    waiting, states, ids, procs, asks, whys, payloads, limit_hits = {}, {}, {}, {}, {}, {}, {}, {}
     stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
     terminals = agent_terminals(conn)
     for agent in [a for a in STILL if a not in terminals or a in stopped]:
@@ -3116,6 +3208,8 @@ def watch_prompts(conn):
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
                 whys[agent] = parts.get("why")
+                if q is not None:
+                    payloads[agent] = prompt_payload(agent, parts, pane, layout, tail)
                 STILL.pop(agent, None)
                 if q is not None and parts.get("command"):  # a permission prompt for a command (#5959)
                     asks[agent] = parts
@@ -3171,6 +3265,8 @@ def watch_prompts(conn):
             hold = q is not None and not whys.get(agent) and core.prompt_hold_manager(conn, agent)
             for person in to:
                 mid = core._send(conn, "alert", agent, body, to=person, item_id=held)
+                if payloads.get(agent):
+                    conn.execute("UPDATE messages SET decision=? WHERE id=?", (json.dumps(payloads[agent]), mid))
                 if hold and person in people:
                     core._hold_question(conn, mid)
             if to:  # with no person in the queue yet, the first one who registers gets it
@@ -3184,11 +3280,22 @@ def watch_prompts(conn):
     return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed, **reported}
 
 
+def _prompt_open_with_person(conn, agent):
+    """True when agent has an open terminal prompt alert that was forwarded to a person and is still open with them:
+    policy p3 does not end the session while the person has the dialog open (#6551)."""
+    rows = conn.execute(
+        "SELECT m.decision FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+        "WHERE m.kind='alert' AND m.from_agent=? AND m.read_at IS NULL AND m.held_for IS NULL AND m.body LIKE ?",
+        (agent, core.PROMPT_NOTE + "%")).fetchall()
+    return any((core.decision_of(r) or {}).get("forwarded_by") for r in rows)
+
+
 def _end_at_prompt(conn, waiting, asks, t):
     """#5959 (policy p3: never type into a permission prompt; end the session and release its work): a session that
     stands at the same permission prompt for a command for prompt_end ends. Only its own process (kill_agent: the PID
     it recorded, or its pane's foreground group); its task goes back to the queue with the prompt in the event, and
-    the manager (else each person) gets one alert with the command. Not the manager, an expert, or a live test session.
+    the manager (else each person) gets one alert with the command. Not the manager, an expert, a live test session,
+    or a session whose prompt is forwarded and open with the person (#6551).
     Returns the agents it ended."""
     limit = core.parse_duration(core.setting(conn, "prompt_end"))
     if not asks or limit.total_seconds() <= 0:
@@ -3197,6 +3304,8 @@ def _end_at_prompt(conn, waiting, asks, t):
     for agent, parts in sorted(asks.items()):
         st = PROMPTS.get(agent)
         if not st or t - st["since"] < limit:
+            continue
+        if _prompt_open_with_person(conn, agent):
             continue
         ag = conn.execute("SELECT role FROM agents WHERE name=?", (agent,)).fetchone()
         _body, _sig, q, held, _pane = waiting[agent]
@@ -5445,8 +5554,10 @@ def pane_prompts(conn, terminals):
                                                                for x in [parts["question"] or "", *options])
         sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
         out[agent] = {"question": parts["question"], "options": options, "fixed": fixed,
+                      "choices": prompt_choices(parts["options"], tell=tell),
                       "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
-                      "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
+                      "tool": parts["tool"], "command": parts["command"],
+                      "command_full": parts.get("command_full") or parts["command"], "why": parts["why"],
                       "lines": tail[parts["start"]:], "sig": sig, "tell": tell, "row": parts["row"],
                       "keys": hint_keys(parts["hint"]) if options else []}
     return out
@@ -5502,6 +5613,11 @@ def prompt_approve(conn, agent, option=None, text=None, who=None):
                 raise RiverError(f"the prompt of {agent} has the options 1 to {len(p['options'])}: "
                                  + "; ".join(f"{n} = {o}" for n, o in enumerate(p["options"], 1)))
             pick = option - 1
+            choices = p.get("choices") or prompt_choices([(o, i == p["selected"]) for i, o in enumerate(p["options"])],
+                                                         tell=p.get("tell"))
+            if not core._is_person(conn, who) and choices[pick]["always_allow"]:
+                raise RiverError(f"only a person may pick an 'always allow' choice ({choices[pick]['text']}); "
+                                 f"pick a one-time choice or forward the alert to the person")
         res = prompt_answer(conn, agent, p["sig"], pick=pick, other=text, who=who)
     finally:
         _MANAGER_ANSWERS.reset(token)
@@ -5543,13 +5659,26 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None, p
         time.sleep(PROMPT_PAUSE)
         terminal_keys(conn, agent, [{"key": "Enter"}], who)
         core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
+        _close_prompt_alerts(conn, agent)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):
         raise RiverError("pick one of the prompt's options, or write what to do instead")
     if key not in (None, "Enter") and key not in [k["key"] for k in p.get("keys") or ()]:
         raise RiverError(f"{key!r} is no key of this menu: use {', '.join(k['key'] for k in p['keys']) or 'Enter'}")
     terminal_keys(conn, agent, _menu_keys(at, pick, p.get("row"), key or "Enter"), who)
+    _close_prompt_alerts(conn, agent)
     return {"agent": agent, "pane": pane, "picked": opts[pick], "text": "", "key": key or "Enter"}
+
+
+def _close_prompt_alerts(conn, agent):
+    """Mark open terminal prompt alerts for agent read right after an answer is typed (#6551)."""
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM messages WHERE kind='alert' AND from_agent=? AND read_at IS NULL AND body LIKE ?",
+        (agent, core.PROMPT_NOTE + "%"))]
+    if ids:
+        with core.tx(conn):
+            core._mark_read(conn, ids)
+            core.sync_needs_you(conn)
 
 
 def _agent_in_pane(agent, pane, when=None):

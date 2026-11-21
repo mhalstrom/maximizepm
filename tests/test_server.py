@@ -3154,6 +3154,45 @@ class LaunchInTmux(unittest.TestCase):
         core.config_set(self.c, "prompt_end", "0s")
         self.assertEqual(server._end_at_prompt(self.c, {}, {"x": {"command": "ls"}}, core.now()), [])
 
+    def test_p3_does_not_end_a_session_whose_prompt_is_forwarded_and_open_with_the_person(self):
+        """#6551: policy p3 must not kill a session while its permission prompt was forwarded to the person."""
+        import subprocess
+        import sys
+        from unittest import mock
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "mgr")
+        core._set_role_note(self.c, "mgr", "manager", None)
+        iid = core.item_add(self.c, "shop", "push the release")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        core.register(self.c, name)
+        core.claim(self.c, iid, name)
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
+        info = core.proc_info(p.pid)
+        if info is None:
+            self.skipTest("no ps on this system")
+        core.set_process(self.c, name, p.pid, info[2])
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.PROMPTS.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+        def watch(after):
+            clock[0] += core.timedelta(seconds=after)
+            return server.watch_prompts(self.c)
+
+        pane["screen"] = "\x1b[1mBash command\x1b[0m\n  git push origin main\n\nDo you want to proceed?\n\x1b[34m❯ 1. Yes\x1b[0m\n  2. No"
+        watch(1)
+        watch(30)  # sends alert held for mgr
+        (alert,) = self.c.execute(
+            "SELECT * FROM messages WHERE from_agent=? AND to_agent='mark'", (name,)).fetchall()
+        core.forward(self.c, msg_id=alert["id"], actor="mgr")
+        # Even well past prompt_end (10m), the session stays alive because the forwarded dialog is open with mark.
+        self.assertNotIn("ended", watch(20 * 60))
+        self.assertIsNone(p.poll())
+        self.assertEqual(core.item_show(self.c, iid)["assignee"], name)
+
     def test_a_prompt_alert_says_what_to_answer_and_who_reads_lines_with_no_question(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)

@@ -1246,7 +1246,14 @@ class ManagerFirst(TmuxBase):
         with self.assertRaisesRegex(core.RiverError, "the options 1 to 3: 1 = 1. Yes"):
             server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 4}, "mgr")
         self.pane["keys"].clear()
-        r = server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 2}, "mgr")
+        # Only a person may pick an 'always allow' choice; the manager is refused (#6551).
+        with self.assertRaisesRegex(core.RiverError, "always allow"):
+            server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 2}, "mgr")
+        self.assertEqual(self.pane["keys"], [])
+        r = server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 1}, "mgr")
+        self.assertEqual((r["picked"], self.pane["keys"]), ("1. Yes", ["Enter"]))
+        self.pane["keys"].clear()
+        r = server.OPS["prompt_approve"](self.c, {"agent": "ag", "option": 2}, "mark")
         self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
         self.pane["keys"].clear()
         server.OPS["prompt_approve"](self.c, {"agent": "ag", "text": "push to a branch first"}, "mgr")
@@ -1283,6 +1290,114 @@ class ManagerFirst(TmuxBase):
         server.watch_prompts(self.c)
         self.assertEqual([r["held_for"] for r in self.c.execute(
             "SELECT held_for FROM messages WHERE from_agent='ag' AND to_agent='mark'")], [None])
+
+
+class TerminalPromptDialog(TmuxBase):
+    """#6551: a terminal permission prompt (Claude Code, Codex, Antigravity) carries its full command and choices
+    (including 'always allow' with exact scope) on the alert; maxpm forward delivers the select dialog payload to
+    the person; a pick types the key only while the same prompt is on screen; leaving the screen closes the alert."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mgr")
+        core._set_role_note(self.c, "mgr", "manager", None)
+        core.config_set(self.c, "prompt_wait", "0s")
+        self.addCleanup(server.PROMPTS.clear)
+
+    def test_parse_command_and_choices_for_claude_codex_and_antigravity(self):
+        from river import agents
+        # Claude Code
+        cl_lay = server._layout(agents.get("claude-code").detect)
+        cl_tail = server._prompt_tail(PERMISSION)
+        cl = server._prompt_parts(cl_tail, cl_lay)
+        cl_p = server.prompt_payload("ag", cl, "%0", cl_lay, cl_tail)
+        self.assertEqual(cl_p["kind"], "terminal_prompt")
+        self.assertIn("git push origin main", cl_p["command"])
+        self.assertEqual([(c["key"], c["always_allow"]) for c in cl_p["choices"]],
+                         [("1", False), ("2", True), ("3", False)])
+        self.assertEqual(cl_p["choices"][1]["scope"], "git push commands in /work")
+        # Codex: command is '$ ...' between question and options
+        cx_lay = server._layout(agents.get("codex").detect)
+        cx_screen = (
+            "Would you like to run the following command?\n\n"
+            "  $ git -C /work/target/6546/wt push origin HEAD:main\n\n"
+            "› 1. Yes, proceed\n"
+            "  2. Yes, and don't ask again for commands that start with `git -C`\n"
+            "  3. No, and tell Codex what to do differently\n"
+        )
+        cx_tail = server._prompt_tail(cx_screen)
+        cx = server._prompt_parts(cx_tail, cx_lay)
+        cx_p = server.prompt_payload("ag", cx, "%0", cx_lay, cx_tail)
+        self.assertEqual(cx_p["command"], "git -C /work/target/6546/wt push origin HEAD:main")
+        self.assertEqual([(c["key"], c["always_allow"]) for c in cx_p["choices"]],
+                         [("1", False), ("2", True), ("3", False)])
+        self.assertEqual(cx_p["choices"][1]["scope"], "commands that start with `git -C`")
+        # Antigravity: 'Requesting permission for:' with multi-line command and two always-allow scopes
+        ag_lay = server._layout(agents.get("antigravity").detect)
+        ag_screen = (
+            "Command\n"
+            "────────────────────────────────────────\n\n"
+            "Requesting permission for:\n"
+            "   git -C /Users/mark/Projects/app/target/6546/wt\n"
+            "   push origin HEAD:main --force-with-lease\n\n"
+            "Run this command?\n"
+            "> 1. Yes, run command\n"
+            "  2. Yes, and always allow in this conversation for commands that start with 'git'\n"
+            "  3. Yes, and always allow for commands that start with 'git' (Persist to settings.json)\n"
+            "  4. No, cancel\n\n"
+            "  ↑/↓ Navigate · tab Amend\n"
+        )
+        ag_tail = server._prompt_tail(ag_screen)
+        ag = server._prompt_parts(ag_tail, ag_lay)
+        ag_p = server.prompt_payload("ag", ag, "%0", ag_lay, ag_tail)
+        self.assertIn("git -C /Users/mark/Projects/app/target/6546/wt", ag_p["command"])
+        self.assertIn("push origin HEAD:main --force-with-lease", ag_p["command"])
+        self.assertEqual([(c["key"], c["always_allow"]) for c in ag_p["choices"]],
+                         [("1", False), ("2", True), ("3", True), ("4", False)])
+        self.assertEqual(ag_p["choices"][1]["scope"], "in this conversation for commands that start with 'git'")
+        self.assertEqual(ag_p["choices"][2]["scope"], "commands that start with 'git' (Persist to settings.json)")
+
+    def test_forward_delivers_select_dialog_payload_and_stale_pick_is_refused(self):
+        server.watch_prompts(self.c)
+        (alert,) = self.c.execute(
+            "SELECT * FROM messages WHERE from_agent='ag' AND to_agent='mark'").fetchall()
+        self.assertEqual(alert["held_for"], "mgr")
+        # Manager forwards the alert to the person with a note.
+        core.forward(self.c, msg_id=alert["id"], note="push to main", actor="mgr")
+        (ev,) = core.needs_you(self.c, "mark")
+        self.assertEqual(ev["type"], "approve")
+        dec = ev["decision"]
+        self.assertEqual(dec["kind"], "terminal_prompt")
+        self.assertEqual(dec["agent"], "ag")
+        self.assertEqual(dec["forwarded_by"], "mgr")
+        self.assertEqual(dec["by"], "mgr")
+        self.assertEqual(dec["note"], "push to main")
+        self.assertIn("git push origin main", dec["command"])
+        self.assertEqual(len(dec["choices"]), 3)
+        self.assertTrue(dec["choices"][1]["always_allow"])
+        self.assertEqual(dec["choices"][1]["scope"], "git push commands in /work")
+        # Stale pick: prompt changes on screen before the person clicks -> refused, no keys typed.
+        self.pane["keys"].clear()
+        self.pane["screen"] = PERMISSION.replace("git push origin main", "rm -rf /tmp/x")
+        with self.assertRaisesRegex(core.RiverError, "changed or is gone"):
+            server.prompt_answer(self.c, "ag", dec["sig"], pick=0, who="mark")
+        self.assertEqual(self.pane["keys"], [])
+        # Restore prompt, pick choice 1 ('always allow', allowed for a person) -> types keys and closes alert.
+        self.pane["screen"] = PERMISSION
+        r = server.prompt_answer(self.c, "ag", dec["sig"], pick=1, who="mark")
+        self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
+        self.assertEqual(core.needs_you(self.c, "mark"), [])
+
+    def test_alert_closes_when_prompt_leaves_the_screen(self):
+        server.watch_prompts(self.c)
+        (alert,) = self.c.execute(
+            "SELECT * FROM messages WHERE from_agent='ag' AND to_agent='mark'").fetchall()
+        core.forward(self.c, msg_id=alert["id"], actor="mgr")
+        self.assertEqual(len(core.needs_you(self.c, "mark")), 1)
+        self.pane["screen"] = "❯ \n"
+        res = server.watch_prompts(self.c)
+        self.assertIn(alert["id"], res["closed"])
+        self.assertEqual(core.needs_you(self.c, "mark"), [])
 
 
 class AskDialog(TmuxBase):

@@ -16776,6 +16776,7 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True, atyp
     sets = _action_types(conn)
     for r in rows:  # its type (#5998); atype keeps one type
         r["type"] = (item_action_type(conn, r["item_id"], r["item_title"], r["project"], sets) if r["kind"] == "item"
+                     else "approve" if (r["decision"] or {}).get("kind") == "terminal_prompt"
                      else action_type(r["body"], "decide" if r["message_kind"] == "question" else "read"))
     if atype:
         check_action_type(atype)
@@ -20230,6 +20231,8 @@ def _hold_question(conn, mid):
                 f"With neither within {hold} (question_hold), {person} gets it.")
     body += _earlier_note(conn, "message", mid)
     alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
+    if q["decision"]:
+        conn.execute("UPDATE messages SET decision=? WHERE id=?", (q["decision"], alert))
     if q["item_id"] is not None:
         _event(conn, q["item_id"], "maxpm", f"{q['kind']} #{mid} to {person} held for the manager {boss} ({hold})")
     return {"manager": boss, "alert": alert, "body": body, "hold": hold}
@@ -20624,8 +20627,17 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False, opt
                        + (f": {note}" if note else ""))
             return message_show(conn, msg_id)
         _unhold_question(conn, q, f"forwarded by {actor}" + (f": {note}" if note else ""))
+        dec = decision_of(q)
+        if dec and dec.get("kind") == "terminal_prompt":  # #6551: forwarded prompt stays open for the person (p3)
+            dec = dict(dec, forwarded_by=actor, forwarded_at=iso(now()))
+            if _is_manager(conn, actor):
+                dec["by"] = actor
+            if note:
+                dec["note"] = note
+            conn.execute("UPDATE messages SET decision=? WHERE id=?", (json.dumps(dec), q["id"]))
         if note:
             _send(conn, "note", actor, note, to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+    sync_needs_you(conn)
     return message_show(conn, msg_id)
 
 

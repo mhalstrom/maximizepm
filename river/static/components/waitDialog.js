@@ -79,29 +79,85 @@ function askBlock(w, n) {
 // openWaiting: sessions.js), also a question that the person saw before.
 function askAgain() { const f = onAsk; setTimeout(() => f ? f() : hooks.refresh(), 300); }
 
+export function promptFromEvent(e) {
+  const d = (e && e.decision) || {};
+  return {
+    kind: "prompt",
+    agent: d.agent || e.from_agent || "",
+    question: d.question || "The terminal waits for an answer",
+    tool: d.tool || null,
+    command: d.command || null,
+    command_full: d.command || null,
+    why: d.why || null,
+    sig: d.sig || "",
+    selected: d.selected || 0,
+    tell: d.tell != null ? d.tell : null,
+    fixed: !!d.fixed,
+    row: !!d.row,
+    keys: d.keys || [],
+    choices: d.choices || [],
+    options: (d.choices || []).map(c => c.text),
+    lines: d.lines || [],
+    note: d.note || null,
+    msg_id: e.message_id,
+    item_id: e.item_id,
+  };
+}
+
 function promptBlock(w, n) {
   if (w.ask) return askBlock(w, n);
+  const target = w.agent || agent || "";
   if (w.elsewhere) {
     return `<div class="wblock"><div class="wkind">Prompt</div><div class="wq">${esc(w.question)}</div>
       <div class="muted">This session runs in no tmux pane here, so the page cannot answer it: use Open session, or its terminal.</div></div>`;
   }
+  const optsList = w.options || [];
   // The CLI's own option to type what to do instead (w.tell) is the Other choice with the text box: no second
   // Other under it (#5253).
-  const own = Number.isInteger(w.tell) && w.tell < w.options.length;
+  const own = Number.isInteger(w.tell) && w.tell < optsList.length;
   // A question that takes only one of its options (a trust question: its Esc ends the CLI) has no Other (#5904).
   const free = !w.fixed;
-  const opts = w.options.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${own && i === w.tell ? "other" : i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
-  return `<form class="wblock" data-kind="prompt" data-sig="${esc(w.sig)}"${own ? ` data-tell="${w.tell}"` : ""}>
-    <div class="wkind">${typeChip("approve")} Prompt in its terminal</div>
+  const cmd = w.command_full || w.command;
+  const choices = (w.choices && w.choices.length)
+    ? w.choices
+    : optsList.map((o, i) => ({
+        index: i, key: String(i + 1), label: o.replace(/^\d+\.\s+/, ""), text: o,
+        selected: i === w.selected, always_allow: false, scope: "", tell: own && i === w.tell,
+      }));
+  const hasKeyMenu = (w.keys || []).length > 0;
+  let bodyHtml = "";
+  if (choices.length && !hasKeyMenu) {
+    const selNorm = choices.findIndex(c => c.selected && !c.always_allow);
+    const primaryIdx = selNorm >= 0 ? selNorm : Math.max(0, choices.findIndex(c => !c.always_allow));
+    const choiceBtns = `<div class="wchoices" role="group" aria-label="Choices">${choices.map(c =>
+      `<div class="wchoice">${button(
+        `<span class="wchoice-key">${esc(c.key)}</span><span class="wchoice-lbl">${esc(c.label)}</span>`,
+        { kind: c.index === primaryIdx ? "primary" : "", cls: "wchoice-btn", type: "button",
+          data: { pick: c.index, ...(c.tell ? { tell: 1 } : {}) }, title: c.text }
+      )}${c.always_allow ? `<div class="wchoice-scope muted t-s">Allows: ${esc(c.scope || c.label)}</div>` : ""}</div>`
+    ).join("")}</div>`;
+    bodyHtml = choiceBtns
+      + (free ? `<textarea class="wother" placeholder="Or tell it what to do instead" aria-label="Your other instruction"></textarea>
+        ${button("Send instruction", { cls: "wgo", type: "submit" })}` : "");
+  } else {
+    const opts = optsList.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${own && i === w.tell ? "other" : i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
+    bodyHtml = (optsList.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
+      numbers): <span class="link" data-term="${esc(target)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`)
+      + (own || !free ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${optsList.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`)
+      + (free ? `<textarea class="wother" placeholder="What the agent does instead" aria-label="Your other instruction"></textarea>` : "")
+      + keyButtons(w);
+  }
+  const who = target ? ` · ${esc(target)}` : "";
+  const itemLink = w.item_id ? ` · ${button(`#${w.item_id}`, { cls: "witem-btn", data: { open: w.item_id }, title: "Open item" })}` : "";
+  return `<form class="wblock" data-kind="prompt" data-agent="${esc(target)}" data-sig="${esc(w.sig)}"${w.msg_id != null ? ` data-msg="${w.msg_id}"` : ""}${own ? ` data-tell="${w.tell}"` : ""}>
+    <div class="wkind">${typeChip("approve")} Prompt in its terminal${who}${itemLink}</div>
     <div class="wq">${esc(w.question || w.tool || "The terminal waits for an answer")}</div>
-    ${w.command ? `<div class="wcmd">${esc(w.command)}</div>` : ""}
+    ${cmd ? `<pre class="wcmd">${esc(cmd)}</pre>` : ""}
     ${w.why ? `<div class="muted t-s">${esc(w.why)}</div>` : ""}
-    <details class="wlines"${w.options.length ? "" : " open"}><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
-    ${w.options.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
-      numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
-    ${own || !free ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
-    ${free ? `<textarea class="wother" placeholder="What the agent does instead" aria-label="Your other instruction"></textarea>` : ""}
-    ${keyButtons(w)}
+    ${w.note ? `<div class="muted">The manager: ${esc(w.note)}</div>` : ""}
+    <div class="werr hidden" role="alert"></div>
+    ${bodyHtml}
+    <details class="wlines"${choices.length ? "" : " open"}><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
   </form>`;
 }
 
@@ -150,11 +206,18 @@ export function openWaiting(s, opts = {}) {
     ? `<div class="muted t-s wnote">This session runs in no tmux pane here, so an answer goes to the queue only; the session reads it with maxpm inbox.</div>`
     : "";
   cards.clear();
-  // opts.extra: the cards of the decisions the session put to the person as the person (#6436, decision.by). Their
-  // answer goes to the queue only, which tells the session; nothing is typed into its chat (data-nopane).
-  const extra = (opts.extra || []).map(c => { cards.set(`${c.kind}:${c.id}`, c); return cardHtml(c); }).join("");
+  // opts.extra: the cards of the decisions the session put to the person as the person (#6436, decision.by), or a
+  // forwarded terminal prompt (#6551). A card's answer goes to the queue only (data-nopane); a prompt types into its
+  // own session's pane (data-agent).
+  const baseN = s.waiting.length;
+  const extra = (opts.extra || []).map((c, i) => {
+    if (c.kind === "prompt") return promptBlock(c, baseN + i);
+    cards.set(`${c.kind}:${c.id}`, c);
+    return cardHtml(c);
+  }).join("");
   $("#waitList").innerHTML = note + s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("") + extra;
   for (const c of opts.extra || []) {
+    if (c.kind === "prompt") continue;
     const f = $("#waitList").querySelector(`form[data-kind="${c.kind}"][data-id="${c.id}"]`);
     if (f) f.dataset.nopane = "1";
   }
@@ -178,6 +241,30 @@ export function openCard(c) {
   shown();
 }
 
+// One terminal prompt alert as a select dialog modal (#6551), from Needs you (desktop and phone).
+export function openPromptDialog(e) {
+  hideDocked(); place(false);
+  const p = promptFromEvent(e);
+  agent = p.agent; pane = true; onSent = null; onAsk = null;
+  setTitle(p.agent ? `Prompt: ${p.agent}` : "Prompt in its terminal");
+  cards.clear();
+  $("#waitList").innerHTML = promptBlock(p, 0);
+  $("#waitList").dataset.agent = p.agent || "";
+  $("#waitList").querySelectorAll(".wq, .wcmd, .wlines pre").forEach(x => linkArtifacts(x, p.agent || null, { inPre: true }));
+  shown();
+}
+
+// Close an open terminal prompt dialog when its alert closed (the prompt left the screen, #6551).
+export function syncPromptDialog(events) {
+  if (docked || $("#waitDlg").classList.contains("hidden")) return;
+  const list = events || [];
+  for (const form of [...$("#waitList").querySelectorAll('form[data-kind="prompt"][data-msg]')]) {
+    const mid = +form.dataset.msg;
+    const ev = list.find(e => e.message_id === mid);
+    if (!ev || (ev.decision && ev.decision.sig && ev.decision.sig !== form.dataset.sig)) done(form);
+  }
+}
+
 // A person item by its id (Plan > Items): its card, from GET api/item/<id>.
 export async function openItemCard(id) {
   try { openCard(fromItem(await getJson(`api/item/${id}`))); }
@@ -191,7 +278,7 @@ function shown(focus = true) {
   loadTryFrames($("#waitList"));  // the canvas of each try (#6040)
   if (docked) dockEl().classList.remove("hidden");
   else dlg.open();
-  const first = focus && $("#waitList").querySelector(".acard-choice input, input:checked, textarea");  // the first option (#6413)
+  const first = focus && $("#waitList").querySelector(".wchoice-btn, .acard-choice input, input:checked, textarea");  // the first option (#6413, #6551)
   if (first) first.focus({ preventScroll: docked });
 }
 
@@ -252,19 +339,31 @@ $("#waitList").addEventListener("submit", async (e) => {
       toast(`Sent: ${r.picked}`);
       askAgain();
     } else {
+      const targetAgent = form.dataset.agent || agent;
       const pick = form.querySelector("input[type=radio]:checked");
-      if (!pick) { toast("Pick an option", true); return; }
-      const other = pick.value === "other" ? form.querySelector(".wother").value.trim() : "";
-      // The CLI's own Other with no text: pick it, and the CLI asks for the text in its terminal.
-      const own = pick.value === "other" && !other && form.dataset.tell != null;
-      if (pick.value === "other" && !other && !own) { toast("Write what the agent does instead", true); return; }
-      const r = await typeAction("prompt_answer", { agent, sig: form.dataset.sig,
-        ...(other ? { other } : { pick: own ? +form.dataset.tell : +pick.value, ...(btn.dataset.key ? { key: btn.dataset.key } : {}) }) });
-      toast(`Sent: ${r.text || r.picked}`);
-      if (onSent) onSent(r.text || r.picked);
+      if (pick) {
+        const other = pick.value === "other" ? form.querySelector(".wother").value.trim() : "";
+        // The CLI's own Other with no text: pick it, and the CLI asks for the text in its terminal.
+        const own = pick.value === "other" && !other && form.dataset.tell != null;
+        if (pick.value === "other" && !other && !own) { toast("Write what the agent does instead", true); return; }
+        const r = await typeAction("prompt_answer", { agent: targetAgent, sig: form.dataset.sig,
+          ...(other ? { other } : { pick: own ? +form.dataset.tell : +pick.value, ...(btn.dataset.key ? { key: btn.dataset.key } : {}) }) });
+        toast(`Sent: ${r.text || r.picked}`);
+        if (onSent) onSent(r.text || r.picked);
+      } else {
+        const other = (form.querySelector(".wother") || {}).value ? form.querySelector(".wother").value.trim() : "";
+        if (!other) { toast("Pick a choice above or write what to do instead", true); return; }
+        const r = await typeAction("prompt_answer", { agent: targetAgent, sig: form.dataset.sig, other });
+        toast(`Sent: ${r.text || r.picked}`);
+        if (onSent) onSent(r.text || r.picked);
+      }
     }
     done(form);
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    const werr = form.querySelector(".werr");
+    if (werr) { werr.textContent = err.message; werr.classList.remove("hidden"); }
+    toast(err.message, true);
+  }
   finally { btn.disabled = false; }
 });
 // The keys of a card (#6413): the arrows move between its options (the browser's own radio group), Enter on an
@@ -281,6 +380,31 @@ $("#waitList").addEventListener("keydown", (e) => {
 });
 $("#waitList").addEventListener("click", async (e) => {
   if (e.target.closest("[data-wcancel]")) { closeAll(); return; }
+  const pickBtn = e.target.closest("[data-pick]");  // a choice button of a terminal prompt (#6551)
+  if (pickBtn) {
+    const form = pickBtn.closest("form");
+    if (!form || pickBtn.disabled) return;
+    const btns = [...form.querySelectorAll("button")];
+    btns.forEach(b => { b.disabled = true; });
+    const werr = form.querySelector(".werr");
+    if (werr) { werr.textContent = ""; werr.classList.add("hidden"); }
+    try {
+      const targetAgent = form.dataset.agent || agent;
+      const otherEl = form.querySelector(".wother");
+      const other = pickBtn.dataset.tell && otherEl ? otherEl.value.trim() : "";
+      const r = await typeAction("prompt_answer", { agent: targetAgent, sig: form.dataset.sig,
+        ...(other ? { other } : { pick: +pickBtn.dataset.pick }) });
+      toast(`Sent: ${r.text || r.picked}`);
+      if (onSent) onSent(r.text || r.picked);
+      done(form);
+    } catch (err) {
+      if (werr) { werr.textContent = err.message; werr.classList.remove("hidden"); }
+      toast(err.message, true);
+    } finally {
+      btns.forEach(b => { b.disabled = false; });
+    }
+    return;
+  }
   const move = e.target.closest("[data-wtab], [data-wchat]");  // another question of the dialog, or Chat about this
   if (move) {
     const form = move.closest("form"), d = move.dataset;

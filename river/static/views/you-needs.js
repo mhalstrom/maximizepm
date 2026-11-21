@@ -9,7 +9,7 @@ import { linkArtifacts } from "../components/artLinks.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 import { secretFillHtml, wireSecretFill } from "../components/secretFill.js";
-import { openCard, openItemCard } from "../components/waitDialog.js";
+import { openCard, openItemCard, openPromptDialog, syncPromptDialog } from "../components/waitDialog.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
 import { fromEvent, typeChip } from "../components/askCard.js";
 import { openSignin } from "./signinAsk.js";
@@ -34,7 +34,7 @@ export async function pollNeedsYou() {
   // #6438 (mark 2026-11-20: 'it also should not take over the screen'): a new question or person item opens nothing by
   // itself. The count of Your action items, the session's row and the bell say it came; the asking session shows it in
   // its own view.
-  renderNeedsYou(); notifyNew();
+  renderNeedsYou(); notifyNew(); syncPromptDialog(NY);
   const ds = JSON.stringify(NY.map(e => [e.id, e.decision || null]));
   if (ds !== nyDecSig) { nyDecSig = ds; document.dispatchEvent(new CustomEvent("maxpm-needs-you")); }
 }
@@ -71,8 +71,9 @@ function askingSession(e) {
 }
 
 // An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE), or for a manager that
-// runs no watch (core.WATCH_NOTE): its Terminal answers it.
+// runs no watch (core.WATCH_NOTE): its Terminal answers it, or for a parsed prompt (#6551), its select dialog.
 export const promptAlert = e => e.message_kind === "alert" && ["waits on a prompt in its terminal", "runs no watch"].some(w => (e.body || "").startsWith(w));
+export const isTerminalPrompt = e => !!(e && e.message_kind === "alert" && e.decision && e.decision.kind === "terminal_prompt");
 
 // The true number of open Needs you events for the person (#5114): from the page's state, which holds every open one.
 // The list of api/needs-you holds at most 100 (the most important); before the state comes, its length.
@@ -127,7 +128,8 @@ export function renderNeedsYou() {
         + button("Done", { kind: "primary", data: { ny: "done", id: e.item_id } })
       : (e.message_kind === "question"
           ? button("Answer", { kind: "primary", data: { ny: "answer", msg: e.message_id } })
-          : (promptAlert(e) ? button("Open session", { kind: "primary", data: { "session-go": e.from_agent }, title: (e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there" }) : "")
+          : (isTerminalPrompt(e) ? button("Choose", { kind: "primary", data: { ny: "prompt", id: e.id }, title: "Answer this prompt" }) : "")
+            + (promptAlert(e) ? button("Open session", { kind: isTerminalPrompt(e) ? "" : "primary", data: { "session-go": e.from_agent }, title: (e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there" }) : "")
             + button("Mark read", { data: { ny: "read", msg: e.message_id } }))
         + (e.item_id ? button(`Open #${e.item_id}`, { data: { open: e.item_id } }) : "");
     // One line each; a click opens the details and the buttons (design: the list fits one screen).
@@ -164,8 +166,8 @@ function notifyNew() {
   if (!first && "Notification" in window && Notification.permission === "granted") {
     for (const e of fresh.slice(0, 5)) {
       const n = new Notification("MaximizePM: needs you", { body: e.summary, tag: "maxpm-" + e.id });
-      // A prompt that waits: its session on the Sessions tab, where the ! dialog answers it (#4698).
-      n.onclick = () => { window.focus(); if (promptAlert(e)) nav.openSession(e.from_agent); else if (e.item_id) nav.openDrawer(e.item_id); n.close(); };
+      // A prompt that waits: its select dialog (#6551), else its session on the Sessions tab (#4698).
+      n.onclick = () => { window.focus(); if (isTerminalPrompt(e)) openPromptDialog(e); else if (promptAlert(e)) nav.openSession(e.from_agent); else if (e.item_id) nav.openDrawer(e.item_id); n.close(); };
     }
   }
   store("river.ny.seen", JSON.stringify([...known, ...fresh.map(e => e.id)].slice(-500)));
@@ -187,6 +189,7 @@ async function needsYouAction(t) {
       const body = prompt("Your answer"); if (!body) return; await act("answer", { msg, body });
     }
     if (what === "read") await act("message_read", { msg });
+    if (what === "prompt") { const e = NY.find(x => x.id === id); if (e) openPromptDialog(e); }
   } catch (e) { /* toast shown */ }
 }
 
@@ -201,6 +204,7 @@ export function onClick(t) {
       if (s && await nav.openSessionAsk(s, e)) return;
       return e.kind === "item" ? openItemCard(e.item_id) : openCard(fromEvent(e));  // an item: its tries too (#5996)
     }
+    if (isTerminalPrompt(e)) return openPromptDialog(e);  // #6551: terminal prompt opens as a select dialog modal
     if (e && e.message_kind === "alert" && e.item_id && /^Read the report/.test(e.body || "")) {  // its Read card (#6003)
       act("message_read", { msg: e.message_id }).catch(() => {});
       return import("../components/reportDialog.js").then(m => m.openReport(e.item_id));
