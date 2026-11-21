@@ -1924,15 +1924,23 @@ def build_parser(only=None):
     y.add_argument("--priority", type=int, help="the priority of its events' items, 0-4 (default: time 2, else 1)")
     y.add_argument("--escalate-after", dest="escalate_after",
                    help="duration: alert the item's holder (else the manager) when an event stays open this long")
-    y.add_argument("--command", help="poll: the routine, a script that prints the events")
-    y.add_argument("--every", help="poll: how often it runs"); y.add_argument("--cron", help="poll: when it runs")
+    y.add_argument("--command", help="event poll: the routine, a script that prints events as JSON lines")
+    y.add_argument("--title", help="time: the fixed title of each event the clock gives")
+    y.add_argument("--every", help="poll or time: how often it runs"); y.add_argument("--cron", help="poll or time: when it runs")
     y.add_argument("--timeout", help="poll: the time limit of one run")
-    y = trs.add_parser("edit", help="a person or the manager: its area, playbook, priority or escalate-after")
+    y = trs.add_parser("edit", help="a person or the manager: its area, playbook, priority, escalate-after, title, routine or schedule")
     y.add_argument("scope"); y.add_argument("name")
     y.add_argument("--area"); y.add_argument("--playbook")
     y.add_argument("--priority", type=int, help="0-4; -1: by its condition again")
     y.add_argument("--escalate-after", dest="escalate_after",
                    help="duration: alert holder (else manager) when open this long; 'off' clears it")
+    y.add_argument("--title", help="time: the fixed title of each event")
+    y.add_argument("--command", help="event poll: the routine script")
+    y.add_argument("--every", help="poll or time: how often it runs")
+    y.add_argument("--cron", help="poll or time: when it runs (empty string clears)")
+    y.add_argument("--timeout", help="poll: the time limit of one run")
+    y = trs.add_parser("run", help="run a trigger now (also when not due)")
+    y.add_argument("scope"); y.add_argument("name")
     y = trs.add_parser("list", help="the triggers by area, of one project or of all"); y.add_argument("project", nargs="?")
     y = trs.add_parser("show", help="one trigger, its playbook and its last events")
     y.add_argument("scope"); y.add_argument("name")
@@ -4810,9 +4818,13 @@ def _dispatch_operations(conn, a, actor):
     if a.ocmd == "trigger":
         if a.otcmd == "add":
             return o.trigger_add(conn, a.project, a.name, a.condition, a.arrival, a.area, a.playbook, a.priority,
-                                 a.command, a.every, a.cron, a.timeout, actor, a.escalate_after)
+                                 a.command, a.every, a.cron, a.timeout, actor, a.escalate_after, a.title)
         if a.otcmd == "edit":
-            return o.trigger_edit(conn, a.scope, a.name, a.area, a.playbook, a.priority, actor, a.escalate_after)
+            return o.trigger_edit(conn, a.scope, a.name, a.area, a.playbook, a.priority, actor, a.escalate_after,
+                                  a.title, a.command, a.every, a.cron, a.timeout)
+        if a.otcmd == "run":
+            o._trigger(conn, a.scope, a.name)
+            return ask_server(conn, "ops_trigger_run", {"scope": a.scope, "name": a.name}, actor)
         if a.otcmd == "list":
             return o.trigger_list(conn, a.project)
         return {"trigger": o.trigger_show(conn, a.scope, a.name)}
@@ -8208,12 +8220,21 @@ def render_operations(a, res):
             if not res["triggers"]:
                 print("no triggers")
             return
+        if a.otcmd == "run":
+            if res.get("event"):
+                e = res["event"]
+                print(f"trigger {res['trigger']} fired: event e{e['id']} ({e['title']})"
+                      + (f"  (item #{res['item']})" if res.get("item") else ""))
+            else:
+                print(f"trigger {res.get('trigger') or res.get('check')}: started run {res['run']}")
+            return
         t = res["trigger"]
         if res.get("changed"):
             print(f"trigger {res['changed']}:")
         print(_trigger_line(t))
         print(f"  area {t['project']}/{t['area']}; {t['events']} event(s)"
               + (f"; escalate after {t['escalate_after']}" if t.get("escalate_after") else "")
+              + (f"; title: {t['title']}" if t.get("title") else "")
               + (f"; routine: {t['routine']}" if t.get("routine") else ""))
         print("\n".join("  " + x for x in _playbook_lines(dict(t["playbook_used"], project=t["project"],
                                                                triggers=[f"{t['scope']}/{t['name']}"]), True)))

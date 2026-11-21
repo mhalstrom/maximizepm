@@ -161,10 +161,12 @@ class Playbooks(Base):
 
 class Triggers(Base):
     def test_time_and_event_triggers_have_their_priority_and_stay_out_of_the_checks(self):
-        o.trigger_add(self.c, "site", "weekly", "time", "poll", command="echo hi", cron="0 9 * * mon", actor="mark")
+        o.trigger_add(self.c, "site", "weekly", "time", "poll", title="Weekly site review", cron="0 9 * * mon", actor="mark")
         o.trigger_add(self.c, "site", "tickets", "event", "push", priority=0, actor="boss")
-        got = {t["name"]: (t["condition"], t["arrival"], t["priority_used"]) for t in o.trigger_list(self.c)["triggers"]}
-        self.assertEqual(got, {"weekly": ("time", "poll", 2), "tickets": ("event", "push", 0)})
+        got = {t["name"]: (t["condition"], t["arrival"], t["priority_used"], t["title"])
+               for t in o.trigger_list(self.c)["triggers"]}
+        self.assertEqual(got, {"weekly": ("time", "poll", 2, "Weekly site review"),
+                               "tickets": ("event", "push", 0, None)})
         self.assertEqual(core.ops_list(self.c)["checks"], [])  # no state trigger: nothing for the fault path to run
         o.trigger_edit(self.c, "site", "tickets", priority=-1, actor="mark")
         self.assertEqual(o.trigger_show(self.c, "site", "tickets")["priority_used"], 1)
@@ -172,7 +174,10 @@ class Triggers(Base):
     def test_the_rules_of_a_trigger(self):
         for kw, msg in ((dict(condition="state", arrival="poll"), "maxpm ops add"),
                         (dict(condition="time", arrival="push"), "polls"),
+                        (dict(condition="time", arrival="poll", command="echo hi", cron="0 9 * * mon"), "no routine"),
+                        (dict(condition="time", arrival="poll"), "--cron"),
                         (dict(condition="event", arrival="poll"), "--command"),
+                        (dict(condition="event", arrival="poll", command="true", title="X"), "--title"),
                         (dict(condition="event", arrival="push", command="x"), "no routine")):
             with self.assertRaisesRegex(RiverError, msg):
                 o.trigger_add(self.c, "site", "t", actor="mark", **kw)
@@ -370,6 +375,155 @@ class EventHandling(Base):
         core.config_set(self.c, "launch_agents", "Claude=@claude-code", actor="mark")
         t = core.launch_target(self.c, item=iid, actor="mark")
         self.assertEqual(os.path.realpath(t["path"]), os.path.realpath(sub))
+
+
+class PollAndTimeTriggers(Base):
+    def setUp(self):
+        super().setUp()
+        self.proj_dir = os.path.join(self.dir.name, "site-repo")
+        os.makedirs(self.proj_dir, exist_ok=True)
+        core.project_path(self.c, "site", self.proj_dir, actor="mark")
+
+    def _fake_result(self, returncode=0, stdout="", stderr="", timed_out=False):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr, timed_out=timed_out)
+
+    def test_poll_trigger_parses_json_lines_drops_repeats_and_preserves_rich_fields(self):
+        from datetime import datetime, timedelta, timezone
+        o.playbook_add(self.c, "site", "tickets", {"knowledge": "Check Zendesk", "done_means": "Replied"}, "mark")
+        o.trigger_add(self.c, "site", "zendesk", "event", "poll", command="poll-zendesk.sh", every="5m",
+                      playbook="tickets", actor="mark")
+        t0 = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
+        due = o.poll_due(self.c, at=t0)
+        self.assertEqual([t["name"] for t in due], ["zendesk"])
+
+        stdout1 = "\n".join([
+            json.dumps({"id": "Z-1", "title": "Billing error"}),
+            json.dumps({"id": "Z-2", "title": "SSO broken", "link": "https://zd/2", "customer": "acme"}),
+            json.dumps({"id": "Z-1", "title": "Billing error"}),  # duplicate inside same run dropped
+        ])
+        with mock.patch.object(core, "OPS_RUNNER", lambda cmd, cwd, lim, env: self._fake_result(0, stdout1)):
+            run = o.poll_start(self.c, due[0], at=t0)
+            res = o.poll_finish(self.c, run, at=t0)
+        self.assertEqual((res["status"], res["summary"]), ("ok", "2 new, 0 repeat"))
+        self.assertEqual(len(res["events"]), 2)
+        ev2 = o.events_show(self.c, f"e{res['events'][1]['event']['id']}")["event"]
+        self.assertEqual(ev2["data"], {"link": "https://zd/2", "customer": "acme"})
+
+        # Not due again at +2m, due at +5m
+        self.assertEqual(o.poll_due(self.c, at=t0 + timedelta(minutes=2)), [])
+        due2 = o.poll_due(self.c, at=t0 + timedelta(minutes=5))
+        self.assertEqual([t["name"] for t in due2], ["zendesk"])
+
+        # Close Z-1's item, then re-poll Z-1: repeat dropped, no second item
+        core.done(self.c, res["events"][0]["item"], output="Fixed", actor="dev")
+        stdout2 = json.dumps({"id": "Z-1", "title": "Billing error"}) + "\n"
+        with mock.patch.object(core, "OPS_RUNNER", lambda cmd, cwd, lim, env: self._fake_result(0, stdout2)):
+            run2 = o.poll_start(self.c, due2[0], at=t0 + timedelta(minutes=5))
+            res2 = o.poll_finish(self.c, run2, at=t0 + timedelta(minutes=5))
+        self.assertEqual((res2["status"], res2["summary"]), ("ok", "0 new, 1 repeat"))
+        self.assertEqual(res2["events"][0]["action"], "repeat-closed")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='operational'").fetchone()[0], 2)
+
+    def test_failed_poll_routine_is_broken_trigger_for_person_or_manager_not_playbook(self):
+        from datetime import datetime, timedelta, timezone
+        o.playbook_add(self.c, "site", "tickets", {"knowledge": "Check Zendesk", "done_means": "Replied"}, "mark")
+        o.trigger_add(self.c, "site", "zendesk", "event", "poll", command="poll-zendesk.sh", every="5m",
+                      playbook="tickets", actor="mark")
+        t0 = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
+        t = o.poll_due(self.c, at=t0)[0]
+
+        # Exit 3 (UNKNOWN) -> broken-trigger item (human, kind=work), NOT operational playbook item
+        with mock.patch.object(core, "OPS_RUNNER", lambda cmd, cwd, lim, env: self._fake_result(3, "", "auth expired")):
+            res = o.poll_finish(self.c, o.poll_start(self.c, t, at=t0), at=t0)
+        self.assertEqual((res["status"], res["action"]), ("unknown", "broken-opened"))
+        self.assertIn("UNKNOWN (3)", res["broken"])
+        it = core.item_show(self.c, res["item"])
+        self.assertEqual((it["doer"], it["kind"]), ("human", "work"))
+        self.assertIsNone(o.event_brief(self.c, it))  # playbook did not run
+        self.assertEqual(o.events_list(self.c)["events"], [])
+        alert = self.c.execute("SELECT kind, to_agent, body FROM messages WHERE item_id=? ORDER BY id DESC LIMIT 1",
+                               (res["item"],)).fetchone()
+        self.assertEqual((alert["kind"], alert["to_agent"]), ("alert", "boss"))
+
+        # Timeout on next run -> adds note to the same broken-trigger item, no duplicate item
+        t1 = t0 + timedelta(minutes=5)
+        with mock.patch.object(core, "OPS_RUNNER", lambda cmd, cwd, lim, env: self._fake_result(None, "", "", timed_out=True)):
+            res2 = o.poll_finish(self.c, o.poll_start(self.c, t, at=t1), at=t1)
+        self.assertEqual((res2["status"], res2["action"], res2["item"]), ("unknown", "broken-note", res["item"]))
+
+        # Invalid JSON line on exit 0 -> also broken-trigger
+        t2 = t0 + timedelta(minutes=10)
+        with mock.patch.object(core, "OPS_RUNNER", lambda cmd, cwd, lim, env: self._fake_result(0, "not json\n")):
+            res3 = o.poll_finish(self.c, o.poll_start(self.c, t, at=t2), at=t2)
+        self.assertEqual((res3["status"], res3["action"], res3["item"]), ("unknown", "broken-note", res["item"]))
+        self.assertIn("invalid event line", res3["broken"])
+
+    def test_time_trigger_fires_on_cron_with_fixed_title_and_no_routine(self):
+        from datetime import datetime, timezone
+        core.config_set(self.c, "timezone", "UTC", actor="mark")
+        # Created Sunday 2026-11-22 10:00Z, cron Monday 09:00 UTC
+        o.playbook_add(self.c, "site", "weekly-book", {"knowledge": "Check catalog", "done_means": "Items added"}, "mark")
+        o.trigger_add(self.c, "site", "weekly", "time", "poll", title="Run weekly catalog check",
+                      cron="0 9 * * mon", playbook="weekly-book", actor="mark")
+        self.c.execute("UPDATE triggers SET created_at='2026-11-22T10:00:00Z' WHERE name='weekly'")
+        self.c.commit()
+
+        # Before Monday 09:00 -> not due
+        self.assertEqual(o.fire_due_time_triggers(self.c, at=datetime(2026, 11, 23, 8, 59, tzinfo=timezone.utc)), [])
+
+        # At Monday 09:01 -> fires once with fixed title, P2, playbook weekly-book
+        fired = o.fire_due_time_triggers(self.c, at=datetime(2026, 11, 23, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual(len(fired), 1)
+        self.assertEqual((fired[0]["action"], fired[0]["event"]["title"]), ("opened", "Run weekly catalog check"))
+        it = core.item_show(self.c, fired[0]["item"])
+        self.assertEqual((it["kind"], it["priority"]), ("operational", 2))
+        self.assertEqual(o.event_brief(self.c, it)["playbook"]["name"], "weekly-book")
+
+        # Same Monday at 09:05 -> not due again
+        self.assertEqual(o.fire_due_time_triggers(self.c, at=datetime(2026, 11, 23, 9, 5, tzinfo=timezone.utc)), [])
+
+        # Next Monday at 09:00 -> fires again with new id
+        fired2 = o.fire_due_time_triggers(self.c, at=datetime(2026, 11, 30, 9, 0, tzinfo=timezone.utc))
+        self.assertEqual(len(fired2), 1)
+        self.assertNotEqual(fired2[0]["item"], fired[0]["item"])
+
+    def test_trigger_edit_updates_title_command_and_schedule(self):
+        o.trigger_add(self.c, "site", "weekly", "time", "poll", title="Old", cron="0 9 * * mon", actor="mark")
+        r = o.trigger_edit(self.c, "site", "weekly", title="New", cron="0 10 * * tue", actor="mark")
+        self.assertEqual((r["trigger"]["title"], r["trigger"]["cron"]), ("New", "0 10 * * tue"))
+        o.trigger_add(self.c, "site", "feed", "event", "poll", command="a.sh", every="5m", actor="mark")
+        r2 = o.trigger_edit(self.c, "site", "feed", command="b.sh", every="10m", timeout="1m", actor="mark")
+        self.assertEqual((r2["trigger"]["routine"], r2["trigger"]["every"], r2["trigger"]["timeout"]),
+                         ("b.sh", "10m", "1m"))
+
+    def test_ops_watch_and_trigger_run_op_fire_time_and_poll_triggers(self):
+        from river import server
+        o.trigger_add(self.c, "site", "hourly", "time", "poll", title="Hourly sweep", every="1h", actor="mark")
+        o.trigger_add(self.c, "site", "feed", "event", "poll", command="poll.sh", every="5m", actor="mark")
+        started_polls = []
+        with mock.patch.object(server, "ops_poll_start_now",
+                               lambda conn, t, actor=None: (started_polls.append(t["name"]), 999)[1]):
+            ids = server.ops_watch(self.c)
+        self.assertEqual(started_polls, ["feed"])
+        self.assertIn(999, ids)
+        self.assertEqual(len(o.events_list(self.c, "site", "hourly")["events"]), 1)
+        # ops_trigger_run_op on push trigger refuses
+        o.trigger_add(self.c, "site", "hook", "event", "push", actor="mark")
+        with self.assertRaisesRegex(RiverError, "push trigger"):
+            server.ops_trigger_run_op(self.c, {"scope": "site", "name": "hook"}, "mark")
+
+    def test_close_lost_polls_deletes_cut_and_breaks_lost(self):
+        from datetime import datetime, timedelta, timezone
+        o.trigger_add(self.c, "site", "feed", "event", "poll", command="poll.sh", every="5m", timeout="30s", actor="mark")
+        t = o.poll_due(self.c)[0]
+        t0 = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
+        run = o.poll_start(self.c, t, at=t0)
+        # Simulate lost run (unknown runner, past timeout + grace)
+        self.c.execute("UPDATE ops_runs SET runner='other' WHERE id=?", (run["id"],))
+        self.c.commit()
+        lost = o.close_lost_polls(self.c, at=t0 + timedelta(minutes=5))
+        self.assertEqual(len(lost), 1)
+        self.assertEqual((lost[0]["status"], lost[0]["action"]), ("unknown", "broken-opened"))
 
 
 if __name__ == "__main__":

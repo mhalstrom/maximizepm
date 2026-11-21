@@ -1881,22 +1881,66 @@ def browser_sweep(conn):
         print(f"browser {project}/{owner}: stopped (its session ended, or nobody used it)", flush=True)
 
 
+def _ops_poll_thread(run):
+    def work():
+        try:
+            c = core.connect()
+            try:
+                from . import operations
+                r = operations.poll_finish(c, run)
+                if r.get("broken"):
+                    print(f"ops poll {run['trigger']['key']}: broken trigger: {r['broken']}", flush=True)
+                elif r.get("events"):
+                    print(f"ops poll {run['trigger']['key']}: {r.get('summary')}", flush=True)
+            finally:
+                c.close()
+        except Exception as e:
+            print(f"ops poll {run['trigger']['key']}: {e}", flush=True)
+        finally:
+            OPS_RUNNING.discard(run["id"])
+    OPS_RUNNING.add(run["id"])
+    threading.Thread(target=work, daemon=True).start()
+
+
+def ops_poll_start_now(conn, t, actor=None):
+    """Start one run of an event poll trigger in a background thread (#6626). Returns the run id, or None if already
+    running."""
+    from . import operations
+    run = operations.poll_start(conn, t, actor=actor)
+    if run is None:
+        return None
+    _ops_poll_thread(run)
+    return run["id"]
+
+
 def ops_watch(conn):
     """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open,
-    escalate overdue trigger event items, then start each check that is due (core.ops_due), at most OPS_MAX_RUNNING
-    at the same time. Returns the run ids."""
+    escalate overdue trigger event items, fire due time triggers, then start each state check and event poll trigger
+    that is due, at most OPS_MAX_RUNNING at the same time. Returns the run ids."""
     for r in core.ops_close_lost(conn, running=set(OPS_RUNNING)):
         if r.get("status") == "cut":  # a restart of serve cut it (#5627): it runs again below, with no fault
             print(f"ops {r['key']}: a stop of maxpm serve cut run {r['run']}; it runs again now", flush=True)
     from . import operations
+    for r in operations.close_lost_polls(conn, running=set(OPS_RUNNING)):
+        if r.get("status") == "cut":
+            print(f"ops poll {r['key']}: a stop of maxpm serve cut run {r['run']}; it runs again now", flush=True)
     operations.escalate_due(conn)
     started = []
+    for r in operations.fire_due_time_triggers(conn):
+        if r.get("run"):
+            started.append(r["run"])
     if core.net_down(conn):  # #6099: the checks wait until the network of this computer is back (core.net_watch)
         return started
     for c in core.ops_due(conn):
         if c["form"] != "beat" and len(OPS_RUNNING) >= OPS_MAX_RUNNING:
             break
         rid = ops_start_now(conn, c)
+        if rid:
+            started.append(rid)
+    for t in operations.poll_due(conn):
+        if len(OPS_RUNNING) >= OPS_MAX_RUNNING:
+            break
+        rid = ops_poll_start_now(conn, t)
         if rid:
             started.append(rid)
     return started
@@ -1939,6 +1983,23 @@ def ops_run_op(conn, a, who):
     if rid is None:
         raise core.RiverError(f"{c['scope']}/{c['name']} runs now; read the result: maxpm ops history {c['scope']} {c['name']}")
     return {"check": f"{c['scope']}/{c['name']}", "run": rid, "form": c["form"]}
+
+
+def ops_trigger_run_op(conn, a, who):
+    """The op ops_trigger_run (maxpm ops trigger run): run a state, time or event poll trigger now (#6626)."""
+    from . import operations
+    t = operations._trigger(conn, a["scope"], a["name"])
+    if t["condition"] == "state":
+        return ops_run_op(conn, a, who)
+    if t["condition"] == "time":
+        return operations.time_fire(conn, t, actor=who)
+    if t["arrival"] == "push":
+        raise core.RiverError(f"{t['scope']}/{t['name']} is a push trigger with no routine; test it with: "
+                              f"maxpm ops events add {t['scope']} {t['name']} --id <id> --title \"<title>\"")
+    rid = ops_poll_start_now(conn, t, actor=who)
+    if rid is None:
+        raise core.RiverError(f"{t['scope']}/{t['name']} runs now")
+    return {"trigger": f"{t['scope']}/{t['name']}", "run": rid, "condition": t["condition"], "arrival": t["arrival"]}
 
 
 def auto_end_orphans(conn):
@@ -6945,6 +7006,7 @@ OPS = {
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,
+    "ops_trigger_run": ops_trigger_run_op,
     "ops_repair": ops_repair_op,
     # maxpm ops setup (#5437): one run of a check that is not kept yet, here outside the sandbox; it writes nothing.
     "ops_trial": lambda c, a, who: core.ops_trial(c, a["scope"], a.get("name"), a["form"], a.get("fields") or {}, who),

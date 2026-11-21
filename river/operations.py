@@ -12,7 +12,10 @@ area|playbook|trigger|events commands. The handling of an event (one item, one f
 of a poll trigger is #6626; the address of a push trigger is #6628.
 """
 
+from datetime import timedelta
 import json
+import os
+import time
 
 from . import core
 from .core import RiverError, iso, now, tx, _event
@@ -403,6 +406,7 @@ def _trigger_brief(conn, r):
     t["playbook"] = b["name"] if b else None
     t["priority_used"] = core.trigger_priority(t)
     t["routine"] = t["config"].get("command") or (t["config"].get("url") if t["form"] == "url" else None)
+    t["title"] = t["config"].get("title")
     ev = conn.execute("SELECT event_id, title, last_at FROM trigger_events WHERE trigger_id=? ORDER BY last_at DESC "
                       "LIMIT 1", (t["id"],)).fetchone()
     t["last_event"] = dict(ev) if ev else None
@@ -411,10 +415,10 @@ def _trigger_brief(conn, r):
 
 
 def trigger_add(conn, project, name, condition, arrival, area=None, playbook=None, priority=None, command=None,
-                every=None, cron=None, timeout=None, actor=None, escalate_after=None):
+                every=None, cron=None, timeout=None, actor=None, escalate_after=None, title=None):
     """maxpm ops trigger add: a time or an event trigger of an area (a state trigger is a check: maxpm ops add). A
-    poll trigger has a routine, a script that MaximizePM runs (decision 5); a push trigger has none (its address and
-    secret come with #6628). The trigger is stored now; MaximizePM runs a time or event routine from #6626 on."""
+    time trigger has no routine: the clock gives the event, with the trigger's fixed title (#6626). An event poll
+    trigger has a routine, a script that prints events as JSON lines (decision 5); a push trigger has none (#6628)."""
     _name(name, "trigger")
     if condition not in core.TRIGGER_CONDITIONS:
         raise RiverError(f"no condition {condition!r}: " + "; ".join(f"{k} ({v})" for k, v in
@@ -428,6 +432,10 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
         raise RiverError("a time trigger polls: MaximizePM runs it at its time (--arrival poll)")
     if arrival == "push" and (command or every or cron):
         raise RiverError("a push trigger has no routine: the outside system posts its events to it")
+    if condition == "time" and (command or "").strip():
+        raise RiverError("a time trigger has no routine: the clock gives the event (use --title for its fixed title)")
+    if condition != "time" and (title or "").strip():
+        raise RiverError("--title is only for a time trigger; an event trigger's events carry their own title")
     _priority(priority)
     esc = _escalate_after(escalate_after)
     with tx(conn):
@@ -439,11 +447,21 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
                         ).fetchone():
             raise RiverError(f"{scope} has a trigger {name!r}: maxpm ops trigger show {scope} {name}")
         col = {"form": "", "config": {}, "every": "5m", "timeout": "30s", "cron": None}
-        if arrival == "poll":
+        if condition == "time":
+            if not (every or cron):
+                raise RiverError("a time trigger needs --cron (for example '0 9 * * mon') or --every")
+            if cron:
+                core.cron_parse(cron)
+            if every:
+                core.parse_duration(every)
+            if timeout:
+                core.parse_duration(timeout)
+            cfg = {"title": title.strip()} if (title or "").strip() else {}
+            col = {"form": "time", "config": cfg, "every": every or "5m", "timeout": timeout or "30s",
+                   "cron": cron or None}
+        elif arrival == "poll":
             if not (command or "").strip():
                 raise RiverError("a poll trigger needs --command: the routine that MaximizePM runs")
-            if condition == "time" and not (every or cron):
-                raise RiverError("a time trigger needs --cron (for example '0 9 * * mon') or --every")
             col = core._ops_build("cmd", {"command": command, "every": every, "cron": cron, "timeout": timeout})
         pid, area_id = core._trigger_home(conn, kind, scope, actor, a["name"] if a else None)
         tid = conn.execute(
@@ -453,6 +471,7 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
              col["every"], col["timeout"], col.get("cron"), actor, iso(now()))).lastrowid
         core._trigger_playbook(conn, tid, pid, name, None, None, playbook, actor)
         _event(conn, None, actor, f"ops trigger {scope}/{name} added: {condition}, {arrival}"
+               + (f", title {title.strip()}" if (title or "").strip() else "")
                + (f", routine {command}" if command else ""))
     return {"trigger": trigger_show(conn, f"{kind}:{scope}", name), "changed": "added"}
 
@@ -472,11 +491,14 @@ def _escalate_after(value):
     return s
 
 
-def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, actor=None, escalate_after=None):
+def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, actor=None, escalate_after=None,
+                 title=None, command=None, every=None, cron=None, timeout=None):
     """maxpm ops trigger edit: another area of the same scope, another playbook of the project, its own priority
-    (-1: by its condition again), or its escalate-after duration ('off' clears it). The routine of a check: maxpm ops edit."""
-    if area is None and playbook is None and priority is None and escalate_after is None:
-        raise RiverError("give a change: --area, --playbook, --priority or --escalate-after")
+    (-1: by its condition again), escalate-after ('off' clears it), or its title/routine/schedule. The routine of a
+    check: maxpm ops edit."""
+    if all(v is None for v in (area, playbook, priority, escalate_after, title, command, every, cron, timeout)):
+        raise RiverError("give a change: --area, --playbook, --priority, --escalate-after, --title, --command, "
+                         "--every, --cron or --timeout")
     if priority is not None and priority != -1:
         _priority(priority)
     esc = _escalate_after(escalate_after) if escalate_after is not None else None
@@ -497,6 +519,47 @@ def trigger_edit(conn, scope, name, area=None, playbook=None, priority=None, act
         if escalate_after is not None:
             conn.execute("UPDATE triggers SET escalate_after=? WHERE id=?", (esc, t["id"]))
             changed.append("escalate_after")
+        cfg = json.loads(t["config"] or "{}")
+        cfg_changed = False
+        if title is not None:
+            if t["condition"] != "time":
+                raise RiverError("--title is only for a time trigger")
+            if title.strip():
+                cfg["title"] = title.strip()
+            else:
+                cfg.pop("title", None)
+            cfg_changed = True
+            changed.append("title")
+        if command is not None:
+            if t["condition"] != "event" or t["arrival"] != "poll":
+                raise RiverError("--command is only for an event poll trigger (a state check uses maxpm ops edit)")
+            if not command.strip():
+                raise RiverError("--command cannot be empty for a poll trigger")
+            cfg["command"] = command.strip()
+            cfg_changed = True
+            changed.append("command")
+        if cfg_changed:
+            conn.execute("UPDATE triggers SET config=? WHERE id=?", (json.dumps(cfg), t["id"]))
+        if every is not None:
+            if t["arrival"] != "poll":
+                raise RiverError("--every is only for a poll or time trigger")
+            core.parse_duration(every)
+            conn.execute("UPDATE triggers SET every=? WHERE id=?", (every, t["id"]))
+            changed.append("every")
+        if cron is not None:
+            if t["arrival"] != "poll":
+                raise RiverError("--cron is only for a poll or time trigger")
+            cval = cron.strip() or None
+            if cval:
+                core.cron_parse(cval)
+            conn.execute("UPDATE triggers SET cron=? WHERE id=?", (cval, t["id"]))
+            changed.append("cron")
+        if timeout is not None:
+            if t["arrival"] != "poll":
+                raise RiverError("--timeout is only for a poll or time trigger")
+            core.parse_duration(timeout)
+            conn.execute("UPDATE triggers SET timeout=? WHERE id=?", (timeout, t["id"]))
+            changed.append("timeout")
         conn.execute("UPDATE triggers SET changed_by=?, changed_at=? WHERE id=?", (actor, iso(now()), t["id"]))
         _event(conn, None, actor, f"ops trigger {t['scope']}/{name} changed ({', '.join(changed) or 'nothing'})")
     return {"trigger": trigger_show(conn, f"{t['scope_kind']}:{t['scope']}", name), "changed": "changed"}
@@ -750,3 +813,284 @@ def events_show(conn, ref):
     if r is None:
         raise RiverError(f"no event e{rid}: maxpm ops events list")
     return {"event": _event_row(r)}
+
+
+# ---- poll and time triggers (#6626)
+
+def _trigger_exec_row(r):
+    t = dict(r)
+    t["config"] = json.loads(t["config"] or "{}") if isinstance(t.get("config"), str) else dict(t.get("config") or {})
+    t["key"] = f"ops:{t['scope']}:{t['name']}"
+    return t
+
+
+def _trigger_due(conn, t, at):
+    """(due, fire_at) for a time or event poll trigger at `at`. Clears an expired pause, skips while a run is open."""
+    if t.get("paused_until"):
+        if core.parse_iso(t["paused_until"]) > at:
+            return False, None
+        with tx(conn):
+            conn.execute("UPDATE triggers SET paused_until=NULL, state='new' WHERE id=? AND paused_until=?",
+                         (t["id"], t["paused_until"]))
+            conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                         (t["id"], t["key"], "resumed", iso(at), "maxpm", f"the pause until {t['paused_until']} ended"))
+        t["paused_until"] = None
+        t["state"] = "new"
+    if conn.execute("SELECT 1 FROM ops_runs WHERE check_id=? AND ended_at IS NULL", (t["id"],)).fetchone():
+        return False, None
+    last = conn.execute("SELECT started_at FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT 1",
+                        (t["id"],)).fetchone()
+    since = core.parse_iso(last["started_at"]) if last else None
+    if t.get("cron"):
+        spec, zone = core.cron_parse(t["cron"]), core._ops_zone(conn, t)
+        fire = core.cron_prev(spec, at, zone)
+        base = since or core.parse_iso(t["created_at"])
+        return (fire is not None and fire > base), fire
+    due = since is None or at - since >= core.parse_duration(t["every"])
+    return due, at
+
+
+def time_due(conn, at=None):
+    """The time triggers due at `at`, as a list of (trigger_dict, scheduled_at)."""
+    at = at or now()
+    out = []
+    for r in conn.execute("SELECT * FROM triggers WHERE condition='time' AND arrival='poll' ORDER BY id").fetchall():
+        t = _trigger_exec_row(r)
+        due, fire = _trigger_due(conn, t, at)
+        if due:
+            out.append((t, fire))
+    return out
+
+
+def time_fire(conn, t, at=None, scheduled_at=None, actor="maxpm"):
+    """Fire one time trigger (#6626): no routine runs; the clock gives the event with the trigger's fixed title."""
+    at = at or now()
+    t = _trigger_exec_row(t)
+    fire_dt = scheduled_at or at
+    title = (t["config"].get("title") or "").strip() or t["name"]
+    eid = f"time-{iso(fire_dt)}"
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM ops_runs WHERE check_id=? AND ended_at IS NULL", (t["id"],)).fetchone():
+            return {"run": None, "trigger": f"{t['scope']}/{t['name']}", "skipped": "already running"}
+        run_id = conn.execute(
+            "INSERT INTO ops_runs(check_id,key,started_at,ended_at,status,seconds,summary,runner) VALUES "
+            "(?,?,?,?,?,?,?,?)",
+            (t["id"], t["key"], iso(at), iso(at), "ok", 0.0, f"time event: {title}"[:300], core.OPS_PROCESS)).lastrowid
+    res = handle_event(conn, t["id"], {"id": eid, "title": title, "scheduled_at": iso(fire_dt)}, at=at, actor=actor)
+    return dict(res, run=run_id, trigger=f"{t['scope']}/{t['name']}")
+
+
+def fire_due_time_triggers(conn, at=None):
+    """Fire every due time trigger at `at` (called from server.ops_watch)."""
+    at = at or now()
+    return [time_fire(conn, t, at=at, scheduled_at=fire) for t, fire in time_due(conn, at)]
+
+
+def poll_due(conn, at=None):
+    """The event poll triggers due at `at`."""
+    at = at or now()
+    out = []
+    for r in conn.execute("SELECT * FROM triggers WHERE condition='event' AND arrival='poll' ORDER BY id").fetchall():
+        t = _trigger_exec_row(r)
+        due, _ = _trigger_due(conn, t, at)
+        if due:
+            out.append(t)
+    return out
+
+
+def poll_start(conn, t, at=None, actor=None):
+    """Open one run of an event poll trigger in ops_runs; returns None if a run is already open."""
+    at = at or now()
+    t = _trigger_exec_row(t)
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM ops_runs WHERE check_id=? AND ended_at IS NULL", (t["id"],)).fetchone():
+            return None
+        rid = conn.execute("INSERT INTO ops_runs(check_id,key,started_at,runner) VALUES (?,?,?,?)",
+                           (t["id"], t["key"], iso(at), core.OPS_PROCESS)).lastrowid
+    folder = playbook_for(conn, t).get("workdir") or core._ops_folder(conn, t)
+    return {"id": rid, "trigger": t, "folder": folder, "limit": core.parse_duration(t["timeout"]).total_seconds(),
+            "actor": actor}
+
+
+def _parse_poll_lines(stdout):
+    """Parse JSON lines printed by a polling routine (#6626). Each non-empty line must be a JSON object with non-empty
+    'id' and 'title'; extra fields are kept as they are. Duplicate ids within the same run are dropped once here.
+    Returns (events, errors)."""
+    events = []
+    errors = []
+    seen = set()
+    for lineno, raw in enumerate((stdout or "").splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as e:
+            errors.append(f"line {lineno}: not valid JSON ({e})")
+            continue
+        if not isinstance(obj, dict):
+            errors.append(f"line {lineno}: expected a JSON object")
+            continue
+        eid = str(obj.get("id") if obj.get("id") is not None else "").strip()
+        title = str(obj.get("title") or "").strip()
+        if not eid or not title:
+            errors.append(f"line {lineno}: event needs non-empty id and title")
+            continue
+        if eid in seen:
+            continue
+        seen.add(eid)
+        events.append(obj)
+    return events, errors
+
+
+def poll_execute(run):
+    """Run an event poll trigger's routine script and return its raw result (writes nothing)."""
+    t = run["trigger"]
+    cmd = t["config"]["command"]
+    env = {**os.environ, "MAXPM_TRIGGER": t["name"], "MAXPM_SCOPE": t["scope"], "MAXPM_TRIGGER_KEY": t["key"],
+           "MAXPM_QUEUE_DIR": str(core.db_path().parent)}
+    t0 = time.monotonic()
+    error = None
+    try:
+        if run["folder"] and not os.path.isdir(run["folder"]):
+            raise OSError(f"the folder {run['folder']} does not exist")
+        r = core.OPS_RUNNER(cmd, run["folder"], run["limit"], env) if core.OPS_RUNNER else \
+            core._run_command(cmd, run["folder"], run["limit"], None, env)
+        code, timed_out = r.returncode, bool(getattr(r, "timed_out", False))
+        stdout = r.stdout or ""
+        stderr = r.stderr or ""
+        text = (stdout.strip() + ("\n" + stderr.strip() if stderr.strip() else "")).strip()
+    except OSError as e:
+        code, timed_out, stdout, stderr, text = None, False, "", "", f"the command did not start: {e}"
+        error = text
+    return {"exit_code": code, "timed_out": timed_out, "stdout": stdout, "stderr": stderr,
+            "output": core._ops_tail(text), "seconds": round(time.monotonic() - t0, 2), "error": error}
+
+
+def _broken_trigger_item(conn, t):
+    prefix = f"ops:{t['scope']}:{t['name']}: broken trigger"
+    return conn.execute(
+        "SELECT id, status, title FROM items WHERE status IN ('open','in_progress','held') "
+        "AND substr(title, 1, ?)=? ORDER BY id DESC LIMIT 1", (len(prefix), prefix)).fetchone()
+
+
+def _broken_trigger(conn, t, why, output=None, exit_code=None, timed_out=False, at=None):
+    """Record a broken-trigger event for a failed poll routine (#6626, kinds.json rule 1): for the person or manager,
+    never the trigger's playbook."""
+    at = at or now()
+    existing = _broken_trigger_item(conn, t)
+    with tx(conn):
+        conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                     (t["id"], t["key"], "broken-trigger", iso(at), "maxpm", why[:500]))
+    if existing:
+        core._ops_note(conn, existing["id"],
+                       f"poll routine failed again at {core.show_time(iso(at))}: {why}", at, force=True)
+        return {"item": existing["id"], "action": "broken-note"}
+    project = core._ops_project(conn, t)
+    prefix = f"ops:{t['scope']}:{t['name']}: broken trigger"
+    cmd = t["config"].get("command") or ""
+    details = [f"The polling routine for trigger {t['scope']}/{t['name']} failed ({why}).",
+               "Broken-trigger event (kinds.json rule 1): fix the trigger's routine, command or access; "
+               "the trigger's playbook did not run."]
+    if cmd:
+        details.append(f"Command: {cmd}")
+    if exit_code is not None:
+        details.append(f"Exit code: {exit_code}")
+    if timed_out:
+        details.append(f"Timed out after {t['timeout']}.")
+    if output:
+        details.append(f"Output:\n{output[:1500]}")
+    r = core.item_add(conn, project, f"{prefix} — {why}"[:300],
+                      priority=core.trigger_priority(t), doer="human", actor="maxpm",
+                      context="\n".join(details), goals=[], kind="work",
+                      short=f"Broken trigger {t['name']}"[:60])
+    core._ops_tell_manager(conn, "alert",
+                           f"broken trigger {t['scope']}/{t['name']}: {why} (#{r['id']})", r["id"])
+    return {"item": r["id"], "action": "broken-opened"}
+
+
+def poll_finish(conn, run, at=None):
+    """Execute an opened poll trigger run, close ops_runs, and either emit its JSON-line events through handle_event
+    or record a broken-trigger event for the person/manager (#6626)."""
+    t = run["trigger"]
+    res = poll_execute(run)
+    at = at or now()
+    why = None
+    if res["timed_out"]:
+        why = f"routine stopped at its timeout {t['timeout']}"
+    elif res["error"] or res["exit_code"] is None:
+        why = res["error"] or "routine did not start"
+    elif res["exit_code"] != 0:
+        first = ((res["output"] or "").splitlines() or [""])[0].strip()[:200]
+        label = "routine exited UNKNOWN (3)" if res["exit_code"] == 3 else f"routine exited {res['exit_code']}"
+        why = f"{label}: {first}" if first else label
+    if why:
+        with tx(conn):
+            conn.execute(
+                "UPDATE ops_runs SET ended_at=?, status='unknown', exit_code=?, timed_out=?, seconds=?, summary=?, "
+                "output=? WHERE id=?",
+                (iso(at), res["exit_code"], int(bool(res["timed_out"])), res["seconds"], why[:300],
+                 res["output"], run["id"]))
+        brk = _broken_trigger(conn, t, why, output=res["output"], exit_code=res["exit_code"],
+                              timed_out=res["timed_out"], at=at)
+        return {"run": run["id"], "trigger": f"{t['scope']}/{t['name']}", "status": "unknown", "broken": why,
+                "events": [], **brk}
+    events, parse_errors = _parse_poll_lines(res["stdout"])
+    handled = [handle_event(conn, t["id"], ev, at=at, actor="maxpm") for ev in events]
+    if parse_errors:
+        why = f"routine printed invalid event line(s): {'; '.join(parse_errors[:3])}"
+        with tx(conn):
+            conn.execute(
+                "UPDATE ops_runs SET ended_at=?, status='unknown', exit_code=0, timed_out=0, seconds=?, summary=?, "
+                "output=? WHERE id=?",
+                (iso(at), res["seconds"], why[:300], res["output"], run["id"]))
+        brk = _broken_trigger(conn, t, why, output=res["output"], exit_code=0, timed_out=False, at=at)
+        return {"run": run["id"], "trigger": f"{t['scope']}/{t['name']}", "status": "unknown", "broken": why,
+                "events": handled, **brk}
+    n_new = sum(1 for h in handled if h["new"])
+    n_rep = len(handled) - n_new
+    summary = f"{n_new} new, {n_rep} repeat" if handled else "0 events"
+    with tx(conn):
+        conn.execute(
+            "UPDATE ops_runs SET ended_at=?, status='ok', exit_code=0, timed_out=0, seconds=?, summary=?, output=? "
+            "WHERE id=?",
+            (iso(at), res["seconds"], summary, res["output"] if handled else None, run["id"]))
+    existing = _broken_trigger_item(conn, t)
+    if existing:
+        core._ops_note(conn, existing["id"],
+                       f"poll routine succeeded at {core.show_time(iso(at))} ({summary})", at, force=True)
+    return {"run": run["id"], "trigger": f"{t['scope']}/{t['name']}", "status": "ok", "summary": summary,
+            "events": handled}
+
+
+def close_lost_polls(conn, running=(), at=None):
+    """Close event poll runs that a stopped maxpm serve left open: cut runs are deleted to retry; lost runs become
+    a broken-trigger event (#6626)."""
+    at = at or now()
+    out = []
+    rows = conn.execute(
+        "SELECT r.id, r.check_id, r.started_at, r.runner, t.* FROM ops_runs r "
+        "JOIN triggers t ON t.id=r.check_id WHERE t.condition='event' AND t.arrival='poll' AND r.ended_at IS NULL"
+    ).fetchall()
+    for r in rows:
+        run_id = r["id"]
+        if run_id in running:
+            continue
+        t = _trigger_exec_row(r)
+        t["id"] = r["check_id"]
+        if core._ops_cut(r["runner"]):
+            with tx(conn):
+                if conn.execute("DELETE FROM ops_runs WHERE id=? AND ended_at IS NULL", (run_id,)).rowcount:
+                    _event(conn, None, "maxpm",
+                           f"ops poll {t['scope']}/{t['name']}: a stop of maxpm serve cut run {run_id}; it runs again")
+            out.append({"key": t["key"], "run": run_id, "status": "cut"})
+            continue
+        if at - core.parse_iso(r["started_at"]) < core.parse_duration(t["timeout"]) + timedelta(seconds=core.OPS_LOST_GRACE):
+            continue
+        why = "the run never ended: maxpm serve stopped while it ran"
+        with tx(conn):
+            conn.execute("UPDATE ops_runs SET ended_at=?, status='unknown', summary=? WHERE id=?",
+                         (iso(at), why, run_id))
+        brk = _broken_trigger(conn, t, why, at=at)
+        out.append({"key": t["key"], "run": run_id, "status": "unknown", "broken": why, **brk})
+    return out

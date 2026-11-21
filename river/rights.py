@@ -107,7 +107,7 @@ OPS = {op: ANY for op in (
     "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "item_reply", "launch_agent", "message_read", "move",
     "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_repair",
-    "ops_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
+    "ops_run", "ops_trigger_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
