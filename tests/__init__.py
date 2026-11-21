@@ -105,10 +105,15 @@ for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", 
     os.environ.pop(_name, None)
 # Nor the agent session that runs the tests: a command records the session's id and web link from these, and that
 # write made a read command (maxpm show) sync the needs-you rows in a Claude Code session with Remote Control only,
-# so a test passed there and failed in every other shell (#5581).
+# so a test passed there and failed in every other shell (#5581). Also clear each adapter's inside_env variables
+# (such as ANTIGRAVITY_AGENT or CLAUDECODE) so tests running inside an agent CLI do not inherit its detection (#6555).
 from river import agents as _agents  # noqa: E402
 _got = _agents.load()
-for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("env") for m in _agents.env_order()]:
+for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [
+    k for m in _agents.env_order() for k in (
+        [(_got[m].identity or {}).get("env")] + list((_got[m].identity or {}).get("inside_env") or ())
+    )
+]:
     if _name:
         os.environ.pop(_name, None)
 
