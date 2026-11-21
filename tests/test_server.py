@@ -6819,12 +6819,12 @@ class OpsPage(unittest.TestCase):
         self.assertEqual(lines["shop"], {"checks": 1, "states": {"new": 1}, "faults": [fault], "proposed": 0})
         self.assertEqual(lines["blog"]["checks"], 0)
 
-    def test_the_page_has_the_view_and_its_dialog(self):
-        page = server.page_html("/plan/ops").decode()
+    def test_the_plan_ops_view_is_removed(self):
+        page = server.page_html("/operations").decode()
         for part in ('id="plan-ops"', 'id="opsDlg"', 'href="views/ops.css"'):
-            self.assertIn(part, page)
+            self.assertNotIn(part, page)
         js = (server.STATIC / "views" / "plan.js").read_text(encoding="utf-8")
-        self.assertIn('["ops", "Operations"]', js)
+        self.assertNotIn('["ops", "Operations"]', js)
 
 
 class OperationsTab(unittest.TestCase):
@@ -6933,10 +6933,39 @@ class OperationsTab(unittest.TestCase):
 
     def test_the_page_has_the_tab_next_to_deploy(self):
         page = server.page_html("/operations").decode()
-        for part in ('id="tab-operations"', 'data-tab="operations"', 'href="views/operations.css"', 'id="opAddTrigger"'):
+        for part in ('id="tab-operations"', 'data-tab="operations"', 'href="views/operations.css"', 'id="opAddTrigger"',
+                     'id="opDetBox"', 'id="opRecKind"', 'id="opRecSince"'):
             self.assertIn(part, page)
         self.assertLess(page.index('data-tab="deploy"'), page.index('data-tab="operations"'))
         self.assertLess(page.index('data-tab="operations"'), page.index('data-tab="terminal"'))
+
+    def test_the_tab_includes_faults_proposals_forms_and_state_trigger_add(self):
+        server.OPS["ops_area_add"](self.c, {"project": "shop", "name": "prod"}, "mark")
+        server.OPS["ops_playbook_add"](self.c, {"project": "shop", "name": "web-pb", "knowledge": "K",
+                                                "done_means": "D"}, "mark")
+        added = server.OPS["ops_add"](self.c, {"scope": "project:shop", "form": "url", "name": "home",
+                                               "fields": {"url": "https://shop.example/"}, "area": "prod",
+                                               "playbook": "web-pb", "priority": "1", "escalate_after": "2h"}, "mark")
+        cid = added["check"]["id"]
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status, summary) VALUES "
+                           "(?, 'ops:shop:home', '2026-11-21T01:00:00Z', '2026-11-21T01:00:01Z', 'ok', '200')", (cid,))
+        fault = core.item_add(self.c, "shop", "ops:shop:home GET 503", kind="operational", doer="ai", actor="maxpm")["id"]
+        core.ops_propose(self.c, "shop", "disk", "cmd", {"command": "df -h"}, why="disk fills", actor="w")
+        code, body = self.get("/api/operations")
+        self.assertEqual(code, 200)
+        self.assertEqual([f["form"] for f in body["forms"]], ["url", "beat", "cmd", "log"])
+        shop = next(p for p in body["projects"] if p["name"] == "shop")
+        self.assertEqual([f["id"] for f in shop["faults"]], [fault])
+        self.assertEqual([p["name"] for p in shop["proposals"]], ["disk"])
+        prod = next(a for a in shop["areas"] if a["name"] == "prod")
+        home = prod["triggers"][0]
+        self.assertEqual((home["name"], home["playbook"], home["priority"], home["escalate_after"]),
+                         ("home", "web-pb", 1, "2h"))
+        self.assertEqual([r["status"] for r in home["runs"]], ["ok"])
+        code, one = self.get("/api/operations/trigger?scope=project:shop&name=home")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["status"] for r in one["runs"]], ["ok"])
 
 
 class Ops(unittest.TestCase):

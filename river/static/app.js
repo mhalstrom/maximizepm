@@ -34,9 +34,8 @@ import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
-import * as ops from "./views/ops.js";
 import * as deploy from "./views/deploy.js";
-import { renderOperations } from "./views/operations.js";
+import { renderOperations, openOperations } from "./views/operations.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog, renderEvents } from "./views/done.js";
 import * as settings from "./views/settings.js";
@@ -288,7 +287,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
-  renderGraph(false); renderLog(false); ops.renderOps(false); deploy.renderDeploy(false); renderOperations(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); deploy.renderDeploy(false); renderOperations(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -303,7 +302,7 @@ async function refresh() {
 document.addEventListener("click", async (e) => {
   const t = e.target;
   // A view's own controls first (#4656), then what every view shares: agents, the drawer, item links.
-  for (const v of [needsYou, youView, sessWork, overview, inbox, projects, targets, ops, settings]) if (v.onClick(t)) return;
+  for (const v of [needsYou, youView, sessWork, overview, inbox, projects, targets, settings]) if (v.onClick(t)) return;
   if (t.dataset.startManager) {
     const ch = await chooseLaunch(S, { title: "Start the manager", go: "Start manager",
       what: "Manager: plans with you, starts agents, fills their queues, and stops stuck ones (maxpm manage)" });
@@ -346,6 +345,9 @@ document.addEventListener("click", async (e) => {
   // A target a session owns (#6136): its pipeline's page in Deploy.
   const dt = t.closest("[data-deploy-target]");
   if (dt) { if (drawer.isOpen()) closeDrawer(); return deploy.openTarget(dt.dataset.deployTarget); }
+  // Open faults on a project card (#6672): the Operations tab for that project.
+  const og = t.closest("[data-ops-go]");
+  if (og) { if (drawer.isOpen()) closeDrawer(); return openOperations(og.dataset.opsGo); }
   // Plan (#5102 step 4): a view button, a project or a goal of the left bar (the scope), + project.
   const pv = t.closest("[data-plan-view]"); if (pv) return showPlan(pv.dataset.planView);
   const sg = t.closest("[data-scope-goal]"); if (sg) return setScope(sg.dataset.scopeProject, scope.goal === sg.dataset.scopeGoal ? "" : sg.dataset.scopeGoal);
@@ -379,7 +381,7 @@ $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
   plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals();
-  renderGraph(false); renderLog(true); ops.renderOps(true); renderEvents();
+  renderGraph(false); renderLog(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -460,6 +462,8 @@ function readUrl() {
   if (r.tab === "plan" && ["releases", "pipelines"].includes(parts[1])) { r.tab = "deploy"; parts.splice(1); }
   // Health left Plan for the Cost page (#6217): its old address shows Cost.
   if (r.tab === "plan" && parts[1] === "health") { r.tab = "sessions"; r.pane = "cost"; }
+  // Operations left Plan for the Operations tab (#6672): its old address shows Operations.
+  if (r.tab === "plan" && parts[1] === "ops") { r.tab = "operations"; parts.splice(1); }
   if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
   if (r.tab === "deploy") r.deploy = deploy.fromUrl(parts.slice(1));
@@ -502,7 +506,7 @@ function setTab(name, push = true) {
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   plan.renderPlanViews(); plan.renderPlanSide();
-  renderLog(true); ops.renderOps(true);
+  renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   deploy.renderDeploy(tab === "deploy");  // shown: it reads and draws; hidden: its pipeline stops reading

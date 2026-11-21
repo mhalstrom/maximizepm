@@ -2879,6 +2879,67 @@ try {
 '''.replace("TARGET", json.dumps(target)).replace("ITEM", str(self.it))
         self.assertEqual(self.drive(driver, "/plan/graph"), {"ok": True})
 
+    def test_operations_tab_shows_checks_faults_proposals_detections_and_adds_state_trigger(self):
+        """#6672: Plan's Operations view (open faults, proposed checks, detections, Add a check with Try once, Pause)
+        moved into the Operations tab, and /plan/ops redirects there. Checked at desktop and 390 px phone width."""
+        core.config_set(self.c, "setup_done", "on")
+        added = core.ops_add(self.c, "site", "home", "url", {"url": "https://site.example/"}, actor="mark")
+        cid = added["check"]["id"]
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status, summary) VALUES "
+                           "(?, 'ops:site:home', '2026-11-21T01:00:00Z', '2026-11-21T01:00:01Z', 'ok', '200')", (cid,))
+            self.c.execute("INSERT INTO ops_detections(check_id, key, scope_kind, scope, check_name, subject, status, "
+                           "kind, why, first_seen, last_seen, count, summary) VALUES "
+                           "(?, 'ops:site:home', 'project', 'site', 'home', '', 'warning', 'noise', 'blip', ?, ?, 2, "
+                           "'slow response')", (cid, core.iso(core.now()), core.iso(core.now())))
+        fault = core.item_add(self.c, "site", "ops:site:home GET 503", kind="operational", doer="ai",
+                              actor="maxpm")["id"]
+        core.ops_propose(self.c, "site", "disk", "cmd", {"command": "df -h"}, why="disk fills", actor="ag")
+        driver = r'''
+const errors = [];
+window.addEventListener("error", e => { if (!/ResizeObserver loop/.test(e.message)) errors.push(String(e.message)); });
+window.addEventListener("unhandledrejection", e => errors.push(String(e.reason && (e.reason.stack || e.reason))));
+try {
+  await until(() => window.__appReady && !q("#tab-operations").classList.contains("hidden"), "Operations tab from /plan/ops");
+  await until(() => q("#opBody .op-fault") && q("#opBody .op-prop-card") && q("#opBody .op-strip") && q("#opRecord .op-det"),
+    "fault, proposed check, run strip and detection");
+  const out = {
+    path: location.pathname,
+    planHasOps: !!q('[data-plan-view="ops"]'),
+    fault: q("#opBody .op-fault").textContent.trim(),
+    prop: q("#opBody .op-prop-card").textContent.includes("disk"),
+    det: q("#opRecord .op-det").textContent.includes("slow response"),
+    over: [...q("#tab-operations").querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5)
+      .map(e => e.tagName + "." + e.className).slice(0, 5),
+  };
+  // Open state trigger dialog: Pause and Resume work.
+  q('[data-op-trigger="home"]').click();
+  await until(() => q("#opDlg [data-op-pause]"), "Pause button in trigger dialog");
+  out.dlgStrip = !!q("#opDlg .op-strip");
+  q("#opDlg [data-op-close]").click();
+  await until(() => q("#opDlg").classList.contains("hidden"), "trigger dialog closed");
+  // Add trigger -> state -> beat check (no live network call) adds cleanly.
+  q("#opAddTrigger").click();
+  await until(() => q("#opDlg #opCond"), "Add trigger form");
+  q("#opCond").value = "state"; q("#opCond").dispatchEvent(new Event("change", { bubbles: true }));
+  await until(() => q("#opCheckForm") && !q("#opDlg [data-op-try]").classList.contains("hidden"), "state form and Try once");
+  out.tryShown = !q("#opDlg [data-op-try]").classList.contains("hidden");
+  q("#opDlg [data-op-close]").click();
+  out.errors = errors;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e), errors }); }'''
+        for size in ("1280,900", "390,844"):
+            r = self.drive(driver, "/plan/ops?as=mark", size=size)
+            self.assertEqual(r["errors"], [], (size, r))
+            self.assertEqual(r["path"], "/operations", (size, r))
+            self.assertFalse(r["planHasOps"], (size, r))
+            self.assertIn(f"#{fault}", r["fault"], (size, r))
+            self.assertTrue(r["prop"], (size, r))
+            self.assertTrue(r["det"], (size, r))
+            self.assertTrue(r["dlgStrip"], (size, r))
+            self.assertTrue(r["tryShown"], (size, r))
+            self.assertEqual(r["over"], [], (size, r))
+
 
 class PageAddresses(unittest.TestCase):
     """#4653: maxpm serve answers the page for the path of each view, with a <base> back to the page's root."""

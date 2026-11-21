@@ -49,7 +49,7 @@ export function renderProjects() {
     const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "",
       o.checks ? `${o.checks} check${o.checks === 1 ? "" : "s"}` : "no checks"].filter(Boolean);
     const faults = o.faults.length ? button(`${o.faults.length} open fault${o.faults.length === 1 ? "" : "s"}`, { cls: "plain ops-faultbtn",
-      data: { "plan-go": "ops", project: p.name }, title: "Open Operations" }) : "";
+      data: { "ops-go": p.name }, title: "Open Operations" }) : "";
     const me = actor();
     // One + goal in one place: the goal box, under the goal cards, also when the project has none yet (#5423).
     return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}${faults}</div>

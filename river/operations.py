@@ -1256,8 +1256,38 @@ def tab_view(conn):
     projects = [dict(r) for r in conn.execute(
         "SELECT id, name, target, rank FROM projects WHERE archived=0 ORDER BY rank, name")]
     by_pid = {p["id"]: p for p in projects}
+    by_name = {p["name"]: p for p in projects}
+    by_target = {}
     for p in projects:
-        p.update(areas=[], playbooks=[])
+        p.update(areas=[], playbooks=[], faults=[], proposals=[])
+        if p["target"]:
+            by_target.setdefault(p["target"], []).append(p)
+    for r in conn.execute("SELECT id, title, short, status, assignee, created_at FROM items "
+                          "WHERE kind='operational' AND status IN ('open','in_progress','held') AND title LIKE 'ops:%' "
+                          "ORDER BY id"):
+        f = dict(r)
+        parts = f["title"].split(":", 2)
+        if len(parts) < 3:
+            continue
+        sc = parts[1]
+        seen = set()
+        for p in ([by_name[sc]] if sc in by_name else []) + by_target.get(sc, []):
+            if p["id"] not in seen:
+                seen.add(p["id"])
+                p["faults"].append(f)
+    for r in conn.execute("SELECT * FROM ops_proposals WHERE state='open' ORDER BY id"):
+        pr = core._ops_proposal_row(conn, r)
+        targets_p = [by_name[pr["scope"]]] if pr["scope_kind"] == "project" and pr["scope"] in by_name \
+            else by_target.get(pr["scope"], []) if pr["scope_kind"] == "target" else []
+        for p in targets_p:
+            p["proposals"].append(pr)
+    runs_by = {}
+    for r in conn.execute(
+        "SELECT check_id, id, started_at, ended_at, status, summary, timed_out, seconds FROM ("
+        "SELECT check_id, id, started_at, ended_at, status, summary, timed_out, seconds, "
+        "ROW_NUMBER() OVER (PARTITION BY check_id ORDER BY id DESC) rn FROM ops_runs) WHERE rn <= ? "
+        "ORDER BY check_id, id", (core.OPS_VIEW_RUNS,)):
+        runs_by.setdefault(r["check_id"], []).append(dict(r))
     areas = {}
     for r in conn.execute("SELECT * FROM ops_areas ORDER BY name"):
         a = dict(r)
@@ -1310,6 +1340,8 @@ def tab_view(conn):
         row = _tab_trigger(t, cfg, push)
         row["last"] = (last_det if t["condition"] == "state" else last_ev).get(t["id"])
         row["events"] = counts.get(t["id"], 0)
+        if t["condition"] == "state":
+            row["runs"] = runs_by.get(t["id"], [])
         a = areas.get(t["area_id"])
         if a is None:
             unplaced.append(row)
@@ -1334,7 +1366,11 @@ def tab_view(conn):
         for a in p["areas"]:
             a.pop("project_id", None)
     targets = [r["name"] for r in conn.execute("SELECT name FROM targets ORDER BY name")]
-    return {"projects": projects, "unplaced": unplaced, "targets": targets,
+    forms = [{"form": f, "label": label, "summary": core.OPS_FORMS[f],
+              "questions": [{"field": k, "ask": q, "default": d} for k, q, d in core.OPS_SETUP_QUESTIONS[f]]}
+             for f, label in core.OPS_SETUP_FORMS]
+    return {"projects": projects, "unplaced": unplaced, "targets": targets, "forms": forms,
+            "severities": list(core.OPS_SEVERITIES),
             "conditions": core.TRIGGER_CONDITIONS, "arrivals": core.TRIGGER_ARRIVALS,
             "defaults": {"knowledge": core.OPS_DEFAULT_KNOWLEDGE, "done_means": core.OPS_DEFAULT_DONE,
                          "tools": core.OPS_NO_TOOLS, "limits": core.OPS_NO_LIMITS,
@@ -1347,6 +1383,10 @@ def tab_trigger(conn, scope, name, n=30):
     with the count of runs that found it); a time or an event trigger's are its rows of trigger_events."""
     t = trigger_show(conn, scope, name, n=0)
     if t["condition"] == "state":
+        runs = [dict(r) for r in conn.execute(
+            "SELECT id, started_at, ended_at, status, summary, timed_out, seconds FROM ops_runs WHERE check_id=? "
+            "ORDER BY id DESC LIMIT ?", (t["id"], core.OPS_VIEW_RUNS))]
+        t["runs"] = runs[::-1]
         rows = [{"ref": f"d{r['id']}", "event_id": r["subject"] or "", "title": r["summary"] or r["status"],
                  "first_at": r["first_seen"], "at": r["last_seen"], "repeats": max(0, (r["count"] or 1) - 1),
                  "item_id": r["item_id"], "status": r["status"], "kind": r["kind"]}

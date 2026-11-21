@@ -1,8 +1,8 @@
-<!-- The Operations tab (#6629; canvas operations-tab, layout mark 2026-11-21): each project, its areas, and each
-     area's triggers with their condition, arrival, playbook and last event; the project's playbooks, each with the
-     triggers that use it. A trigger opens its dialog with its events. Add and edit forms for areas, triggers and
-     playbooks. views/operations.js draws it from GET api/operations. maxpm serve puts it into index.html, at
-     view: operations. -->
+<!-- The Operations tab (#6629, #6672; canvas operations-tab, layout mark 2026-11-21): each project's open faults,
+     proposed checks, areas, triggers (condition, arrival, playbook, last event, run strip) and playbooks, plus the
+     detections record with kind and time filters. A trigger opens its dialog with its events and pause/run controls.
+     Add and edit forms for areas, triggers (including state checks with Try once) and playbooks. views/operations.js
+     draws it from GET api/operations and GET api/ops/record. maxpm serve puts it into index.html, at view: operations. -->
 <section id="tab-operations" class="hidden">
   <div class="plan-bar op-bar">
     <select id="opProject" aria-label="Project" title="Project"></select>
@@ -12,4 +12,14 @@
     <button class="btn primary" type="button" id="opAddTrigger" title="Add a trigger">Add trigger</button>
   </div>
   <div id="opBody"></div>
+  <!-- The record of every detection (#5510, moved from Plan > Operations #6672): also noise, planned and warnings. -->
+  <div class="panel" id="opDetBox">
+    <h2 class="op-det-head">Detections<span class="spacer"></span>
+      <select id="opRecKind" class="op-filter" title="Kind" aria-label="Kind"></select>
+      <select id="opRecSince" class="op-filter" title="Last seen" aria-label="Last seen">
+        <option value="1d">1 day</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="">All</option>
+      </select>
+    </h2>
+    <div id="opRecord"></div>
+  </div>
 </section>

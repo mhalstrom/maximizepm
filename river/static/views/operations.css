@@ -29,8 +29,27 @@
 .op-events td { overflow-wrap: anywhere; }
 .op-prop { border-top: var(--hair) solid var(--line); padding: var(--sp-3) 0; }
 .op-form-note { margin: 0 0 var(--sp-3); }
+.op-h-warn { color: var(--warn); }
+.op-fault { padding: var(--sp-2) 0; overflow-wrap: anywhere; }
+.op-prop-card { border-top: var(--hair) solid var(--line); padding: var(--sp-3) 0; }
+.op-prop-card:first-child { border-top: 0; padding-top: 0; }
+.op-prop-act { margin-top: var(--sp-3); flex-wrap: wrap; gap: var(--sp-3); }
+.op-why { flex: 1; min-width: var(--w-input-m); }
+.op-until { width: auto; }
+.op-strip { display: inline-flex; gap: var(--sp-0); align-items: center; }
+.op-run { display: inline-block; width: var(--sp-3); height: var(--sp-5); border-radius: var(--r-xs); background: var(--line); }
+.op-ok { background: var(--ready); }
+.op-warning { background: var(--wait); }
+.op-critical { background: var(--warn); }
+.op-unknown { background: var(--muted); }
+.op-det-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.op-det-head .spacer { flex: 1; }
+.op-filter { width: auto; max-width: 100%; }
+.op-det { border-top: var(--hair) solid var(--line); padding: var(--sp-3) 0; }
+.op-det:first-child { border-top: 0; padding-top: 0; }
 @media (max-width: 759px) {
   .op-bar select { flex-basis: 100%; }
+  .op-why { min-width: 0; width: 100%; flex-basis: 100%; }
   .op-kv { grid-template-columns: 1fr; gap: var(--sp-0); }
   .op-kv dd { margin-bottom: var(--sp-3); }
   .op-events tr { display: block; border-top: var(--hair) solid var(--line); padding: var(--sp-2) 0; }

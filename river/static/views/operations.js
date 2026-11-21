@@ -1,11 +1,11 @@
-// The Operations tab (#6629; canvas operations-tab, layout mark 2026-11-21: "projects, then areas, then triggers;
-// playbooks at the project level, each showing the triggers that use it"). Each trigger shows its condition (time,
-// state, event), how its events arrive (poll, push: its address and a button that makes a new secret and shows it
-// once), its playbook, and its last event with the item it opened. A trigger opens a dialog with its playbook and its
-// events. Add and edit forms for areas, triggers and playbooks (ops ops_area_*, ops_trigger_*, ops_playbook_*,
-// river/routes/operations.py). A check is a state trigger: it is added in Plan > Operations (Add a check), and its
-// area, playbook and priority change here. Reads GET api/operations (all of it, in one read) and
-// GET api/operations/trigger (one trigger's events).
+// The Operations tab (#6629, #6672; canvas operations-tab, layout mark 2026-11-21: "projects, then areas, then
+// triggers; playbooks at the project level, each showing the triggers that use it"). Each project also shows its open
+// faults and proposed checks; the detections record sits below with kind and time filters. Each trigger shows its
+// condition (time, state, event), how its events arrive (poll, push: its address and a button that makes a new secret
+// and shows it once), its playbook, its last event with the item it opened, and for state triggers its run strip. A
+// trigger opens a dialog with its playbook, its events, and Run now / Pause / Resume. Add and edit forms for areas,
+// triggers (including state checks with Try once via ops_trial and ops_add) and playbooks (river/routes/operations.py).
+// Reads GET api/operations and GET api/ops/record in parallel, and GET api/operations/trigger for one trigger's dialog.
 import { $, esc, getJson, ago, left, act, toast, store, copyText } from "../lib.js";
 import { button, iconButton } from "../components/button.js";
 import { chip } from "../components/chip.js";
@@ -13,32 +13,53 @@ import { empty } from "../components/empty.js";
 import { makeDialog } from "../components/dialog.js";
 import { field, input, select, textarea, two, actions } from "../components/form.js";
 import { OPEN_MARK } from "../components/rowOpen.js";
-import { tab } from "../page.js";
+import { tab, nav } from "../page.js";
 
-let O = null, sig = "", dlg = null, box = null, form = null;
+let O = null, sig = "", dlg = null, box = null, form = null, anyway = false;
 const PROJECT_KEY = "river.opsProject";
 
 const COND = { time: "time", state: "state", event: "event" };
 const STATE = { fault: "c-p0", failing: "c-waiting", recovered: "c-in_progress", healthy: "c-ready", new: "c-p", paused: "c-p" };
+const QUIET = new Set(["noise", "planned"]);
 const keyOf = (t) => `${t.scope_kind}:${t.scope}`;
 const projectOf = (name) => O && O.projects.find(p => p.name === name);
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 // An event's link comes from outside (untrusted data): only a web address becomes a link.
 const safeLink = (u) => typeof u === "string" && /^https?:\/\//i.test(u);
 
+export function openOperations(project) {
+  const name = project || "";
+  store(PROJECT_KEY, name);
+  const sel = $("#opProject");
+  if (sel && [...sel.options].some(o => o.value === name)) sel.value = name;
+  return nav.setTab("operations");
+}
+
 // ---- reading and drawing
 
 export async function renderOperations(force) {
   if (tab !== "operations") return;
-  let d;
-  try { d = await getJson("api/operations"); }
-  catch (e) { $("#opBody").innerHTML = empty(esc(e.message)); return; }
+  const wantProj = O ? $("#opProject").value : (store(PROJECT_KEY) || "");
+  const rq = new URLSearchParams();
+  if (wantProj) rq.set("project", wantProj);
+  if ($("#opRecKind").value) rq.set("kind", $("#opRecKind").value);
+  if ($("#opRecSince").value) rq.set("since", $("#opRecSince").value);
+  let d, R;
+  try {
+    [d, R] = await Promise.all([
+      getJson("api/operations"),
+      getJson("api/ops/record?" + rq).catch(() => wantProj ? getJson("api/ops/record") : { rows: [], kinds: {}, all_kinds: [] }),
+    ]);
+  } catch (e) { $("#opBody").innerHTML = empty(esc(e.message)); return; }
   O = d;
   drawProjects();
-  const s = JSON.stringify([d, $("#opProject").value, Math.floor(Date.now() / 60000)]);  // "3m ago" changes each minute
+  if (!force && $("#tab-operations").contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;
+  const curProj = $("#opProject").value;
+  const s = JSON.stringify([d, R, curProj, Math.floor(Date.now() / 60000)]);  // "3m ago" changes each minute
   if (s === sig && !force) return;
   sig = s;
   $("#opBody").innerHTML = bodyHtml(d);
+  drawRecord(R, !curProj);
 }
 
 // The project choice of the bar: all projects, or one; this browser keeps it.
@@ -50,8 +71,9 @@ function drawProjects() {
   sel.value = opts.some(([v]) => v === want) ? want : "";
 }
 
-// A project that has operations: an area with a trigger, an area a person added, or a playbook of its own.
-const used = (p) => p.areas.some(a => a.triggers.length || a.created_by) || p.playbooks.some(b => !b.is_default);
+// A project that has operations: an area with a trigger, a custom area or playbook, an open fault, or a proposed check.
+const used = (p) => p.areas.some(a => a.triggers.length || a.created_by) || p.playbooks.some(b => !b.is_default)
+  || (p.faults && p.faults.length) || (p.proposals && p.proposals.length);
 
 function bodyHtml(d) {
   const only = $("#opProject").value;
@@ -66,12 +88,34 @@ function bodyHtml(d) {
   return parts.join("");
 }
 
+function faultRow(f) {
+  return `<div class="op-fault t-m"><span class="link" data-open="${f.id}">#${f.id}</span> ${esc(f.short || f.title)}
+    <span class="muted t-s">${esc(f.status.replace("_", " "))}${f.assignee ? " · " + esc(f.assignee) : ""} · ${ago(f.created_at)}</span></div>`;
+}
+
+function proposalCard(pr) {
+  const key = `${pr.id}`;
+  return `<div class="op-prop-card">
+    <div class="op-head"><b>${esc(pr.name)}</b>${chip("c-human", pr.changes ? "change" : "new")}<span class="muted t-s">${esc(pr.scope_kind === "target" ? "target " + pr.scope : pr.scope)}</span></div>
+    <div class="t-s op-line">${esc(pr.why)}</div>
+    <div class="muted t-s op-line">${esc(pr.summary)}${pr.changes ? " · changes " + esc(pr.changes.join(", ")) : ""}${pr.runs_command ? " · runs a command outside the sandbox" : ""}${pr.repair ? " · repair: " + esc(pr.repair) : ""}</div>
+    <div class="muted t-s op-line">by ${esc(pr.proposed_by || "?")} ${ago(pr.proposed_at)}${pr.item_id ? ` · <span class="link" data-open="${pr.item_id}">#${pr.item_id}</span>` : ""}</div>
+    <div class="actions op-prop-act"><input id="oprej-${key}" class="op-why" placeholder="Why not? (for Reject)">
+      ${button("Reject", { data: { "op-check-reject": pr.name, scope: keyOf(pr), pid: key }, title: "Do not keep it" })}
+      ${button("Accept", { kind: "primary", data: { "op-check-accept": pr.name, scope: keyOf(pr) }, title: "Keep as a check" })}</div>
+  </div>`;
+}
+
 function projectHtml(p) {
+  const faults = p.faults && p.faults.length
+    ? `<h3 class="op-h op-h-warn">Open faults</h3><div class="op-list">${p.faults.map(faultRow).join("")}</div>` : "";
+  const props = p.proposals && p.proposals.length
+    ? `<h3 class="op-h">Proposed checks</h3><div class="op-list">${p.proposals.map(proposalCard).join("")}</div>` : "";
   const areas = p.areas.length ? p.areas.map(a => areaHtml(p, a)).join("")
     : `<div class="muted t-m">No areas yet.</div>`;
   const books = p.playbooks.length ? p.playbooks.map(b => bookRow(p, b)).join("") : `<div class="muted t-m">No playbooks yet.</div>`;
   return `<div class="panel op-project"><h2>${esc(p.name)}</h2>
-    ${areas}
+    ${faults}${props}${areas}
     <h3 class="op-h">Playbooks</h3><div class="op-list">${books}</div></div>`;
 }
 
@@ -83,6 +127,14 @@ function areaHtml(p, a) {
       ${button("Edit", { data: { "op-area-edit": a.name, project: p.name }, title: "Edit area" })}</div>
     ${a.description ? `<div class="muted t-s op-desc">${esc(a.description)}</div>` : ""}
     <div class="op-list">${rows}</div></div>`;
+}
+
+// The last runs of a check, oldest first: one mark per run in the color of its status.
+function strip(c) {
+  const runs = c.runs || [];
+  if (!runs.length) return `<span class="muted t-s">${c.form === "beat" ? "no beat yet" : "no run yet"}</span>`;
+  return `<span class="op-strip" role="img" aria-label="Last ${runs.length} runs">${runs.map(r =>
+    `<span class="op-run op-${esc(r.status || "running")}" title="${esc((r.ended_at ? ago(r.ended_at) : "running") + ": " + (r.summary || r.status || ""))}"></span>`).join("")}</span>`;
 }
 
 // When the trigger acts: its time, its routine and how often, or the address that the outside system posts to.
@@ -111,10 +163,11 @@ function triggerRow(t) {
     ? "paused · " + left(t.paused_until) : t.state)) : "";
   const prio = t.priority != null ? chip(t.priority === 0 ? "c-p0" : "c-p", "P" + t.priority, "Priority") : "";
   const secret = t.arrival === "push" ? button("New secret", { data: { "op-secret": t.name, scope: keyOf(t) }, title: "Show a new secret" }) : "";
+  const runs = t.condition === "state" && t.runs && t.runs.length ? `<span class="spacer"></span>${strip(t)}` : "";
   return `<div class="op-row clickrow" role="button" tabindex="0" data-op-trigger="${esc(t.name)}" data-scope="${esc(keyOf(t))}">
     <div class="op-main">
       <div class="op-head"><span class="title">${esc(t.name)}</span>${chip("c-p", COND[t.condition] || esc(t.condition), "Condition")}
-        ${chip("c-p", esc(t.arrival), "Arrival")}${st}${prio}</div>
+        ${chip("c-p", esc(t.arrival), "Arrival")}${st}${prio}${runs}</div>
       <div class="t-s op-line"><span class="muted">When</span> ${whenText(t)}</div>
       <div class="t-s op-line"><span class="muted">Playbook</span> ${esc(t.playbook || "default")}
         · <span class="muted">Last</span> ${lastText(t)}</div>
@@ -132,6 +185,26 @@ function bookRow(p, b) {
     </div>${OPEN_MARK}</div>`;
 }
 
+// One detection of the record (#5510): its kind, the check (and subject), how often and when, and its item.
+function detectionRow(r, showScope) {
+  const seen = `${esc(r.status)} · ${r.count}× · ${ago(r.last_seen)}${r.count > 1 ? " · first " + ago(r.first_seen) : ""}`;
+  const sc = showScope ? `<span class="muted t-s">${esc(r.scope_kind === "target" ? "target " + r.scope : r.scope)}</span>` : "";
+  return `<div class="op-det">
+    <div class="op-head">${chip(QUIET.has(r.kind) ? "c-p" : "c-waiting", esc(r.kind || "?"))}<b>${esc(r.check_name)}${r.subject ? ":" + esc(r.subject) : ""}</b>${sc}
+      <span class="muted t-s">${seen}</span><span class="spacer"></span>
+      ${r.item_id ? `<span class="link t-s" data-open="${r.item_id}">#${r.item_id}</span>` : `<span class="muted t-s">no item</span>`}</div>
+    <div class="muted t-s op-line">${esc(r.summary || "")}</div>
+  </div>`;
+}
+
+function drawRecord(R, showScope) {
+  const sel = $("#opRecKind"), was = sel.value;
+  sel.innerHTML = `<option value="">All kinds</option>` + (R.all_kinds || []).map(k =>
+    `<option value="${esc(k)}">${esc(k)}${R.kinds && R.kinds[k] ? ` (${R.kinds[k]})` : ""}</option>`).join("");
+  sel.value = was;
+  $("#opRecord").innerHTML = (R.rows || []).map(r => detectionRow(r, showScope)).join("") || empty("No detections in this time.");
+}
+
 // ---- the dialog (one for every form; its content changes)
 
 function ensureDialog() {
@@ -144,6 +217,7 @@ function ensureDialog() {
   dlg = makeDialog(el);
   box.addEventListener("click", onDialogClick);
   box.addEventListener("change", onDialogChange);
+  box.addEventListener("input", onDialogInput);
 }
 
 function show(title, body, foot) {
@@ -168,6 +242,7 @@ async function openTrigger(scope, name) {
     ["Secret", `${esc(t.push.secret_prefix || "")}… ` + button("New secret", { data: { "op-secret": t.name, scope: keyOf(t) }, title: "Show a new secret" })
       + (t.push.bad_secrets ? ` <span class="c-warn t-s">${plural(t.push.bad_secrets, "refused post")}</span>` : "")]] : [];
   const often = t.cron ? `cron ${t.cron}` : `every ${t.every}`;
+  const stateLabel = t.state === "paused" && t.paused_until ? `paused · ${left(t.paused_until)}` : t.state;
   const rows = [
     ["Condition", esc(O && O.conditions[t.condition] || t.condition)],
     ["Arrival", esc(O && O.arrivals[t.arrival] || t.arrival)],
@@ -177,7 +252,8 @@ async function openTrigger(scope, name) {
     ["Area", esc(t.area || "")],
     ["Priority", t.priority != null ? "P" + t.priority : `P${t.priority_used} <span class="muted">by its condition</span>`],
     ["Escalate after", t.escalate_after ? esc(t.escalate_after) : `<span class="muted">off</span>`],
-    t.condition === "state" ? ["State", esc(t.state)] : null,
+    t.condition === "state" ? ["State", esc(stateLabel)] : null,
+    t.condition === "state" ? ["Recent runs", strip(t)] : null,
     ["Playbook", `<span class="link" data-op-book="${esc(b.name || "")}" data-project="${esc(t.project || "")}">${esc(b.name || "")}</span>`],
     ["Knowledge", `<div class="op-text t-s">${esc(b.knowledge || "")}</div>`],
     ["Done means", `<div class="op-text t-s">${esc(b.done_means || "")}</div>`],
@@ -192,9 +268,13 @@ async function openTrigger(scope, name) {
       <td>${e.item_id ? `<span class="link" data-open="${e.item_id}">#${e.item_id}</span>${e.item ? ` <span class="muted">${esc(e.item.status.replace("_", " "))}</span>` : ""}` : `<span class="muted">none</span>`}</td></tr>`).join("")}</table>`
     : `<div class="muted t-m">No events yet.</div>`;
   const run = t.arrival === "poll" ? button("Run now", { data: { "op-run": t.name, scope: keyOf(t) }, title: "Run once now" }) : "";
+  const pause = t.condition === "state" ? (t.state === "paused"
+    ? button("Resume", { data: { "op-resume": t.name, scope: keyOf(t) }, title: "Resume from now" })
+    : select({ id: "opPauseUntil", class: "op-until", title: "Pause duration" }, ["30m", "1h", "2h", "4h", "1d"], "1h")
+      + button("Pause", { data: { "op-pause": t.name, scope: keyOf(t) }, title: "Pause for planned work" })) : "";
   show(`${esc(t.name)} <span class="muted t-s">${esc(t.scope)}</span>`,
     kv(rows) + `<h3 class="op-h">Events</h3>${evs}`,
-    run + button("Edit", { data: { "op-trigger-edit": t.name, scope: keyOf(t) } }) + button("Close", { data: { "op-close": 1 } }));
+    run + pause + button("Edit", { data: { "op-trigger-edit": t.name, scope: keyOf(t) } }) + button("Close", { data: { "op-close": 1 } }));
 }
 
 // A new secret for a push trigger: the old one stops at once, and the new one shows only now (it is kept hashed).
@@ -236,19 +316,41 @@ const PRIO = [["", "By its condition"], ...[0, 1, 2, 3, 4].map(n => [String(n), 
 
 function openTriggerForm(t) {
   form = { kind: "trigger", edit: t || null };
+  anyway = false;
   const pname = t ? t.project : formProject(), p = projectOf(pname);
   const cond = t ? t.condition : "event", arr = t ? t.arrival : "poll";
   const head = t ? "" : field("Project", projectSelect("opProj", pname)) + field("Name", input({ id: "opName", placeholder: "new-tickets" }));
   const kinds = t ? "" : two(field("When it acts", select({ id: "opCond" }, [["event", "an outside system reports an event"],
       ["time", "a time comes"], ["state", "a check changes state"]], cond)),
     field("How events arrive", select({ id: "opArr" }, [["poll", "MaximizePM runs a routine"], ["push", "the system posts to it"]], arr)));
+  const tryBtn = t ? "" : button("Try once", { cls: "hidden", data: { "op-try": 1 }, title: "Run it once" });
   show(t ? `Edit trigger · ${esc(t.name)}` : "Add trigger",
     `<div class="form">${head}${kinds}<div id="opCondFields"></div>
       ${two(field("Area", areaChoices(p, t ? t.area : undefined)), field("Playbook", bookChoices(p, t ? t.playbook : undefined)))}
       ${two(field("Priority", select({ id: "opPrio" }, PRIO, t && t.priority != null ? String(t.priority) : "")),
         field("Escalate after", input({ id: "opEsc", value: t ? t.escalate_after || "" : "", placeholder: "off, or 2h" })))}</div>`,
-    button("Cancel", { data: { "op-close": 1 } }) + button(t ? "Save" : "Add", { kind: "primary", data: { "op-save": 1 } }));
+    button("Cancel", { data: { "op-close": 1 } }) + tryBtn + button(t ? "Save" : "Add", { kind: "primary", data: { "op-save": 1 } }));
   condFields();
+}
+
+function resetTrial() {
+  anyway = false;
+  const tr = box && box.querySelector("#opTrial"); if (tr) tr.textContent = "";
+  const sb = box && box.querySelector("[data-op-save]"); if (sb && form && !form.edit) sb.textContent = "Add";
+}
+
+function drawCheckFields() {
+  const forms = (O && O.forms) || [], kind = val("opCheckForm");
+  const f = forms.find(x => x.form === kind) || forms[0];
+  if (!f) return;
+  const host = box.querySelector("#opCheckFields");
+  if (host) host.innerHTML = f.questions.map(q => field(esc(q.ask.replace(/\s*\(Enter:[^)]*\)/, "")),
+    input({ "data-op-field": q.field, value: q.default || "" }))).join("");
+  const nm = box.querySelector("#opName");
+  if (nm) nm.placeholder = f.form === "beat" ? "the job's name (needed)" : "from the address or command";
+  const ev = box.querySelector("#opEvery");
+  if (ev) ev.placeholder = f.form === "beat" ? "how often to look: 5m" : "5m";
+  resetTrial();
 }
 
 // The fields of the trigger form that its condition and arrival need.
@@ -257,18 +359,60 @@ function condFields() {
   const cond = t ? t.condition : val("opCond"), arrSel = box.querySelector("#opArr");
   if (arrSel) { arrSel.disabled = cond !== "event"; if (cond !== "event") arrSel.value = "poll"; }
   const arr = t ? t.arrival : val("opArr");
-  const save = box.querySelector("[data-op-save]");
-  if (save) save.disabled = cond === "state" && !t;
+  const tryBtn = box.querySelector("[data-op-try]");
+  if (tryBtn) tryBtn.classList.toggle("hidden", !(cond === "state" && !t));
+  resetTrial();
   const often = (x) => two(field("Cron", input({ id: "opCron", value: x ? x.cron || "" : "", placeholder: "0 9 * * mon" })),
     field("Or every", input({ id: "opEvery", value: x ? x.every || "" : "", placeholder: "5m" })));
   let h = "";
-  if (cond === "state") h = t ? `<p class="muted t-s op-form-note">A check: change its routine in Plan › Operations.</p>`
-    : `<p class="t-m op-form-note">A check is a state trigger. Add it in <a href="plan/ops">Plan › Operations</a> with Add a check; then set its area and playbook here.</p>`;
-  else if (cond === "time") h = field("Title of its event", input({ id: "opTitle", value: t ? t.title || "" : "", placeholder: "Weekly dependency update" })) + often(t);
-  else if (arr === "poll") h = field("Routine", input({ id: "opCmd", value: t ? t.routine || "" : "", placeholder: "a command that prints one JSON event a line" }))
-    + often(t) + field("Time limit", input({ id: "opTimeout", value: t ? t.timeout || "" : "", placeholder: "30s" }));
-  else if (!t) h = `<p class="muted t-s op-form-note">MaximizePM gives the trigger its address and a secret when you add it.</p>`;
+  if (cond === "state") {
+    if (t) h = `<p class="muted t-s op-form-note">A check: change its area, playbook, priority and escalation here.</p>`;
+    else {
+      const forms = (O && O.forms) || [];
+      h = field("What to watch", select({ id: "opCheckForm" }, forms.map(f => [f.form, f.label]), (forms[0] || {}).form || "url"))
+        + `<div id="opCheckFields"></div>`
+        + two(field("How often", input({ id: "opEvery", placeholder: "5m" })),
+          field("On a fault", select({ id: "opSeverity" }, [["item", "an item for an agent, and the manager hears"],
+            ["note", "a line on this page only"]], "item")))
+        + `<div id="opTrial" class="muted t-s" role="status"></div>`;
+    }
+  } else {
+    const nm = box.querySelector("#opName"); if (nm) nm.placeholder = "new-tickets";
+    if (cond === "time") h = field("Title of its event", input({ id: "opTitle", value: t ? t.title || "" : "", placeholder: "Weekly dependency update" })) + often(t);
+    else if (arr === "poll") h = field("Routine", input({ id: "opCmd", value: t ? t.routine || "" : "", placeholder: "a command that prints one JSON event a line" }))
+      + often(t) + field("Time limit", input({ id: "opTimeout", value: t ? t.timeout || "" : "", placeholder: "30s" }));
+    else if (!t) h = `<p class="muted t-s op-form-note">MaximizePM gives the trigger its address and a secret when you add it.</p>`;
+  }
   host.innerHTML = h;
+  if (cond === "state" && !t) drawCheckFields();
+}
+
+function stateFormArgs() {
+  const pname = val("opProj"), p = projectOf(pname), aname = val("opArea");
+  const a = p && p.areas.find(x => x.name === aname);
+  const scope = a && a.target ? `target:${a.target}` : `project:${pname}`;
+  const fields = {};
+  box.querySelectorAll("#opCheckFields [data-op-field]").forEach(i => { if (i.value.trim()) fields[i.dataset.opField] = i.value.trim(); });
+  const every = val("opEvery");
+  if (every) fields.every = every;
+  fields.severity = val("opSeverity") || "item";
+  return { scope, form: val("opCheckForm"), name: val("opName") || undefined, fields,
+    area: aname || undefined, playbook: val("opBook") || undefined, priority: val("opPrio"), escalate_after: val("opEsc") };
+}
+
+// One run of a state trigger in maxpm serve; it keeps nothing. Returns true when it passed (a beat has no run).
+async function trialState() {
+  const a = stateFormArgs();
+  if (a.form === "beat") return true;
+  const out = box.querySelector("#opTrial");
+  if (out) out.textContent = "Running it once …";
+  try {
+    const r = await act("ops_trial", { scope: a.scope, form: a.form, name: a.name, fields: a.fields });
+    const res = r.result || {};
+    const ok = res.status === "ok";
+    if (out) out.textContent = `${ok ? "Passed" : "Did not pass"}: ${res.status || "?"}${res.summary ? " · " + res.summary : ""}`;
+    return ok;
+  } catch (e) { if (out) out.textContent = e.message; return false; }
 }
 
 function openAreaForm(project, a) {
@@ -314,6 +458,18 @@ const BOOK_KEYS = ["knowledge", "done_means", "tools", "limits", "model", "effor
 
 async function save() {
   const f = form, name = val("opName");
+  if (f.kind === "trigger" && !f.edit && val("opCond") === "state") {
+    if (!anyway && !(await trialState())) {
+      anyway = true;
+      const sb = box.querySelector("[data-op-save]"); if (sb) sb.textContent = "Add anyway";
+      return;
+    }
+    let r;
+    try { r = await act("ops_add", stateFormArgs()); } catch (e) { return; }
+    dlg.close();
+    toast(`Check ${r.check.scope}/${r.check.name} added: maxpm serve runs it from now on`);
+    return renderOperations(true);
+  }
   let op, args, done;
   if (f.kind === "trigger") {
     const t = f.edit;
@@ -366,6 +522,7 @@ async function onDialogClick(e) {
   if (t.closest("[data-open]")) return dlg.close();  // the item opens in the drawer (app.js)
   const c = t.closest("[data-op-copy]");
   if (c) { await copyText(c.dataset.opCopy); return toast("Copied"); }
+  if (t.closest("[data-op-try]")) return trialState();
   if (t.closest("[data-op-save]")) return save();
   const b = t.closest("[data-op-book]");
   if (b) return openBook(b.dataset.project, b.dataset.opBook);
@@ -379,7 +536,17 @@ async function onDialogClick(e) {
   const run = t.closest("[data-op-run]");
   if (run) {
     try { await act("ops_trigger_run", { scope: run.dataset.scope, name: run.dataset.opRun }); } catch (err) { return; }
-    toast(`${run.dataset.opRun} runs now`); return;
+    toast(`${run.dataset.opRun} runs now`); setTimeout(() => renderOperations(true), 3000); return;
+  }
+  const pa = t.closest("[data-op-pause]");
+  if (pa) {
+    try { await act("ops_pause", { scope: pa.dataset.scope, name: pa.dataset.opPause, until: val("opPauseUntil") || "1h" }); } catch (err) { return; }
+    toast(`${pa.dataset.opPause} paused`); openTrigger(pa.dataset.scope, pa.dataset.opPause); return renderOperations(true);
+  }
+  const re = t.closest("[data-op-resume]");
+  if (re) {
+    try { await act("ops_pause", { scope: re.dataset.scope, name: re.dataset.opResume, resume: true }); } catch (err) { return; }
+    toast(`${re.dataset.opResume} runs again`); openTrigger(re.dataset.scope, re.dataset.opResume); return renderOperations(true);
   }
   const ed = t.closest("[data-op-trigger-edit]");
   if (ed) return openTriggerForm(findTrigger(ed.dataset.scope, ed.dataset.opTriggerEdit));
@@ -410,11 +577,18 @@ function prompt_note(ref) {
 function onDialogChange(e) {
   if (!form) return;
   if (e.target.id === "opCond" || e.target.id === "opArr") return condFields();
+  if (e.target.id === "opCheckForm") return drawCheckFields();
   if (e.target.id === "opProj" && form.kind === "trigger") {
     const p = projectOf(e.target.value);
     box.querySelector("#opArea").outerHTML = areaChoices(p);
     box.querySelector("#opBook").outerHTML = bookChoices(p);
+    resetTrial();
   }
+  if (e.target.id === "opArea" && form.kind === "trigger") resetTrial();
+}
+
+function onDialogInput(e) {
+  if (form && form.kind === "trigger" && !form.edit && e.target.closest("#opCheckFields, #opName, #opEvery")) resetTrial();
 }
 
 function findTrigger(scope, name) {
@@ -430,6 +604,16 @@ function openBook(project, name) {
 $("#tab-operations").addEventListener("click", (e) => {
   const t = e.target;
   if (!O || t.closest("[data-open]") || t.closest("a")) return;
+  const ca = t.closest("[data-op-check-accept]");
+  if (ca) return act("ops_accept", { scope: ca.dataset.scope, name: ca.dataset.opCheckAccept })
+    .then(() => { toast(`${ca.dataset.opCheckAccept} is a check now`); renderOperations(true); }).catch(() => {});
+  const cr = t.closest("[data-op-check-reject]");
+  if (cr) {
+    const why = document.getElementById("oprej-" + cr.dataset.pid), note = why ? why.value.trim() : "";
+    if (!note) return toast("Say why not, in the box beside Reject", true);
+    return act("ops_reject", { scope: cr.dataset.scope, name: cr.dataset.opCheckReject, note })
+      .then(() => { toast(`${cr.dataset.opCheckReject} rejected`); renderOperations(true); }).catch(() => {});
+  }
   const s = t.closest("[data-op-secret]");
   if (s) return askSecret(s.dataset.scope, s.dataset.opSecret);
   const ae = t.closest("[data-op-area-edit]");
@@ -446,3 +630,5 @@ $("#tab-operations").addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.matches(".op-row")) { e.preventDefault(); e.target.click(); }
 });
 $("#opProject").addEventListener("change", () => { store(PROJECT_KEY, $("#opProject").value); renderOperations(true); });
+$("#opRecKind").addEventListener("change", () => renderOperations(true));
+$("#opRecSince").addEventListener("change", () => renderOperations(true));

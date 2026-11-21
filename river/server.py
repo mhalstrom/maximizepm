@@ -1976,6 +1976,20 @@ def ops_name_for(a):
     return name
 
 
+def ops_add_op(conn, a, who):
+    """The op ops_add: add a state trigger (check), with its optional area, playbook, priority and escalate_after."""
+    r = core.ops_add(conn, a["scope"], ops_name_for(a), a["form"], a.get("fields") or {}, who,
+                     area=a.get("area") or None, playbook=a.get("playbook") or None)
+    prio = a.get("priority")
+    esc = (a.get("escalate_after") or "").strip() if a.get("escalate_after") is not None else ""
+    if prio not in (None, "") or esc:
+        from . import operations
+        operations.trigger_edit(conn, a["scope"], r["check"]["name"],
+                                priority=None if prio in (None, "") else int(prio),
+                                escalate_after=esc or None, actor=who)
+    return r
+
+
 def ops_run_op(conn, a, who):
     """The op ops_run (maxpm ops run): run a check now, also when it is not due or is paused."""
     c = core.ops_find(conn, a["scope"], a.get("name"))
@@ -7011,8 +7025,8 @@ OPS = {
     # maxpm ops setup (#5437): one run of a check that is not kept yet, here outside the sandbox; it writes nothing.
     "ops_trial": lambda c, a, who: core.ops_trial(c, a["scope"], a.get("name"), a["form"], a.get("fields") or {}, who),
     "ops_beat": lambda c, a, who: core.ops_beat(c, a["scope"], a.get("name"), who),
-    # The Operations view of Plan (#5438): Add a check, Pause and Resume, and Accept or Reject a proposed check.
-    "ops_add": lambda c, a, who: core.ops_add(c, a["scope"], ops_name_for(a), a["form"], a.get("fields") or {}, who),
+    # The Operations tab (#6672, #5438): Add a check, Pause and Resume, and Accept or Reject a proposed check.
+    "ops_add": ops_add_op,
     "ops_pause": lambda c, a, who: core.ops_pause(c, a["scope"], a["name"], until=a.get("until") or None,
                                                   resume=bool(a.get("resume")), actor=who),
     "ops_accept": lambda c, a, who: core.ops_accept(c, a["scope"], a["name"], who, a.get("note") or None),
