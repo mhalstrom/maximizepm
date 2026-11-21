@@ -40,8 +40,8 @@ function runnerRow(r, clis) {
 // A forge's own CI (#6152 GitHub Actions, #6172 GitLab CI, #6173 Pulumi Deployments): the agent runs there when a
 // stage fails; no slots, no Check.
 function forgeRow(f) {
-  const used = f.used_by.map(p => button(esc(p), { cls: "plain", data: { "dp-triggers": p }, title: "Open its triggers" })).join(" ")
-    || `<span class="muted">no rule yet: maxpm runner ${esc(f.name)} &lt;pipeline&gt;</span>`;
+  const used = f.used_by.map(p => button(esc(p), { cls: "plain", data: { "dp-triggers": p }, title: "Triggers" })).join(" ")
+    || `<span class="muted">Not linked</span>`;
   return `<tr><td><b>${esc(f.label)}</b></td><td class="t-s" data-label="What it is">${esc(f.what)}</td>
     <td class="t-s" data-label="Agents">Claude Code, Codex</td>
     <td class="t-s" data-label="Last seen">${f.last_seen ? `<span class="dot active"></span> ${esc(ago(f.last_seen))}` : "never"}</td>
@@ -53,13 +53,13 @@ function runRow(x) {
   const [cls, word] = STATE[x.state] || ["c-waiting", x.state];
   const live = ["queued", "running"].includes(x.state);
   return `<tr><td class="mono">#${x.id} ${chip(cls, word)} ${esc(x.runner)}</td>
-    <td data-label="Task">${button("#" + x.item, { cls: "plain", data: { "dp-card": x.item }, title: "Open the task" })}</td>
-    <td class="t-s" data-label="Started by">${x.pipeline ? `${esc(x.pipeline)} ${esc(x.rule || "")}` : "by hand"}</td>
+    <td data-label="Task">${button("#" + x.item, { cls: "plain", data: { "dp-card": x.item }, title: "Task" })}</td>
+    <td class="t-s" data-label="Started by">${x.pipeline ? `${esc(x.pipeline)} ${esc(x.rule || "")}` : "manual"}</td>
     <td class="t-s" data-label="Since" title="${esc(x.started_at || x.queued_at)}">${esc(ago(x.started_at || x.queued_at))}</td>
-    <td class="t-s" data-label="Cost">${x.cost != null ? "$" + Number(x.cost).toFixed(2) : "not known"}</td>
+    <td class="t-s" data-label="Cost">${x.cost != null ? "$" + Number(x.cost).toFixed(2) : "—"}</td>
     <td class="t-s rn-result"${x.result ? ` data-label="Result"` : ""}>${esc(x.result || "")}</td>
-    <td class="rn-acts">${x.started_at ? button("Watch", { data: { "rn-watch": x.id }, title: "What the agent printed" }) : ""}
-      ${live ? button("Stop", { kind: "warn", data: { "rn-stop": x.id }, title: "Stop this agent" }) : ""}</td></tr>`;
+    <td class="rn-acts">${x.started_at ? button("Watch", { data: { "rn-watch": x.id }, title: "Log" }) : ""}
+      ${live ? button("Stop", { kind: "warn", data: { "rn-stop": x.id }, title: "Stop" }) : ""}</td></tr>`;
 }
 
 // The Runners part of Deploy, from the data of api/deploy.
@@ -68,24 +68,19 @@ export function runnersHtml(data) {
   const forges = R.forges || [];
   const rows = R.runners.map(r => runnerRow(r, R.clis)).join("") + forges.map(forgeRow).join("");
   const thisRules = R.this.rules.map(x => `${esc(x.pipeline)} ${esc(x.rule)}`).join(", ");
-  const here = `<tr><td><b>This computer</b></td><td class="t-s" data-label="What it is">maxpm serve · a session in a terminal, with the agent CLI you signed in</td>
-    <td class="t-s" data-label="Agents">every agent CLI</td><td class="t-s" data-label="Last seen"><span class="dot active"></span> now</td>
+  const here = `<tr><td><b>This computer</b></td><td class="t-s" data-label="What it is">Local terminal session</td>
+    <td class="t-s" data-label="Agents">All CLIs</td><td class="t-s" data-label="Last seen"><span class="dot active"></span> now</td>
     <td class="t-s" data-label="Load">max_sessions</td>
-    <td class="t-s" data-label="Used by">${thisRules || `<span class="muted">rules that name no runner</span>`}</td><td></td></tr>`;
+    <td class="t-s" data-label="Used by">${thisRules || `<span class="muted">Default</span>`}</td><td></td></tr>`;
   const runs = R.runners.concat(forges).flatMap(r => r.runs).sort((a, b) => b.id - a.id);
-  return `<div class="pl-bar"><b>Runners</b><span class="muted t-s">places where an agent runs with no person · shared by the pipelines</span>
-      <span class="spacer"></span>${button("Add a runner", { kind: "primary", data: { "rn-add": 1 }, title: "Add a server" })}</div>
+  return `<div class="pl-bar"><b>Runners</b>
+      <span class="spacer"></span>${button("Add runner", { kind: "primary", data: { "rn-add": 1 }, title: "Add runner" })}</div>
     <div class="pl-table"><table class="pl-blocks"><tr><th>Runner</th><th>What it is</th><th>Agents</th><th>Last seen</th><th>Load</th><th>Used by</th><th></th></tr>
       ${rows}${here}</table></div>
-    ${R.runners.length || forges.length ? "" : `<div class="muted t-m rn-none">No runner yet. Add a server that you reach with ssh: MaximizePM installs itself there and runs the agents of the trigger rules that name it.</div>`}
-    <h3 class="tg-h">Agents on runners</h3>
+    ${R.runners.length || forges.length ? "" : `<div class="muted t-m rn-none">No runners.</div>`}
+    <h3 class="tg-h">Recent runs</h3>
     ${runs.length ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Run</th><th>Task</th><th>Started by</th><th>Since</th><th>Cost</th><th>Result</th><th></th></tr>
-      ${runs.map(runRow).join("")}</table></div>` : `<div class="muted t-m">No agent ran on a runner yet.</div>`}
-    <div class="muted t-s">A pipeline ticks the runners it may use on its Triggers tab; a rule there names one. The agent's model key: a credential set granted to the runner, else the runner's own:
-      ${Object.values(R.clis).map(c => `${esc(c.label)}: ${esc(c.key)}`).join("; ")}.</div>
-    <pre class="rn-cmds mono">maxpm runner add ci-1 --ssh ci@ci-1        # checks the server, installs maxpm there
-maxpm runner allow ci-1 &lt;pipeline&gt;          # the pipeline's trigger rules may run their agents there
-maxpm secret grant model-keys --runner ci-1  # every run there gets the set (never a person's sign-in)</pre>`;
+      ${runs.map(runRow).join("")}</table></div>` : `<div class="muted t-m">No runs yet.</div>`}`;
 }
 
 // ---- the dialogs: Add a runner, Watch a run
@@ -102,12 +97,12 @@ function dialog() {
 
 function openAdd(refresh) {
   dialog();
-  box.innerHTML = `<div class="dlg-head"><h2>Add a runner</h2>${iconButton("✕", "Close", { data: { "rn-close": 1 } })}</div>
+  box.innerHTML = `<div class="dlg-head"><h2>Add runner</h2>${iconButton("✕", "Close", { data: { "rn-close": 1 } })}</div>
     <div class="form">
       ${field("Name", input({ id: "rnName", placeholder: "ci-1" }))}
-      ${field("SSH target", input({ id: "rnSsh", placeholder: "ci@ci-1" }), ` <span class="muted t-s">Tailscale SSH or your key; no password prompt</span>`)}
+      ${field("SSH target", input({ id: "rnSsh", placeholder: "ci@ci-1" }), ` <span class="muted t-s">Tailscale SSH or key</span>`)}
     </div>
-    <div class="muted t-s">MaximizePM checks the server, installs this computer's maxpm there, and finds its agent CLIs. This takes up to a few minutes.</div>
+    <div class="muted t-s">Checks the server and finds its agent CLIs.</div>
     ${actions(button("Cancel", { data: { "rn-close": 1 } }) + button("Add", { kind: "primary", data: { "rn-save": 1 } }))}`;
   box.onclick = async (e) => {
     if (e.target.closest("[data-rn-close]")) return dlg.close();
@@ -166,7 +161,7 @@ export function runnerClick(t, refresh) {
 // The ticks on a pipeline's Triggers tab: which runners its rules may use.
 export function ticksHtml(d) {
   const all = d.all_runners || [];
-  if (!all.length) return `<div class="muted t-m">No runner yet: Deploy › Runners adds one. Until then the agents run on this computer.</div>`;
+  if (!all.length) return `<div class="muted t-m">No runners.</div>`;
   return `<div class="pl-table"><table><tr><th>Uses</th><th>Runner</th><th>What it is</th></tr>
     ${all.map(r => `<tr><td>${button(r.ticked ? "✓ Uses" : "Use", { pressed: r.ticked, data: { "rn-tick": r.name, on: r.ticked ? "" : "1" },
       title: r.ticked ? "Stop using it" : "Let its rules use it" })}</td><td><b>${esc(r.name)}</b></td>

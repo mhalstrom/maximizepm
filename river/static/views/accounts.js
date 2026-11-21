@@ -50,7 +50,7 @@ function row(a) {
     <td class="${soon ? "c-warn" : ""}" data-label="Runs out">${esc(runsOut(a)) || `<span class="muted">-</span>`}</td>
     <td class="t-s" data-label="Reaches">${repos.length ? repos.map(([r, ok]) => ok ? esc(r) : `<span class="c-warn">${esc(r)} (not reached)</span>`).join("<br>")
       : `<span class="muted">-</span>`}${a.scopes ? `<div class="muted">${esc(a.scopes)}</div>` : ""}</td>
-    <td data-label="Used by">${a.used_by.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open the pipeline" })).join(" ")}</td>
+    <td data-label="Used by">${a.used_by.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open" })).join(" ")}</td>
     <td>${btn}</td></tr>`;
 }
 
@@ -59,23 +59,21 @@ export function accountsHtml(data) {
   const accts = data.accounts || [];
   const here = data.pipelines.filter(p => !p.default && p.source.state === "local").map(p => p.name);
   const plugins = data.pipelines.filter(p => !p.default && p.source.plugin).map(p => p.name);
-  const add = button("Add a token", { kind: "primary", data: { "ac-add": "github" }, title: "Save a token" });
-  const table = accts.length ? `<div class="pl-card"><div class="pl-bar"><h3>Accounts and tokens</h3>${add}</div>
-    <div class="muted t-s">One token for each account on a Git host; many pipelines can use one token. MaximizePM asks the Git host about each token once an hour.</div>
+  const add = button("Add token", { kind: "primary", data: { "ac-add": "github" }, title: "Add token" });
+  const table = accts.length ? `<div class="pl-card"><div class="pl-bar"><h3>Accounts</h3>${add}</div>
     <div class="pl-table"><table class="pl-blocks">
-      <tr><th>Account</th><th>Token</th><th>State</th><th>Runs out</th><th>Reaches</th><th>Used by</th><th></th></tr>
-      ${accts.map(row).join("")}</table></div>
-    <div class="muted t-s">A token is a secret of MaximizePM. Nobody sees its value, not here and not in a terminal.</div></div>`
-    : `<div class="pl-card"><div class="pl-bar"><h3>Accounts and tokens</h3>${add}</div>
-      <div class="muted t-s">No pipeline names a Git host token yet. Add one here, then name it: maxpm pipeline host &lt;pipeline&gt; github --repo &lt;owner/name&gt; --secret &lt;name&gt;</div></div>`;
-  const local = here.length ? `<div class="pl-card"><h3>This computer</h3><div class="t-m muted">maxpm serve runs these stages here: no token.</div>
-    <div class="t-m">${here.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open the pipeline" })).join(" ")}</div></div>` : "";
-  const plug = plugins.length ? `<div class="pl-card"><h3>Plugins</h3><div class="t-m muted">A plugin reads its own system with the secrets its pipeline maps to it.</div>
-    <div class="t-m">${plugins.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open the pipeline" })).join(" ")}</div></div>` : "";
+      <tr><th>Account</th><th>Token</th><th>State</th><th>Expires</th><th>Repos</th><th>Used by</th><th></th></tr>
+      ${accts.map(row).join("")}</table></div></div>`
+    : `<div class="pl-card"><div class="pl-bar"><h3>Accounts</h3>${add}</div>
+      <div class="muted t-s">No tokens saved.</div></div>`;
+  const local = here.length ? `<div class="pl-card"><h3>This computer</h3>
+    <div class="t-m">${here.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open" })).join(" ")}</div></div>` : "";
+  const plug = plugins.length ? `<div class="pl-card"><h3>Plugins</h3>
+    <div class="t-m">${plugins.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open" })).join(" ")}</div></div>` : "";
   const targets = data.pipelines.filter(p => p.default).map(p => p.name);
-  const tgt = targets.length ? `<div class="pl-card"><h3>Deploy targets</h3><div class="t-m muted">MaximizePM's own releases: no token.</div>
-    <div class="t-m">${targets.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open the pipeline" })).join(" ")}</div></div>` : "";
-  return table + local + plug + tgt || empty("No pipeline yet.");
+  const tgt = targets.length ? `<div class="pl-card"><h3>Deploy targets</h3>
+    <div class="t-m">${targets.map(n => button(esc(n), { cls: "plain", data: { "dp-open": n }, title: "Open" })).join(" ")}</div></div>` : "";
+  return table + local + plug + tgt || empty("No releases yet.");
 }
 
 // ---- Add a token (#6148)
@@ -83,7 +81,7 @@ export function accountsHtml(data) {
 let dlg = null, box = null;
 
 function formHtml(forge, name, url) {
-  return `<div class="dlg-head"><h2>Add a token</h2>${iconButton("✕", "Close", { data: { "ac-close": 1 } })}</div>
+  return `<div class="dlg-head"><h2>Add token</h2>${iconButton("✕", "Close", { data: { "ac-close": 1 } })}</div>
     <div class="form">
       ${field("Git host", select({ id: "acForge" }, FORGES, forge))}
       ${field("Server", input({ id: "acUrl", value: url || "", placeholder: "https://<host>, for a server of your own" }))}
@@ -94,8 +92,7 @@ function formHtml(forge, name, url) {
     ${actions(button("Cancel", { data: { "ac-close": 1 } }) + button("Check and save", { kind: "primary", data: { "ac-save": 1 }, title: "Check, then save" }))}
     <div class="t-m" id="acResult"></div>
     <div class="ac-or muted t-s">or</div>
-    <div>${button("Make the token for me", { data: { "ac-make": 1 }, title: "A session makes it" })}
-      <div class="muted t-s">A session opens the Git host's new-token page in the project's browser, on the Sessions tab. You sign in there; the session fills in the name, the repositories and the permissions, and you press Generate. It saves the token without anyone seeing it.</div></div>`;
+    <div>${button("Create in browser", { data: { "ac-make": 1 }, title: "Create in browser" })}</div>`;
 }
 
 const val = (id) => (box.querySelector(id).value || "").trim();
@@ -130,8 +127,8 @@ async function onClick(e) {
     box.querySelector("#acName").value = r.secret;
     const end = r.expires_at ? `runs out ${r.expires_at.slice(0, 10)}` : "no end date";
     box.querySelector("#acResult").innerHTML = `<span class="c-ready">●</span> ${esc(r.label)} accepts it: ${esc(r.kind || "account")}
-      <b>${esc(r.owner || "?")}</b>, ${esc(end)}${r.scopes ? `, scopes ${esc(r.scopes)}` : ""}. ${r.replaced ? "It replaced" : "Saved as"}
-      <span class="mono">${esc(r.secret)}</span>${r.used_by.length ? `, used by ${r.used_by.map(esc).join(", ")}` : ". Name it in a pipeline: maxpm pipeline host &lt;pipeline&gt; " + esc(r.forge) + " --secret " + esc(r.secret)}.`;
+      <b>${esc(r.owner || "?")}</b>, ${esc(end)}${r.scopes ? `, scopes ${esc(r.scopes)}` : ""}. ${r.replaced ? "Replaced" : "Saved as"}
+      <span class="mono">${esc(r.secret)}</span>${r.used_by.length ? `, used by ${r.used_by.map(esc).join(", ")}` : ""}.`;
     return;
   }
   if (e.target.closest("[data-ac-make]")) {

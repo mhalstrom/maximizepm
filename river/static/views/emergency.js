@@ -13,11 +13,11 @@ import { field, input, select, textarea, renderKeepingEdits } from "../component
 
 // [key, name, what it does, tooltip (1-4 words, p146)]
 const ACTS = [
-  ["stop", "Stop this pipeline", "Hold every stage. Nothing new starts, and a running stage stops after its present step.", "Stop the pipeline"],
-  ["agents", "Stop its agents", "Ask each agent session that works on it now to stop. Its task goes back to the queue with a note.", "Stop its agents"],
-  ["moveback", "Move back to the last good version", "Pick a stage: it runs the last version that passed there before, and the transition into it is blocked after it.", "Move a stage back"],
-  ["override", "Send a version straight to a stage", "Override: a hotfix, or a version that passed elsewhere, goes to a later stage now, past the stages and transitions between.", "Override"],
-  ["revoke", "Revoke its keys", "Take a token or a credential set away from this pipeline, for one that leaked.", "Revoke a key"],
+  ["stop", "Stop", "Hold all stages; running steps finish.", "Stop"],
+  ["agents", "Stop agents", "Ask running agents to stop and release their tasks.", "Stop agents"],
+  ["moveback", "Roll back", "Re-run the last passing version and block newer ones.", "Roll back"],
+  ["override", "Skip to stage", "Send a version directly to a later stage.", "Skip to stage"],
+  ["revoke", "Revoke key", "Remove a token or credential set from this pipeline.", "Revoke key"],
 ];
 let E = null, sig = "", pick = "stop", ovStage = null, ovRev = null;
 
@@ -46,11 +46,10 @@ function operatorsHtml(o) {
   const names = o.operators.map(x => `<span class="em-op">${chip(x.may_act ? "" : "c-waiting", `${x.kind === "agent" ? "🤖" : "👤"} ${esc(x.name)}`,
     x.may_act ? "May act" : "Agents may not act")}${iconButton("✕", `Remove ${x.name}`, { data: { "em-remove": x.name } })}</span>`).join("");
   return `<div class="pl-card"><h3>Operators</h3>
-    <div class="pl-bar">${names || `<span class="muted t-m">None named: a person or the manager may press these.</span>`}</div>
-    <div class="pl-bar">${input({ id: "emAddOp", placeholder: "a person or a session", "aria-label": "Name of an operator" })}
-      ${button("Add an operator", { data: { "em-add": 1 }, title: "Add an operator" })}
-      ${button(o.agents ? "Agents may be operators" : "Agents may not be operators", { pressed: o.agents, data: { "em-agents": 1 }, title: "Agents as operators" })}</div>
-    <div class="muted t-s">Only a person changes this list and the setting. The audit log names the operator of each action.</div></div>`;
+    <div class="pl-bar">${names || `<span class="muted t-m">None set.</span>`}</div>
+    <div class="pl-bar">${input({ id: "emAddOp", placeholder: "person or session", "aria-label": "Name of an operator" })}
+      ${button("Add operator", { data: { "em-add": 1 }, title: "Add operator" })}
+      ${button(o.agents ? "Agents allowed" : "Agents blocked", { pressed: o.agents, data: { "em-agents": 1 }, title: "Agents as operators" })}</div></div>`;
 }
 
 function actsOn(d) {
@@ -68,7 +67,7 @@ function actsOn(d) {
   if (pick === "moveback") return d.moveback.filter(m => m.good).map(m => `${m.stage}: ${short(m.now) || "none"} → ${short(m.good)}`
     + (m.good_at ? ` (passed there ${ago(m.good_at)})` : "")).concat(["The transition into that stage is blocked after it, until a person unblocks it"]);
   return d.keys.length ? d.keys.map(k => `${k.key}: ${k.what}` + (k.others.length ? ` ⚠ ${k.others.join(", ")} use${k.others.length === 1 ? "s" : ""} it too and keep${k.others.length === 1 ? "s" : ""} it` : ""))
-    .concat(["The secret itself stays: a person replaces it (maxpm secret put <name>) or deletes it"]) : ["This pipeline names no key"];
+    : ["No keys linked"];
 }
 const short = (rev) => rev && /^[0-9a-f]{12,}$/.test(rev) ? rev.slice(0, 7) : rev || "";
 
@@ -93,30 +92,27 @@ function actionHtml(d) {
     : pick === "revoke" && d.keys.length ? field("Token or key", select({ id: "emKey" }, d.keys.map(k => [k.key, k.key + (k.others.length ? " ⚠ shared" : "")]))) : "";
   return `<div class="pl-card dp-em-card"><h3>${esc(d.pipeline)}: ${esc(title)}</h3>
     <div class="t-s muted">It acts on:</div><ul class="t-m em-list">${actsOn(d).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
-    ${can ? `<div class="form">${extra}${field("Why? (required)", textarea({ id: "emWhy", rows: 2, placeholder: "what happened" }, ""))}</div>
+    ${can ? `<div class="form">${extra}${field("Reason", textarea({ id: "emWhy", rows: 2, placeholder: "what happened" }, ""))}</div>
       <div class="pl-bar">${button(esc(goWord(d)), { kind: "warn", data: { "em-go": pick }, title: tip })}</div>`
-      : `<div class="muted t-m">${pick === "stop" ? "The pipeline is stopped: resume it from the banner." : "Nothing to act on now."}</div>`}</div>`;
+      : `<div class="muted t-m">${pick === "stop" ? "Already stopped." : "Nothing to act on."}</div>`}</div>`;
 }
 function goWord(d) {
   const oc = overrideChoice(d);
-  return { stop: `Stop ${d.pipeline} now`, agents: "Stop these agents now", moveback: "Move back now", revoke: "Revoke now",
+  return { stop: `Stop ${d.pipeline}`, agents: "Stop agents", moveback: "Roll back", revoke: "Revoke key",
     override: oc ? `Send ${short(oc.rev)} to ${oc.stage.name} now` : "Send now" }[pick];
 }
 
 function viewHtml(d) {
   const st = d.stopped;
   const banner = st ? `<div class="pl-banner">⛔ ${esc(d.pipeline)} is ${st.stop_runs ? "stopped" : "held"} by ${esc(st.by || "a person")}${st.at ? " " + esc(ago(st.at)) : ""}: ${esc(st.reason)}.
-    ${st.stop_runs ? "Nothing new starts; a running stage stops after its present step." : "Nothing new starts."}
-    ${button(`Resume ${esc(d.pipeline)}`, { kind: "primary", data: { "em-resume": 1 }, title: "Stages start again" })}</div>` : "";
+    ${button("Resume", { kind: "primary", data: { "em-resume": 1 }, title: "Resume" })}</div>` : "";
   // A followed pipeline (#6167): its own system runs the flow, so only the actions on our side apply.
   const acts = d.followed ? ACTS.filter(([k]) => k === "agents" || k === "revoke") : ACTS;
   if (d.followed && !acts.some(([k]) => k === pick)) pick = "agents";
   const picks = acts.map(([k, t, text, tip]) => button(`<b>${esc(t)}</b><span class="t-s muted">${esc(text)}</span>`,
     { kind: "card", cls: "pl-card em-pick", pressed: pick === k, data: { "em-pick": k }, title: tip })).join("");
-  const note = d.followed ? `<div class="pl-banner">${esc(d.pipeline)} is followed: ${esc(d.followed)} runs its flow. Stop, Move back and Send a version act there, not here; Stop its agents and Revoke its keys act on our side.</div>`
-    : d.target ? `<div class="muted t-s">${esc(d.pipeline)} is a deploy target. Stop holds its release items. Move back and Send a version add a deploy item pinned at that version: it still waits for the person's yes and goes out through the deploy hook.</div>` : "";  // #6176
-  return `${banner}${note}${operatorsHtml(d.operators)}<div class="em-picks">${picks}</div>${actionHtml(d)}
-    <div class="muted t-s">The emergency actions take ${esc(d.operators.rule)}.</div>`;
+  const note = d.followed ? `<div class="pl-banner">Read only: ${esc(d.followed)} runs this pipeline.</div>` : "";
+  return `${banner}${note}${operatorsHtml(d.operators)}<div class="em-picks">${picks}</div>${actionHtml(d)}`;
 }
 
 async function emAct(op, args, done) {

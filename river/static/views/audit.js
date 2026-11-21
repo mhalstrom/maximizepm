@@ -47,8 +47,7 @@ export async function drawAudit(name, box, force) {
       <select class="au-since" aria-label="Since">${options(SINCE, "30d")}</select>
       <input type="search" class="dp-q au-q" placeholder="Search: a version, a reason" aria-label="Search the log">
       <span class="muted t-s dp-an"></span><span class="au-grow"></span>
-      ${button("Export as a file", { data: { "au-export": "1" }, title: "Save as CSV" })}</div>
-      <div class="muted t-s au-note">Every change to ${name ? "this pipeline" : "a pipeline"} and its flow. No line can be changed or deleted; Correct adds a line.</div>
+      ${button("Export CSV", { data: { "au-export": "1" }, title: "Export CSV" })}</div>
       <div class="dp-at"></div></div>`;
     box._sig = null;
   }
@@ -79,8 +78,7 @@ function drawLines(box, A, name) {
   const filtered = query(box).replace(/(^|&)pipeline=[^&]*/, "") !== "";
   box.querySelector(".dp-an").textContent = L.length ? `${L.length}${A.more ? "+" : ""} line${L.length === 1 ? "" : "s"}` : "";
   if (!L.length) {
-    box.querySelector(".dp-at").innerHTML = empty(filtered ? "No line fits these filters."
-      : "Nothing changed yet: each change of a pipeline, each action on it, each stage's end and each deploy goes here with who did it.");
+    box.querySelector(".dp-at").innerHTML = empty(filtered ? "No matching entries." : "No audit entries.");
     return;
   }
   // #6183: a column that no line of the list fills (On, Version, Why, Result) is left out: four empty columns took the
@@ -93,12 +91,12 @@ function drawLines(box, A, name) {
       <td><span aria-hidden="true">${KIND_MARK[l.kind] || ""}</span> ${esc(l.actor || "")}<div class="muted t-s">${esc(KIND_WORD[l.kind] || l.kind || "")}</div></td>
       <td><b>${esc(l.action || "")}</b><div class="t-s">${esc(l.change)}</div>
         ${l.corrected_by ? `<div class="au-corr t-s">corrected by line ${l.corrected_by.map(esc).join(", ")}</div>` : ""}</td>
-      ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline.split(", ")[0] }, title: "Open the pipeline" })}</td>`}
+      ${one ? "" : `<td>${button(esc(l.pipeline), { cls: "plain", data: { "dp-open": l.pipeline.split(", ")[0] }, title: "Open" })}</td>`}
       ${has.place ? `<td class="t-s">${esc(l.place || "")}</td>` : ""}${has.rev ? `<td class="mono" title="${esc(l.rev || "")}">${esc(short(l.rev))}</td>` : ""}
       ${has.why ? `<td class="t-s">${esc(l.reason || "")}${l.until ? `<div class="muted">until <span title="${esc(l.until)}">${esc(new Date(l.until).toLocaleString([], { hourCycle: "h23" }))}</span></div>` : ""}</td>` : ""}
       ${has.result ? `<td class="t-s">${esc(l.result || "")}</td>` : ""}
       <td>${typeof l.id === "number" ? button("Correct", { cls: "plain", data: { "au-correct": l.id }, title: "Add a correction" }) : ""}</td>
-    </tr>`).join("")}</table></div>${A.more ? `<div class="muted t-s">The newest ${L.length} lines. Narrow the time or search to find older ones; Export saves up to ${EXPORT_MAX}.</div>` : ""}`;
+    </tr>`).join("")}</table></div>${A.more ? `<div class="muted t-s">Showing ${L.length} newest.</div>` : ""}`;
 }
 
 // The lines that the filters find, as a CSV file (up to EXPORT_MAX).

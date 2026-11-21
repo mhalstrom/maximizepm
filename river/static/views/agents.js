@@ -51,8 +51,8 @@ function agentCard(a) {
       <div class="ag-acts">${button("Yes", { kind: "primary", data: { "ag-answer": q.id, "ag-word": "yes" }, title: "Answer yes" })}
         ${button("No", { kind: "warn", data: { "ag-answer": q.id, "ag-word": "no" }, title: "Answer no" })}</div></div>` : ""}
     <div class="ag-acts">${gone ? "" : button("Watch", { data: { "ag-watch": a.name }, title: "Open its session" })}
-      ${button("Open the task", { cls: "plain", data: { "ag-item": a.item }, title: "Open its task" })}
-      ${done || gone ? "" : button("Stop", { kind: "warn", data: { "ag-stop": a.name }, title: "Ask it to stop" })}</div></div>`;
+      ${button("Task", { cls: "plain", data: { "ag-item": a.item }, title: "Task" })}
+      ${done || gone ? "" : button("Stop", { kind: "warn", data: { "ag-stop": a.name }, title: "Stop" })}</div></div>`;
 }
 
 function arrowChip(s) {
@@ -62,13 +62,13 @@ function arrowChip(s) {
 }
 
 function laneHtml(p) {
-  return `<div class="ag-lane"><div class="ag-lhead">${button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open the pipeline" })}
-      <span class="muted t-s">${esc(p.default ? "deploy target" : p.source.label)}</span></div>
+  return `<div class="ag-lane"><div class="ag-lhead">${button(esc(p.name), { cls: "plain", data: { "dp-open": p.name }, title: "Open" })}
+      ${p.default ? "" : `<span class="muted t-s">${esc(p.source.label)}</span>`}</div>
     <div class="ag-row">${p.stages.map((s, i) => {
       const w = s.work || NO_WORK;
       return (i ? arrowChip(s) : "") + `<div class="ag-col">
         <div class="ag-stage"><b class="t-m">${esc(s.name)}</b>
-          <span class="pl-st ${esc(s.state)}">● ${esc(s.state === "none" ? "no run yet" : s.state)}${s.version ? " · " + esc(short(s.version)) : ""}</span></div>
+          <span class="pl-st ${esc(s.state)}">● ${esc(s.state === "none" ? "no run" : s.state)}${s.version ? " · " + esc(short(s.version)) : ""}</span></div>
         ${w.faults.map(faultCard).join("")}${w.agents.map(agentCard).join("")}</div>`;
     }).join("")}</div></div>`;
 }
@@ -81,12 +81,11 @@ export function agentsHtml(data) {
   const now = agents.filter(a => a.st !== "ok"), asks = agents.filter(a => a.question);
   const idle = pipes.filter(p => !hasWork(p)).map(p => p.name);
   if (!busy.length) {
-    return empty("No agent works on a release now. When a stage fails, its fault and the session that fixes it show here, under that stage; so do the sessions on a release's review and deploy.");
+    return empty("No agents on releases.");
   }
-  return `<div class="ag-top"><b>Agents at work on releases</b><span class="muted t-s">${now.length} now${asks.length ? ` · ${asks.length} wait${asks.length === 1 ? "s" : ""} for a yes` : ""}</span></div>
+  return `<div class="ag-top"><b>Release agents</b><span class="muted t-s">${now.length} active${asks.length ? ` · ${asks.length} waiting` : ""}</span></div>
     ${busy.map(laneHtml).join("")}
-    ${idle.length ? `<div class="muted t-s">No work under the stages of ${idle.map(esc).join(", ")} now.</div>` : ""}
-    <div class="muted t-s">Each pipeline flows left to right. A fault and the agents that work on it stand under the stage where they work; a done one stays a day, with its proof and its cost.</div>`;
+    ${idle.length ? `<div class="muted t-s">Idle: ${idle.map(esc).join(", ")}</div>` : ""}`;
 }
 
 $("#tab-deploy").addEventListener("click", (e) => {

@@ -15,7 +15,7 @@ export function definitionHead(p) {
   const d = p && p.definition;
   if (!d) return "";
   return `<span class="muted t-s dv-head" title="${esc(d.why || "")}">definition v${d.n} · ${esc(d.actor || "maxpm")}, ${esc(ago(d.at))}</span>`
-    + button("Versions", { cls: "plain", data: { "dv-open": p.name }, title: "Definition versions" });
+    + button("Versions", { cls: "plain", data: { "dv-open": p.name }, title: "Config history" });
 }
 
 export async function openVersions(pipeline, done) {
@@ -46,14 +46,13 @@ async function draw() {
     } catch (e) { diff = `<div class="muted t-s">${esc(e.message)}</div>`; }
   }
   const newest = d.versions.length ? d.versions[0].n : 0;
-  box.innerHTML = `<div class="dlg-head"><h2>Definition versions · ${esc(d.pipeline)}</h2>${iconButton("✕", "Close", { data: { "dv-close": 1 } })}</div>
+  box.innerHTML = `<div class="dlg-head"><h2>Config history · ${esc(d.pipeline)}</h2>${iconButton("✕", "Close", { data: { "dv-close": 1 } })}</div>
     <div class="pl-table"><table><tr><th>Version</th><th>When</th><th>Who</th><th>Why</th></tr>
     ${d.versions.map(v => `<tr${v.n === newest ? ' class="live"' : ""}><td class="mono tg-nw">v${v.n}${v.n === newest ? ` <span class="muted t-s">now</span>` : ""}</td>
       <td class="t-s tg-nw" title="${esc(v.at)}">${esc(ago(v.at))}</td><td class="t-s">${esc(v.actor || "maxpm")}</td>
       <td class="t-s dv-why">${esc(v.why || "")}<div class="pl-bar">${v.n > 1 ? button(open === v.n ? "Hide" : "Changes", { data: { "dv-diff": v.n }, title: `What v${v.n} changed` }) : ""}
         ${v.n !== newest ? button("Go back…", { kind: "warn", data: { "dv-back": v.n }, title: `Back to v${v.n}` }) : ""}</div>
-        ${open === v.n ? diff : ""}</td></tr>`).join("")}</table></div>
-    <div class="muted t-s">Each change of the stages, commands, branches, transitions, trigger rules, runners or keys is a version. Go back makes one more version, the same as the one you pick; the source and the freezes stay as they are.</div>`;
+        ${open === v.n ? diff : ""}</td></tr>`).join("")}</table></div>`;
 }
 const show = (v) => v == null ? "none" : typeof v === "string" ? v : JSON.stringify(v);
 

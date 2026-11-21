@@ -214,21 +214,18 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('[data-dp-part="runners"]'), "Deploy and its parts");
   q('[data-dp-part="runners"]').click();
-  await until(() => q("#dpPart .rn-cmds") && q("#dpPart [data-rn-stop]"), "Deploy > Runners with its runs");
+  await until(() => q("#dpPart [data-rn-stop]"), "Deploy > Runners with its runs");
   await new Promise(r => setTimeout(r, 300));
-  const cmds = q("#dpPart .rn-cmds");
-  const over = [...q("#dpPart").querySelectorAll("*")].filter(e => !cmds.contains(e) || e === cmds)
+  const over = [...q("#dpPart").querySelectorAll("*")]
     .filter(e => e.getBoundingClientRect().width && e.getBoundingClientRect().right > innerWidth + 0.5)
     .map(e => e.tagName + "." + e.className + " " + Math.round(e.getBoundingClientRect().right));
   post({ w: innerWidth, over: over.slice(0, 8), page: document.documentElement.scrollWidth <= innerWidth,
-    add: q('#dpPart [data-rn-add]').getBoundingClientRect().right <= innerWidth,
-    cmdsScroll: cmds.scrollWidth > cmds.clientWidth });
+    add: q('#dpPart [data-rn-add]').getBoundingClientRect().right <= innerWidth });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         r = self.drive(driver, "/", size="390,844")
         self.assertEqual(r["w"], 390, r)
         self.assertEqual(r["over"], [], r)
         self.assertTrue(r["page"] and r["add"], r)
-        self.assertTrue(r["cmdsScroll"], r)  # the long command lines scroll in their box, not the page
 
     def test_the_arrows_of_a_pipeline_show_their_transitions_and_open_their_controls(self):
         """#6139: each arrow between two stages shows its mode or the control that holds it, who set it and the
@@ -1006,10 +1003,10 @@ try {
   await until(() => q(".em-picks"), "the Emergency tab");
   const out = { ops: q(".em-view").textContent.includes("mark"), picks: [...document.querySelectorAll("[data-em-pick]")].map(b => b.dataset.emPick) };
   q('[data-em-pick="revoke"]').click();
-  await until(() => q(".dp-em-card").textContent.includes("Revoke its keys"), "the revoke card");
+  await until(() => q(".dp-em-card").textContent.includes("Revoke key"), "the revoke card");
   out.revoke = q(".dp-em-card").textContent.replace(/\s+/g, " ");
   q('[data-em-pick="stop"]').click();
-  await until(() => q(".dp-em-card").textContent.includes("Stop this pipeline"), "the stop card");
+  await until(() => q(".dp-em-card").textContent.includes("app: Stop"), "the stop card");
   if (q("#emWhy")) {
     q("#emWhy").value = "the prod database is slow";
     q('[data-em-go="stop"]').click();

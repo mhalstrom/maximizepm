@@ -51,7 +51,7 @@ function ruleHtml(r) {
 }
 
 function firedHtml(d) {
-  if (!d.fired.length) return `<div class="muted t-m">No rule acted yet.</div>`;
+  if (!d.fired.length) return `<div class="muted t-m">No runs yet.</div>`;
   return `<div class="pl-table"><table><tr><th>When</th><th class="tg-nw">Rule</th><th>What happened</th><th>What it did</th></tr>
     ${d.fired.map(f => `<tr><td class="mono tg-nw" title="${esc(f.fired_at)}">${esc(ago(f.fired_at))}</td><td>${esc(f.rule)}</td>
       <td class="t-m">${esc(d.events[f.event] || f.event)}: ${esc(f.stage || "")}${f.rev ? ` <span class="pl-ver">${esc(f.rev.slice(0, 7))}</span>` : ""}</td>
@@ -60,7 +60,7 @@ function firedHtml(d) {
 
 // What the pipeline's agents may do with no permission prompt (#6154): at once, ask first (a card), never; and the
 // steps that runs asked for lately, each with its card.
-const ASK_STATE = { asked: ["c-human", "waits for a yes"], yes: ["c-ready", "yes"], no: ["c-waiting", "no"] };
+const ASK_STATE = { asked: ["c-human", "waiting"], yes: ["c-ready", "yes"], no: ["c-waiting", "no"] };
 function permissionsHtml(d) {
   const P = d.permissions;
   if (!P) return "";
@@ -68,16 +68,14 @@ function permissionsHtml(d) {
   const asks = (P.asks || []).map(a => {
     const [cls, word] = ASK_STATE[a.state] || ["c-waiting", a.state];
     return `<tr><td class="mono t-s" data-label="Step">${esc(a.rule)}</td>
-      <td data-label="Task">${button("#" + a.item, { cls: "plain", data: { "dp-card": a.item }, title: "Open the task" })}</td>
-      <td data-label="Card">${a.card ? button("#" + a.card, { cls: "plain", data: { "dp-card": a.card }, title: "Open the card" }) : ""}</td>
+      <td data-label="Task">${button("#" + a.item, { cls: "plain", data: { "dp-card": a.item }, title: "Task" })}</td>
+      <td data-label="Card">${a.card ? button("#" + a.card, { cls: "plain", data: { "dp-card": a.card }, title: "Details" }) : ""}</td>
       <td data-label="Answer">${chip(cls, word)}${a.decided_by ? ` <span class="muted t-s">${esc(a.decided_by)}</span>` : ""}</td></tr>`;
   }).join("");
-  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Does it at once</th><th>Asks first (a card, not a prompt)</th><th>Never</th></tr>
-      <tr><td data-label="At once">${col(P.allow)}</td><td data-label="Asks first">${col(P.ask)}</td><td data-label="Never">${col(P.never)}</td></tr></table></div>
-    <div class="pl-bar">${button("Edit the list", { data: { "tg-perms": 1 }, title: "Change the list" })}
-      ${P.default ? `<span class="muted t-s">the default list</span>` : ""}</div>
-    <div class="t-s muted">A step outside the list is refused with no prompt. After the run, a refused step of Asks first, or of no list,
-      becomes a card for the manager or a person; a yes runs the task again with that one step allowed. Rules in Claude Code's form: Read, Bash(git push:*).</div>
+  return `<div class="pl-table"><table class="pl-blocks"><tr><th>Allow</th><th>Ask</th><th>Deny</th></tr>
+      <tr><td data-label="Allow">${col(P.allow)}</td><td data-label="Ask">${col(P.ask)}</td><td data-label="Deny">${col(P.never)}</td></tr></table></div>
+    <div class="pl-bar">${button("Edit", { data: { "tg-perms": 1 }, title: "Edit permissions" })}
+      ${P.default ? `<span class="muted t-s">default</span>` : ""}</div>
     ${asks ? `<div class="pl-table"><table class="pl-blocks"><tr><th>Asked for</th><th>Task</th><th>Card</th><th>Answer</th></tr>${asks}</table></div>` : ""}`;
 }
 
@@ -87,38 +85,34 @@ function openPerms() {
   const P = T.permissions;
   ensureDialog();
   const area = (id, xs, ph) => textarea({ id, rows: 4, placeholder: ph }, xs.join("\n"));
-  dlgBox.innerHTML = `<div class="dlg-head"><h2>What its agents may do · ${esc(T.pipeline)}</h2>
+  dlgBox.innerHTML = `<div class="dlg-head"><h2>Permissions · ${esc(T.pipeline)}</h2>
       ${iconButton("✕", "Close", { data: { "tg-close": 1 } })}</div>
     <div class="form">
-      ${field("Does it at once", area("tgAllow", P.allow, "Read\nBash(npm test:*)"))}
-      ${field("Asks first (a card)", area("tgAsk", P.ask, "Bash(./deploy.sh:*)"))}
-      ${field("Never", area("tgNever", P.never, "Bash(rm:*)"))}
+      ${field("Allow", area("tgAllow", P.allow, "Read\nBash(npm test:*)"))}
+      ${field("Ask", area("tgAsk", P.ask, "Bash(./deploy.sh:*)"))}
+      ${field("Deny", area("tgNever", P.never, "Bash(rm:*)"))}
     </div>
-    <div class="muted t-s">One rule a line, as Claude Code writes them. Bash(maxpm:*) stays allowed: the agent reports through it.</div>
+    <div class="muted t-s">One rule per line.</div>
     ${actions(button("Cancel", { data: { "tg-close": 1 } }) + button("Save", { kind: "primary", data: { "tg-perms-save": 1 } }))}`;
   dlg.open();
   dlgBox.querySelector("#tgAllow").focus();
 }
 
 function viewHtml(d) {
-  const rules = d.rules.map(ruleHtml).join("") || empty("No rule: nothing in this pipeline starts an agent.");
+  const rules = d.rules.map(ruleHtml).join("") || empty("No rules yet.");
   return `<div class="dp-cards">${rules}</div>
-    <div class="pl-bar">${button("Add a rule", { kind: "primary", data: { "tg-add": 1 }, title: "Add a trigger rule" })}</div>
-    <div class="t-s muted">A rule names what happens in the pipeline, not an event of GitHub, GitLab or Pulumi: every source
-      reports its runs the same way. Each rule's agent works on a task that maxpm serve starts on ${esc(d.runners.join(", "))}.
-      A person or the manager changes the rules; the audit log names who, and each rule that acted.</div>
-    <h3 class="tg-h">Runners it may use</h3>${ticksHtml(d)}
-    <div class="t-s muted">A runner is a server where the agent works with no person, terminal or prompt (Deploy › Runners). This computer is always a choice.</div>
-    <h3 class="tg-h">What its agents may do, with no permission prompt</h3>${permissionsHtml(d)}
-    <h3 class="tg-h">What the rules did lately</h3>${firedHtml(d)}`;
+    <div class="pl-bar">${button("Add rule", { kind: "primary", data: { "tg-add": 1 }, title: "Add rule" })}</div>
+    <h3 class="tg-h">Runners</h3>${ticksHtml(d)}
+    <h3 class="tg-h">Permissions</h3>${permissionsHtml(d)}
+    <h3 class="tg-h">Recent runs</h3>${firedHtml(d)}`;
 }
 
 // The fixed rules of a deploy target: it has no pipeline of its own, so nothing here can change them.
 export function defaultTriggersHtml(p) {
   const rule = (when, then) => `<div class="dp-rule"><div class="t-m"><b>When</b> ${when}</div><div class="t-m"><b>Then</b> ${then}</div></div>`;
-  return `<div class="dp-cards">${rule("a release waits for a person's yes", "MaximizePM asks the person (a task in What waits for you).")}
-    ${rule("a check fails while the watch of a release runs", "its check opens an operational task with the evidence, and a new session takes it.")}</div>
-    <div class="muted t-s">${esc(p.name)} is a deploy target: its rules are fixed. A pipeline of its own has rules you can change.</div>`;
+  return `<div class="dp-cards">${rule("a release awaits approval", "Ask for approval.")}
+    ${rule("a post-deploy check fails", "Open a fault task and start a session.")}</div>
+    <div class="muted t-s">Built-in rules.</div>`;
 }
 
 // ---- the dialog that adds or changes a rule
