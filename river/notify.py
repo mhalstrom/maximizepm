@@ -181,6 +181,225 @@ def _windows_channel(conn):
 register_channel("windows", _windows_channel)
 
 
+# ---------------------------------------------------------------- app channel (#6469)
+# Pure-Python RFC 8439 ChaCha20-Poly1305 AEAD (standard library only): iOS decrypts with CryptoKit.ChaChaPoly
+# and Android with javax.crypto.Cipher("ChaCha20-Poly1305"). Wire format: base64(0x01 || nonce(12) || ct || tag(16))
+# with AAD = b"\x01". Plaintext is UTF-8 JSON {"title", "body", "url"}, bounded so base64 stays under the push
+# Worker's 3500-byte MAX_CIPHERTEXT_BYTES limit.
+_APP_CIPHER_VERSION = b"\x01"
+_APP_MAX_PLAINTEXT_BYTES = 2500
+_CHACHA_CONST = (0x61707865, 0x3320646E, 0x79622D32, 0x6B206574)
+
+
+def _rotl32(v, c):
+    return ((v << c) & 0xFFFFFFFF) | (v >> (32 - c))
+
+
+def _chacha20_block(key, counter, nonce):
+    import struct
+    init = _CHACHA_CONST + struct.unpack("<8I", key) + (counter & 0xFFFFFFFF,) + struct.unpack("<3I", nonce)
+    s = list(init)
+    for _ in range(10):
+        for a, b, c, d in ((0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15),
+                           (0, 5, 10, 15), (1, 6, 11, 12), (2, 7, 8, 13), (3, 4, 9, 14)):
+            s[a] = (s[a] + s[b]) & 0xFFFFFFFF; s[d] = _rotl32(s[d] ^ s[a], 16)
+            s[c] = (s[c] + s[d]) & 0xFFFFFFFF; s[b] = _rotl32(s[b] ^ s[c], 12)
+            s[a] = (s[a] + s[b]) & 0xFFFFFFFF; s[d] = _rotl32(s[d] ^ s[a], 8)
+            s[c] = (s[c] + s[d]) & 0xFFFFFFFF; s[b] = _rotl32(s[b] ^ s[c], 7)
+    return struct.pack("<16I", *((x + y) & 0xFFFFFFFF for x, y in zip(s, init)))
+
+
+def _chacha20_xor(key, counter, nonce, data):
+    out = bytearray(len(data))
+    for i in range(0, len(data), 64):
+        ks = _chacha20_block(key, counter + (i // 64), nonce)
+        chunk = data[i:i + 64]
+        for j, b in enumerate(chunk):
+            out[i + j] = b ^ ks[j]
+    return bytes(out)
+
+
+def _poly1305_mac(otk, msg):
+    r = int.from_bytes(otk[:16], "little") & 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF
+    s = int.from_bytes(otk[16:32], "little")
+    p = (1 << 130) - 5
+    acc = 0
+    for i in range(0, len(msg), 16):
+        n = int.from_bytes(msg[i:i + 16] + b"\x01", "little")
+        acc = ((acc + n) * r) % p
+    return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+
+def _aead_mac_data(aad, ct):
+    import struct
+    pad_a = b"\x00" * ((-len(aad)) % 16)
+    pad_c = b"\x00" * ((-len(ct)) % 16)
+    return aad + pad_a + ct + pad_c + struct.pack("<QQ", len(aad), len(ct))
+
+
+def chacha20_poly1305_encrypt(key, nonce, plaintext, aad=b""):
+    """RFC 8439 ChaCha20-Poly1305 AEAD encrypt. Returns (ciphertext, tag)."""
+    if len(key) != 32:
+        raise ValueError("key must be 32 bytes")
+    if len(nonce) != 12:
+        raise ValueError("nonce must be 12 bytes")
+    otk = _chacha20_block(key, 0, nonce)[:32]
+    ct = _chacha20_xor(key, 1, nonce, plaintext)
+    tag = _poly1305_mac(otk, _aead_mac_data(aad, ct))
+    return ct, tag
+
+
+def chacha20_poly1305_decrypt(key, nonce, ciphertext, tag, aad=b""):
+    """RFC 8439 ChaCha20-Poly1305 AEAD decrypt. Raises ValueError on bad tag."""
+    import hmac
+    if len(key) != 32:
+        raise ValueError("key must be 32 bytes")
+    if len(nonce) != 12:
+        raise ValueError("nonce must be 12 bytes")
+    if len(tag) != 16:
+        raise ValueError("tag must be 16 bytes")
+    otk = _chacha20_block(key, 0, nonce)[:32]
+    expected = _poly1305_mac(otk, _aead_mac_data(aad, ciphertext))
+    if not hmac.compare_digest(tag, expected):
+        raise ValueError("authentication failed")
+    return _chacha20_xor(key, 1, nonce, ciphertext)
+
+
+def _decode_device_key(key_b64):
+    """Decode a 32-byte base64 or base64url device key stored by pairing."""
+    import base64
+    raw = (key_b64 or "").strip()
+    if not raw:
+        raise ValueError("empty device key")
+    norm = raw.replace("-", "+").replace("_", "/")
+    pad = (-len(norm)) % 4
+    try:
+        key = base64.b64decode(norm + ("=" * pad), validate=True)
+    except Exception as e:
+        raise ValueError(f"invalid base64 device key: {e}") from e
+    if len(key) != 32:
+        raise ValueError(f"device key must be 32 bytes (got {len(key)})")
+    return key
+
+
+def _encode_notice_payload(title, body, url):
+    """UTF-8 JSON {"title", "body", "url"} bounded to _APP_MAX_PLAINTEXT_BYTES."""
+    t, b, u = str(title or ""), str(body or ""), str(url or "")
+    raw = json.dumps({"title": t, "body": b, "url": u}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) <= _APP_MAX_PLAINTEXT_BYTES:
+        return raw
+    # Trim body first, then title, so the encrypted payload always fits the push Worker's 3500-byte limit.
+    lo, hi = 0, len(b)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        cand = json.dumps({"title": t, "body": b[:mid] + "…", "url": u},
+                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(cand) <= _APP_MAX_PLAINTEXT_BYTES:
+            lo = mid
+        else:
+            hi = mid - 1
+    b_fit = (b[:lo] + "…") if lo < len(b) else b
+    raw = json.dumps({"title": t, "body": b_fit, "url": u}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) <= _APP_MAX_PLAINTEXT_BYTES:
+        return raw
+    return json.dumps({"title": t[:200], "body": "", "url": u[:500]},
+                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def encrypt_notice(key_b64, title, body, url="", nonce=None):
+    """Encrypt a notice for a paired phone with its 32-byte key. Returns base64(0x01 || nonce || ct || tag)."""
+    import base64
+    import os
+    key = _decode_device_key(key_b64)
+    n = os.urandom(12) if nonce is None else bytes(nonce)
+    plaintext = _encode_notice_payload(title, body, url)
+    ct, tag = chacha20_poly1305_encrypt(key, n, plaintext, aad=_APP_CIPHER_VERSION)
+    return base64.b64encode(_APP_CIPHER_VERSION + n + ct + tag).decode("ascii")
+
+
+def decrypt_notice(key_b64, ciphertext_b64):
+    """Decrypt a base64 notice envelope made by encrypt_notice. Returns {"title", "body", "url"}."""
+    import base64
+    key = _decode_device_key(key_b64)
+    raw = base64.b64decode(ciphertext_b64, validate=True)
+    if len(raw) < 1 + 12 + 16:
+        raise ValueError("ciphertext too short")
+    if raw[:1] != _APP_CIPHER_VERSION:
+        raise ValueError(f"unsupported ciphertext version {raw[0]}")
+    nonce, ct, tag = raw[1:13], raw[13:-16], raw[-16:]
+    plaintext = chacha20_poly1305_decrypt(key, nonce, ct, tag, aad=_APP_CIPHER_VERSION)
+    return json.loads(plaintext.decode("utf-8"))
+
+
+def _app_channel(conn):
+    """Send each notice to every active paired phone through the stateless push Worker (#6469).
+    The notice is encrypted with each phone's own key; a token the Worker reports dead (410) is marked dead in Settings."""
+    import urllib.error
+    import urllib.request
+    base = core.setting(conn, "notify_app_url").rstrip("/")
+    devices = [d for d in core.device_list(conn, include_secrets=True) if not d.get("dead_at")]
+    if not devices:
+        raise RiverError("no active paired phone; scan the QR code in Settings > setup guide > Your phone")
+
+    def send(title, body, url):
+        link = url or ""
+        if link and _is_local(link):
+            link = remote_page(link) or link
+        delivered = 0
+        dead = 0
+        errors = []
+        for d in devices:
+            try:
+                ct = encrypt_notice(d["key"], title, body, link)
+            except ValueError as e:
+                errors.append(f"{d['name']}: {e}")
+                continue
+            payload = json.dumps({"platform": d["platform"], "token": d["push_token"], "ciphertext": ct}).encode("utf-8")
+            req = urllib.request.Request(f"{base}/push", data=payload,
+                                         headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    if r.status >= 300:
+                        errors.append(f"{d['name']}: push worker answered {r.status}")
+                        continue
+            except urllib.error.HTTPError as e:
+                is_dead = e.code == 410
+                reason = ""
+                try:
+                    info = json.loads(e.read().decode("utf-8", "replace"))
+                    if isinstance(info, dict):
+                        if info.get("dead_token"):
+                            is_dead = True
+                        reason = info.get("reason") or info.get("error") or ""
+                except Exception:
+                    pass
+                finally:
+                    e.close()
+                if is_dead:
+                    core.device_mark_dead(conn, d["id"])
+                    dead += 1
+                else:
+                    msg = f"{d['name']}: push worker answered {e.code}" + (f" ({reason})" if reason else "")
+                    errors.append(msg)
+            except Exception as e:
+                errors.append(f"{d['name']}: {e}")
+            else:
+                core.device_touch(conn, d["id"])
+                delivered += 1
+        if delivered:
+            if errors:
+                _say("maxpm notify app: partial failure: " + "; ".join(errors))
+            return
+        if errors:
+            raise OSError("; ".join(errors))
+        if dead:
+            raise OSError("all paired phones have expired push tokens")
+    return send
+
+
+register_channel("app", _app_channel)
+
+
 # The first characters that NSUserDefaults misreads in a terminal-notifier value: [ ( { < and a double quote
 # start a property list, and a - starts the next option, so every batch ("- one\n- two") failed (#5042).
 # A single quote is safe, but the escape does no harm; a backslash gets one more, as terminal-notifier

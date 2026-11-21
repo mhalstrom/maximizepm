@@ -129,6 +129,9 @@ DEFAULT_SETTINGS = {
     # that tailscale serve forwards, a comma list. Empty: only the login that owns this computer in the tailnet.
     "tailnet_logins": "",
     "ntfy_url": "https://ntfy.sh",
+    # Push Worker address for the 'app' notice channel (#6469, plan: canvas phone-app-plan): receives encrypted notices
+    # and forwards them to APNs (iOS) or FCM (Android) without storing tokens or notice text.
+    "notify_app_url": "https://push.maximizepm.com",
     # Where a tap on a notification opens (#4673): maxpm (the MaximizePM page: the item's drawer, the session in
     # the Sessions tab for its question or prompt, the Board's Needs you for a batch) or agent (the agent's own app:
     # Claude Code's claude.ai/code session, Codex's chatgpt.com/codex; else the page). Per person: --agent <person>.
@@ -3421,6 +3424,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
                          + " (high and urgent show a banner on the phone)")
     elif key == "ntfy_url" and not re.match(r"^https?://[^\s/]+", value):
         raise RiverError("ntfy_url is the server address, for example https://ntfy.sh")
+    elif key == "notify_app_url" and not re.match(r"^https?://[^\s/]+", value):
+        raise RiverError("notify_app_url is the push service address, for example https://push.maximizepm.com")
     elif key == "ntfy_topic" and value and not re.match(r"^[A-Za-z0-9_-]{1,64}$", value):
         raise RiverError("ntfy_topic uses letters, digits, '-' and '_' (up to 64); maxpm notify setup ntfy makes one")
     elif key == "notifications" and value not in ("on", "off"):
@@ -25069,6 +25074,10 @@ def device_pair(conn, name, platform, push_token, key):
                 (label, plat, token, k, ts, ts)).lastrowid
         row = conn.execute("SELECT id, name, platform, paired_at, last_seen, dead_at FROM devices WHERE id=?",
                            (did,)).fetchone()
+        chans = _channels(setting(conn, "notify_channels"))
+        if "app" not in chans:
+            conn.execute("INSERT INTO settings(scope,key,value) VALUES ('global','notify_channels',?) "
+                         "ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value", (",".join(chans + ["app"]),))
     return _device_public(row)
 
 
