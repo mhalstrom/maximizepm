@@ -269,6 +269,47 @@ transcripts from `seed/transcripts.py`; it needs tmux and ffmpeg, and runs
 outside a sandbox):
 `cd desktop && npm ci && npx electron ../seed/shoot.js`.
 
+## Phone and remote host
+
+The easiest way to open the MaximizePM page from your phone or another computer
+is the MaximizePM relay. Run `maxpm connect` to link this computer to your relay
+account (it opens a browser window to approve the device), and keep
+`maxpm serve` running:
+
+```sh
+maxpm connect                 # links this computer to relay.maximizepm.com (opens approval in your browser)
+maxpm connect --status        # checks the relay connection
+maxpm connect --off           # disconnects and revokes this computer's relay token
+maxpm serve --install-login   # optional: start maxpm serve at login and restart it after a crash
+```
+
+If you'd rather run it free on your own network without the relay, Tailscale
+also works. Install Tailscale on this computer and your phone with the same
+account, turn on HTTPS certificates in your Tailscale DNS settings, and run:
+
+```sh
+maxpm phone --on              # serves the page on your tailnet only (tailscale serve --bg)
+maxpm phone                   # prints the https://<computer>.<tailnet>.ts.net/ address and a QR code
+```
+
+Only your Tailscale account can open the page (add more accounts with
+`maxpm config set tailnet_logins <logins>`).
+
+To run MaximizePM on an always-on Linux server or Mac mini, set it up from your
+computer over SSH (using Tailscale SSH or an SSH key, with no password prompt):
+
+```sh
+maxpm host setup mini              # installs maxpm, starts serve at login, turns on Tailscale, prints QR code
+maxpm host setup mini --move       # same, and moves this computer's queue to a host with no projects yet
+maxpm host signin mini claude      # signs an agent CLI in on the host using your browser here
+```
+
+Replace `mini` with any SSH target, such as `you@server`. With `--move`, this
+computer's copy of the queue refuses commands and points you to the host
+(`maxpm host forget` lets you use the local copy again). Project folders don't
+move: clone each project on the host and link it with
+`maxpm project path <name> <folder>`.
+
 ## Use it
 
 ```sh
@@ -309,6 +350,9 @@ maxpm view                                       # every agent that runs in tmux
 maxpm capacity                                   # open slots and idle sessions
 maxpm usage                                      # the token cost of each done item, from the Claude Code transcripts
 maxpm artifacts --item 12                        # what the sessions of item 12 made (files, screenshots, canvases, links); show <n> reads one
+maxpm health --since 7d                          # how well the queue works: person minutes per done item, rework, idle time, cost
+maxpm pause --until "tomorrow 8:00"              # stop working sessions cleanly and hold new starts (--status checks; --restart restarts serve when clear)
+maxpm resume                                     # end a pause so new sessions can start again
 ```
 
 Every command gives machine-readable output with `--json` before the command
@@ -350,6 +394,23 @@ maxpm config set max_leases 3 --agent alex
 `max_leases` (1) limits how many items an agent holds. Items that serve its
 own outcome count apart, against `goal_max_leases` (3): items of a goal it
 owns, items such an item waits on, and the deploy items of a target it owns.
+
+### Pause, resume, and health
+
+`maxpm pause` asks every working agent session (except the manager and experts)
+to commit, release its task, and stop, and keeps new sessions from starting
+without changing your settings. Pass `--until` (`tomorrow 8:00`, `12h`,
+`2026-12-01`) to set when work can start again, `--reason` so sessions see why,
+or `--restart` to restart `maxpm serve` once no session holds work.
+`maxpm pause --status` shows what sessions still hold, and `maxpm resume` ends
+the pause right away.
+
+`maxpm health` compares a window (default `--since 7d`; also `30d` or `all`)
+against the same length of time before it. It reports estimated person minutes
+per done item, items done per day, rework rate (reopens, expired leases, and
+review fixes), how long items wait on you, session idle share, and token cost
+per done item. Filter to one project with `--project <name>`, or run
+`maxpm health --by goal` to compare goal-tagged items against untagged ones.
 
 ### Model and effort
 
