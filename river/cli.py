@@ -1941,6 +1941,9 @@ def build_parser(only=None):
     y.add_argument("--timeout", help="poll: the time limit of one run")
     y = trs.add_parser("run", help="run a trigger now (also when not due)")
     y.add_argument("scope"); y.add_argument("name")
+    y = trs.add_parser("rotate", help="a person or the manager: issue a new secret (and optionally address) for a push trigger")
+    y.add_argument("scope"); y.add_argument("name")
+    y.add_argument("--address", action="store_true", help="also issue a new push address (breaks the old URL)")
     y = trs.add_parser("list", help="the triggers by area, of one project or of all"); y.add_argument("project", nargs="?")
     y = trs.add_parser("show", help="one trigger, its playbook and its last events")
     y.add_argument("scope"); y.add_argument("name")
@@ -4825,6 +4828,8 @@ def _dispatch_operations(conn, a, actor):
         if a.otcmd == "run":
             o._trigger(conn, a.scope, a.name)
             return ask_server(conn, "ops_trigger_run", {"scope": a.scope, "name": a.name}, actor)
+        if a.otcmd == "rotate":
+            return o.trigger_rotate(conn, a.scope, a.name, a.address, actor)
         if a.otcmd == "list":
             return o.trigger_list(conn, a.project)
         return {"trigger": o.trigger_show(conn, a.scope, a.name)}
@@ -8236,6 +8241,22 @@ def render_operations(a, res):
               + (f"; escalate after {t['escalate_after']}" if t.get("escalate_after") else "")
               + (f"; title: {t['title']}" if t.get("title") else "")
               + (f"; routine: {t['routine']}" if t.get("routine") else ""))
+        if t.get("push"):
+            pu = t["push"]
+            note = ""
+            if pu.get("via") == "tunnel":
+                note = "  (relay webhook path needed for internet posts)"
+            elif pu.get("via") == "local":
+                note = "  (local only; connect relay for internet posts)"
+            print(f"  push address: {pu['url']}{note}")
+            if res.get("secret"):
+                print(f"  push secret (shown once): {res['secret']}")
+                print("  header: Authorization: Bearer <secret>  (or X-Maxpm-Secret: <secret>)")
+            elif pu.get("secret_prefix"):
+                print(f"  push secret: {pu['secret_prefix']}...  (rotate: maxpm ops trigger rotate {t['scope']} {t['name']})")
+            if pu.get("bad_secrets"):
+                print(f"  wrong secrets refused: {pu['bad_secrets']}"
+                      + (f" (last {core.show_time(pu['last_bad_secret_at'])})" if pu.get("last_bad_secret_at") else ""))
         print("\n".join("  " + x for x in _playbook_lines(dict(t["playbook_used"], project=t["project"],
                                                                triggers=[f"{t['scope']}/{t['name']}"]), True)))
         for e in t.get("event_list", []):

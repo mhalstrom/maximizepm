@@ -13,8 +13,11 @@ of a poll trigger is #6626; the address of a push trigger is #6628.
 """
 
 from datetime import timedelta
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import time
 
 from . import core
@@ -25,6 +28,38 @@ PLAYBOOK_TEXT = ("knowledge", "done_means")  # an agent proposes them; the manag
 PLAYBOOK_PERSON = ("tools", "limits", "repair")  # only a person changes them (#6641)
 PLAYBOOK_FIELDS = ("name",) + PLAYBOOK_TEXT + PLAYBOOK_PERSON + ("model", "effort", "workdir")
 EVENT_MAX = 20000  # the characters of an event's data that MaximizePM keeps
+PUSH_PATH_PREFIX = "/api/ops/push/"  # HTTP path for push triggers (#6628)
+PUSH_MAX_BYTES = 256 * 1024  # max request body bytes for a push trigger event
+PUSH_BAD_SECRET_ALERTS = (5, 25, 100)  # alert the manager at these wrong-secret counts
+
+
+def _hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _new_push_creds(push_id: str | None = None) -> tuple[str, str, dict]:
+    pid = push_id or secrets.token_hex(16)
+    secret = secrets.token_urlsafe(32)
+    return pid, secret, {"push_id": pid, "secret_hash": _hash_secret(secret), "secret_prefix": secret[:6],
+                         "bad_secrets": 0}
+
+
+def push_address(push_id: str, port: int | None = None) -> dict:
+    """The address for a push trigger (#6628): the relay webhook URL when the relay gives one, else the tunnel URL,
+    else this computer's local maxpm serve address (or just the path when no port is known)."""
+    from . import relay
+    path = f"{PUSH_PATH_PREFIX}{push_id}"
+    wh = relay.webhook_url()
+    if wh:
+        return {"path": path, "url": f"{wh}{path}", "via": "relay"}
+    cfg = relay.load()
+    tunnel = (cfg or {}).get("tunnel")
+    if isinstance(tunnel, str) and tunnel.startswith(("https://", "http://")):
+        return {"path": path, "url": f"{tunnel.rstrip('/')}{path}", "via": "tunnel"}
+    p = port or relay.PAGE_PORT.get("port")
+    if p:
+        return {"path": path, "url": f"http://127.0.0.1:{p}{path}", "via": "local"}
+    return {"path": path, "url": path, "via": "local"}
 
 
 def _who(conn, actor):
@@ -396,7 +431,21 @@ def _trigger(conn, scope, name):
 
 def _trigger_brief(conn, r):
     t = dict(r)
-    t["config"] = json.loads(t["config"] or "{}")
+    cfg = json.loads(t["config"] or "{}")
+    if t["arrival"] == "push":
+        pid_tok = cfg.get("push_id")
+        addr = push_address(pid_tok) if pid_tok else None
+        t["push"] = {
+            "id": pid_tok,
+            "path": addr["path"] if addr else None,
+            "url": addr["url"] if addr else None,
+            "via": addr["via"] if addr else None,
+            "secret_prefix": cfg.get("secret_prefix"),
+            "bad_secrets": int(cfg.get("bad_secrets") or 0),
+            "last_bad_secret_at": cfg.get("last_bad_secret_at"),
+        }
+        cfg = {k: v for k, v in cfg.items() if k != "secret_hash"}
+    t["config"] = cfg
     a = conn.execute("SELECT a.name, p.name project FROM ops_areas a JOIN projects p ON p.id=a.project_id WHERE "
                      "a.id=?", (t["area_id"],)).fetchone() if t["area_id"] else None
     b = conn.execute("SELECT name FROM ops_playbooks WHERE id=?", (t["playbook_id"],)).fetchone() \
@@ -447,6 +496,7 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
                         ).fetchone():
             raise RiverError(f"{scope} has a trigger {name!r}: maxpm ops trigger show {scope} {name}")
         col = {"form": "", "config": {}, "every": "5m", "timeout": "30s", "cron": None}
+        push_secret = None
         if condition == "time":
             if not (every or cron):
                 raise RiverError("a time trigger needs --cron (for example '0 9 * * mon') or --every")
@@ -463,6 +513,9 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
             if not (command or "").strip():
                 raise RiverError("a poll trigger needs --command: the routine that MaximizePM runs")
             col = core._ops_build("cmd", {"command": command, "every": every, "cron": cron, "timeout": timeout})
+        elif arrival == "push":
+            _, push_secret, push_cfg = _new_push_creds()
+            col["config"] = push_cfg
         pid, area_id = core._trigger_home(conn, kind, scope, actor, a["name"] if a else None)
         tid = conn.execute(
             "INSERT INTO triggers(scope_kind,scope,name,area_id,condition,arrival,priority,escalate_after,form,config,"
@@ -473,7 +526,10 @@ def trigger_add(conn, project, name, condition, arrival, area=None, playbook=Non
         _event(conn, None, actor, f"ops trigger {scope}/{name} added: {condition}, {arrival}"
                + (f", title {title.strip()}" if (title or "").strip() else "")
                + (f", routine {command}" if command else ""))
-    return {"trigger": trigger_show(conn, f"{kind}:{scope}", name), "changed": "added"}
+    out = {"trigger": trigger_show(conn, f"{kind}:{scope}", name), "changed": "added"}
+    if push_secret is not None:
+        out["secret"] = push_secret
+    return out
 
 
 def _priority(priority):
@@ -1094,3 +1150,77 @@ def close_lost_polls(conn, running=(), at=None):
         brk = _broken_trigger(conn, t, why, at=at)
         out.append({"key": t["key"], "run": run_id, "status": "unknown", "broken": why, **brk})
     return out
+
+
+# ---- push triggers (#6628)
+
+def trigger_rotate(conn, scope, name, new_address=False, actor=None):
+    """maxpm ops trigger rotate: issue a new secret (and optionally a new push_id address) for a push trigger."""
+    with tx(conn):
+        _need(conn, actor, "rotates a trigger's secret")
+        t = _trigger(conn, scope, name)
+        if t["arrival"] != "push":
+            raise RiverError(f"{t['scope']}/{name} is not a push trigger (arrival {t['arrival']})")
+        cfg = json.loads(t["config"] or "{}")
+        keep_id = None if new_address else cfg.get("push_id")
+        _, secret, push_cfg = _new_push_creds(keep_id)
+        cfg.update(push_cfg)
+        cfg.pop("last_bad_secret_at", None)
+        conn.execute("UPDATE triggers SET config=?, changed_by=?, changed_at=? WHERE id=?",
+                     (json.dumps(cfg), actor, iso(now()), t["id"]))
+        _event(conn, None, actor, f"ops trigger {t['scope']}/{name} push secret rotated"
+               + (" (new address)" if new_address or not keep_id else ""))
+    return {"trigger": trigger_show(conn, f"{t['scope_kind']}:{t['scope']}", name), "changed": "rotated",
+            "secret": secret}
+
+
+def _find_push_trigger(conn, push_id):
+    if not isinstance(push_id, str) or not push_id:
+        return None
+    for r in conn.execute("SELECT * FROM triggers WHERE arrival='push' ORDER BY id").fetchall():
+        cfg = json.loads(r["config"] or "{}")
+        pid = cfg.get("push_id")
+        if isinstance(pid, str) and pid and hmac.compare_digest(pid, push_id):
+            return dict(r), cfg
+    return None
+
+
+def push_receive(conn, push_id, secret, event, at=None):
+    """Receive one HTTP push event for a push trigger (#6628): verify the trigger's secret (refusing and counting
+    wrong secrets), check pause state, and pass the event into the same handle_event path as a poll trigger
+    (deduplicate by id, storm-fold, and escalate per decision #6644). Returns (http_status, response_dict)."""
+    at_dt = at or now()
+    found = _find_push_trigger(conn, push_id)
+    if found is None:
+        return 404, {"error": "unknown push trigger"}
+    t, cfg = found
+    want_hash = cfg.get("secret_hash") or ""
+    given_hash = _hash_secret(secret) if isinstance(secret, str) and secret else ""
+    if not want_hash or not given_hash or not hmac.compare_digest(given_hash, want_hash):
+        bad = int(cfg.get("bad_secrets") or 0) + 1
+        cfg["bad_secrets"] = bad
+        cfg["last_bad_secret_at"] = iso(at_dt)
+        with tx(conn):
+            conn.execute("UPDATE triggers SET config=? WHERE id=?", (json.dumps(cfg), t["id"]))
+            conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                         (t["id"], f"ops:{t['scope']}:{t['name']}", "bad-secret", iso(at_dt), "maxpm",
+                          f"wrong secret refused (count {bad})"))
+        if bad in PUSH_BAD_SECRET_ALERTS:
+            core._ops_tell_manager(conn, "alert",
+                                   f"push trigger {t['scope']}/{t['name']} refused {bad} requests with a wrong secret")
+        return 401, {"error": "wrong or missing secret", "bad_secrets": bad}
+    if t.get("paused_until"):
+        if core.parse_iso(t["paused_until"]) > at_dt:
+            return 503, {"error": f"trigger {t['scope']}/{t['name']} is paused until {t['paused_until']}",
+                         "paused_until": t["paused_until"]}
+        with tx(conn):
+            conn.execute("UPDATE triggers SET paused_until=NULL, state='new' WHERE id=? AND paused_until=?",
+                         (t["id"], t["paused_until"]))
+    try:
+        res = handle_event(conn, t["id"], event, at=at_dt, actor="maxpm")
+    except RiverError as e:
+        return 400, {"error": str(e)}
+    ev = res["event"]
+    return 200, {"ok": True, "trigger": f"{t['scope']}/{t['name']}", "id": f"e{ev['id']}",
+                 "event_id": ev["event_id"], "new": res["new"], "action": res["action"],
+                 "item": res["item"], "escalated_to": res["escalated_to"]}

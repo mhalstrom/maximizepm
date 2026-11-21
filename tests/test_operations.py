@@ -525,6 +525,99 @@ class PollAndTimeTriggers(Base):
         self.assertEqual(len(lost), 1)
         self.assertEqual((lost[0]["status"], lost[0]["action"]), ("unknown", "broken-opened"))
 
+    def test_push_trigger_gets_unique_address_and_secret_and_rotates(self):
+        r1 = o.trigger_add(self.c, "site", "sentry", "event", "push", actor="mark")
+        r2 = o.trigger_add(self.c, "site", "stripe", "event", "push", actor="mark")
+        self.assertTrue(r1["secret"])
+        self.assertTrue(r2["secret"])
+        self.assertNotEqual(r1["secret"], r2["secret"])
+        p1, p2 = r1["trigger"]["push"], r2["trigger"]["push"]
+        self.assertNotEqual(p1["id"], p2["id"])
+        self.assertEqual(p1["path"], f"/api/ops/push/{p1['id']}")
+        self.assertEqual(p1["secret_prefix"], r1["secret"][:6])
+        self.assertNotIn("secret_hash", r1["trigger"]["config"])
+        # trigger_show never leaks the plaintext secret or hash
+        shown = o.trigger_show(self.c, "site", "sentry")
+        self.assertNotIn("secret", shown)
+        self.assertNotIn("secret_hash", shown["config"])
+        # Rotate keeps the address by default and issues a new secret
+        rot = o.trigger_rotate(self.c, "site", "sentry", actor="mark")
+        self.assertNotEqual(rot["secret"], r1["secret"])
+        self.assertEqual(rot["trigger"]["push"]["id"], p1["id"])
+        # Old secret is refused; new secret works
+        st_old, _ = o.push_receive(self.c, p1["id"], r1["secret"], {"id": "e1", "title": "Boom"})
+        self.assertEqual(st_old, 401)
+        st_new, ans = o.push_receive(self.c, p1["id"], rot["secret"], {"id": "e1", "title": "Boom"})
+        self.assertEqual(st_new, 200)
+        self.assertEqual(ans["action"], "opened")
+        # Rotate with new_address changes push_id and resets bad_secrets
+        rot2 = o.trigger_rotate(self.c, "site", "sentry", new_address=True, actor="mark")
+        self.assertNotEqual(rot2["trigger"]["push"]["id"], p1["id"])
+        self.assertEqual(rot2["trigger"]["push"]["bad_secrets"], 0)
+        self.assertEqual(o.push_receive(self.c, p1["id"], rot2["secret"], {"id": "e2", "title": "X"})[0], 404)
+        # Non-push trigger refuses rotate
+        o.trigger_add(self.c, "site", "poll1", "event", "poll", command="true", actor="mark")
+        with self.assertRaisesRegex(RiverError, "not a push trigger"):
+            o.trigger_rotate(self.c, "site", "poll1", actor="mark")
+
+    def test_push_receive_enters_handle_event_counts_bad_secrets_and_alerts_manager(self):
+        from datetime import datetime, timedelta, timezone
+        o.playbook_add(self.c, "site", "hook-pb", {"knowledge": "Check webhook payload.", "done_means": "Resolved."},
+                       actor="mark")
+        created = o.trigger_add(self.c, "site", "alerts", "event", "push", playbook="hook-pb", actor="mark")
+        pid, secret = created["trigger"]["push"]["id"], created["secret"]
+
+        # Wrong and missing secrets are refused (401), counted, and alert the manager at threshold (5)
+        for i in range(1, 6):
+            st, ans = o.push_receive(self.c, pid, None if i == 1 else "wrong", {"id": "x", "title": "y"})
+            self.assertEqual((st, ans["bad_secrets"]), (401, i))
+        shown = o.trigger_show(self.c, "site", "alerts")
+        self.assertEqual(shown["push"]["bad_secrets"], 5)
+        self.assertTrue(shown["push"]["last_bad_secret_at"])
+        inbox = core.inbox(self.c, "boss")
+        self.assertTrue(any("wrong secret" in m["body"] for m in inbox))
+
+        # Invalid event payload returns 400
+        self.assertEqual(o.push_receive(self.c, pid, secret, {"id": "only-id"})[0], 400)
+        self.assertEqual(o.push_receive(self.c, pid, secret, ["not", "an", "object"])[0], 400)
+
+        # Valid event enters handle_event: opens one operational item with playbook and extra data
+        st, ans = o.push_receive(self.c, pid, secret, {"id": "inc-42", "title": "Disk 95%", "host": "db1"})
+        self.assertEqual((st, ans["ok"], ans["new"], ans["action"]), (200, True, True, "opened"))
+        brief = o.event_brief(self.c, ans["item"])
+        self.assertEqual(brief["playbook"]["name"], "hook-pb")
+        self.assertEqual(brief["events"][0]["data"], {"host": "db1"})
+
+        # Repeat of same id deduplicates and escalates (no second item, per #6644)
+        st2, ans2 = o.push_receive(self.c, pid, secret, {"id": "inc-42", "title": "Disk 95%"})
+        self.assertEqual((st2, ans2["new"], ans2["action"], ans2["item"]), (200, False, "repeat-note", ans["item"]))
+
+        # Paused trigger returns 503 while paused, accepts once expired
+        t0 = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+        self.c.execute("UPDATE triggers SET paused_until=? WHERE name='alerts'", (core.iso(t0 + timedelta(hours=1)),))
+        self.c.commit()
+        self.assertEqual(o.push_receive(self.c, pid, secret, {"id": "inc-43", "title": "Later"}, at=t0)[0], 503)
+        st3, ans3 = o.push_receive(self.c, pid, secret, {"id": "inc-43", "title": "Later"},
+                                   at=t0 + timedelta(hours=2))
+        self.assertEqual((st3, ans3["action"]), (200, "opened"))
+
+    def test_push_cli_prints_address_one_time_secret_and_bad_secret_count(self):
+        def run_cli(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_QUIET": "1"}):
+                cli.run(list(words))
+            return out.getvalue()
+        with mock.patch.object(core, "agent_type_from_env", lambda env: None):
+            out = run_cli("ops", "trigger", "add", "site", "vendor", "--condition", "event", "--arrival", "push")
+            self.assertIn("push address:", out)
+            self.assertIn("push secret (shown once):", out)
+            self.assertIn("Authorization: Bearer", out)
+            shown = run_cli("ops", "trigger", "show", "site", "vendor")
+            self.assertNotIn("shown once", shown)
+            self.assertIn("maxpm ops trigger rotate", shown)
+            rot = run_cli("ops", "trigger", "rotate", "site", "vendor")
+            self.assertIn("push secret (shown once):", rot)
+
 
 if __name__ == "__main__":
     unittest.main()

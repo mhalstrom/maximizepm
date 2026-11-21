@@ -78,7 +78,12 @@ GZIP_MIN = 1024  # bytes: a shorter answer is sent as it is
 # content-length: the relay passes the exact body.
 HOP_HEADERS = frozenset(("connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
                          "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length"))
+# Headers proxies/edge workers add: stripped on push-trigger requests forwarded through the relay (#6628) so
+# maxpm serve's local_refusal lets them reach /api/ops/push/<id>, which authenticates with the trigger's own secret.
+PROXY_HEADERS = frozenset(("forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "cf-connecting-ip",
+                           "cf-ray", "cf-ipcountry", "true-client-ip"))
 TUNNEL = {"url": None}  # this computer's tunnel, https://<name>.relay.maximizepm.com (the relay's welcome)
+WEBHOOK = {"url": None}  # this computer's unauthenticated push-trigger base URL, if the relay gives one (#6628)
 # The header that marks a page request as relayed. Only this process knows the value, so no other program on
 # this computer can make maxpm serve record its actions as <name>@relay.
 PAGE_SECRET = secrets.token_urlsafe(24)
@@ -132,6 +137,15 @@ def site_url(cfg: dict | None = None) -> str:
     site, whose Open my setup button leads to the tunnel."""
     cfg = cfg if cfg is not None else load()
     return ((cfg or {}).get("tunnel") or relay_url(cfg)).rstrip("/")
+
+
+def webhook_url(cfg: dict | None = None) -> str | None:
+    """The relay base URL for unauthenticated push trigger webhooks, when the relay gives one (#6628)."""
+    url = WEBHOOK.get("url")
+    if not url:
+        cfg = cfg if cfg is not None else load()
+        url = (cfg or {}).get("webhook")
+    return url.rstrip("/") if isinstance(url, str) and url.startswith(("https://", "http://")) else None
 
 
 def host_label() -> str:
@@ -428,6 +442,8 @@ def status() -> dict:
         st.setdefault("host", cfg.get("host"))
         st.setdefault("url", relay_url(cfg))
         st.setdefault("tunnel", cfg.get("tunnel"))
+        if cfg.get("webhook"):
+            st.setdefault("webhook", cfg.get("webhook"))
     return st
 
 
@@ -435,7 +451,7 @@ def saved_status() -> dict:
     """The relay connection as the last maxpm serve wrote it (for maxpm status and maxpm connect --status)."""
     cfg = load()
     out = {"configured": bool(cfg), "account": (cfg or {}).get("account"), "url": relay_url(cfg),
-           "tunnel": (cfg or {}).get("tunnel"),
+           "tunnel": (cfg or {}).get("tunnel"), "webhook": (cfg or {}).get("webhook"),
            "host": (cfg or {}).get("host"), "state": "off"}
     try:
         with open(state_path(), encoding="utf-8") as f:
@@ -603,6 +619,7 @@ class Link:
                 cfg = {k: v for k, v in cfg.items() if k != "replace"}  # replace is for one connection
                 save(cfg)
             cfg = self.retunnel(cfg, frame.get("tunnel"))
+            cfg = self.rewebhook(cfg, frame.get("webhook"))
             limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
             part = limits.get("part")
             self.part = min(PART, part) if isinstance(part, int) and part >= 1024 else PART
@@ -624,6 +641,16 @@ class Link:
             cfg = {**cfg, "tunnel": tunnel}
             save(cfg)
         _set_state(tunnel=tunnel)
+        return cfg
+
+    def rewebhook(self, cfg: dict, webhook) -> dict:
+        """The relay's push-trigger webhook base URL, when the relay gives one (#6628)."""
+        webhook = webhook.rstrip("/") if isinstance(webhook, str) and webhook.startswith(("https://", "http://")) else None
+        WEBHOOK["url"] = webhook
+        if webhook and cfg.get("webhook") != webhook:
+            cfg = {**cfg, "webhook": webhook}
+            save(cfg)
+        _set_state(webhook=webhook)
         return cfg
 
     def loop(self, ws: WebSocket, cfg: dict) -> None:
@@ -666,6 +693,10 @@ class Link:
                 self.cancelled.add(frame.get("id"))
             elif t == "tunnel":
                 cfg = self.retunnel(cfg, frame.get("tunnel"))
+                if "webhook" in frame:
+                    cfg = self.rewebhook(cfg, frame.get("webhook"))
+            elif t == "webhook":
+                cfg = self.rewebhook(cfg, frame.get("webhook"))
             elif t == "plan":
                 _set_state(plan=_plan(frame))
             elif t == "bye":
@@ -745,10 +776,11 @@ def _origin(url) -> str | None:
     return f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else None
 
 
-def request_headers(pairs, local: str) -> list:
+def request_headers(pairs, local: str, strip_proxy: bool = False) -> list:
     """A request's headers as maxpm serve gets them: every header but this hop's. The tunnel's own origin in
     Origin and Referer becomes this computer's (local), as a request made here has it; any other origin stays,
-    so maxpm serve refuses a request from another site as it does here."""
+    so maxpm serve refuses a request from another site as it does here. With strip_proxy (push trigger webhooks,
+    #6628), proxy headers from the edge are stripped so local_refusal lets the push route check the trigger secret."""
     tunnel = _origin(TUNNEL["url"])
     out = []
     for pair in pairs if isinstance(pairs, list) else []:
@@ -756,7 +788,7 @@ def request_headers(pairs, local: str) -> list:
             continue
         k, v = pair
         n = k.lower()
-        if n in HOP_HEADERS or n == "x-maxpm-relay" or "\r" in v or "\n" in v:
+        if n in HOP_HEADERS or n == "x-maxpm-relay" or (strip_proxy and n in PROXY_HEADERS) or "\r" in v or "\n" in v:
             continue
         if n in ("origin", "referer") and tunnel and (v == tunnel or v.startswith(tunnel + "/")):
             v = local + v[len(tunnel):]
@@ -804,21 +836,33 @@ def _gzip_answer(status: int, headers: list) -> bool:
 def serve_page(frame: dict, body: bytes, send, part: int = PART, gzip: bool = False) -> None:
     """One request from the relay (its whole body, as bytes): maxpm serve answers it, and send(frame) gets the
     answer's frames as river reads it, res first, then part frames. With gzip (the welcome said so, #4895) a text
-    answer goes gzipped when the browser accepts gzip."""
+    answer goes gzipped when the browser accepts gzip.
+    Push trigger webhooks (#6628): frames with kind 'push' or public=True may only POST to /api/ops/push/<id>,
+    strip edge proxy headers, and never receive X-Maxpm-Relay (they authenticate with the trigger's own secret)."""
     rid = frame.get("id")
     path, method = frame.get("path") or "/", frame.get("method") or "GET"
-    if frame.get("kind") != "http" or not path.startswith("/") or not method.isalpha() or not method.isupper():
+    kind = frame.get("kind")
+    is_push_frame = kind == "push" or frame.get("public") is True
+    is_push_path = path.split("?")[0].startswith("/api/ops/push/")
+    if kind not in ("http", "push") or not path.startswith("/") or not method.isalpha() or not method.isupper():
         return send(fail(rid, 400, "bad request"))
+    if is_push_frame:
+        if not is_push_path:
+            return send(fail(rid, 404, "not found"))
+        if method != "POST":
+            return send(fail(rid, 405, "method not allowed"))
     if not PAGE_PORT["port"]:
         return send(fail(rid, 502, "maxpm serve has no port"))
     local = f"http://127.0.0.1:{PAGE_PORT['port']}"
+    untrusted_push = is_push_frame or is_push_path
     conn = http.client.HTTPConnection("127.0.0.1", PAGE_PORT["port"], timeout=55)
     try:
         conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
         conn.putheader("Host", f"127.0.0.1:{PAGE_PORT['port']}")
-        for k, v in request_headers(frame.get("headers"), local):
+        for k, v in request_headers(frame.get("headers"), local, strip_proxy=untrusted_push):
             conn.putheader(k, v)
-        conn.putheader("X-Maxpm-Relay", PAGE_SECRET)
+        if not untrusted_push:
+            conn.putheader("X-Maxpm-Relay", PAGE_SECRET)
         if body or method not in ("GET", "HEAD"):
             conn.putheader("Content-Length", str(len(body)))
         conn.endheaders(body or None)

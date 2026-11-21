@@ -774,6 +774,75 @@ class PageRelay(Base):
         relay.PAGE_PORT["port"] = None
         self.assertEqual(self.page("GET", "/")[0], 502)
 
+    def test_push_trigger_over_http_and_relay_with_secret_and_proxy_headers(self):
+        """#6628: POST /api/ops/push/<id> through the relay enters handle_event with the trigger's secret, strips
+        edge proxy headers, never attaches X-Maxpm-Relay, and refuses non-push paths on kind='push'."""
+        from river import operations as o
+        c = core.connect()
+        try:
+            core.project_add(c, "web")
+            created = o.trigger_add(c, "web", "hook", "event", "push", actor="mark")
+        finally:
+            c.close()
+        pid, secret = created["trigger"]["push"]["id"], created["secret"]
+        path = f"/api/ops/push/{pid}"
+        payload = json.dumps({"id": "evt-99", "title": "Payment webhook failed", "code": 500}).encode()
+
+        # Relay push frame with edge proxy headers and Bearer secret succeeds
+        res = relay.handle_page(
+            {"t": "req", "id": "push1", "kind": "push", "method": "POST", "path": path,
+             "headers": [["Content-Type", "application/json"], ["Authorization", f"Bearer {secret}"],
+                         ["CF-Connecting-IP", "203.0.113.5"], ["X-Forwarded-For", "203.0.113.5"]]},
+            payload)
+        self.assertEqual(res["status"], 200, res["body"])
+        ans = json.loads(res["body"])
+        self.assertEqual((ans["ok"], ans["new"], ans["action"]), (True, True, "opened"))
+
+        # X-Maxpm-Secret header also works; repeat deduplicates
+        res2 = relay.handle_page(
+            {"t": "req", "id": "push2", "kind": "http", "public": True, "method": "POST", "path": path,
+             "headers": [["Content-Type", "application/json"], ["X-Maxpm-Secret", secret],
+                         ["CF-Ray", "abc123"]]},
+            payload)
+        self.assertEqual(res2["status"], 200, res2["body"])
+        ans2 = json.loads(res2["body"])
+        self.assertEqual((ans2["new"], ans2["action"], ans2["item"]), (False, "repeat-note", ans["item"]))
+
+        # Wrong secret is refused (401) and counted
+        res3 = relay.handle_page(
+            {"t": "req", "id": "push3", "kind": "push", "method": "POST", "path": path,
+             "headers": [["Content-Type", "application/json"], ["Authorization", "Bearer wrong"]]},
+            payload)
+        self.assertEqual(res3["status"], 401)
+        self.assertEqual(json.loads(res3["body"])["bad_secrets"], 1)
+
+        # Browser Origin header is refused (403)
+        res_origin = relay.handle_page(
+            {"t": "req", "id": "push4", "kind": "push", "method": "POST", "path": path,
+             "headers": [["Content-Type", "application/json"], ["Authorization", f"Bearer {secret}"],
+                         ["Origin", "https://evil.example"]]},
+            payload)
+        self.assertEqual(res_origin["status"], 403)
+
+        # kind='push' or public=True refuses any non-push path (404) and non-POST (405) at relay.serve_page
+        self.assertEqual(relay.handle_page(
+            {"t": "req", "id": "push5", "kind": "push", "method": "POST", "path": "/api/action", "headers": []},
+            b'{"op":"project_add"}')["status"], 404)
+        self.assertEqual(relay.handle_page(
+            {"t": "req", "id": "push6", "kind": "http", "public": True, "method": "GET", "path": "/api/state",
+             "headers": []})["status"], 404)
+        self.assertEqual(relay.handle_page(
+            {"t": "req", "id": "push7", "kind": "push", "method": "GET", "path": path, "headers": []})["status"], 405)
+
+        # webhook URL from relay is used by operations.push_address
+        old_wh = relay.WEBHOOK["url"]
+        try:
+            relay.WEBHOOK["url"] = "https://relay.maximizepm.com/e/wh-abc"
+            addr = o.push_address(pid)
+            self.assertEqual(addr, {"path": path, "url": f"https://relay.maximizepm.com/e/wh-abc{path}", "via": "relay"})
+        finally:
+            relay.WEBHOOK["url"] = old_wh
+
 
 class PageConnect(Base):
     def test_the_page_starts_the_flow_and_serve_finishes_it(self):

@@ -7764,6 +7764,38 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         return self._send(status, answer)
 
+    def _ops_push(self, push_id):
+        """POST /api/ops/push/<push_id> (#6628): an outside system posts one event to a push trigger, authenticated
+        by the trigger's own secret (Authorization: Bearer <secret> or X-Maxpm-Secret / X-Webhook-Secret). Enters
+        the same handle_event path as a poll trigger."""
+        from . import operations
+        if self.headers.get("Origin"):
+            return self._send(403, {"error": "a page may not post push trigger events; send them from an outside system"})
+        if not push_id or "/" in push_id:
+            return self._send(404, {"error": "unknown push trigger"})
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._send(400, {"error": "bad Content-Length"})
+        if size < 0 or size > operations.PUSH_MAX_BYTES:
+            return self._send(413, {"error": f"the request is larger than {operations.PUSH_MAX_BYTES} bytes"})
+        try:
+            body = json.loads(self.rfile.read(size) or b"{}")
+        except ValueError:
+            return self._send(400, {"error": "the body is not JSON"})
+        auth = self.headers.get("Authorization") or ""
+        secret = (auth[7:].strip() if auth.lower().startswith("bearer ") else None) or \
+            (self.headers.get("X-Maxpm-Secret") or "").strip() or \
+            (self.headers.get("X-Webhook-Secret") or "").strip() or None
+        conn = core.connect()
+        try:
+            status, answer = operations.push_receive(conn, push_id, secret, body)
+            if status == 200:
+                core.sync_needs_you_now(conn)
+        finally:
+            conn.close()
+        return self._send(status, answer)
+
     def _pair_device(self):
         """POST /api/pair (#6471): the phone app scans the setup guide's QR and POSTs the 10-minute pairing code,
         its push_token, platform ('ios' or 'android'), encryption key, and optional device name."""
@@ -7918,6 +7950,9 @@ class Handler(BaseHTTPRequestHandler):
                 _leave_run()
         if self.path == "/api/pipeline-events":  # #6163: events in from any system, with a token of the pipeline
             return self._pipeline_events()
+        path = self.path.split("?")[0]
+        if path.startswith("/api/ops/push/"):  # #6628: push trigger events in over HTTP (local or via relay)
+            return self._ops_push(path[len("/api/ops/push/"):])
         if self.path == "/api/pair":  # #6471: phone app pairs with a 10-minute code from the setup guide's QR
             return self._pair_device()
         if self.path != "/api/action":
