@@ -507,7 +507,11 @@ maxpm target add <name> --description "how it deploys"  # where projects ship to
 maxpm project target <name> <target>                   # each project has at most one
 maxpm target show <target>                             # its projects and owner
 maxpm target own <target>                              # one owner per target runs its deploys
-maxpm ops add <target> <check> <form> ...              # its checks, and its projects', run at once after each release
+maxpm ops area add|edit|list|show <project> ...        # areas of a project (its general area, each target, an env)
+maxpm ops playbook add|edit|accept|reject ...          # playbooks (knowledge, done means; only a person sets tools/limits/repair)
+maxpm ops trigger add|edit|list|rotate ...             # time and event (poll or push) triggers; checks: maxpm ops add
+maxpm ops events list|show|add ...                     # recorded trigger events; full guide: maxpm guide ops
+maxpm ops add <target> <check> <form> ...              # state checks; target and project checks run after each release
 maxpm ops system show|edit|accept|reject <project>     # its system description; an agent's edit waits for your accept
 maxpm ops noise add|list|rm                            # what is not a problem; you get a note for each agent's rule
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect

@@ -1959,7 +1959,8 @@ class Plan(Base):
         self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text(encoding="utf-8"))
 
     def test_guide_ops_prints_the_operations_guide_that_the_worker_guide_names(self):
-        # #5439: the operations guide is a file beside the worker guide, so the skill carries it too.
+        # #5439, #6630: the operations guide is a file beside the worker guide; both skills name it, and it covers
+        # areas, playbooks, triggers and events without runbook or repair per check.
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -1967,9 +1968,17 @@ class Plan(Base):
         text = out.getvalue()
         self.assertTrue(text.startswith("# MaximizePM operations"), text[:80])
         for part in ("## The parts", "## Who may do what", "## When you hold a fault item", "## Writing a check script",
+                     "- **Area**:", "- **Playbook**:", "- **Trigger**:", "- **Event**:",
+                     "maxpm ops area", "maxpm ops playbook", "maxpm ops trigger", "maxpm ops events",
                      "maxpm ops cause <id>", "ops_deadman_url"):
             self.assertIn(part, text)
-        self.assertIn("`maxpm guide ops`", (cli.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertNotIn("runbook", text.lower())
+        self.assertNotIn("on a check (`--repair`)", text)
+        for skill in ("maxpm", "maxpm-manager"):
+            stext = (cli.GUIDES / skill / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("maxpm guide ops", stext)
+            for word in ("areas", "playbooks", "triggers", "events"):
+                self.assertIn(word, stext.lower())
 
     def test_guide_pipelines_prints_the_pipelines_guide_that_both_skills_name(self):
         # #6158: the pipelines guide is a file beside the worker guide; the worker and manager guides name it.

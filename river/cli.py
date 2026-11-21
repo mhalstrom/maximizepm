@@ -44,7 +44,7 @@ More:
   maxpm guide          how an agent works from the queue (the full loop)
   maxpm guide manager  the manager, and how to write tasks (dependencies, priorities)
   maxpm guide setup    how to set up your agents to use MaximizePM
-  maxpm guide ops      operations: checks, faults, repairs, check scripts
+  maxpm guide ops      operations: areas, playbooks, triggers, events, scripts
   maxpm --help         every command
 """
 
