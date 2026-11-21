@@ -1671,9 +1671,9 @@ def build_parser(only=None):
     x = ops.add_parser("reject", help="a person or the manager: the proposed check is not wanted")
     x.add_argument("scope"); x.add_argument("name"); x.add_argument("--note", required=True, help="why")
     x = ops.add_parser("setup", help="a guided start: which project, what to watch (plain questions for the four "
-                       "forms), one run of each new check before it is kept, a test notice to your phone, and the "
-                       "outside switch. In a terminal it asks one question at a time; an agent gives the answers "
-                       "as options (--url, --period, --command and --pattern, --test-notice, --deadman-url)")
+                       "forms), one run of each new check before it is kept, and the outside switch. In a terminal "
+                       "it asks one question at a time; an agent gives the answers as options (--url, --period, "
+                       "--command and --pattern, --deadman-url)")
     x.add_argument("scope", nargs="?", help="a project or a deploy target")
     x.add_argument("--name", help="the check's name (default: from its address or command; a beat check needs one)")
     x.add_argument("--form", choices=list(core.OPS_FORMS), help="the form (default: from the options: --url url, "
@@ -1682,7 +1682,6 @@ def build_parser(only=None):
     x.add_argument("--anyway", action="store_true", help="keep the check also when its first run fails")
     x.add_argument("--why-propose", dest="why_propose", help="when you may not add the check (a command, a repair): "
                    "propose it with this reason instead")
-    x.add_argument("--test-notice", dest="test_notice", action="store_true", help="send one test notice to the phone")
     x.add_argument("--deadman-url", dest="deadman_url", help="the ping address of a heartbeat service outside this "
                    "computer (ops_deadman_url); setup sends one beat to it at once")
     x.add_argument("--profile", help="apply a profile: a file, or the name of one that ships with MaximizePM "
@@ -4596,15 +4595,6 @@ def _setup_check(conn, scope, name, form, fields, actor, say, anyway=False, why=
     return {"name": name, "kept": True, "form": form, "scope": sc, "result": result, "summary": core._ops_summary(c)}
 
 
-def _setup_notice(conn):
-    """One test notice to the phone (the ntfy channel), now."""
-    from . import notify
-    if "ntfy" not in core._channels(core.setting(conn, "notify_channels")):
-        return {"sent": False, "why": "your phone gets no notices yet: maxpm notify setup ntfy"}
-    r = notify.test(conn, "ntfy")
-    return {"sent": r["ok"], "why": r.get("error")}
-
-
 def _setup_deadman(conn, url, actor):
     """The outside switch: keep the address (ops_deadman_url), then send one beat to it now."""
     core.config_set(conn, "ops_deadman_url", url, actor=actor)
@@ -4647,11 +4637,11 @@ def _setup_ask_check(conn, scope, form, actor, ask, yes, say):
 
 def ops_setup(conn, a, actor):
     """maxpm ops setup (#5437): in a terminal, one question at a time; with --yes, or with no terminal, only what the
-    options say. Steps: the project or target, the checks (each runs once before it is kept), a test notice to the
-    phone, the outside switch."""
-    from . import notify
+    options say. Steps: the project or target, the checks (each runs once before it is kept), the outside switch.
+    A fault opens an item for the manager and rings no phone (#6650), so setup sets up no phone notices (#6660):
+    maxpm notify setup does that, for a person's items."""
     asking = not a.yes and (SETUP_ASK is not None or sys.stdin.isatty())
-    done = {"scope": None, "checks": [], "notice": None, "deadman": None, "profile": None, "asked": asking}
+    done = {"scope": None, "checks": [], "deadman": None, "profile": None, "asked": asking}
 
     def say(text=""):
         print(text, flush=True)
@@ -4675,20 +4665,18 @@ def ops_setup(conn, a, actor):
     if not asking:
         if a.profile:
             done["profile"] = _setup_profile(conn, a.profile, a.scope, actor)
-            if not (form or a.test_notice or a.deadman_url):
+            if not (form or a.deadman_url):
                 return {"setup": done}
         if not a.scope:
             raise RiverError("name the project or the deploy target: maxpm ops setup <scope> --yes ... (in a "
                              "terminal it asks)")
-        if not (form or a.test_notice or a.deadman_url):
+        if not (form or a.deadman_url):
             raise RiverError("nothing to set up: give a check (--url; --period with --name; --command; --command "
-                             "with --pattern), --test-notice, or --deadman-url")
+                             "with --pattern) or --deadman-url")
         done["scope"] = "{}:{}".format(*core._ops_scope(conn, a.scope))
         if form:
             done["checks"].append(_setup_check(conn, a.scope, a.name, form, fields, actor, say, a.anyway,
                                                a.why_propose))
-        if a.test_notice:
-            done["notice"] = _setup_notice(conn)
         if a.deadman_url:
             done["deadman"] = _setup_deadman(conn, a.deadman_url, actor)
         return {"setup": done}
@@ -4746,16 +4734,6 @@ def ops_setup(conn, a, actor):
             done["checks"].append(_setup_ask_check(conn, done["scope"], f, actor, ask, yes, say))
         except RiverError as e:
             say(f"  {e}. This check was not kept; try again")
-    if "ntfy" not in core._channels(core.setting(conn, "notify_channels")):
-        say("Your phone gets no notices from MaximizePM yet.")
-        if yes("Set up notices to your phone now (the free ntfy app)?"):
-            for line in notify.setup_ntfy(conn, actor=actor)["subscribe"]:
-                say(f"  {line}")
-            ask("Press Enter when the phone has subscribed")
-    if "ntfy" in core._channels(core.setting(conn, "notify_channels")) and yes(
-            "Send a test notice to your phone now?"):
-        done["notice"] = _setup_notice(conn)
-        say("  sent: look at your phone" if done["notice"]["sent"] else f"  not sent: {done['notice']['why']}")
     current = core.setting(conn, "ops_deadman_url")
     if current:
         say(f"The outside switch is on: maxpm serve sends a beat to {current} every "
@@ -4763,7 +4741,7 @@ def ops_setup(conn, a, actor):
     else:
         say("When this computer is off or offline, nothing on it can tell you. A heartbeat service outside it can:")
         say("maxpm serve sends it a beat each minute, and the service tells you when the beats stop. Any service with")
-        say("a ping address works; Healthchecks.io has a free plan, and it can send its alerts to your ntfy topic.")
+        say("a ping address works; Healthchecks.io has a free plan, and it sends its own alerts by mail or to a phone.")
         url = ask("The ping address (Enter: skip for now)")
         if url:
             done["deadman"] = _setup_deadman(conn, url, actor)
@@ -8048,9 +8026,6 @@ def render_ops_setup(res):
         else:
             print(f"  not kept {c['name']}: " + ("its first run failed (keep it anyway: --anyway)"
                                                 if not d["asked"] else "you chose not to keep it"))
-    n = d["notice"]
-    if n:
-        print("  test notice: sent to your phone" if n["sent"] else f"  test notice: not sent ({n['why']})")
     m = d["deadman"]
     if m:
         print(f"  outside switch: {m['url']}; the first beat "

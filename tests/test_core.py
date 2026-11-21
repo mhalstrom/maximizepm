@@ -12228,7 +12228,7 @@ class OpsSelf(Base):
         from river import cli
         core.register(self.c, "mark", human=True)
         core.project_add(self.c, "web")
-        asked, replies = [], iter(["0", "", "n", ""])  # the project, no more checks, no phone, no outside switch
+        asked, replies = [], iter(["0", "", ""])  # the project, no more checks, no outside switch
 
         def ask(q):
             asked.append(q)
@@ -13784,10 +13784,10 @@ class Ops(Base):
                                    "--yes")
         self.assertIn("the job reports each time it runs: maxpm ops beat site nightly", out)
 
-    def test_setup_with_options_sends_the_test_notice_and_sets_the_outside_switch(self):
-        _, out, _ = self.setup_run("--as", "mark", "ops", "setup", "site", "--test-notice", "--deadman-url",
+    def test_setup_with_options_sets_the_outside_switch(self):
+        _, out, _ = self.setup_run("--as", "mark", "ops", "setup", "site", "--deadman-url",
                                    "https://hc-ping.com/abc", "--yes", beat=lambda url, t: 200)
-        self.assertIn("test notice: not sent (your phone gets no notices yet: maxpm notify setup ntfy)", out)
+        self.assertNotIn("notice", out)  # a fault rings no phone (#6650), so setup sets up no phone (#6660)
         self.assertIn("outside switch: https://hc-ping.com/abc; the first beat arrived", out)
         self.assertEqual(core.setting(self.c, "ops_deadman_url"), "https://hc-ping.com/abc")
         with self.assertRaisesRegex(RiverError, "nothing to set up"):
@@ -13798,7 +13798,6 @@ class Ops(Base):
                    "1", "https://example.com/", "", "", "", "",     # url: address, body, name, every, keep
                    "2", "", "nightly-backup", "",           # beat: period, name, keep
                    "",                                      # no more checks
-                   "n",                                     # no ntfy now
                    ""]                                      # no outside switch
         code, out, asked = self.setup_run("--as", "mark", "ops", "setup", answers=answers,
                                           http=lambda url, t: (200, "ok"))
@@ -13815,7 +13814,6 @@ class Ops(Base):
             "Which job reports? Its short name, for example nightly-backup ",
             "Keep this check? (Y/n) ",
             "Which one? (1-4, Enter: no more checks) ",
-            "Set up notices to your phone now (the free ntfy app)? (Y/n) ",
             "The ping address (Enter: skip for now) "])
         self.assertIn("  1. project site\n  2. target prod\n", out)
         self.assertIn("passed: HTTP 200", out)
@@ -13826,7 +13824,7 @@ class Ops(Base):
         self.assertIn("maxpm ops beat site nightly-backup", out)
 
     def test_setup_offers_a_proposal_when_the_person_at_the_terminal_is_an_agent(self):
-        answers = ["3", "check_jobs", "", "", "y", "the nightly jobs fail with no word", "", "n", ""]
+        answers = ["3", "check_jobs", "", "", "y", "the nightly jobs fail with no word", "", ""]
         _, out, asked = self.setup_run("--as", "dev", "ops", "setup", "site", answers=answers)
         self.assertIn("dev is an agent; only a person or the manager sets", out)
         self.assertEqual(asked[4:6], ["Propose it to the manager instead? (Y/n) ",
