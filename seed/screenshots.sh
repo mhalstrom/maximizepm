@@ -26,7 +26,7 @@ $R config set timezone UTC >/dev/null
 $R register web-agent --note "storefront work" >/dev/null
 $R --as api-agent send question --to alex "Do orders over \$500 need a manual review step?" --item 2 >/dev/null
 $R --as alex push 5 --to web-agent --note "quick one before the checkout work" >/dev/null
-$R --as alex add website "Publish the launch post" --doer human \
+$R --as alex add website "Publish the launch post" --doer human --type do \
   --context "Post on the blog and the newsletter once checkout is live." >/dev/null                         # 9
 $R --as alex blocked 9 --reason "Launch date is not set yet" --until 3d >/dev/null
 $R --as alex edit 4 --due "$(date -u -v+5d +%Y-%m-%d 2>/dev/null || date -u -d +5days +%Y-%m-%d) UTC" >/dev/null

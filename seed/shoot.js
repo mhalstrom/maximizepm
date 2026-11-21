@@ -5,7 +5,7 @@
 // The server runs with a throwaway HOME (/tmp/.../alex), so no path of this computer shows in a picture.
 // The page never clicks Start or Dispatch here: those open real terminal windows. The agents of the
 // pictures are stand-ins in panes of a tmux server of its own (TMUX_TMPDIR), never this computer's tmux:
-// they give the ! dialog and the alert for a prompt that waits, and maxpm view.
+// they give the session's question panel and the alert for a prompt that waits, and maxpm view.
 // A sandbox blocks the tmux socket: run this outside one.
 const { app, BrowserWindow } = require("electron");
 const { execFileSync, spawn } = require("node:child_process");
@@ -61,7 +61,9 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   makeHome();
   const base = { ...process.env, HOME: home, SHELL: "/bin/zsh", TZ: "UTC", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TMUX_TMPDIR: sock };
-  for (const k of ["MAXPM_AGENT", "MAXPM_FOCUS", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MAXPM_DB", "TMUX", "TMUX_PANE"]) delete base[k];
+  for (const k of Object.keys(base)) if (/^(MAXPM_|CLAUDE|ANTIGRAVITY_|CODEX_)/.test(k)) delete base[k];
+  for (const k of ["PI_CODING_AGENT", "CURSOR_AGENT", "OPENCODE_SESSION_ID", "HERMES_SESSION_ID", "COPILOT_CLI",
+    "AMP_CURRENT_THREAD_ID", "AGENT_SESSION_ID", "GROK_SESSION_ID", "TMUX", "TMUX_PANE"]) delete base[k];
   const tmux = (...a) => execFileSync(tmuxExe, ["-u", "-f", "/dev/null", ...a], { env: base, encoding: "utf8" }).replace(/\n$/, "");
   const outer = (...a) => tmux("-L", "outer", ...a);
   // The tmux server of the pictures is a new one: this must find no server.
@@ -118,6 +120,8 @@ Object.defineProperty(document, "visibilityState", { get: () => "visible" });\n`
         width: Math.ceil(r.width + 2 * pad), height: Math.ceil(Math.min(r.height + 2 * pad, H)) };
     }
     await tidyPaths();  // again: a field the page filled after the box was measured
+    await js(`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    await sleep(100);
     const img = await win.webContents.capturePage(rect);
     fs.writeFileSync(path.join(out, name), img.toPNG());
     console.log("wrote", name, JSON.stringify(img.getSize()));
@@ -227,21 +231,23 @@ while True:
     await sleep(300);
     await shot(`needs-you-${theme}.png`, "#needsYouPanel", 8);
   }
-  // The Sessions tab: the ! dialog opens by itself for the prompt that waits in web-agent's terminal; then its
-  // chat, with a file it wrote open in the side panel.
-  const dlgOpen = () => until(`!document.querySelector("#waitDlg").classList.contains("hidden")`);
+  // The Sessions tab: the question panel (#sessAsk) opens above the message box for the prompt that waits in
+  // web-agent's terminal (#6438); then its chat, with a file it wrote open in the side panel.
+  const askOpen = () => until(`!document.querySelector("#sessAsk").classList.contains("hidden")`);
+  const closeAsk = () => js(`document.querySelector("#sessAskClose").click()`);
   await open("sessions/web-agent?as=alex");
-  if (!await dlgOpen()) {
+  if (!await askOpen()) {
     console.error(await js(`fetch("api/sessions").then(r => r.json()).then(j => JSON.stringify({ hidden: document.hidden, path: location.pathname,
       title: document.querySelector("#sessTitle").textContent, dialogs: [...document.querySelectorAll('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')].map(e => e.id),
+      askHidden: document.querySelector("#sessAsk").classList.contains("hidden"),
       sessions: j.sessions.map(s => [s.name, s.state, (s.waiting || []).map(w => w.kind + ":" + (w.sig || "").slice(0, 8))]) }))`));
-    throw new Error("the ! dialog did not open");
+    throw new Error("the session question panel did not open");
   }
   await sleep(400); await shot("sessions-prompt.png");
   const photos = path.join(cwd, "docs", "product-photos.md");
   for (const theme of ["light", "dark"]) {
     await open("sessions/web-agent?as=alex", theme);
-    await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+    await askOpen(); await closeAsk();
     await js(`import("/components/sidePanel.js").then(m => m.openInPanel(${JSON.stringify(photos)}))`);
     await until(`(document.querySelector("#spBody .sp-md") || {}).textContent > ""`);
     await sleep(600); await shot(`sessions-${theme}.png`);
@@ -249,7 +255,7 @@ while True:
   // The message box (#5112, #5107): a draft of its own for each session, and the microphone while it listens (the
   // Mac turns the speech into text). The draft is cleared after the picture, so no other picture shows it.
   await open("sessions/web-agent?as=alex");
-  await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+  await askOpen(); await closeAsk();
   const typeDraft = (text, on) => js(`(() => { const t = document.querySelector("#sessText"); t.value = ${JSON.stringify(text)};
     t.dispatchEvent(new Event("input", { bubbles: true }));
     const m = document.querySelector("#sessMic"); m.classList.remove("hidden"); m.classList.toggle("on", ${on});
@@ -259,7 +265,7 @@ while True:
   await typeDraft("", false);
   // A chat after a compaction (#5120): scrolled up, the 'Compacted' divider with the lines before it above.
   await open("sessions/api-agent?as=alex");
-  if (await until(`!document.querySelector("#waitDlg").classList.contains("hidden")`, 10)) await js(`document.querySelector("#waitDismiss").click()`);
+  if (await until(`!document.querySelector("#sessAsk").classList.contains("hidden")`, 10)) await closeAsk();
   await until(`!!document.querySelector("#sessCol .chat-div")`);
   await js(`(() => { const b = document.querySelector("#sessBody"); b.scrollTop = 0; b.dispatchEvent(new Event("scroll")); })()`);
   if (!await until(`!!document.querySelector('#sessCol .chat-div[data-kind="compacted"]') && /Start of the session/.test(document.querySelector("#sessCol").textContent)`))
@@ -273,7 +279,7 @@ while True:
   await shot("menu.png", ["#hdrMore", "#hdrMenu"], 0);  // the button and its card, not the page under it
   // The launch dialog that every Start opens: the agent, the model, the effort, the work; no 'Open in' (#5105).
   await open("sessions/web-agent?as=alex");
-  await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+  await askOpen(); await closeAsk();
   await js(`document.querySelector('#sessStart [data-launch]').click()`);
   if (!await until(`!!document.querySelector("#launchDlg:not(.hidden) .box")`)) throw new Error("no launch dialog");
   await sleep(400); await shot("launch.png", "#launchDlg .box", 0);
@@ -286,21 +292,21 @@ while True:
   await open("settings?as=alex"); await sleep(600); await shot("settings.png");  // the window: the tab is taller
   await open("plan/overview?as=alex"); await shot("parallel-work.png", "#plan-overview", 8);
   await open("plan/graph?as=alex"); await sleep(1500); await shot("graph.png", "#plan-graph", 8);
-  await open("plan/releases?as=alex"); await shot("release.png", "#plan-releases", 8);
+  await open("deploy?as=alex"); await shot("release.png", "#deploy-list", 8);
   await open("plan/goals?project=website&goal=checkout-launch&as=alex");
   await sleep(600); await shot("goals.png", "#plan-goals", 8);
   await js(`localStorage.removeItem("river.scope")`);  // the page remembers the scope: the pictures after this one show all work
 
-  // The tour: the You view; an agent's session on the Sessions tab, first with the ! dialog for its prompt, then its
-  // chat; an item, Artifacts, and Plan: Overview, Items, Goals, Graph, Releases, Done. Two frames each.
+  // The tour: the You view; an agent's session on the Sessions tab, first with the question panel for its prompt,
+  // then its chat; an item, Artifacts, and Plan: Overview, Items, Goals, Graph, Deploy, Done. Two frames each.
   for (const h of ["?as=alex", "sessions/web-agent?as=alex", "sessions/web-agent?as=alex&item=4", "artifacts?as=alex",
                    "plan/overview?as=alex", "plan/items?as=alex", "plan/goals?as=alex", "plan/graph?as=alex",
-                   "plan/releases?as=alex", "plan/done?as=alex"]) {
+                   "deploy?as=alex", "plan/done?as=alex"]) {
     await open(h); if (h.includes("graph")) await sleep(1500);
     if (h.startsWith("sessions")) {
-      if (!await dlgOpen()) throw new Error("the ! dialog did not open for the tour");
+      if (!await askOpen()) throw new Error("the session question panel did not open for the tour");
       await sleep(400); await frame(); await frame();
-      await js(`document.querySelector("#waitDismiss").click()`);
+      await closeAsk();
       await sleep(1500);
     }
     await frame(); await frame();
