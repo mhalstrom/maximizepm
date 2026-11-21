@@ -511,6 +511,48 @@ class LimitStopModelGroup(unittest.TestCase):
         t = core.launch_target(self.conn, item=it["id"], agent="Antigravity CLI", model="gemini-4-neon")
         self.assertEqual(t["platform"], "antigravity")
 
+    def test_explicit_antigravity_launch_uses_free_model_entry_or_items_own_opus(self):
+        # #6547: with agy_model=gemini-4-neon and a Gemini limit stop (weekly, 6 days away), launching with
+        # --agent 'Antigravity CLI' checked agy_model (Gemini) and refused even though agent_order had a free
+        # Claude Opus entry or the item had its own model opus.
+        core.config_set(self.conn, "launch_agents", "Claude Code=@claude-code; Antigravity CLI=@antigravity")
+        core.config_set(self.conn, "agy_model", "gemini-4-neon")
+        core.config_set(self.conn, "default_model", "opus")
+        core.record_agent_limit(self.conn, "antigravity", limited=True,
+                                resets_at=core.iso(self.t0 + timedelta(days=6)),
+                                reason="Individual quota reached.", source="limit_stop",
+                                session="agy-1", model="gemini-4-neon")
+        # 1. With agent_order listing Gemini (limited) then Claude Opus (free): --agent 'Antigravity CLI' picks
+        # the free Claude Opus entry instead of refusing on agy_model (Gemini).
+        core.config_set(self.conn, "agent_order",
+                        "antigravity model gemini-4-neon effort medium max 4, "
+                        "antigravity model claude-opus-5-5-medium max 2, claude-code")
+        plain = core.item_add(self.conn, "app", "Plain task")
+        t = core.launch_target(self.conn, item=plain["id"], agent="Antigravity CLI")
+        self.assertEqual((t["platform"], t["model"]), ("antigravity", "claude-opus-5-5-medium"))
+        self.assertIn("Gemini models: limit stop", t["fallback_why"])
+        # Explicit --model gemini-4-neon is still refused while Gemini is at its limit.
+        with self.assertRaises(core.RiverError) as ctx:
+            core.launch_target(self.conn, item=plain["id"], agent="Antigravity CLI", model="gemini-4-neon")
+        self.assertIn("Gemini models: limit stop", str(ctx.exception))
+        # 2. Item with its own model opus: matches the Claude entry even when Gemini is first in agent_order.
+        own_opus = core.item_add(self.conn, "app", "Opus task", models={"model": "opus"})
+        t2 = core.launch_target(self.conn, item=own_opus["id"], agent="Antigravity CLI")
+        self.assertEqual((t2["platform"], t2["model"]), ("antigravity", "claude-opus-5-5-medium"))
+        # 3. Without agent_order: an item's own model opus (or claude-opus-5-5-medium) resolves on Antigravity
+        # instead of falling back to agy_model (Gemini) and getting refused.
+        core.config_unset(self.conn, "agent_order")
+        t3 = core.launch_target(self.conn, item=own_opus["id"], agent="Antigravity CLI")
+        self.assertEqual(t3["platform"], "antigravity")
+        self.assertIn("claude-opus", t3["model"])
+        own_id = core.item_add(self.conn, "app", "Direct model task", models={"model": "claude-opus-5-5-medium"})
+        t4 = core.launch_target(self.conn, item=own_id["id"], agent="Antigravity CLI")
+        self.assertEqual((t4["platform"], t4["model"]), ("antigravity", "claude-opus-5-5-medium"))
+        # Without agent_order and with no own model on the item, agy would run agy_model (Gemini) -> refused.
+        with self.assertRaises(core.RiverError) as ctx2:
+            core.launch_target(self.conn, item=plain["id"], agent="Antigravity CLI")
+        self.assertIn("Gemini models: limit stop", str(ctx2.exception))
+
 
 class LimitStopHandbackAndRestart(unittest.TestCase):
     def setUp(self):
@@ -744,6 +786,83 @@ class UsageProbe(unittest.TestCase):
         # An agent the probe cannot read: the refusal says what to do.
         with self.assertRaises(core.RiverError):
             server.usage_read_now(self.conn, "goose")
+
+    def test_limit_stop_does_not_postpone_probe_and_probe_replaces_stale_stop(self):
+        # #6547: a session's limit_stop updates agent_limits.updated_at without reading /usage; usage_probes_due
+        # must check the last real reading's time so the scheduled probe still runs and replaces a stale stop
+        # (e.g. after a plan upgrade).
+        t0 = datetime(2026, 11, 21, 3, 0, 0, tzinfo=timezone.utc)
+        cur = [t0]
+        with mock.patch.object(core, "now", side_effect=lambda: cur[0]):
+            core.record_agent_limit(self.conn, "antigravity", limited=False, source="probe", windows=[
+                {"name": "Gemini models: weekly", "used_percent": 95.0, "remaining_percent": 5.0,
+                 "resets_at": core.iso(t0 + timedelta(days=6))}])
+            # 20m later: a session hits a weekly limit stop; updated_at moves to t0+20m.
+            cur[0] = t0 + timedelta(minutes=20)
+            core.record_agent_limit(self.conn, "antigravity", limited=True,
+                                    resets_at=core.iso(t0 + timedelta(days=6)),
+                                    reason="Individual quota reached.", source="limit_stop",
+                                    session="agy-1", model="gemini-4-neon")
+            # At t0+25m (5m after stop, 25m after probe): not due yet.
+            cur[0] = t0 + timedelta(minutes=25)
+            self.assertNotIn("antigravity", [a for a, _ in server.usage_probes_due(self.conn)])
+            # At t0+31m (11m after stop, 31m after last real probe): due! The limit_stop must not delay it.
+            cur[0] = t0 + timedelta(minutes=31)
+            self.assertIn("antigravity", [a for a, _ in server.usage_probes_due(self.conn)])
+            # Probe reads the upgraded plan's /usage and replaces the stale limit_stop row.
+            self.screens["antigravity"] = (self.AGY_IDLE, [
+                "└ Models & Quota", "GEMINI MODELS", "  Weekly Limit Remaining",
+                "    [██████████████████████████████████████████████████] 99.80%",
+                "    Refreshes in 167h 53m"])
+            got = server.probe_usage(self.conn)
+            self.assertIn("antigravity", got)
+            st = core.agent_limit_status(self.conn, "antigravity")
+            self.assertEqual(st["source"], "probe")
+            self.assertIsNone(core.agent_is_limited(self.conn, "antigravity", model="gemini-4-neon"))
+
+    def test_restart_waits_for_running_probe_and_orphaned_probe_panes_are_cleaned(self):
+        # #6547: restart_blocked waits while a probe runs, and orphaned panes in maxpm-usage (dead owner PID,
+        # stale untagged pane from a prior serve) are killed without touching another queue's or a live probe's pane.
+        import os
+        server.PROBE["running"], server.PROBE["now"] = True, "antigravity"
+        self.assertIn("antigravity", server.restart_blocked(self.conn))
+        server.PROBE["running"], server.PROBE["now"] = False, None
+        self.assertIsNone(server.restart_blocked(self.conn))
+
+        now_ts = int(core.now().timestamp())
+        db = server._queue_db()
+        panes = "\n".join([
+            f"%dead|999999|{db}|{now_ts - 10}|{now_ts - 10}",
+            f"%stale||{db}||{now_ts - server.PROBE_STALE_SEC - 5}",
+            f"%mine|{os.getpid()}|{db}|{now_ts - 5}|{now_ts - 5}",
+            f"%other|999999|/tmp/other-queue.db|{now_ts - 500}|{now_ts - 500}",
+            f"%live|424242|{db}|{now_ts - 5}|{now_ts - 5}",
+        ])
+        killed = []
+
+        def fake_tmux(args):
+            if args[0] == "has-session":
+                return ""
+            if args[0] == "list-panes":
+                return panes
+            if args[0] == "kill-pane":
+                killed.append(args[args.index("-t") + 1])
+                return ""
+            return ""
+
+        with mock.patch.object(server, "TMUX_RUNNER", fake_tmux), \
+             mock.patch.object(core, "pid_alive", side_effect=lambda p: p in (os.getpid(), 424242)):
+            closed = server._clean_probe_panes()
+        self.assertEqual(closed, ["%dead", "%stale", "%mine"])
+        self.assertEqual(killed, ["%dead", "%stale", "%mine"])
+
+    def test_start_probes_resets_running_if_connect_fails(self):
+        # #6547: an exception in core.connect() inside _start_probes must not leave PROBE['running'] stuck True.
+        with mock.patch.object(core, "connect", side_effect=RuntimeError("db locked")):
+            server._start_probes([("antigravity", Path(self.tmp.name))])
+        self.assertFalse(server.PROBE["running"])
+        self.assertIsNone(server.PROBE["now"])
+        self.assertIn("db locked", server.PROBE["error"]["antigravity"])
 
 
 class AgentUsagePanel(unittest.TestCase):

@@ -4380,28 +4380,57 @@ def pick_provider(conn, agent, project_id=None, explicit=False, slots=True, mode
         if explicit and held:
             raise RiverError(f"{held}: pick another agent, or start it again when Settings > Agents shows the update done")
         if explicit:
-            lim = agent_is_limited(conn, plat, model=model, project_id=project_id)
-            if lim:
-                raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
-                                 + (" or model" if lim.get("model") else "") + " or wait until it resets")
             # #6429: with no model named, the agent's entry in agent_order gives its model and effort, as when the
             # list picks the agent: two Dispatches of Codex ran gpt-6.2-sol (the list's pick) and GPT-6.1 Terra
             # (Codex was named, so Codex's own default ran).
-            # A model of another family (the item's opus on Codex) does not run there, so it counts as none.
+            # A model of another single-family ladder (the item's opus on Codex) does not run there, so it counts as
+            # none. On a multi-family agent (Antigravity), a ladder name (opus) matches its provider entry in
+            # agent_order, and with no model named an explicit --agent skips a limited model-group entry of the same
+            # agent for a free one (#6547).
+            ladder = parse_ladder(setting(conn, "model_ladder"))
             fam = platform_spec(plat).get("family")
-            mfam = _family(parse_ladder(setting(conn, "model_ladder")), model)[0] if model else None
-            none_named = not model or bool(fam and mfam and mfam != fam)
-            ent = _entry_for(conn, provs, aid, None) if none_named and provs and provs[0]["set"] else None
+            mfam, mpos = _family(ladder, model) if model else (None, None)
+            bare_ladder = bool(mfam and model and model.lower() == ladder[mfam][mpos].lower())
+            other_fam = bool(fam and fam in ladder and mfam and mfam != fam)
+            multi_ladder = bool(fam and fam not in ladder and bare_ladder)
+            mine = [p for p in provs if p["agent"] == aid] if provs and provs[0]["set"] else []
+            ent, note = None, None
+            if mine and (not model or other_fam):
+                avail = [p for p in mine if not p["limited"] and not p["refused"]
+                         and (not fits or not p["model"] or fits(p["model"], p["platform"]))]
+                ent = avail[0] if avail else mine[0]
+                if ent is not mine[0] and mine[0]["limited"]:
+                    why_lim = f" ({mine[0]['limit_reason']})" if mine[0].get("limit_reason") else ""
+                    note = (f"{mine[0]['name']}{why_lim} is at its usage limit"
+                            + (f" {mine[0]['until']}" if mine[0]["until"] else ""))
+            elif mine and multi_ladder:
+                key = _model_key(conn, model, ladder)
+                matched = [p for p in mine if key and _model_key(conn, p["run_model"], ladder) == key]
+                if matched:
+                    avail = [p for p in matched if not p["limited"] and not p["refused"]]
+                    ent = avail[0] if avail else matched[0]
+            check_model = (ent["run_model"] if ent else None) if (not model or other_fam or ent) else model
+            lim = agent_is_limited(conn, plat, model=check_model, project_id=project_id)
+            if lim:
+                raise RiverError(f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}; pick another agent"
+                                 + (" or model" if lim.get("model") else "") + " or wait until it resets")
             if ent and ent["model"]:
-                return {**none, "label": agent, "model": ent["model"], "effort": ent["effort"], "pos": ent["pos"]}
-            return {**none, "label": agent}
+                return {**none, "label": agent, "model": ent["model"], "effort": ent["effort"], "pos": ent["pos"],
+                        "note": note}
+            return {**none, "label": agent, "note": note}
+        ladder = parse_ladder(setting(conn, "model_ladder"))
+        fam = platform_spec(plat).get("family")
+        mfam, mpos = _family(ladder, model) if model else (None, None)
+        bare_ladder = bool(mfam and model and model.lower() == ladder[mfam][mpos].lower())
         skip = _entry_for(conn, provs, aid, model)
         run = model or (skip["run_model"] if skip else None)
         lim = agent_is_limited(conn, plat, model=run, project_id=project_id)
         full = slots and skip is not None and skip["full"]
         refused = skip["refused"] if skip is not None else None
         if not lim and not full and not refused and not held:
-            got = skip if skip is not None and not model else None
+            key_match = bool(skip is not None and fam and fam not in ladder and bare_ladder
+                             and _model_key(conn, skip["run_model"], ladder) == _model_key(conn, model, ladder))
+            got = skip if skip is not None and (not model or key_match) else None
             return {**none, "label": keep, **({"model": got["model"], "effort": got["effort"], "pos": got["pos"]}
                                               if got else {})}
         why = (held if held else f"{_limit_what(lim)} is at its usage limit{_until_text(lim)}" if lim
@@ -24480,7 +24509,14 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         # No model named: the item's own (#4961), else the default_model setting (#5346: the manager launched seven
         # items with default_model opus and each pane ran Sonnet, the CLI's own default), of the agent's family, so
         # the session declares it (MAXPM_MODEL) and its limits hold. With neither, the agent's own default runs.
-        model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None)
+        plat_fam = platform_spec(plat)["family"] if plat else None
+        model, model_why = session_model(conn, _item(conn, top["id"]), plat_fam)
+        if not model and own_model and plat and plat_fam and plat_fam not in ladder:
+            # #6547: an item's own model on a multi-family agent (Antigravity: claude-opus-5-5-medium, or ladder name
+            # opus mapped to the agent's Claude Opus model) must not drop to the agent's default (Gemini).
+            resolved = _multi_model_for(conn, plat, own_model, p["id"], ladder)
+            if resolved:
+                model, model_why = resolved, f"#{top['id']}'s own model"
     for m in {model, model_id(conn, plat, model, p["id"])} - {None, ""}:  # the name and the id the CLI gets (#5961)
         old = model_too_old(conn, m, p["id"])
         if old:
@@ -24539,6 +24575,23 @@ def keep_dispatched_agent(conn, item_id, label, project_id=None, actor=None):
             return None
         _event(conn, item_id, actor or "maxpm", f"started on {label}: a fresh session for it starts on {label} too")
     return plat
+
+
+def _multi_model_for(conn, plat, own_model, project_id, ladder):
+    """Resolve an item's own model for a multi-family agent (family not in model_ladder, #6547): a model mapped by
+    model_ids or already a full model id (e.g. claude-opus-5-5-medium) stays as-is; a bare ladder name (opus) matches
+    the first listed model of the agent whose name carries both its family and name (claude-opus-5-5), else None."""
+    if model_id(conn, plat, own_model, project_id) != own_model:
+        return own_model
+    own_fam, pos = _family(ladder, own_model)
+    if own_fam is None or own_model.lower() != ladder[own_fam][pos].lower():
+        return own_model
+    want = {own_fam.lower(), own_model.lower()}
+    for r in platform_models(conn, plat, project_id):
+        words = set(re.findall(r"[a-z0-9]+", str(r.get("name") or "").lower()))
+        if want <= words:
+            return r["name"]
+    return None
 
 
 def launch_entries(conn, project_id=None):

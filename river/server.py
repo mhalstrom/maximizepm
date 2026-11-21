@@ -1521,6 +1521,10 @@ def auto_tidy(conn):
     if TMUX_RUNNER is None and not _tmux_cmd():
         return []
     try:
+        _clean_probe_panes()
+    except RiverError:
+        pass
+    try:
         if _tmux("has-session", "-t", "=" + TMUX_SESSION, check=False) is None:
             TIDY.update(at=t, screens={})  # no agent runs in tmux
             return []
@@ -1791,6 +1795,8 @@ def restart_blocked(conn):
         return f"{HOOKS['running']} hook(s) of this process run"
     if OPS_RUNNING:
         return f"{len(OPS_RUNNING)} operations check(s) run"
+    if PROBE["running"]:
+        return f"reading the usage of {PROBE['now'] or 'an agent'}"
     from .pipeline import runner as pipeline_runner
     stages = pipeline_runner.running_text()  # #6114: a restart would end the stage's command
     if stages:
@@ -3390,9 +3396,52 @@ PROBE_SESSION = "maxpm-usage"  # the tmux session of the probe panes: not the ma
 PROBE = {"running": False, "at": {}, "now": None, "error": {}}
 PROBE_START_MAX = 60  # seconds for the agent's input line to show
 PROBE_READ_MAX = 30  # seconds for its usage screen to show the limits
+PROBE_STALE_SEC = PROBE_START_MAX + PROBE_READ_MAX + 60  # untagged probe pane older than this is an orphan (#6547)
 PROBE_POLL = 1.0  # seconds between two looks at the pane (tests: 0)
 PROBE_SYNC = False  # tests: run the probes in the pass, not in a thread
 PROBE_EXE = None  # tests: a function (exe) -> whether the agent CLI is installed
+
+
+def _last_usage_read_at(st):
+    """When an agent's usage windows were last read (probe, screen, log or chat), or None (#6547): a limit_stop
+    overwrites agent_limits.updated_at without reading /usage, so its time must not postpone the next probe."""
+    if not st:
+        return None
+    if st.get("source") != "limit_stop":
+        return st.get("updated_at")
+    dated = [w.get("read_at") for w in (st.get("windows") or ())
+             if not (w.get("name") or "").endswith(core._STOP_SUFFIX) and w.get("read_at")]
+    return max(dated) if dated else None
+
+
+def _clean_probe_panes():
+    """Close orphaned panes in PROBE_SESSION (#6547): a serve restart during a probe killed the daemon thread before
+    finally, leaving usage-antigravity open in maxpm-usage. Cleans only this queue's panes (_own_pane), and never a
+    pane whose owner process still runs a recent probe."""
+    if _tmux("has-session", "-t", "=" + PROBE_SESSION, check=False) is None:
+        return []
+    out = _tmux("list-panes", "-s", "-t", "=" + PROBE_SESSION,
+                "-F", "#{pane_id}|#{@maxpm_probe_pid}|#{@maxpm_db}|#{@maxpm_started}|#{window_activity}", check=False)
+    if not out:
+        return []
+    closed, now_ts, me = [], core.now().timestamp(), os.getpid()
+    for line in out.splitlines():
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+        pane, pid_s, db, started_s, act_s = parts
+        if not _own_pane({"db": db or None}):
+            continue
+        ts_s = started_s if started_s.isdigit() else act_s
+        stale = ts_s.isdigit() and (now_ts - int(ts_s)) >= PROBE_STALE_SEC
+        if pid_s.isdigit():
+            pid = int(pid_s)
+            orphan = (pid == me and not PROBE["running"]) or not core.pid_alive(pid) or stale
+        else:
+            orphan = stale
+        if orphan and _tmux("kill-pane", "-t", pane, check=False) is not None:
+            closed.append(pane)
+    return closed
 
 
 def _probe_exe(exe):
@@ -3430,8 +3479,9 @@ def usage_probes_due(conn, every=None):
         if last and t - last < every:
             continue
         st = core.agent_limit_status(conn, aid)
+        read_at = _last_usage_read_at(st)
         try:
-            if st and st.get("updated_at") and t - core.parse_iso(st["updated_at"]) < every:
+            if read_at and t - core.parse_iso(read_at) < every:
                 continue
         except (ValueError, TypeError):
             pass
@@ -3452,6 +3502,10 @@ def probe_usage(conn):
         return []
     if TMUX_RUNNER is None and not _tmux_cmd():
         return []
+    try:
+        _clean_probe_panes()
+    except RiverError:
+        pass
     if core.net_down(conn):  # offline: the usage screen cannot load
         return []
     due = usage_probes_due(conn, every)
@@ -3469,8 +3523,9 @@ def _start_probes(due):
     PROBE["running"], PROBE["now"] = True, due[0][0]
 
     def run():
-        c = core.connect()
+        c = None
         try:
+            c = core.connect()
             for aid, folder in due:
                 PROBE["now"] = aid
                 try:
@@ -3482,8 +3537,12 @@ def _start_probes(due):
                     print(f"maxpm serve: usage of {aid}: {got['error']}", file=sys.stderr, flush=True)
                 else:
                     PROBE["error"].pop(aid, None)
+        except Exception as e:  # noqa: BLE001 - never leave PROBE['running'] stuck True
+            PROBE["error"][PROBE["now"] or due[0][0]] = f"{type(e).__name__}: {e}"
+            print(f"maxpm serve: usage probe: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
-            c.close()
+            if c is not None:
+                c.close()
             PROBE["running"], PROBE["now"] = False, None
 
     if PROBE_SYNC:
@@ -3569,6 +3628,9 @@ def probe_one(conn, aid, folder):
     if not pane:
         return {"error": "tmux opened no pane"}
     try:
+        _tmux("set-option", "-p", "-t", pane, "@maxpm_db", _queue_db(), check=False)
+        _tmux("set-option", "-p", "-t", pane, "@maxpm_probe_pid", str(os.getpid()), check=False)
+        _tmux("set-option", "-p", "-t", pane, "@maxpm_started", str(int(core.now().timestamp())), check=False)
         _tmux("send-keys", "-t", pane, "-l", line)
         _tmux("send-keys", "-t", pane, "Enter")
         end = time.monotonic() + PROBE_START_MAX
