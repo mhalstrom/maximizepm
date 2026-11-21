@@ -41,6 +41,9 @@ os.environ["CODEX_HOME"] = os.path.join(_queue_dir, "codex")
 
 from river import core, dictation, server  # noqa: E402
 
+# #6635: a start refuses on a low disk; a test run must not depend on the free space of the computer that runs it.
+core.DEFAULT_SETTINGS["disk_launch_min"] = "off"
+
 
 # #6430: a pass of maxpm serve reads the agent CLIs' versions (river/agentupdate.py). In a test it finds no agent
 # program and asks no registry (a full run asked x.ai and formulae.brew.sh), unless the test sets the fakes itself.

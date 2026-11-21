@@ -152,6 +152,28 @@ def _save(conn, m):
                      (META, json.dumps(m)))
 
 
+def sweep_item_targets(conn, dry_run=False):
+    """Remove the build folders of closed items (#6635): <project folder>/target/<item id> of an item that is done or
+    dropped, in every project folder. On 2026-11-21 the disk reached 0.3 GB free with 14 builds of finished items.
+    Only a folder named by an item id of this queue goes, and the walk follows no link. Returns [(path, bytes)]."""
+    from .space import tree_bytes
+    out = []
+    for r in conn.execute("SELECT path FROM projects WHERE path IS NOT NULL AND path != ''"):
+        base = Path(os.path.expanduser(r["path"])) / "target"
+        try:
+            kids = [d for d in base.iterdir() if d.name.isdigit() and d.is_dir() and not d.is_symlink()]
+        except OSError:
+            continue
+        for d in kids:
+            it = conn.execute("SELECT status FROM items WHERE id=?", (int(d.name),)).fetchone()
+            if it is None or it["status"] not in core.CLOSED_STATES:
+                continue
+            out.append((str(d), tree_bytes(d)))
+            if not dry_run:
+                shutil.rmtree(d, ignore_errors=True)
+    return out
+
+
 def _inside(p, root):
     return str(p.resolve()).startswith(str(root.resolve()) + os.sep)
 

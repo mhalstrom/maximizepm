@@ -99,6 +99,32 @@ class DiskGuard(unittest.TestCase):
         self.assertEqual(self.ran, [])
         self.assertIn("maxpm config set disk_sweep_cmd", self.alerts()[-1])
 
+    def test_the_sweep_removes_target_folders_of_closed_items_only(self):
+        folder = self.root / "proj"
+        core.project_add(self.c, "proj", actor="mark")
+        core.project_path(self.c, "proj", str(folder))
+        done = core.item_add(self.c, "proj", "old build", actor="mark")["id"]
+        core.drop(self.c, done, "mark", note="x")
+        live = core.item_add(self.c, "proj", "live build", actor="mark")["id"]
+        for name in (str(done), str(live), "debug", "99999"):
+            (folder / "target" / name).mkdir(parents=True)
+            (folder / "target" / name / "f").write_text("x")
+        self.free[0] = 10 * GB
+        diskguard.serve_pass(self.c, wait=True)
+        self.assertFalse((folder / "target" / str(done)).exists())
+        for name in (str(live), "debug", "99999"):
+            self.assertTrue((folder / "target" / name).exists())
+
+    def test_a_start_is_refused_below_disk_launch_min(self):
+        core.config_set(self.c, "disk_launch_min", "10GB")
+        self.free[0] = 5 * GB
+        self.assertIn("disk_launch_min", core.disk_refusal(self.c))
+        self.free[0] = 15 * GB
+        self.assertIsNone(core.disk_refusal(self.c))
+        core.config_set(self.c, "disk_launch_min", "off")
+        self.free[0] = 1 * GB
+        self.assertIsNone(core.disk_refusal(self.c))
+
     def test_off_turns_the_guard_off_and_a_bad_size_is_refused(self):
         core.config_set(self.c, "disk_warn_free", "off")
         core.config_set(self.c, "disk_sweep_free", "off")

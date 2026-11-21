@@ -134,11 +134,16 @@ def sweep(conn, before, cmd):
     from . import scratch
     from .space import show_size
     scratch.sweep(conn)
+    gone = scratch.sweep_item_targets(conn)
+    if gone:
+        print(f"disk: removed {len(gone)} build folders of closed items ({show_size(sum(b for _, b in gone))})",
+              flush=True)
+    before = free_bytes(conn) if gone else before
     if not cmd:
         after = free_bytes(conn)
         body = (f"Disk: {show_size(after)} free on the disk of the queue, below disk_sweep_free. maxpm serve removed "
-                f"the build folders of ended sessions; nothing else is set to go. Free build output and caches, and "
-                f"set the command that does it: maxpm config set disk_sweep_cmd '<command>'")
+                f"the build folders of ended sessions and of closed items. To free more (caches, other build output), "
+                f"set a command: maxpm config set disk_sweep_cmd '<command>'")
     else:
         rc, out = _shell(cmd)
         after = free_bytes(conn)

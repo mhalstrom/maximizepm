@@ -504,6 +504,9 @@ DEFAULT_SETTINGS = {
     "disk_warn_free": "30GB",
     "disk_sweep_free": "20GB",
     "disk_sweep_cmd": "",
+    # disk_launch_min (#6635): below this free space no new session starts (launch is refused); off turns it off.
+    # The sweep at disk_sweep_free also removes target/<id> of each done or dropped item in every project folder.
+    "disk_launch_min": "10GB",
     "tmp_max_size": "2GB",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
@@ -3303,7 +3306,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size", "disk_warn_free", "disk_sweep_free",
-                 "tmp_max_size"):
+                 "disk_launch_min", "tmp_max_size"):
         from . import space
         space.parse_size(value)
     elif key == "fresh_min":
@@ -15563,6 +15566,20 @@ def pause_refusal(conn):
             + ": no new session starts. To start again: maxpm resume")
 
 
+def disk_refusal(conn):
+    """Why a new session may not start: the disk of the queue has less than disk_launch_min free (#6635), or None."""
+    from . import diskguard
+    from .space import parse_size, show_size
+    low = parse_size(setting(conn, "disk_launch_min"))
+    if low is None:
+        return None
+    free = diskguard.free_bytes(conn)
+    if free >= low:
+        return None
+    return (f"refused: {show_size(free)} free on the disk of the queue, below disk_launch_min ({show_size(low)}): "
+            f"no new session starts. Free build output; maxpm serve sweeps at disk_sweep_free")
+
+
 def pause_status(conn):
     """The pause and what the working sessions still hold: {"paused", ..., "held": [{agent, holds}], "clear"}."""
     p = paused(conn) or {}
@@ -24476,7 +24493,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     session gets it. prompt: maxpm launch --prompt, after the profile's first prompt. folder: the folder the person
     picked for a project with none (start_folder). preview (the page's Next line): the item and project only, also
     for a project with no folder yet."""
-    why = None if preview else (pause_refusal(conn) or net_refusal(conn))  # #5962: maxpm pause holds every new session
+    why = None if preview else (pause_refusal(conn) or net_refusal(conn) or disk_refusal(conn))  # #5962: maxpm pause holds every new session
     if why:
         raise RiverError(why)
     ann = annotate(conn, closed=False)
