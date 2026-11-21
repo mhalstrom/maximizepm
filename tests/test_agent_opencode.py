@@ -14,7 +14,6 @@ from unittest import mock
 
 from river import agents, core, sessions
 from river.agents import opencode
-from tests import timing
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "opencode"
 SESSION_ID = "ses_e366d1e13ffe0SgSDgPP6MNKXx"
@@ -82,51 +81,71 @@ class Describe(Env):
             return "opencode/big-pickle\nopencode/glm-5.3-flash-free\nopenrouter/meta/muse-spark-1.3-contributor\n" \
                    "a warning line\n"
 
-        mock.patch.object(opencode, "MODELS_RUNNER", runner).start()
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
+        mock.patch.object(opencode.MODELS, "runner", runner).start()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        opencode.MODELS.refresh()
+        opencode.MODELS.wait()
         got = self.a.read_models()
         self.assertEqual(got, ["opencode/big-pickle", "opencode/glm-5.3-flash-free",
                                "openrouter/meta/muse-spark-1.3-contributor"])
+        opencode.MODELS.refresh()  # within ten minutes: no second read
+        opencode.MODELS.wait()
         self.assertEqual(self.a.read_models(), got)
         self.assertEqual(len(calls), 1)
 
-    @timing.local_only("wall-clock latency and background thread timing")
-    def test_a_page_build_never_waits_for_the_cli_and_an_old_list_stands_while_a_thread_reads(self):
-        # #5638: `opencode models` took 470 ms of the page's build once in ten minutes.
-        import threading
-        go, calls = threading.Event(), []
+    def test_a_page_build_and_command_start_no_cli_and_read_the_list_serve_kept(self):
+        # #6512: only maxpm serve (notify.refresh_cli_lists) starts `opencode models --standalone`, in a thread, and
+        # keeps its list in cli-lists/opencode.json; a page build or command starts nothing and reads that file.
+        from river import notify, server
+        calls = []
 
         def runner():
             calls.append(1)
-            go.wait(5)
             return f"opencode/model-{len(calls)}\n"
-        mock.patch.object(opencode, "MODELS_RUNNER", runner).start()
+
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
+        mock.patch.object(opencode.MODELS, "runner", runner).start()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None, "reader": None}).start()
-        token = core.BUILD_MEMO.set({})
-        try:
-            t = time.monotonic()
-            self.assertIsNone(opencode.read_models())  # no list yet: the build goes on with the described models
-            self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
-            self.assertLess(time.monotonic() - t, timing.limit(1, below=5))  # the runner waits 5 s
-        finally:
-            core.BUILD_MEMO.reset(token)
-        go.set()
-        self.assertEqual(opencode.read_models(), ["opencode/model-1"])  # a command waits for the read
-        self.assertEqual(len(calls), 1)  # one read at a time
-        opencode._models["at"] = 0.0  # ten minutes later: the old list, and a thread reads the new one
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        server.page_state(False)
+        self.assertIsNone(opencode.MODELS.state["reader"])
+        self.assertEqual(calls, [])
+        self.assertIsNone(opencode.read_models())  # no list yet: DESCRIBE['models'] stand
+        self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
+        notify.refresh_cli_lists(conn)  # not maxpm serve: nothing
+        self.assertEqual(calls, [])
+        mock.patch.dict(notify.SERVE_PORT, {"port": 7777}).start()
+        notify.refresh_cli_lists(conn)
+        opencode.MODELS.wait()
         self.assertEqual(opencode.read_models(), ["opencode/model-1"])
-        reader = opencode._models["reader"]  # None when it is done already
-        if reader is not None:
-            reader.join(5)
+        self.assertEqual(calls, [1])
+        notify.refresh_cli_lists(conn)  # within ten minutes: no second read
+        opencode.MODELS.wait()
+        self.assertEqual(calls, [1])
+        # Another process reads serve's cache file and starts no CLI.
+        other = agents.CliList(["opencode", "models", "--standalone"], opencode.parse_models)
+        agents.CliList.ALL.remove(other)
+        other.runner = lambda: calls.append(2) or ""
+        self.assertEqual(other.get(), ["opencode/model-1"])
+        self.assertIsNone(other.state["reader"])
+        self.assertEqual(calls, [1])
+        # Ten minutes later, serve refreshes in a thread and updates the list.
+        opencode.MODELS.state["at"] = 0.0
+        notify.refresh_cli_lists(conn)
+        opencode.MODELS.wait()
         self.assertEqual(opencode.read_models(), ["opencode/model-2"])
 
     def test_the_tests_never_run_the_installed_opencode(self):
         # #5286: core.platform_models (the launch dialog, a launch) calls read_models; tests/__init__.py fakes it.
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
-        self.addCleanup(mock.patch.stopall)
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
         with mock.patch("subprocess.run", side_effect=AssertionError("ran a CLI")):
+            opencode.MODELS.refresh()
+            opencode.MODELS.wait()
             self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
 
     def test_a_running_session_s_settings_dialog_offers_both_toggles(self):
@@ -136,9 +155,12 @@ class Describe(Env):
         self.assertEqual((got["auto"]["restart"], got["auto"]["choices"]), ("opt", ["on", "off"]))
 
     def test_with_no_cli_answer_the_described_models_stand(self):
-        mock.patch.object(opencode, "MODELS_RUNNER", lambda: "").start()
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
+        mock.patch.object(opencode.MODELS, "runner", lambda: "").start()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        opencode.MODELS.refresh()
+        opencode.MODELS.wait()
         self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
 
     def test_the_launch_dialog_gets_the_described_models_first_and_finds_the_rest_by_typing(self):
@@ -146,9 +168,12 @@ class Describe(Env):
         picks = opencode.DESCRIBE["models"]
         others = [f"openrouter/vendor/model-{n}" for n in range(60)]
         cli = others[:30] + [picks[1]] + others[30:]  # the CLI knows a pick too, in its own place
-        mock.patch.object(opencode, "MODELS_RUNNER", lambda: "\n".join(cli) + "\n").start()
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
+        mock.patch.object(opencode.MODELS, "runner", lambda: "\n".join(cli) + "\n").start()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        opencode.MODELS.refresh()
+        opencode.MODELS.wait()
         conn = core.connect()
         self.addCleanup(conn.close)
         ms = core.platform_models(conn, "opencode")
@@ -180,9 +205,12 @@ class Describe(Env):
         # #5242: the Model row of a running OpenCode session lists the same picks first, as the launch dialog does.
         picks = opencode.DESCRIBE["models"]
         others = [f"openrouter/vendor/model-{n}" for n in range(60)]
-        mock.patch.object(opencode, "MODELS_RUNNER", lambda: "\n".join(others) + "\n").start()
+        opencode.MODELS.reset()
+        self.addCleanup(opencode.MODELS.reset)
+        mock.patch.object(opencode.MODELS, "runner", lambda: "\n".join(others) + "\n").start()
         self.addCleanup(mock.patch.stopall)
-        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        opencode.MODELS.refresh()
+        opencode.MODELS.wait()
         conn = core.connect()
         self.addCleanup(conn.close)
         core.register(conn, "oc1")

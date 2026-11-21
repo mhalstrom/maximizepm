@@ -36,12 +36,10 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
-import threading
 import time
 from pathlib import Path
 
-from . import Raw
+from . import CliList, Raw
 
 DESCRIBE = {
     "id": "opencode",
@@ -230,46 +228,21 @@ def _own_dir():
 # 1. Describe: the models of the installed CLI
 # ---------------------------------------------------------------------------------------------------------------
 
-MODELS_RUNNER = None  # a test hook: a function () -> the text of `opencode models`
-_models = {"at": 0.0, "list": None, "reader": None}
-_models_lock = threading.Lock()
+def parse_models(text):
+    """The "provider/model" ids that `opencode models --standalone` prints (the providers a person connected, and
+    OpenCode's free ones); skips warnings and blank lines."""
+    return [ln.strip() for ln in (text or "").splitlines() if re.fullmatch(r"[\w.-]+/\S+", ln.strip())]
+
+
+# `opencode models --standalone`, read by maxpm serve in a thread at most once in ten minutes (agents.CliList); until
+# serve's first read ends, and when it gives nothing, DESCRIBE['models'] stand (#6512). MODELS.runner: a test hook.
+MODELS = CliList(["opencode", "models", "--standalone"], parse_models)
 
 
 def read_models():
-    """The "provider/model" ids that `opencode models --standalone` lists (the providers a person connected, and
-    OpenCode's free ones), read at most once in ten minutes; None when the CLI does not answer. A CLI that gave no list
-    is asked again only after the ten minutes too, and one read at a time (#5428: the page's state reads it, and
-    each read starts the CLI for seconds). A thread reads it, and until it is done the caller gets the list read
-    before: the read took 470 ms of the page's build once in ten minutes (#5638). With no list yet, a command waits
-    for the read; a page state build (core.BUILD_MEMO) does not, and has OpenCode's described models meanwhile."""
-    from ..core import BUILD_MEMO
-    with _models_lock:
-        got, reader = _models["list"], _models.get("reader")
-        if got is not None and time.time() - _models["at"] < 600:
-            return list(got) or None
-        if reader is None:
-            reader = _models["reader"] = threading.Thread(target=_read_models, daemon=True, name="opencode-models")
-            reader.start()
-    if got is None and BUILD_MEMO.get() is None:
-        reader.join()
-        got = _models["list"]
-    return list(got or []) or None
-
-
-def _read_models():
-    got = []
-    try:
-        if MODELS_RUNNER:
-            out = MODELS_RUNNER()
-        else:
-            out = subprocess.run(["opencode", "models", "--standalone"], capture_output=True, text=True,
-                                 timeout=60).stdout
-        got = [ln.strip() for ln in (out or "").splitlines() if re.fullmatch(r"[\w.-]+/\S+", ln.strip())]
-    except (OSError, subprocess.SubprocessError):
-        pass
-    finally:
-        with _models_lock:
-            _models.update(at=time.time(), list=got, reader=None)
+    """The "provider/model" ids that `opencode models --standalone` lists, from maxpm serve's cache (agents.CliList);
+    None before the first read or when the CLI gave no list."""
+    return MODELS.get() or None
 
 
 # ---------------------------------------------------------------------------------------------------------------

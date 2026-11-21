@@ -169,7 +169,7 @@ server.DELIVER_RUNNER = lambda agent: None  # no thread types a held message (#5
 server.PANE_PROCESS_FIND = lambda agent, process: (None, None)  # the pane watcher reads no real ps (#5907)
 server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests the shared build (#5428)
 from river.agents import opencode as opencode_adapter  # noqa: E402
-opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
+opencode_adapter.MODELS.runner = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
 from river.agents import antigravity as agy_adapter  # noqa: E402
 agy_adapter.MODELS.runner = lambda: ""  # never the installed agy (agy models): MODELS_SEEN stands (#6256)
 from river.agents import cursor as cursor_adapter  # noqa: E402

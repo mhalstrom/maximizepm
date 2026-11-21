@@ -158,7 +158,8 @@ def _version_of(m):
 
 
 class CliList:
-    """A list that a CLI prints (`agy models`, `cursor-agent models`, `pi --list-models`; #6257). Only maxpm serve
+    """A list that a CLI prints (`agy models`, `cursor-agent models`, `opencode models --standalone`, `pi --list-models`;
+    #6257, #6512). Only maxpm serve
     starts the CLI: each pass of its loop calls refresh_lists(), which reads a list older than `ttl` seconds in a
     thread and keeps it in a file beside the queue (cli-lists/<exe>.json). get() starts nothing (#6510: a page build
     in a fresh process started `cursor-agent models`, which asks api2.cursor.sh over the network; p147: a page build
@@ -245,8 +246,6 @@ class CliList:
             pass
         finally:
             at = time.time()
-            with self.lock:
-                self.state.update(at=at, list=got or list(self.fallback), reader=None)
             if got:
                 try:
                     p = self.path()
@@ -256,6 +255,8 @@ class CliList:
                     os.replace(tmp, p)
                 except (OSError, TypeError, ValueError):
                     pass
+            with self.lock:
+                self.state.update(at=at, list=got or list(self.fallback), reader=None)
 
 
 def refresh_lists(conn=None):
