@@ -893,9 +893,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   any Monitoring Plugins script. When a check keeps failing, MaximizePM opens
   one task with the evidence, sorts it by kind (a vendor outage, a full disk,
   a bad release, a bug), and starts a fresh agent session to find the cause
-  and prove it. A check marked `page` reaches your phone only when the fault
-  doesn't heal and nobody picked it up within 15 minutes; `ops_page` changes
-  that for a project. A watchdog keeps checking while `maxpm serve` is down.
+  and prove it. A watchdog keeps checking while `maxpm serve` is down.
   `maxpm ops profile export` saves a project's checks as one file you can keep
   in its repository. Agents read `maxpm guide ops`.
 - Review before release (`maxpm config set review on`): each release gets one
