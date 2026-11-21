@@ -6704,6 +6704,8 @@ OPS = {
     "accept": lambda c, a, who: core.accept(c, a["id"], who),
     "decline": lambda c, a, who: core.decline(c, a["id"], a.get("note"), who),
     "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who, choice=a.get("choice")),
+    "item_reply": lambda c, a, who: core.item_reply(c, a["id"], a.get("body"), who, choice=a.get("choice"),
+                                                    postpone=bool(a.get("postpone")), until=a.get("until")),
     "release": lambda c, a, who: core.release(c, a["id"], a.get("note"), who),
     "drop": lambda c, a, who: core.drop(c, a["id"], who),
     "reopen": lambda c, a, who: core.reopen(c, a["id"], who),

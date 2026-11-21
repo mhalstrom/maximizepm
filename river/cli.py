@@ -497,6 +497,9 @@ def _print_show(a):
         print(f"  ship requested: joins deploy item #{a['shipped_in']}")
         if (a.get("ship_release") or {}).get("text") or (a.get("ship_release") or {}).get("in_cut"):
             print(f"  {_ship_line(a['ship_release'])}")
+    if a.get("kept_open"):
+        print("  kept open (postponed; items waiting on it did not become ready)"
+              if a.get("postponed") else "  kept open (reply saved; items waiting on it did not become ready)")
     if a.get("now_ready"):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):

@@ -42,7 +42,22 @@ class AskCard(unittest.TestCase):
         self.assertIn(">P1<", html)
         self.assertIn("In the drawer", html)
         self.assertIn(">Done<", html)
+        self.assertIn('data-wlater="1"', html)
         self.assertNotIn("data-opt", html)  # no decision form, no option buttons
+
+    def test_forwarded_person_item_card_has_later_and_keep_open_buttons(self):
+        # #6526: a forwarded person item card always lets the person postpone (Later) or reply without closing.
+        q_only = run("m.cardHtml(m.fromItem({id: 10, title: 'Apple activates membership', type: 'do', "
+                     "decision: {question: 'Upload your ID, then reply here.', options: []}}))")
+        self.assertIn('data-wlater="1"', q_only)
+        self.assertIn('data-wreply="1"', q_only)
+        self.assertIn(">Mark done<", q_only)
+        with_opts = run("m.cardHtml(m.fromItem({id: 11, title: 'Decide page source', type: 'decide', "
+                        "decision: {question: 'Which source?', options: [{label: 'A', detail: 'live', recommended: true}, "
+                        "{label: 'Later', detail: 'postpone', recommended: false}]}}))")
+        self.assertIn('data-wlater="1"', with_opts)
+        self.assertIn('data-wreply="1"', with_opts)
+        self.assertIn(">Submit<", with_opts)
 
     def test_a_look_card_of_tries_shows_them_side_by_side(self):
         # #5996: each try with what its session said to look at; a button keeps a done try.

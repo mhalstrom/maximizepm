@@ -230,8 +230,9 @@ $("#waitList").addEventListener("submit", async (e) => {
       if (!actor()) { toast("Choose your name in 'You are' first", true); return; }
       const out = form.querySelector(".wanswer").value.trim();
       if (!out && !choice && form.querySelector(".acard-choice")) { toast("Pick an option or write your answer", true); return; }
-      await act("done", { id: +form.dataset.id, output: out || undefined, choice });
-      toast(`#${form.dataset.id} is done` + (choice ? `: ${choice}` : ""));
+      const r = await act("done", { id: +form.dataset.id, output: out || undefined, choice });
+      if (r && r.kept_open) toast(`#${form.dataset.id} postponed (kept open)` + (choice ? `: ${choice}` : ""));
+      else toast(`#${form.dataset.id} is done` + (choice ? `: ${choice}` : ""));
     } else if (form.dataset.kind === "ask") {  // the CLI's question dialog (#6234)
       const text = (form.querySelector(".wother") || {}).value || "";
       const own = form.querySelector('input[value="text"]');
@@ -299,6 +300,31 @@ $("#waitList").addEventListener("click", async (e) => {
     try {
       const r = await act("release_changes", { item: +form.dataset.id, note });
       toast(`Changes asked: fix #${r.fix}; the review runs again`);
+      done(form);
+    } catch (err) { /* act showed it */ }
+    return;
+  }
+  const later = e.target.closest("[data-wlater]");
+  if (later) {  // postpone a person item: keep it open and blocked (#6526)
+    if (!actor()) { toast("Choose your name in 'You are' first", true); return; }
+    const form = later.closest("form"), out = form.querySelector(".wanswer").value.trim();
+    try {
+      await act("item_reply", { id: +form.dataset.id, body: out || undefined, postpone: true });
+      toast(`#${form.dataset.id} postponed (kept open)`);
+      done(form);
+    } catch (err) { /* act showed it */ }
+    return;
+  }
+  const reply = e.target.closest("[data-wreply]");
+  if (reply) {  // reply on a person item without closing it (#6526)
+    if (!actor()) { toast("Choose your name in 'You are' first", true); return; }
+    const form = reply.closest("form"), out = form.querySelector(".wanswer").value.trim();
+    const picked = form.querySelector(".acard-choice input:checked");
+    const choice = picked ? picked.value : undefined;
+    if (!out && !choice) { toast("Write your reply first", true); form.querySelector(".wanswer").focus(); return; }
+    try {
+      await act("item_reply", { id: +form.dataset.id, body: out || undefined, choice, postpone: false });
+      toast(`Reply saved on #${form.dataset.id} (kept open)`);
       done(form);
     } catch (err) { /* act showed it */ }
     return;

@@ -7621,6 +7621,72 @@ class NeedsYouDialog(Base):
         core.done(self.c, j, None, actor="mark", choice="Blue")
         self.assertEqual(self.notices("boss") + self.notices(), [])
 
+    def test_later_choice_on_person_item_keeps_it_open_and_postponed(self):
+        # #6526: picking 'Later' on a forwarded person item card must not close the item as done
+        # or make items that wait on it ready.
+        i = core.item_add(self.c, "a", "Create Google OAuth client", doer="human", actor="mark")["id"]
+        child = self.add("a", "Wire Google client id")
+        core.dep_add(self.c, child, [i], "w1")
+        self.as_session("you-1")
+        core.forward(self.c, item=i, actor="mark",
+                     options=["Agent does it: run setup", "I do it: do it now", "Later: postpone"],
+                     recommend="Agent does it", question="Do Google setup now?")
+        core.TOKEN_AGENT.set(None)
+        r = core.done(self.c, i, "after workflows", actor="mark", choice="Later")
+        self.assertTrue(r["kept_open"])
+        self.assertTrue(r["postponed"])
+        self.assertEqual(r["status"], "open")
+        self.assertEqual(r["now_ready"], [])
+        self.assertIsNone(r["decision"])
+        self.assertIn("Later: after workflows", r["blocked_reason"])
+        # Downstream item stays unready (still waits on #i).
+        self.assertFalse(core.annotate(self.c)[child]["ready"])
+        # The person's words are saved on the item and the assistant session is notified.
+        msgs = [m["body"] for m in self.c.execute("SELECT body FROM messages WHERE item_id=? AND kind='note'", (i,))]
+        self.assertTrue(any("Later: after workflows" in b for b in msgs))
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn("postponed", self.notices()[0])
+        self.assertIn("kept open", self.notices()[0])
+        self.assertIn("Later: after workflows", self.notices()[0])
+
+    def test_defer_text_on_person_item_keeps_it_open_while_real_output_closes(self):
+        # #6526: typing 'Later' or 'we will discuss this later' as a person keeps the item open.
+        i = core.item_add(self.c, "a", "Decide page source", doer="human", actor="mark")["id"]
+        child = self.add("a", "Build app shell")
+        core.dep_add(self.c, child, [i], "w1")
+        r = core.done(self.c, i, "we will discuss this later", actor="mark")
+        self.assertTrue(r["kept_open"])
+        self.assertEqual(r["status"], "open")
+        self.assertFalse(core.annotate(self.c)[child]["ready"])
+        # Unblock and give a real answer: closes as done and makes child ready.
+        core.unblock(self.c, i, "mark")
+        r2 = core.done(self.c, i, "Use option A from the computer", actor="mark")
+        self.assertEqual(r2["status"], "done")
+        self.assertIn(child, r2["now_ready"])
+
+    def test_item_reply_keeps_question_only_forwarded_item_open(self):
+        # #6526: replying on a --question-only card (e.g. 'already done' on an activation item)
+        # saves the person's words on the item, clears the card, notifies the session, and keeps it open.
+        i = core.item_add(self.c, "a", "Apple activates membership", doer="human", actor="mark")["id"]
+        child = self.add("a", "Create signing certificate")
+        core.dep_add(self.c, child, [i], "w1")
+        self.as_session("you-1")
+        core.forward(self.c, item=i, actor="mark", question="Upload your ID, then reply here.")
+        core.TOKEN_AGENT.set(None)
+        r = core.item_reply(self.c, i, "already done", actor="mark", postpone=False)
+        self.assertTrue(r["kept_open"])
+        self.assertFalse(r["postponed"])
+        self.assertEqual(r["status"], "open")
+        self.assertIsNone(r["decision"])
+        self.assertIsNone(r["blocked_reason"])
+        self.assertEqual(r["now_ready"], [])
+        self.assertFalse(core.annotate(self.c)[child]["ready"])
+        msgs = [m["body"] for m in self.c.execute("SELECT body FROM messages WHERE item_id=? AND kind='note'", (i,))]
+        self.assertIn("already done", msgs)
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn("replied on", self.notices()[0])
+        self.assertIn("already done", self.notices()[0])
+
 
 class QuestionHold(Base):
     """#5307: mark, 2026-11-11: worker questions that he had settled opened 'Waits for you' on his page; 'these sorts

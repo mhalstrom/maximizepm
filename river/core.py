@@ -18148,7 +18148,12 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
     if choice is not None:
         if it["doer"] != "human":
             raise RiverError(f"#{item_id} is no person's item; --choice is a person's pick of its options")
+        raw_output = output
         choice, output = decision_choice(decision_of(it), choice, output)
+        if is_defer_choice(choice):
+            return item_reply(conn, item_id, raw_output, actor=actor, choice=choice, postpone=True)
+    elif it["doer"] == "human" and not _is_ai(conn, actor) and is_defer_text(output):
+        return item_reply(conn, item_id, output, actor=actor, postpone=True)
     changed = check_changed(changed) if changed else None
     proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
@@ -20350,6 +20355,86 @@ def decision_choice(decision, choice, text=None):
         raise RiverError(f"{choice!r} is no option of this decision" + (f"; the options: {', '.join(labels)}"
                                                                          if labels else "; it has no options"))
     return got, f"{got}: {text}" if text else got
+
+
+# Option labels and whole-reply texts that postpone a person's item instead of finishing its outcome (#6526):
+# picking one keeps the item open and blocked, so items waiting on it do not become ready.
+_DEFER_CHOICE_RE = re.compile(
+    r"^(later|not now|defer(?:red)?|postpone(?:d)?|skip(?:\s+for\s+now)?|hold(?:\s+off)?|wait(?:\s+for\s+now)?|"
+    r"(?:do|decide|revisit|ask|come back|handle|check|look)\s+later|(?:leave|keep)\s+open)\b",
+    re.I,
+)
+_DEFER_TEXT_RE = re.compile(
+    r"^(later|not now|defer(?:red)?|postpone(?:d)?|skip(?:\s+for\s+now)?|hold(?:\s+off)?|"
+    r"(?:do|decide|revisit|discuss|handle)\s+(?:this\s+)?later|"
+    r"we(?:'ll| will)\s+discuss\s+(?:this\s+)?later)[.!]?$",
+    re.I,
+)
+
+
+def is_defer_choice(choice):
+    return bool(choice and _DEFER_CHOICE_RE.match(str(choice).strip()))
+
+
+def is_defer_text(text):
+    return bool(text and _DEFER_TEXT_RE.match(" ".join(str(text).split())))
+
+
+def item_reply(conn, item_id, body=None, actor=None, choice=None, postpone=False, until=None):
+    """Record a person's reply or postponement on an open person item without closing it as done (#6526).
+    Used when the person picks a 'Later'/defer choice, clicks Later, or replies on a forwarded card without
+    finishing the item's outcome. Keeps the item open (so items waiting on it do not become ready), clears its
+    active decision card, saves the person's words on the item, optionally blocks/postpones it (postpone=True),
+    and notifies the session that put the card (_tell_asker) or the active manager."""
+    it = _item(conn, item_id)
+    if it["status"] in CLOSED_STATES:
+        raise RiverError(_already_closed(conn, it))
+    if it["doer"] != "human":
+        raise RiverError(f"#{item_id} is no person's item")
+    dec = decision_of(it)
+    if choice is not None:
+        choice, said = decision_choice(dec, choice, body)
+    else:
+        said = (body or "").strip() or ("Later" if postpone else None)
+    if not said:
+        raise RiverError("write your reply or pick an option")
+    zone = setting(conn, "timezone")
+    t_until = iso(parse_when(until, zone)) if until else None
+    if t_until and t_until <= iso(now()):
+        raise RiverError(f"{until!r} is not in the future ({show_time(t_until, zone)})")
+    with tx(conn):
+        conn.execute("UPDATE items SET decision=NULL WHERE id=?", (it["id"],))
+        if postpone:
+            conn.execute(
+                "UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, "
+                "blocked_at=COALESCE(CASE WHEN blocked_reason IS NOT NULL THEN blocked_at END, ?) WHERE id=?",
+                (said, t_until, actor, iso(now()), it["id"]),
+            )
+            _event(conn, it["id"], actor, f"postponed (kept open): {said}"
+                   + (f" (until {show_time(t_until, zone)})" if t_until else ""))
+        else:
+            _event(conn, it["id"], actor, f"reply (kept open): {said}")
+        _send(conn, "note", actor or "maxpm", said, item_id=it["id"])
+    verb = "postponed" if postpone else "replied on"
+    state_note = ("It stays open and blocked; items waiting on it did not become ready. Go on to the next one."
+                  if postpone else
+                  "It stays open (not done); items waiting on it did not become ready. Decide whether to block it, "
+                  "follow up, or mark it done when its outcome holds.")
+    _tell_asker(conn, it, f"{actor or 'The person'} {verb} #{it['id']} {it['title']} (kept open): {said}"
+                + (f" [choice: {choice}]" if choice else "") + f". {state_note}", it["id"], actor)
+    by = (dec or {}).get("by")
+    boss = active_manager(conn)
+    if boss and _is_manager(conn, by) and actor != boss:
+        with tx(conn):
+            _send(conn, "notice", actor or "maxpm",
+                  f"{actor or 'The person'} {verb} #{it['id']} {it['title']} (kept open): {said}"
+                  + (f" [choice: {choice}]" if choice else "") + ".",
+                  to=boss, item_id=it["id"])
+    res = item_show(conn, item_id)
+    res["kept_open"] = True
+    res["postponed"] = bool(postpone)
+    res["now_ready"] = []
+    return res
 
 
 def _tell_asker(conn, row, text, item_id=None, actor=None):
@@ -23136,8 +23221,9 @@ DIALOG_STEPS = """Put the decision itself in the Waits for you card above {perso
    A question (not an item): maxpm forward <question-id> with the same flags. A step with no real options (do a thing, sign in, read a page): only
    --question "<what to do>"; the card then shows a text box. Point {person} to the card below the chat, not "a dialog".
    Then wait for the answer: end your turn (in Claude Code, first run maxpm inbox --wait, without --as, as a
-   background command). The answer on the card closes the item or question, and MaximizePM sends you a
-   notice with the choice and the person's words; record nothing for it. When the page is not open (they
+   background command). A real answer on the card closes the item or question, while Later or Reply, keep open
+   keeps a person item open (so items waiting on it do not become ready), and MaximizePM sends you a
+   notice with the choice and the person's words; record nothing for a closed one. When the page is not open (they
    talk with you in a terminal only), ask in the chat in the form below instead, and record the answer
    yourself with the "record the result" command (add --choice <label> when they picked an option):
 """

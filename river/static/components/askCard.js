@@ -166,8 +166,10 @@ export function cardHtml(c, { pane = false } = {}) {
     : `<textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>`;
   const acts = (c.item_id ? button("Open the item", { data: { open: c.item_id } }) : "")
     + (rel ? button("Request changes", { data: { wchanges: 1 }, title: "The review runs again" }) : "")
+    + (item && !rel ? button("Later", { data: { wlater: 1 }, title: "Postpone and keep open" }) : "")
+    + (item && !rel && c.decision ? button("Reply, keep open", { data: { wreply: 1 }, title: "Reply without closing" }) : "")
     + (c.decision ? button("Cancel", { data: { wcancel: 1 }, title: "Close without an answer" }) : "")
-    + button(rel ? "Approve" : c.decision ? "Submit" : item ? "Done" : pane ? "Send to the chat" : "Answer",
+    + button(rel ? "Approve" : (item && c.decision && !picks) ? "Mark done" : c.decision ? "Submit" : item ? "Done" : pane ? "Send to the chat" : "Answer",
       { kind: "primary", cls: "wgo", type: "submit" });
   return `<form class="wblock acard" data-kind="${item ? "item" : "question"}" data-id="${c.id}">
     <div class="acard-main">${head}
