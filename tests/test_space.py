@@ -68,6 +68,15 @@ class Sizes(SpaceBase):
         self.assertTrue(now["db_max_size"].startswith("now "))
         self.assertIn("not measured", now["folder_max_size"])
 
+    def test_current_handles_folder_without_folder_at(self):
+        # #6661: a disk record with folder but no folder_at must not crash space.current / config_list.
+        space._save_meta(self.c, {"folder": 12 * 1024 ** 2})
+        now = core.config_list(self.c)["now"]
+        self.assertEqual(now["folder_max_size"], "now 12 MB")
+        space._save_meta(self.c, {"folder": 12 * 1024 ** 2, "folder_at": OLD})
+        now = core.config_list(self.c)["now"]
+        self.assertIn("now 12 MB (measured ", now["folder_max_size"])
+
 
 class Database(SpaceBase):
     def fill(self):
@@ -370,6 +379,23 @@ class BrowserTidy(SpaceBase):
         cache = self.file("browsers/p/profile/Default/Cache/data_2", 50_000)
         space.serve_pass(self.c)
         self.assertTrue(cache.exists())
+
+    def test_serve_pass_keeps_folder_at_while_tidying_and_remeasures(self):
+        # #6661: browser tidy saves meta before re-measuring; folder_at must stay paired with folder at every save.
+        now_s = core.iso(core.now())
+        space._save_meta(self.c, {"last_run": now_s, "removed": True, "folder": 999_999_999, "folder_at": now_s})
+        saved = []
+        orig_save = space._save_meta
+        def spy(conn, m):
+            saved.append(dict(m))
+            orig_save(conn, m)
+        with mock.patch.object(space, "_save_meta", side_effect=spy):
+            space.serve_pass(self.c)
+        self.assertTrue(saved)
+        for snap in saved:
+            if snap.get("folder"):
+                self.assertIn("folder_at", snap)
+        self.assertLess(space._meta(self.c)["folder"], 999_999_999)
 
     def test_run_says_it_and_a_dry_run_removes_nothing(self):
         dry = space.run(self.c, dry_run=True)

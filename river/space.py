@@ -188,8 +188,11 @@ def _save_meta(conn, m):
 def current(conn):
     """The sizes for the page's settings: the database now, the folder as serve measured it last."""
     m = _meta(conn)
-    folder = f"now {show_size(m['folder'])} (measured {core.show_time(m['folder_at'])})" if m.get("folder") else \
-        "not measured yet (maxpm cleanup --dry-run)"
+    if m.get("folder"):
+        at = f" (measured {core.show_time(m['folder_at'])})" if m.get("folder_at") else ""
+        folder = f"now {show_size(m['folder'])}{at}"
+    else:
+        folder = "not measured yet (maxpm cleanup --dry-run)"
     return {"db_max_size": f"now {show_size(db_used(conn))}", "folder_max_size": folder}
 
 
@@ -888,20 +891,21 @@ def serve_pass(conn):
     dbl, fl = parse_size(setting(conn, "db_max_size")), parse_size(setting(conn, "folder_max_size"))
     if not dbl and not fl:
         return None
+    remeasure = False
     if fl:  # the browser tidy, at any size (#6135): one event when it removed something, no note
         at = parse_iso(m["tidy_at"]) if m.get("tidy_at") else None
         if not at or t - at >= FOLDER_EVERY:
             tidy = _tidy_browsers(conn, False, t)
             m["tidy_at"] = iso(t)
             if tidy["removed"]:
-                m.pop("folder_at", None)  # measure the folder again below
+                remeasure = True  # measure the folder again below without dropping folder_at from meta (#6661)
                 with tx(conn):
                     core._event(conn, None, "maxpm", "browser tidy: removed " + ", ".join(_parts(tidy, "folders")))
             _save_meta(conn, m)
     over = bool(dbl and db_used(conn) > dbl)
     if not over and fl:
         at = parse_iso(m["folder_at"]) if m.get("folder_at") else None
-        if not at or t - at >= FOLDER_EVERY:
+        if remeasure or not at or t - at >= FOLDER_EVERY:
             m.update(folder=tree_bytes(db_file(conn).parent), folder_at=iso(t))
             _save_meta(conn, m)
         over = m["folder"] > fl
