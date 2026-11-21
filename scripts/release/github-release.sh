@@ -8,10 +8,18 @@
 #   maxpm config set release_approval draft --project deploy-maximizepm-github
 #
 #   github-release.sh             a minor version: 1.3.0 -> 1.4.0 (a release
-#                                 of a week of work always holds features)
+#                                 of a week of work always holds features);
+#                                 for MAXPM_RELEASE_KIND=deps, default is patch
 #   github-release.sh --patch     a patch version: 1.3.0 -> 1.3.1
+#   github-release.sh --minor     a minor version: 1.3.0 -> 1.4.0
 #   github-release.sh --dry-run   the checks and the plan; changes nothing
 #                                 (DRY_RUN=1 does the same)
+#
+# Dependency releases (#6603, #6623): when MAXPM_RELEASE_KIND=deps, MAXPM_REV is a commit whose sole parent is
+# MAXPM_DEPS_BASE (the last release) and whose diff from MAXPM_DEPS_BASE names only dependency files. The version
+# commit is made on top of MAXPM_REV (not main), tested there, pushed to a temporary branch maxpm/deps/vX.Y.Z-<pin>
+# (never main) so desktop-release.yml builds the draft from it, then after the person's yes tagged at vX.Y.Z,
+# published, and the temporary branch deleted. Main stays untouched.
 #
 # A release is one line of stages, and the tag is the last step (#6213, mark 2026-11-19: 'we actually want the tag to
 # be a final step with a manual approval'; 'this should not be a branching deploy workflow'):
@@ -77,7 +85,7 @@ main() {
   # before the error of a tool.
   exec 2>&1
 
-  local bump=minor dry_run="" arg
+  local bump="" dry_run="" arg
   for arg in "$@"; do
     case "$arg" in
       --patch) bump=patch ;;
@@ -99,8 +107,13 @@ main() {
   local test_cmd="${RELEASE_TEST_CMD:-python3 -m unittest discover -s tests -t .}"
   local wait_s="${RELEASE_WAIT:-3600}" poll="${RELEASE_POLL:-30}"
   local deploy="${MAXPM_DEPLOY:-}" approved="${MAXPM_APPROVED:-}" remote=origin
+  local release_kind="${MAXPM_RELEASE_KIND:-code}" deps_base="${MAXPM_DEPS_BASE:-}"
+  local build_ref=""
   local step="" scratch="" wt="" HOOK_YES=76
   local project="${RELEASE_PROJECT:-maximizepm}"
+  if [ -z "$bump" ]; then
+    [ "$release_kind" = deps ] && bump=patch || bump=minor
+  fi
 
   step_start() {  # step_start <name> <kind>
     step="$1"
@@ -135,53 +148,106 @@ main() {
     read -r state draft_sha url <<<"$line"
   }
 
+  is_dep_file() {  # is_dep_file <path>: 0 when the file's basename is a dependency manifest or lock file (river/pipeline/deps.py DEFAULT_FILES)
+    case "${1##*/}" in
+      Cargo.toml|Cargo.lock|\
+      package.json|package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb|\
+      pyproject.toml|poetry.lock|uv.lock|requirements*.txt|Pipfile|Pipfile.lock|\
+      go.mod|go.sum|\
+      Gemfile|Gemfile.lock|\
+      composer.json|composer.lock|\
+      mix.exs|mix.lock|\
+      pubspec.yaml|pubspec.lock|\
+      Package.swift|Package.resolved|\
+      flake.lock)
+        return 0 ;;
+      *)
+        return 1 ;;
+    esac
+  }
+
   # ---- check
   step_start check check
+  [ "$release_kind" = code ] || [ "$release_kind" = deps ] \
+    || fail "unknown MAXPM_RELEASE_KIND '$release_kind' (expected code or deps)"
   [ "$git_dir" = "$common_dir" ] \
     || fail "$tree is a worktree; the release runs only in the main tree (AGENTS.md: the main tree is the live maxpm)"
-  [ "$(git symbolic-ref -q HEAD)" = refs/heads/main ] \
-    || fail "the main tree is not on the branch main ($(git symbolic-ref -q --short HEAD || echo detached))"
-  local unclean
-  unclean="$(git status --porcelain --untracked-files=no | head -n 3 | tr '\n' ' ')"
-  [ -z "$unclean" ] || fail "the main tree has uncommitted changes (${unclean% }); the release runs only on a clean main"
-  git fetch --quiet "$remote" "+refs/heads/main:refs/remotes/$remote/main" \
-    || fail "git fetch $remote main failed"
-  local head pin
-  head="$(git rev-parse HEAD)" || fail "no HEAD"
+  local head="" pin
   pin="${MAXPM_REV:-}"
-  if [ -z "$pin" ]; then
-    pin="$head"
-    echo "github-release: the release has no pin (MAXPM_REV); it releases HEAD of main, $head"
+  if [ "$release_kind" = deps ]; then
+    [ -n "$pin" ] || fail "a dependency release needs MAXPM_REV"
+    [ -n "$deps_base" ] || fail "a dependency release needs MAXPM_DEPS_BASE"
+    pin="$(git rev-parse --verify --quiet "$pin^{commit}")" || fail "the release pin ${MAXPM_REV:-} is not a commit of this repository"
+    deps_base="$(git rev-parse --verify --quiet "$deps_base^{commit}")" || fail "MAXPM_DEPS_BASE (${MAXPM_DEPS_BASE:-}) is not a commit of this repository"
+    local parents
+    parents="$(git rev-list --parents -n 1 "$pin")"
+    [ "$parents" = "$pin $deps_base" ] \
+      || fail "the dependency release pin $pin must have only $deps_base as its parent (got: ${parents#$pin })"
+    local path n_dep=0
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      is_dep_file "$path" \
+        || fail "the dependency release pin $pin changes a non-dependency file: $path (only dependency files are allowed)"
+      n_dep=$((n_dep + 1))
+    done < <(git diff --name-only "$deps_base" "$pin")
+    [ "$n_dep" -gt 0 ] || fail "the dependency release pin $pin changes no files from $deps_base"
+    echo "github-release: dependency release; pin $pin on top of $deps_base ($n_dep dependency file(s))"
+  else
+    [ "$(git symbolic-ref -q HEAD)" = refs/heads/main ] \
+      || fail "the main tree is not on the branch main ($(git symbolic-ref -q --short HEAD || echo detached))"
+    local unclean
+    unclean="$(git status --porcelain --untracked-files=no | head -n 3 | tr '\n' ' ')"
+    [ -z "$unclean" ] || fail "the main tree has uncommitted changes (${unclean% }); the release runs only on a clean main"
+    git fetch --quiet "$remote" "+refs/heads/main:refs/remotes/$remote/main" \
+      || fail "git fetch $remote main failed"
+    head="$(git rev-parse HEAD)" || fail "no HEAD"
+    if [ -z "$pin" ]; then
+      pin="$head"
+      echo "github-release: the release has no pin (MAXPM_REV); it releases HEAD of main, $head"
+    fi
+    pin="$(git rev-parse --verify --quiet "$pin^{commit}")" || fail "the release pin ${MAXPM_REV:-} is not a commit of this repository"
+    git merge-base --is-ancestor "$pin" "$head" \
+      || fail "the release pin $pin is not an ancestor of main ($head); cut the release again at a commit of main"
+    git merge-base --is-ancestor "$remote/main" "$head" \
+      || fail "$remote/main ($(git rev-parse --short "$remote/main")) is not an ancestor of main: main and $remote/main went apart; the release never force-pushes"
+    local after
+    after="$(git rev-list --count "$pin..$head")"
+    echo "github-release: pin $pin; main $head ($after commit(s) after the pin go out with it)"
   fi
-  pin="$(git rev-parse --verify --quiet "$pin^{commit}")" || fail "the release pin ${MAXPM_REV:-} is not a commit of this repository"
-  git merge-base --is-ancestor "$pin" "$head" \
-    || fail "the release pin $pin is not an ancestor of main ($head); cut the release again at a commit of main"
-  git merge-base --is-ancestor "$remote/main" "$head" \
-    || fail "$remote/main ($(git rev-parse --short "$remote/main")) is not an ancestor of main: main and $remote/main went apart; the release never force-pushes"
-  local after
-  after="$(git rev-list --count "$pin..$head")"
-  echo "github-release: pin $pin; main $head ($after commit(s) after the pin go out with it)"
   [ -z "$approved" ] || echo "github-release: the person approved the draft (yes #$approved): this run tags and publishes it"
   step_end passed
 
   # ---- version
   step_start version check
-  versions() {  # versions <dir>: the versions of the four files, one line each
-    python3 - "$1" <<'PY'
-import json, re, sys
-d = sys.argv[1]
-def grab(path, pattern):
+  versions() {  # versions <dir> | versions --commit <rev>: the versions of the four files, one line each
+    python3 - "$@" <<'PY'
+import json, re, subprocess, sys
+commit = sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == "--commit" else None
+d = None if commit else sys.argv[1]
+def read_file(path):
+    if commit is not None:
+        r = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
     try:
-        m = re.search(pattern, open(f"{d}/{path}", encoding="utf-8").read(), re.M)
+        return open(f"{d}/{path}", encoding="utf-8").read()
     except OSError:
+        return None
+def grab(path, pattern):
+    text = read_file(path)
+    if text is None:
         return "missing"
+    m = re.search(pattern, text, re.M)
     return m.group(1) if m else "none"
 print(grab("pyproject.toml", r'^version = "([^"]+)"'))
 print(grab("river/__init__.py", r'^__version__ = "([^"]+)"'))
 for path in ("desktop/package.json", "desktop/package-lock.json"):
+    text = read_file(path)
+    if text is None:
+        print("missing")
+        continue
     try:
-        j = json.load(open(f"{d}/{path}", encoding="utf-8"))
-    except (OSError, ValueError):
+        j = json.loads(text)
+    except ValueError:
         print("missing")
         continue
     print(j.get("version", "none"))
@@ -190,7 +256,11 @@ for path in ("desktop/package.json", "desktop/package-lock.json"):
 PY
   }
   local vs cur
-  vs="$(versions "$tree")" || fail "could not read the version files"
+  if [ "$release_kind" = deps ]; then
+    vs="$(versions --commit "$pin")" || fail "could not read the version files at $pin"
+  else
+    vs="$(versions "$tree")" || fail "could not read the version files"
+  fi
   cur="$(echo "$vs" | head -n 1)"
   [ "$(echo "$vs" | sort -u | wc -l | tr -d ' ')" = 1 ] \
     || fail "the version files disagree: $(echo "$vs" | tr '\n' ' ')(pyproject.toml, river/__init__.py, desktop/package.json, its lock twice)"
@@ -201,52 +271,96 @@ PY
       END { if (peeled != "") print peeled; else if (plain != "") print plain }'
   }
   local cur_tag new commit="$head" state="" draft_sha="" url="" tagged=""
-  cur_tag="$(remote_tag "v$cur")" || fail "git ls-remote $remote failed"
-  if [ -n "$approved" ]; then
-    # After the yes: the version of main, made from the commit that the person approved (its draft names it).
-    new="$cur"
-    release_state "v$new" || fail "could not read the GitHub release v$new"
-    [ "$state" != none ] \
-      || fail "GitHub has no draft of v$new, so there is nothing approved to publish; the release starts again"
-    commit="$draft_sha"
-    git cat-file -e "$commit^{commit}" 2>/dev/null \
-      || fail "the draft of v$new is made from $commit, which is not a commit of this repository"
-    git merge-base --is-ancestor "$commit" "$remote/main" \
-      || fail "the draft of v$new is made from $commit, which is not on $remote/main"
-    [ -z "$cur_tag" ] || [ "$cur_tag" = "$commit" ] \
-      || fail "$remote has a tag v$new at $cur_tag, not at the approved $commit; the release never moves a tag"
-    [ -n "$cur_tag" ] && tagged=1
-    echo "github-release: v$new, approved at $commit ($state: $url)"
-  elif [ -n "$cur_tag" ]; then
-    release_state "v$cur" || fail "could not read the GitHub release v$cur"
-    if [ "$state" = draft ]; then
-      # The tag went out and the publish did not: the person approves that draft again; nothing is built again.
-      new="$cur"
-      commit="$cur_tag"
-      tagged=1
-      echo "github-release: $remote has the tag v$cur and its release is still a draft ($url): it asks for the yes on it again"
+  if [ "$release_kind" = deps ]; then
+    local major minor patch new_tag
+    IFS=. read -r major minor patch <<<"$cur"
+    if [ "$bump" = patch ]; then
+      new="$major.$minor.$((patch + 1))"
     else
-      local major minor patch
-      IFS=. read -r major minor patch <<<"$cur"
-      if [ "$bump" = patch ]; then
-        new="$major.$minor.$((patch + 1))"
+      new="$major.$((minor + 1)).0"
+    fi
+    build_ref="maxpm/deps/v$new-${pin:0:8}"
+    new_tag="$(remote_tag "v$new")" || fail "git ls-remote $remote failed"
+    if [ -n "$approved" ]; then
+      git fetch --quiet "$remote" "refs/heads/$build_ref" 2>/dev/null || true
+      [ -z "$new_tag" ] || git fetch --quiet "$remote" "refs/tags/v$new:refs/tags/v$new" 2>/dev/null || true
+      release_state "v$new" || fail "could not read the GitHub release v$new"
+      [ "$state" != none ] \
+        || fail "GitHub has no draft of v$new, so there is nothing approved to publish; the release starts again"
+      commit="$draft_sha"
+      git cat-file -e "$commit^{commit}" 2>/dev/null \
+        || fail "the draft of v$new is made from $commit, which is not a commit of this repository"
+      [ "$(git rev-list --parents -n 1 "$commit")" = "$commit $pin" ] \
+        || fail "the draft of v$new is made from $commit, which is not on top of $pin"
+      [ -z "$new_tag" ] || [ "$new_tag" = "$commit" ] \
+        || fail "$remote has a tag v$new at $new_tag, not at the approved $commit; the release never moves a tag"
+      [ -n "$new_tag" ] && tagged=1
+      echo "github-release: v$new (dependency release), approved at $commit ($state: $url)"
+    elif [ -n "$new_tag" ]; then
+      release_state "v$new" || fail "could not read the GitHub release v$new"
+      if [ "$state" = draft ]; then
+        git fetch --quiet "$remote" "refs/tags/v$new:refs/tags/v$new" 2>/dev/null || true
+        [ "$(git rev-list --parents -n 1 "$new_tag")" = "$new_tag $pin" ] \
+          || fail "$remote has a tag v$new at $new_tag, not on top of $pin; the release never moves a tag"
+        commit="$new_tag"
+        tagged=1
+        echo "github-release: $remote has the tag v$new and its release is still a draft ($url): it asks for the yes on it again"
       else
-        new="$major.$((minor + 1)).0"
+        fail "$remote has a tag v$new already, at another commit; the release never moves a tag"
       fi
-      echo "github-release: v$cur is out; this release is v$new ($bump)"
+    else
+      echo "github-release: v$cur at $pin; this dependency release is v$new ($bump)"
     fi
   else
-    new="$cur"
-    echo "github-release: $remote has no tag v$cur: an earlier run raised the version and stopped before its tag; this release is v$new"
-  fi
-  if [ -z "$approved" ] && [ -z "$tagged" ]; then
-    [ -z "$(remote_tag "v$new")" ] || fail "$remote has a tag v$new already, at another commit; the release never moves a tag"
+    cur_tag="$(remote_tag "v$cur")" || fail "git ls-remote $remote failed"
+    if [ -n "$approved" ]; then
+      # After the yes: the version of main, made from the commit that the person approved (its draft names it).
+      new="$cur"
+      release_state "v$new" || fail "could not read the GitHub release v$new"
+      [ "$state" != none ] \
+        || fail "GitHub has no draft of v$new, so there is nothing approved to publish; the release starts again"
+      commit="$draft_sha"
+      git cat-file -e "$commit^{commit}" 2>/dev/null \
+        || fail "the draft of v$new is made from $commit, which is not a commit of this repository"
+      git merge-base --is-ancestor "$commit" "$remote/main" \
+        || fail "the draft of v$new is made from $commit, which is not on $remote/main"
+      [ -z "$cur_tag" ] || [ "$cur_tag" = "$commit" ] \
+        || fail "$remote has a tag v$new at $cur_tag, not at the approved $commit; the release never moves a tag"
+      [ -n "$cur_tag" ] && tagged=1
+      echo "github-release: v$new, approved at $commit ($state: $url)"
+    elif [ -n "$cur_tag" ]; then
+      release_state "v$cur" || fail "could not read the GitHub release v$cur"
+      if [ "$state" = draft ]; then
+        # The tag went out and the publish did not: the person approves that draft again; nothing is built again.
+        new="$cur"
+        commit="$cur_tag"
+        tagged=1
+        echo "github-release: $remote has the tag v$cur and its release is still a draft ($url): it asks for the yes on it again"
+      else
+        local major minor patch
+        IFS=. read -r major minor patch <<<"$cur"
+        if [ "$bump" = patch ]; then
+          new="$major.$minor.$((patch + 1))"
+        else
+          new="$major.$((minor + 1)).0"
+        fi
+        echo "github-release: v$cur is out; this release is v$new ($bump)"
+      fi
+    else
+      new="$cur"
+      echo "github-release: $remote has no tag v$cur: an earlier run raised the version and stopped before its tag; this release is v$new"
+    fi
+    if [ -z "$approved" ] && [ -z "$tagged" ]; then
+      [ -z "$(remote_tag "v$new")" ] || fail "$remote has a tag v$new already, at another commit; the release never moves a tag"
+    fi
   fi
   step_end passed
 
   if [ -n "$dry_run" ]; then
     if [ -n "$approved" ]; then
       echo "github-release: dry run: it would push the tag v$new at $commit and publish the draft of v$new"
+    elif [ "$release_kind" = deps ]; then
+      echo "github-release: dry run: it would commit 'Release v$new (deploy #${deploy:-none})' on top of $pin (not main), test it, push it to $remote $build_ref (not main), build the downloads as a draft of v$new, write its notes and ask for the person's yes; the tag comes after the yes"
     else
       echo "github-release: dry run: it would commit 'Release v$new (deploy #${deploy:-none})' on main when the version changes, move main to it, test it, push it to $remote main, build the downloads as a draft of v$new, write its notes and ask for the person's yes; the tag comes after the yes"
     fi
@@ -281,35 +395,64 @@ if lock["version"] != new or lock["packages"][""]["version"] != new:
 PY
   }
 
-  # ---- commit: on top of main as it is now; the tests come after it (#6492)
+  # ---- commit: on top of main (code) or on top of MAXPM_REV (deps); the tests come after it (#6492, #6623)
   step_start commit build
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/maxpm-release.XXXXXX")" || fail "mktemp failed"
   wt="$scratch/tree"
-  git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
-  if [ "$new" != "$cur" ]; then
-    local try base made=""
-    for try in 1 2 3 4 5; do
-      base="$(git rev-parse --verify --quiet refs/heads/main)" || fail "the branch main is gone"
-      git merge-base --is-ancestor "$head" "$base" \
-        || fail "main went back from $head to $base while the release ran; the release never force-moves main"
-      git -C "$wt" checkout --quiet --detach "$base" || fail "git checkout of main $base in $wt failed"
-      bump || fail "could not write the version $new on main $base (a commit after the check changed a version file?)"
+  if [ "$release_kind" = deps ]; then
+    local existing=""
+    if git fetch --quiet "$remote" "refs/heads/$build_ref" 2>/dev/null; then
+      existing="$(git rev-parse --verify --quiet FETCH_HEAD^{commit} || true)"
+      if [ -n "$existing" ] && [ "$(git rev-list --parents -n 1 "$existing")" = "$existing $pin" ]; then
+        local evs
+        evs="$(versions --commit "$existing" 2>/dev/null || true)"
+        if [ "$(echo "$evs" | sort -u)" = "$new" ]; then
+          git worktree add --quiet --detach "$wt" "$existing" || fail "git worktree add $wt at $existing failed"
+          commit="$existing"
+          echo "github-release: reusing dependency release commit $commit (v$new on top of $pin)"
+        else
+          existing=""
+        fi
+      else
+        existing=""
+      fi
+    fi
+    if [ -z "$existing" ]; then
+      git worktree add --quiet --detach "$wt" "$pin" || fail "git worktree add $wt at $pin failed"
+      bump || fail "could not write the version $new on $pin"
       git -C "$wt" commit --quiet -m "Release v$new (deploy #${deploy:-none})" -- \
         pyproject.toml river/__init__.py desktop/package.json desktop/package-lock.json \
         || fail "git commit of the version $new failed"
       commit="$(git -C "$wt" rev-parse HEAD)" || fail "no commit"
-      if git merge --quiet --ff-only "$commit"; then
-        made=1
-        break
-      fi
-      echo "github-release: main moved while the release committed (merge --ff-only $commit refused, try $try of 5); it commits again on the new main"
-      sleep "$try"
-    done
-    [ -n "$made" ] || fail "main moved at each of 5 tries to move it to the release commit; the next run starts again"
-    [ "$base" = "$head" ] \
-      || echo "github-release: $(git rev-list --count "$head..$base") commit(s) came into main after the check; they go out too, and the tests run them"
+    fi
+    echo "github-release: dependency release is at $commit (v$new on top of $pin; main untouched)"
+  else
+    git worktree add --quiet --detach "$wt" "$head" || fail "git worktree add $wt at $head failed"
+    if [ "$new" != "$cur" ]; then
+      local try base made=""
+      for try in 1 2 3 4 5; do
+        base="$(git rev-parse --verify --quiet refs/heads/main)" || fail "the branch main is gone"
+        git merge-base --is-ancestor "$head" "$base" \
+          || fail "main went back from $head to $base while the release ran; the release never force-moves main"
+        git -C "$wt" checkout --quiet --detach "$base" || fail "git checkout of main $base in $wt failed"
+        bump || fail "could not write the version $new on main $base (a commit after the check changed a version file?)"
+        git -C "$wt" commit --quiet -m "Release v$new (deploy #${deploy:-none})" -- \
+          pyproject.toml river/__init__.py desktop/package.json desktop/package-lock.json \
+          || fail "git commit of the version $new failed"
+        commit="$(git -C "$wt" rev-parse HEAD)" || fail "no commit"
+        if git merge --quiet --ff-only "$commit"; then
+          made=1
+          break
+        fi
+        echo "github-release: main moved while the release committed (merge --ff-only $commit refused, try $try of 5); it commits again on the new main"
+        sleep "$try"
+      done
+      [ -n "$made" ] || fail "main moved at each of 5 tries to move it to the release commit; the next run starts again"
+      [ "$base" = "$head" ] \
+        || echo "github-release: $(git rev-list --count "$head..$base") commit(s) came into main after the check; they go out too, and the tests run them"
+    fi
+    echo "github-release: main is at $commit (v$new)"
   fi
-  echo "github-release: main is at $commit (v$new)"
   step_end passed
 
   # ---- test: the commit that goes out
@@ -325,17 +468,24 @@ PY
   ) || fail "the tests failed at $commit (v$new); nothing was pushed. Fix them on main: the next run releases v$new with no second raise"
   step_end passed
 
-  # ---- push: main only; the tag comes after the person's yes
+  # ---- push: main (code) or temporary deps branch (deps); the tag comes after the person's yes
   step_start push deploy
-  git push --quiet "$remote" "$commit:refs/heads/main" || fail "git push $remote main failed (never forced)"
-  echo "github-release: pushed main $commit to $remote"
+  local workflow_ref=main
+  if [ "$release_kind" = deps ]; then
+    workflow_ref="$build_ref"
+    git push --quiet "$remote" "$commit:refs/heads/$build_ref" || fail "git push $remote $build_ref failed (never forced)"
+    echo "github-release: pushed dependency release $commit to $remote $build_ref (main untouched)"
+  else
+    git push --quiet "$remote" "$commit:refs/heads/main" || fail "git push $remote main failed (never forced)"
+    echo "github-release: pushed main $commit to $remote"
+  fi
   step_end passed
 
   # ---- build: the workflow desktop-release builds the downloads of the commit into a draft release
   step_start build build
   local since
   since="$(date -u -v-2M +%FT%TZ 2>/dev/null || date -u -d '2 minutes ago' +%FT%TZ)"
-  "$gh" workflow run desktop-release.yml --ref main -f "tag=v$new" -f "sha=$commit" >/dev/null \
+  "$gh" workflow run desktop-release.yml --ref "$workflow_ref" -f "tag=v$new" -f "sha=$commit" >/dev/null \
     || fail "gh workflow run desktop-release.yml for v$new at $commit failed"
   echo "github-release: started the draft build of v$new at $commit"
   step_end passed
@@ -387,7 +537,11 @@ ask() {
   cleanup
   echo "github-release: v$new is prepared and waits for your yes. Nothing is public yet."
   echo "  the draft: $url"
-  echo "  its commit: $commit (on $remote main)"
+  if [ "$release_kind" = deps ]; then
+    echo "  its commit: $commit (dependency release on top of $(git rev-parse --short "$deps_base"), not on main)"
+  else
+    echo "  its commit: $commit (on $remote main)"
+  fi
   echo "  its files: MaximizePM-$new-arm64.dmg, MaximizePM-$new-x64.dmg, MaximizePM-$new-code.tar.gz, manifest.json"
   echo "  its notes: on the draft's page"
   echo "  after the yes: the tag v$new at $commit, then the draft is published"
@@ -417,6 +571,7 @@ publish() {
     # published notes are the report's text of now (#6493).
     [ -z "$deploy" ] || notes
     "$gh" release edit "v$new" --draft=false >/dev/null || fail "gh release edit v$new --draft=false failed; the tag stays"
+    [ "$release_kind" != deps ] || git push --quiet "$remote" --delete "refs/heads/$build_ref" 2>/dev/null || true
     echo "github-release: published the release v$new: $url"
     step_end passed
   else

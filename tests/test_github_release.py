@@ -524,6 +524,150 @@ class Script(unittest.TestCase):
         self.assertNotIn("workflow run", log)  # it may read GitHub, never change it
         self.assertNotIn("release edit", log)
 
+    def _make_deps_commit(self, base, files, msg="deps update"):
+        """Make a commit on top of base in a detached worktree, leaving main untouched."""
+        wt = os.path.join(self.tmp, f"deps-wt-{len(os.listdir(self.tmp))}")
+        self.git("worktree", "add", "--quiet", "--detach", wt, base)
+        try:
+            for rel, content in files.items():
+                _write(os.path.join(wt, rel), content)
+            self.git("add", "-A", cwd=wt)
+            self.git("commit", "--quiet", "--allow-empty", "-m", msg, cwd=wt)
+            return self.git("rev-parse", "HEAD", cwd=wt)
+        finally:
+            self.git("worktree", "remove", "--force", wt)
+
+    def test_dependency_release_builds_tags_and_publishes_without_touching_main(self):
+        """#6623: MAXPM_RELEASE_KIND=deps accepts a pin on top of MAXPM_DEPS_BASE (not main), makes the version commit
+        on top of it, tests that tree without unreleased main commits, pushes a temporary branch (not main), builds
+        the draft, and after MAXPM_APPROVED pushes the tag, publishes the draft and cleans up the temporary branch."""
+        base = self.git("rev-parse", "v1.3.0^{commit}")
+        main_before = self.git("rev-parse", "HEAD")
+        origin_main_before = self.origin_ref("refs/heads/main")
+        lock = json.dumps({
+            "name": "maximizepm", "version": "1.3.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "maximizepm", "version": "1.3.0"}, "node_modules/x": {"version": "9.9.10"}},
+        }, indent=2)
+        deps_pin = self._make_deps_commit(base, {"desktop/package-lock.json": lock})
+        self.git("branch", "maxpm/deps/maximizepm-github-1", deps_pin)
+
+        # Before the yes: version 1.3.1 (patch by default), tests see 9.9.10 and NOT feature.txt from main.
+        r = self.run_script(
+            MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin,
+            RELEASE_TEST_CMD="! test -f feature.txt && grep -q 9.9.10 desktop/package-lock.json && grep -q 1.3.1 pyproject.toml",
+        )
+        self.assertEqual(r.returncode, 76, r.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD"), main_before)
+        self.assertEqual(self.origin_ref("refs/heads/main"), origin_main_before)
+        build_ref = f"maxpm/deps/v1.3.1-{deps_pin[:8]}"
+        commit = self.origin_ref(f"refs/heads/{build_ref}")
+        self.assertIsNotNone(commit)
+        self.assertEqual(self.git("rev-parse", f"{commit}^"), deps_pin)
+        self.assertIsNone(self.origin_ref("refs/tags/v1.3.1"))
+        self.assertEqual(self.releases(), {"v1.3.1": {"draft": True, "sha": commit}})
+        with open(self.gh_log, encoding="utf-8") as f:
+            self.assertIn(f"workflow run desktop-release.yml --ref {build_ref} -f tag=v1.3.1 -f sha={commit}", f.read())
+        self.assertIn("not on main", r.stdout)
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
+        # After the yes: tags v1.3.1 at commit, publishes draft, deletes temp branch, main still untouched.
+        r = self.run_script(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin, MAXPM_APPROVED="17")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.steps(r.stdout), ["check", "version", "tag", "publish", "published"])
+        self.assertEqual(self.origin_ref("refs/tags/v1.3.1^{commit}"), commit)
+        self.assertEqual(self.releases(), {"v1.3.1": {"draft": False, "sha": commit}})
+        self.assertIsNone(self.origin_ref(f"refs/heads/{build_ref}"))
+        self.assertEqual(self.git("rev-parse", "HEAD"), main_before)
+        self.assertEqual(self.origin_ref("refs/heads/main"), origin_main_before)
+
+        # A second run after the yes only checks the published downloads.
+        r = self.run_script(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin, MAXPM_APPROVED="17")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.steps(r.stdout), ["check", "version", "published"])
+
+        # A later code release on main still bumps 1.3.0 -> 1.4.0 with no tag collision.
+        r = self.run_script(MAXPM_REV=main_before)
+        self.assertEqual(r.returncode, 76, r.stdout)
+        self.assertIn("v1.4.0", self.releases())
+
+    def test_dependency_release_refusals(self):
+        base = self.git("rev-parse", "v1.3.0^{commit}")
+        main_head = self.git("rev-parse", "HEAD")
+        origin_main = self.origin_ref("refs/heads/main")
+        lock = json.dumps({
+            "name": "maximizepm", "version": "1.3.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "maximizepm", "version": "1.3.0"}, "node_modules/x": {"version": "9.9.10"}},
+        }, indent=2)
+        good_pin = self._make_deps_commit(base, {"desktop/package-lock.json": lock})
+        two_commits = self._make_deps_commit(good_pin, {"desktop/package-lock.json": lock.replace("9.9.10", "9.9.11")})
+        non_dep = self._make_deps_commit(base, {"desktop/package-lock.json": lock, "river/core.py": "# code\n"})
+        empty_commit = self._make_deps_commit(base, {})
+
+        cases = [
+            ("missing MAXPM_REV", dict(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base), "needs MAXPM_REV"),
+            ("missing MAXPM_DEPS_BASE", dict(MAXPM_RELEASE_KIND="deps", MAXPM_REV=good_pin), "needs MAXPM_DEPS_BASE"),
+            ("wrong parent", dict(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=two_commits), "as its parent"),
+            ("non-dependency file", dict(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=non_dep), "non-dependency file: river/core.py"),
+            ("no files changed", dict(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=empty_commit), "changes no files"),
+            ("unknown kind", dict(MAXPM_RELEASE_KIND="bogus"), "unknown MAXPM_RELEASE_KIND"),
+        ]
+        for label, env, words in cases:
+            with self.subTest(label):
+                r = self.run_script(**env)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("::step end check failed", r.stdout)
+                self.assertIn(words, r.stdout)
+                self.assertEqual(self.git("rev-parse", "HEAD"), main_head)
+                self.assertEqual(self.origin_ref("refs/heads/main"), origin_main)
+                self.assertIsNone(self.origin_ref("refs/tags/v1.3.1"))
+
+    def test_dependency_release_retry_after_failed_test_and_build(self):
+        base = self.git("rev-parse", "v1.3.0^{commit}")
+        origin_main = self.origin_ref("refs/heads/main")
+        lock = json.dumps({
+            "name": "maximizepm", "version": "1.3.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "maximizepm", "version": "1.3.0"}, "node_modules/x": {"version": "9.9.10"}},
+        }, indent=2)
+        deps_pin = self._make_deps_commit(base, {"desktop/package-lock.json": lock})
+        build_ref = f"maxpm/deps/v1.3.1-{deps_pin[:8]}"
+
+        # Failed test: nothing pushed at all.
+        r = self.run_script(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin,
+                            RELEASE_TEST_CMD="false")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("::step end test failed", r.stdout)
+        self.assertIsNone(self.origin_ref(f"refs/heads/{build_ref}"))
+        self.assertEqual(self.origin_ref("refs/heads/main"), origin_main)
+
+        # Failed build: temp branch was pushed; retry reuses the same commit without force-pushing.
+        self.github(run="failure")
+        r = self.run_script(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        first_commit = self.origin_ref(f"refs/heads/{build_ref}")
+        self.assertIsNotNone(first_commit)
+
+        self.github()
+        r = self.run_script(MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin)
+        self.assertEqual(r.returncode, 76, r.stdout)
+        self.assertIn("reusing dependency release commit", r.stdout)
+        self.assertEqual(self.origin_ref(f"refs/heads/{build_ref}"), first_commit)
+        self.assertEqual(self.releases(), {"v1.3.1": {"draft": True, "sha": first_commit}})
+
+    def test_dependency_release_dry_run(self):
+        base = self.git("rev-parse", "v1.3.0^{commit}")
+        main_head = self.git("rev-parse", "HEAD")
+        lock = json.dumps({
+            "name": "maximizepm", "version": "1.3.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "maximizepm", "version": "1.3.0"}, "node_modules/x": {"version": "9.9.10"}},
+        }, indent=2)
+        deps_pin = self._make_deps_commit(base, {"desktop/package-lock.json": lock})
+        r = self.run_script("--dry-run", MAXPM_RELEASE_KIND="deps", MAXPM_DEPS_BASE=base, MAXPM_REV=deps_pin)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("dry run", r.stdout)
+        self.assertIn("not main", r.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD"), main_head)
+        self.assertIsNone(self.origin_ref(f"refs/heads/maxpm/deps/v1.3.1-{deps_pin[:8]}"))
+
 
 if __name__ == "__main__":
     unittest.main()
