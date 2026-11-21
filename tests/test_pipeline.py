@@ -578,7 +578,7 @@ class Runner(RunnerBase):
         self.assertEqual(test["state"], "queued")
         self.assertIn("(a delay of 30m) while the checks pass", test["gate_note"])
         # A failed check of the project since the build keeps it closed.
-        cid = self.c.execute("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
+        cid = self.c.execute("INSERT INTO triggers(scope_kind, scope, name, form, config, every, fail_after, "
                              "recover_after, timeout, severity, created_at) VALUES ('project','app','up','http','{}',"
                              "'1m',1,1,'10s','item',?)", (core.iso(core.now()),)).lastrowid
         self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, status) VALUES (?, 'ops:app:up', ?, "
@@ -1743,7 +1743,7 @@ class DefaultPipelines(Base):
         self.hook(d1, "deploy", 2, "aaaaaaa", old)
         self.hook(d1, "deploy", 0, "aaaaaaa", old)
         self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (old, d1))
-        cid = self.c.execute("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
+        cid = self.c.execute("INSERT INTO triggers(scope_kind, scope, name, form, config, every, fail_after, "
                              "recover_after, timeout, severity, created_at) VALUES ('target','web-prod','up','http',"
                              "'{}','1m',1,1,'10s','item',?)", (old,)).lastrowid
         self.c.execute("INSERT INTO ops_runs(check_id, key, started_at, ended_at, status) VALUES (?, 'k', ?, ?, 'ok')",
@@ -1782,7 +1782,7 @@ class DefaultPipelines(Base):
         ids = {}
         for name in ("up", "errors", "shell"):
             ids[name] = self.c.execute(
-                "INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
+                "INSERT INTO triggers(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
                 "severity, created_at) VALUES ('target','web-prod',?,'http','{}','1m',1,1,'10s','item',?)",
                 (name, core.iso(start))).lastrowid
         for n in range(100):

@@ -1646,11 +1646,18 @@ def build_parser(only=None):
                        "a launchd job: maxpm serve --install-watchdog), not maxpm serve, so it also runs while serve "
                        "is down; for a check of serve itself or of the relay")
 
+    def ops_home(x):
+        x.add_argument("--area", help="the area of the project it is in (maxpm ops area list); default: the "
+                       "project's general area, or the deploy target's area")
+        x.add_argument("--playbook", help="the playbook of the project that its faults get (maxpm ops playbook "
+                       "list); default: its own playbook with --runbook or --repair, else the project's default")
+
     x = ops.add_parser("add", help="add a check: maxpm ops add <project|target> <name> <form> --url ... "
                        "(forms: " + "; ".join(f"{k}: {v}" for k, v in core.OPS_FORMS.items()) + ")")
     x.add_argument("scope", help="a project or a deploy target (project:<name> or target:<name> when both exist)")
     x.add_argument("name"); x.add_argument("form", choices=list(core.OPS_FORMS))
     ops_fields(x, True)
+    ops_home(x)
     x = ops.add_parser("propose", help="propose a check, or a change of one: it never runs; a person or the manager "
                        "accepts it (maxpm ops accept) or rejects it. Any form: the way for an agent to ask for a cmd, "
                        "log, or plugin check or a repair")
@@ -1685,6 +1692,7 @@ def build_parser(only=None):
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--form", choices=list(core.OPS_FORMS), help="another form; give its settings too")
     ops_fields(x, False)
+    ops_home(x)
     x = ops.add_parser("record", help="the record of every detection: each check or subject a run found not ok "
                        "(also noise, planned and warnings), its kind, first and last seen, how often, and its item")
     x.add_argument("--project", help="the project and its deploy target (default: all)")
@@ -1858,6 +1866,83 @@ def build_parser(only=None):
                    "with MaximizePM: " + ", ".join(core.ops_builtin_profiles()))
     y.add_argument("--scope", help="apply it to this project or target instead of the one the file names")
     y.add_argument("--yes", action="store_true", help="write the change")
+    x = ops.add_parser("area", help="the areas of a project (its general area, each deploy target, an environment, "
+                       "a host): each holds triggers")
+    ars = x.add_subparsers(dest="oacmd", required=True)
+    y = ars.add_parser("add", help="a person or the manager: a new area")
+    y.add_argument("project"); y.add_argument("name")
+    y.add_argument("--description", default="", help="what it is")
+    y.add_argument("--place", help="its folder or its host")
+    y.add_argument("--target", help="the deploy target it is: its triggers have the scope target:<name>")
+    y = ars.add_parser("edit", help="a person or the manager: change its description, place or name")
+    y.add_argument("project"); y.add_argument("name")
+    y.add_argument("--description"); y.add_argument("--place", help="its folder or its host; empty removes it")
+    y.add_argument("--name", dest="new_name", help="a new name")
+    y = ars.add_parser("list", help="the areas, of one project or of all"); y.add_argument("project", nargs="?")
+    y = ars.add_parser("show", help="one area and its triggers"); y.add_argument("project"); y.add_argument("name")
+    x = ops.add_parser("playbook", help="the playbooks of a project: what the agent of a trigger's event knows, "
+                       "when it is done, its tools and its limits. A person changes all of it; the manager all but "
+                       "the tools, limits and repair; another agent proposes the knowledge and done means")
+
+    def book_fields(y):
+        y.add_argument("--knowledge", help="what the agent must know: where to look, what is normal")
+        y.add_argument("--done-means", dest="done_means", help="when the work of an event is finished")
+        y.add_argument("--tools", help=f"a person: what the agent may use (default: {core.OPS_NO_TOOLS})")
+        y.add_argument("--limits", help=f"a person: what the agent may do alone (default: {core.OPS_NO_LIMITS})")
+        y.add_argument("--repair", help="a person: a command that fixes a known fault; empty removes it")
+        y.add_argument("--model", help="the model of its sessions (default: the queue's setting for operational work)")
+        y.add_argument("--effort", help="their effort")
+        y.add_argument("--where", dest="workdir", help="the folder it runs in (default: the area's, else the "
+                       "project's)")
+    bks = x.add_subparsers(dest="obcmd", required=True)
+    y = bks.add_parser("add", help="a person or the manager: a new playbook (--knowledge and --done-means needed)")
+    y.add_argument("project"); y.add_argument("name"); book_fields(y)
+    y = bks.add_parser("edit", help="change a playbook; an agent's change of --knowledge or --done-means is a "
+                       "proposal for the manager")
+    y.add_argument("project"); y.add_argument("name"); book_fields(y)
+    y.add_argument("--name", dest="new_name", help="a new name")
+    y.add_argument("--why", help="an agent: what the agent of an event lacked, and the event that showed it")
+    y.add_argument("--item", type=int, help="the item that showed it (default: the item you hold)")
+    y = bks.add_parser("list", help="the playbooks, of one project or of all, with the triggers each serves")
+    y.add_argument("project", nargs="?")
+    y = bks.add_parser("show", help="one playbook"); y.add_argument("project"); y.add_argument("name")
+    y = bks.add_parser("accept", help="a person or the manager: an agent's proposed change is in force")
+    y.add_argument("proposal", help="p<id>"); y.add_argument("--note")
+    y = bks.add_parser("reject", help="a person or the manager: an agent's proposed change is not wanted")
+    y.add_argument("proposal", help="p<id>"); y.add_argument("--note", required=True)
+    x = ops.add_parser("trigger", help="the triggers: what starts an agent (a check's state, a time, an outside "
+                       "event), each in an area with one playbook. A check is a state trigger (maxpm ops add)")
+    trs = x.add_subparsers(dest="otcmd", required=True)
+    y = trs.add_parser("add", help="a person or the manager: a time or an event trigger")
+    y.add_argument("project"); y.add_argument("name")
+    y.add_argument("--condition", required=True, choices=[k for k in core.TRIGGER_CONDITIONS if k != "state"],
+                   help="time: at its --cron or --every; event: an outside system reports events")
+    y.add_argument("--arrival", default="poll", choices=list(core.TRIGGER_ARRIVALS),
+                   help="poll: MaximizePM runs its --command (the default); push: the outside system posts to it")
+    y.add_argument("--area", help="the area (default: the project's general area)")
+    y.add_argument("--playbook", help="the playbook (default: the project's default playbook)")
+    y.add_argument("--priority", type=int, help="the priority of its events' items, 0-4 (default: time 2, else 1)")
+    y.add_argument("--command", help="poll: the routine, a script that prints the events")
+    y.add_argument("--every", help="poll: how often it runs"); y.add_argument("--cron", help="poll: when it runs")
+    y.add_argument("--timeout", help="poll: the time limit of one run")
+    y = trs.add_parser("edit", help="a person or the manager: its area, playbook or priority")
+    y.add_argument("scope"); y.add_argument("name")
+    y.add_argument("--area"); y.add_argument("--playbook")
+    y.add_argument("--priority", type=int, help="0-4; -1: by its condition again")
+    y = trs.add_parser("list", help="the triggers by area, of one project or of all"); y.add_argument("project", nargs="?")
+    y = trs.add_parser("show", help="one trigger, its playbook and its last events")
+    y.add_argument("scope"); y.add_argument("name")
+    x = ops.add_parser("events", help="the events of the triggers: each id once, repeats counted")
+    evs = x.add_subparsers(dest="oecmd", required=True)
+    y = evs.add_parser("add", help="a person or the manager: give a trigger one event by hand")
+    y.add_argument("scope"); y.add_argument("name", help="the trigger")
+    y.add_argument("--id", dest="event_id", required=True, help="the event's id: a repeat of it starts nothing new")
+    y.add_argument("--title", required=True, help="one line: what happened")
+    y.add_argument("--data", help="the other fields as a JSON object (details, a link, ...)")
+    y = evs.add_parser("list", help="the last events, of one trigger or of all")
+    y.add_argument("scope", nargs="?"); y.add_argument("name", nargs="?")
+    y.add_argument("-n", type=int, default=20, help="at most this many (default 20)")
+    y = evs.add_parser("show", help="one event with its data"); y.add_argument("event", help="e<id>")
 
     tg = sub.add_parser("target", help="deploy targets: where projects ship to")
     tgs = tg.add_subparsers(dest="tcmd", required=True)
@@ -4689,7 +4774,62 @@ def _setup_profile(conn, name, scope, actor):
     return res
 
 
+def _dispatch_operations(conn, a, actor):
+    """maxpm ops area|playbook|trigger|events (#6625)."""
+    from . import operations as o
+    sub = a.oacmd if a.ocmd == "area" else a.obcmd if a.ocmd == "playbook" else a.otcmd if a.ocmd == "trigger" \
+        else a.oecmd
+    if sub not in ("list", "show") and not actor and core.agent_type_from_env(os.environ):
+        raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} {sub} ... (a person or the manager changes "
+                         f"areas, playbooks and triggers; an agent proposes a playbook change)")
+    if a.ocmd == "area":
+        if a.oacmd == "add":
+            return o.area_add(conn, a.project, a.name, a.description, a.place, a.target, actor)
+        if a.oacmd == "edit":
+            return o.area_edit(conn, a.project, a.name, {"description": a.description, "place": a.place,
+                                                          "name": a.new_name}, actor)
+        if a.oacmd == "list":
+            return o.area_list(conn, a.project)
+        return {"area": o.area_show(conn, a.project, a.name)}
+    if a.ocmd == "playbook":
+        if a.obcmd in ("accept", "reject"):
+            return o.playbook_decide(conn, a.proposal, a.obcmd == "accept", actor, a.note)
+        if a.obcmd == "list":
+            return o.playbook_list(conn, a.project)
+        if a.obcmd == "show":
+            return {"playbook": o.playbook_show(conn, a.project, a.name)}
+        fields = {k: getattr(a, k) for k in ("knowledge", "done_means", "tools", "limits", "repair", "model",
+                                             "effort", "workdir")}
+        if a.obcmd == "add":
+            return o.playbook_add(conn, a.project, a.name, fields, actor)
+        return o.playbook_edit(conn, a.project, a.name, dict(fields, name=a.new_name), a.why, a.item, actor)
+    if a.ocmd == "trigger":
+        if a.otcmd == "add":
+            return o.trigger_add(conn, a.project, a.name, a.condition, a.arrival, a.area, a.playbook, a.priority,
+                                 a.command, a.every, a.cron, a.timeout, actor)
+        if a.otcmd == "edit":
+            return o.trigger_edit(conn, a.scope, a.name, a.area, a.playbook, a.priority, actor)
+        if a.otcmd == "list":
+            return o.trigger_list(conn, a.project)
+        return {"trigger": o.trigger_show(conn, a.scope, a.name)}
+    if a.oecmd == "add":
+        try:
+            data = json.loads(a.data) if a.data else {}
+        except ValueError as e:
+            raise RiverError(f"--data is not JSON: {e}")
+        if not isinstance(data, dict):
+            raise RiverError("--data is a JSON object: {\"link\": \"...\", ...}")
+        return o.events_add(conn, a.scope, a.name, dict(data, id=a.event_id, title=a.title), actor)
+    if a.oecmd == "list":
+        if bool(a.scope) != bool(a.name):
+            raise RiverError("name the trigger with its scope and name: maxpm ops events list <scope> <trigger>")
+        return o.events_list(conn, a.scope, a.name, a.n)
+    return o.events_show(conn, a.event)
+
+
 def _dispatch_ops(conn, a, actor):
+    if a.ocmd in ("area", "playbook", "trigger", "events"):
+        return _dispatch_operations(conn, a, actor)
     if a.ocmd == "record":
         return core.ops_detections(conn, a.project, a.kind, a.since, a.check, a.n)
     if a.ocmd == "list":
@@ -4784,10 +4924,10 @@ def _dispatch_ops(conn, a, actor):
     fields["subject"] = None if a.subject is None else a.subject == "on"
     fields["outside"] = None if a.outside is None else a.outside == "on"
     if a.ocmd == "add":
-        return core.ops_add(conn, a.scope, a.name, a.form, fields, actor)
+        return core.ops_add(conn, a.scope, a.name, a.form, fields, actor, a.area, a.playbook)
     if a.ocmd == "propose":
         return core.ops_propose(conn, a.scope, a.name, a.form, fields, a.why, actor)
-    return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor)
+    return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor, a.area, a.playbook)
 
 
 def _project_folder(path, create, again):
@@ -7951,7 +8091,116 @@ def render_schedule(a, res):
         print("maxpm serve adds each item at its time; maxpm schedule list shows them")
 
 
+def _trigger_line(t):
+    what = t["condition"] + ("" if t["arrival"] == "poll" else ", push")
+    when = (f"; {core.ops_when(t)}" if t["arrival"] == "poll" and t["condition"] != "state" else "")
+    last = t.get("last_event")
+    return (f"{t['scope']}/{t['name']}  [{what}{when}; P{t['priority_used']}; playbook {t['playbook'] or 'default'}"
+            + (f"; {t['state']}" if t["condition"] == "state" else "") + "]"
+            + (f"  last event {core.show_time(last['last_at'])}: {last['title']}" if last else ""))
+
+
+def _playbook_lines(b, full=False):
+    out = [f"{b['project']}/{b['name']}" + ("  (the project's default)" if b["is_default"] else "")
+           + f"  serves: {', '.join(b['triggers']) or 'no trigger'}"]
+    if full:
+        out.append(f"    knowledge: {b['knowledge'] or core.OPS_DEFAULT_KNOWLEDGE}")
+        out.append(f"    done means: {b['done_means']}")
+        out.append(f"    tools: {b['tools'] or core.OPS_NO_TOOLS}")
+        out.append(f"    limits: {b['limits'] or core.OPS_NO_LIMITS}")
+        if b.get("repair"):
+            out.append(f"    repair: {b['repair']}")
+        out.append(f"    model: {b['model'] or 'the queue setting for operational work'}"
+                   + (f", effort {b['effort']}" if b.get("effort") else "")
+                   + f"; runs in: {b['workdir'] or 'the area folder, else the project folder'}")
+    for p in b.get("proposals", []):
+        out.append(f"    proposal p{p['id']} by {p['proposed_by']}: {p['why']}  (maxpm ops playbook accept p{p['id']})")
+    return out
+
+
+def render_operations(a, res):
+    """maxpm ops area|playbook|trigger|events (#6625)."""
+    if a.ocmd == "area":
+        if a.oacmd == "list":
+            for r in res["areas"]:
+                print(f"{r['project']}/{r['name']}  {r['triggers']} trigger(s)"
+                      + (f"; deploy target {r['target']}" if r["target"] else "")
+                      + (f"; {r['place']}" if r["place"] else "") + (f"  {r['description']}" if r["description"] else ""))
+            if not res["areas"]:
+                print("no areas (each project gets its general area with its first check)")
+            return
+        r = res["area"]
+        if res.get("changed"):
+            print(f"area {res['changed']}: {r['project']}/{r['name']}")
+        print(f"{r['project']}/{r['name']}" + (f"  deploy target {r['target']}" if r["target"] else "")
+              + (f"  {r['place']}" if r["place"] else ""))
+        if r["description"]:
+            print(f"  {r['description']}")
+        for t in r.get("trigger_list", []):
+            print("  " + _trigger_line(t))
+        return
+    if a.ocmd == "playbook":
+        if a.obcmd in ("accept", "reject") or res.get("changed") == "proposed":
+            p = res["proposal"]
+            print(f"playbook proposal p{p['id']} of {p['project']}/{p['playbook']}: {p['state']}"
+                  + ("; the manager gets a note to accept or reject it" if p["state"] == "open" else ""))
+            return
+        if a.obcmd == "list":
+            for b in res["playbooks"]:
+                print("\n".join(_playbook_lines(b)))
+            if not res["playbooks"]:
+                print("no playbooks (each project gets its default playbook with its first check)")
+            return
+        if res.get("changed"):
+            print(f"playbook {res['changed']}:")
+        print("\n".join(_playbook_lines(res["playbook"], True)))
+        return
+    if a.ocmd == "trigger":
+        if a.otcmd == "list":
+            area = None
+            for t in res["triggers"]:
+                if (t["project"], t["area"]) != area:
+                    area = (t["project"], t["area"])
+                    print(f"{t['project'] or '?'} / {t['area'] or 'no area'}")
+                print("  " + _trigger_line(t))
+            if not res["triggers"]:
+                print("no triggers")
+            return
+        t = res["trigger"]
+        if res.get("changed"):
+            print(f"trigger {res['changed']}:")
+        print(_trigger_line(t))
+        print(f"  area {t['project']}/{t['area']}; {t['events']} event(s)"
+              + (f"; routine: {t['routine']}" if t.get("routine") else ""))
+        print("\n".join("  " + x for x in _playbook_lines(dict(t["playbook_used"], project=t["project"],
+                                                               triggers=[f"{t['scope']}/{t['name']}"]), True)))
+        for e in t.get("event_list", []):
+            print(f"  e{e['id']}  {core.show_time(e['last_at'])}  {e['event_id']}: {e['title']}"
+                  + (f"  ({e['repeats']} repeats)" if e["repeats"] else ""))
+        return
+    if a.oecmd == "add":
+        e = res["event"]
+        print(f"event e{e['id']} of {res['trigger']}: "
+              + (f"received: {e['title']}" if res["new"] else f"a repeat of {e['event_id']} ({e['repeats']}x): no new work"))
+        return
+    if a.oecmd == "list":
+        for e in res["events"]:
+            print(f"e{e['id']}  {core.show_time(e['last_at'])}  {e['trigger']}  {e['event_id']}: {e['title']}"
+                  + (f"  ({e['repeats']} repeats)" if e["repeats"] else "") + (f"  #{e['item_id']}" if e["item_id"] else ""))
+        if not res["events"]:
+            print("no events")
+        return
+    e = res["event"]
+    print(f"e{e['id']}  {e['trigger']}  {e['event_id']}: {e['title']}")
+    print(f"  received {core.show_time(e['received_at'])}, last {core.show_time(e['last_at'])}, {e['repeats']} repeats"
+          + (f", item #{e['item_id']}" if e["item_id"] else ""))
+    if e["data"]:
+        print("  " + json.dumps(e["data"], indent=2).replace("\n", "\n  "))
+
+
 def render_ops(a, res):
+    if a.ocmd in ("area", "playbook", "trigger", "events"):
+        return render_operations(a, res)
     if a.ocmd == "record":
         if not res["rows"]:
             print("no detections" + (f" of kind {res['kind']}" if res["kind"] else "") +
@@ -8092,6 +8341,9 @@ def render_ops(a, res):
     print(f"    {core.ops_when(c)}, timeout {c['timeout']}, fault after {c['fail_after']} failed runs, healed after "
           f"{c['recover_after']} passed runs; severity {c['severity']}"
           + ("; a fault for each subject in the output" if c["subject"] else ""))
+    if c.get("area") or c.get("playbook"):
+        print(f"    area {c.get('area') or 'none'}, playbook {c.get('playbook') or 'default'} (maxpm ops trigger show "
+              f"{c['scope']} {c['name']})")
     if c["runbook"]:
         print(f"    runbook: {c['runbook']}")
     if c["repair"]:

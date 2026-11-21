@@ -91,7 +91,7 @@ def build(conn, sizes=None, seed=6505):
                              [(dpid, f"Deploy {name}", "done" if r else "open", "released" if r else "", name,
                                at(span - r * 600 - 60), at(span - r * 600) if r else None)
                               for r in range(s["releases"])])
-            conn.executemany("INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, "
+            conn.executemany("INSERT INTO triggers(scope_kind, scope, name, form, config, every, fail_after, "
                              "recover_after, timeout, severity, created_at) VALUES ('project', ?, ?, 'url', '{}', "
                              "'5m', 2, 1, '30s', 'item', ?)",
                              [(names[2 * t], f"check-{k}", at(0)) for k in range(s["checks"])])

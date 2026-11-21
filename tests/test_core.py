@@ -6078,7 +6078,7 @@ class ReleaseWatch(ReleaseBase):
                      actor="dev")
         released = self.release()
         with core.tx(self.c):  # added at the release: no cron time of its own passed before t
-            self.c.execute("UPDATE checks SET created_at=?", (core.iso(released),))
+            self.c.execute("UPDATE triggers SET created_at=?", (core.iso(released),))
         t = released + timedelta(seconds=1)
         self.assertEqual(self.due(t), [])
         self.assertIsNone(core._ops_watch(self.c, core.ops_find(self.c, "site", "weekly"), t))
@@ -6163,7 +6163,7 @@ class ReleaseWatch(ReleaseBase):
     def test_a_check_added_after_the_release_runs_on_its_own_schedule(self):
         t = self.release() + timedelta(seconds=5)
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
-        self.c.execute("UPDATE checks SET created_at=?", (core.iso(t),))  # a second may hold both
+        self.c.execute("UPDATE triggers SET created_at=?", (core.iso(t),))  # a second may hold both
         self.c.commit()
         self.assertEqual(self.due(t), ["home"])  # its first run
         self.run_at("home", t)
@@ -12751,7 +12751,7 @@ class Ops(Base):
         self.assertEqual(show(), ["  monitoring: no checks (maxpm ops setup site)"])
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
         core.ops_add(self.c, "prod", "nightly", "beat", {"period": "1d"}, actor="dev")
-        self.c.execute("UPDATE checks SET state='fault' WHERE name='nightly'")
+        self.c.execute("UPDATE triggers SET state='fault' WHERE name='nightly'")
         self.c.commit()
         it = core.item_add(self.c, "site", "ops:prod:nightly no beat in 1d", kind="operational", doer="ai",
                            actor="maxpm")["id"]
@@ -13831,7 +13831,7 @@ class Ops(Base):
         core.ops_add(self.c, "site", "api", "plugin", {"command": "check_api", "every": "1m", "fail_after": 1},
                      actor="mark")
         pid = core._project(self.c, "site")["id"]
-        self.c.execute("UPDATE checks SET severity='page'")
+        self.c.execute("UPDATE triggers SET severity='page'")
         self.c.executemany("INSERT INTO settings(scope,key,value) VALUES (?,?,?)",
                            [("global", "ops_page", "every"), (f"project:{pid}", "ops_page_after", "5m")])
         self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # as an older maxpm left the queue
@@ -14424,7 +14424,7 @@ class OpsCron(Base):
         core.ops_add(self.c, "site", "home", "url", {"url": "https://x.test/", "cron": "0 */4 * * *",
                                                     "timeout": "10m", "every": "1m"}, actor="dev")
         with core.tx(self.c):
-            self.c.execute("UPDATE checks SET created_at=? WHERE name='home'", (core.iso(self.t("00:30")),))
+            self.c.execute("UPDATE triggers SET created_at=? WHERE name='home'", (core.iso(self.t("00:30")),))
         due = lambda at: [c["name"] for c in core.ops_due(self.c, at)]
         self.assertEqual(due(self.t("03:59")), [])  # its first time is 04:00, not when it was added
         self.assertEqual(due(self.t("04:01")), ["home"])

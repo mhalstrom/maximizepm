@@ -301,7 +301,7 @@ try {
         self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (core.iso(start), dep))
         for name in ("host-check-edge-cell-long-name", "backend-errors", "mcp-endpoint"):
             cid = self.c.execute(
-                "INSERT INTO checks(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
+                "INSERT INTO triggers(scope_kind, scope, name, form, config, every, fail_after, recover_after, timeout, "
                 "severity, created_at) VALUES ('target','web-prod',?,'http','{}','1m',1,1,'10s','item',?)",
                 (name, core.iso(start))).lastrowid
             for n in range(240):

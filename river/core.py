@@ -1599,24 +1599,90 @@ CREATE TABLE IF NOT EXISTS policies (
   changed_at  TEXT
 );
 
--- Operations checks (#5429): what MaximizePM watches for a project or a deploy target. A check runs a plugin:
--- a built-in form (url, beat, cmd, log) or an executable on the Monitoring Plugins API (form plugin). One
--- generic process: nothing about a project lives in the code, each project sets its own checks.
-CREATE TABLE IF NOT EXISTS checks (
+-- Operations (#6625, plan: canvas operations-tab). An area is a part of a project that triggers watch: its general
+-- area, a deploy target, an environment or a host. Each project has one area 'general'; each deploy target with
+-- checks has an area of its name in the project that its faults go to (_ops_project).
+CREATE TABLE IF NOT EXISTS ops_areas (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  name        TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  place       TEXT,                      -- its folder or its host
+  target      TEXT,                      -- the deploy target it is: its triggers have the scope target:<name>
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  changed_by  TEXT,
+  changed_at  TEXT,
+  UNIQUE (project_id, name)
+);
+
+-- A playbook gives the agent of a trigger's event what it needs to work alone: the knowledge, what done means, the
+-- tools and the limits that the person allows. A project's playbooks serve its triggers; each project has one
+-- default playbook (is_default 1) for the triggers that name none. mark 2026-11-21 (#6641): an agent proposes a
+-- change of knowledge or done means (ops_playbook_proposals) and the manager accepts it; only a person changes the
+-- tools, the limits and the repair. mark 2026-11-21 (#6645): MaximizePM adds no limit of its own; empty limits
+-- mean "investigate and propose only".
+CREATE TABLE IF NOT EXISTS ops_playbooks (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  name        TEXT NOT NULL,
+  knowledge   TEXT NOT NULL,
+  done_means  TEXT NOT NULL,
+  tools       TEXT NOT NULL DEFAULT '',  -- '': none (the agent reads the project and the event: no secrets, no accounts)
+  limits      TEXT NOT NULL DEFAULT '',  -- '': investigate and propose only
+  model       TEXT,                      -- none: the queue's setting for operational work
+  effort      TEXT,
+  workdir     TEXT,                      -- where it runs; none: the area's folder, else the project's
+  repair      TEXT,                      -- a command that fixes a known fault (a check's repair before #6625)
+  is_default  INTEGER NOT NULL DEFAULT 0,
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  changed_by  TEXT,
+  changed_at  TEXT,
+  UNIQUE (project_id, name)
+);
+
+-- An agent's change of a playbook's knowledge or done means: it is in force when a person or the manager accepts it.
+CREATE TABLE IF NOT EXISTS ops_playbook_proposals (
+  id          INTEGER PRIMARY KEY,
+  playbook_id INTEGER NOT NULL,
+  knowledge   TEXT,                      -- the new text; none: unchanged
+  done_means  TEXT,
+  why         TEXT NOT NULL,
+  item_id     INTEGER,
+  proposed_by TEXT,
+  proposed_at TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'open',  -- open, accepted, rejected
+  decided_by  TEXT,
+  decided_at  TEXT,
+  note        TEXT
+);
+
+-- Operations triggers (#6625; before it the table checks, #5429): what starts an agent of a project. A trigger is in
+-- an area and has one playbook. condition: state (a check: MaximizePM runs a plugin, a built-in form url, beat, cmd,
+-- log or an executable on the Monitoring Plugins API, and a fault opens an item), time (at its cron or every) or
+-- event (an outside system reports events); arrival: poll (MaximizePM runs its routine) or push (the outside system
+-- posts to it). The view checks holds the state triggers that poll, with the runbook and the repair of their
+-- playbook, so the fault path reads one place for all of them. One generic process: nothing about a project lives in
+-- the code, each project sets its own triggers.
+CREATE TABLE IF NOT EXISTS triggers (
   id            INTEGER PRIMARY KEY,
-  scope_kind    TEXT NOT NULL,           -- project or target
+  scope_kind    TEXT NOT NULL,           -- project or target: from the area (a target's area gives target)
   scope         TEXT NOT NULL,           -- the name of the project or the target
   name          TEXT NOT NULL,
-  form          TEXT NOT NULL,           -- one of OPS_FORMS
-  config        TEXT NOT NULL,           -- the settings of the form as JSON (OPS_FORM_FIELDS)
-  every         TEXT NOT NULL,           -- a duration: how often it runs
-  fail_after    INTEGER NOT NULL,        -- failed runs in a row before it is a fault
-  recover_after INTEGER NOT NULL,        -- passed runs in a row before a fault counts as healed
-  timeout       TEXT NOT NULL,           -- a duration: the time limit of one run
-  severity      TEXT NOT NULL,           -- item or note
-  runbook       TEXT,                    -- for the agent that investigates a fault
+  area_id       INTEGER,                 -- ops_areas; none: the project's general area
+  playbook_id   INTEGER,                 -- ops_playbooks; none: the project's default playbook
+  condition     TEXT NOT NULL DEFAULT 'state',  -- one of TRIGGER_CONDITIONS
+  arrival       TEXT NOT NULL DEFAULT 'poll',   -- one of TRIGGER_ARRIVALS
+  priority      INTEGER,                 -- of its event's item; none: by condition (trigger_priority)
+  form          TEXT NOT NULL DEFAULT '',  -- a poll: one of OPS_FORMS; a push: ''
+  config        TEXT NOT NULL DEFAULT '{}',  -- the settings of the form as JSON (OPS_FORM_FIELDS)
+  every         TEXT NOT NULL DEFAULT '5m',  -- a duration: how often it runs
+  fail_after    INTEGER NOT NULL DEFAULT 1,  -- failed runs in a row before it is a fault
+  recover_after INTEGER NOT NULL DEFAULT 1,  -- passed runs in a row before a fault counts as healed
+  timeout       TEXT NOT NULL DEFAULT '30s',  -- a duration: the time limit of one run
+  severity      TEXT NOT NULL DEFAULT 'item',  -- item or note
   subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
-  repair        TEXT,                    -- a command that fixes a known fault
   layer         TEXT NOT NULL DEFAULT 'app',  -- what it watches (OPS_LAYERS): a fault of a lower layer gives the kind
   cron          TEXT,                    -- a cron expression (five fields): it runs then, not every N (#5506)
   outside       INTEGER NOT NULL DEFAULT 0,  -- 1: the watchdog runs it (maxpm ops check --outside), not maxpm serve
@@ -1630,6 +1696,22 @@ CREATE TABLE IF NOT EXISTS checks (
   changed_at    TEXT,
   UNIQUE (scope_kind, scope, name)
 );
+
+-- The events of the triggers (#6625): one row for each event id of a trigger, so a repeat of the id starts nothing
+-- new (it counts here). id and title are required; data holds the other fields of the event, as they came.
+CREATE TABLE IF NOT EXISTS trigger_events (
+  id          INTEGER PRIMARY KEY,
+  trigger_id  INTEGER NOT NULL,
+  event_id    TEXT NOT NULL,             -- the outside system's id of the event
+  title       TEXT NOT NULL,
+  data        TEXT,                      -- the optional fields as JSON (details, a link, any other)
+  received_at TEXT NOT NULL,
+  last_at     TEXT NOT NULL,             -- the last time the id came
+  repeats     INTEGER NOT NULL DEFAULT 0,
+  item_id     INTEGER,                   -- the item the event opened (#6627)
+  UNIQUE (trigger_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS trigger_events_time ON trigger_events(trigger_id, received_at);
 
 -- One row for each run of a check. check_id stays when the check is removed, so the history stays readable.
 -- A scheduled task (#5507): a repeating obligation (an annual report, taxes, a renewal, an access review). At each
@@ -2285,7 +2367,7 @@ def schema_print():
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
     for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts,
-              _migrate_report_cards, _pipeline_migrate, _migrate_artifact_links):
+              _migrate_report_cards, _pipeline_migrate, _migrate_artifact_links, _migrate_triggers):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -2413,6 +2495,44 @@ def graph_version(conn):
     return r[0] if r else None
 
 
+# The checks of the fault path (#6625): the state triggers that MaximizePM polls, each with the runbook (the knowledge
+# of its own playbook; none for the project's default one) and the repair of its playbook. Code writes triggers.
+_CHECKS_VIEW = (
+    "CREATE VIEW checks AS SELECT t.id, t.scope_kind, t.scope, t.name, t.form, t.config, t.every, t.fail_after, "
+    "t.recover_after, t.timeout, t.severity, CASE WHEN p.is_default THEN NULL ELSE NULLIF(p.knowledge, '') END "
+    "AS runbook, "
+    "t.subject, NULLIF(p.repair, '') AS repair, t.layer, t.cron, t.outside, t.errors, t.paused_until, t.last_beat, "
+    "t.state, t.created_by, t.created_at, t.changed_by, t.changed_at, t.area_id, t.playbook_id, t.condition, "
+    "t.arrival, t.priority FROM triggers t LEFT JOIN ops_playbooks p ON p.id = t.playbook_id "
+    "WHERE t.condition = 'state' AND t.arrival = 'poll'")
+
+
+def _migrate_triggers(conn):
+    """Move the checks table of an older queue into triggers, once (#6625, mark 2026-11-21 #6631: a new table). Each
+    check keeps its id, so ops_runs, ops_events and ops_detections still name it. Each gets its area (the project's
+    general area, or its deploy target's area, #6639) and a playbook: its runbook and repair become a playbook of the
+    check's name; a check with neither serves the project's default playbook. Then (also in a new queue) the view
+    checks is made again."""
+    r = conn.execute("SELECT type FROM sqlite_master WHERE name='checks'").fetchone()
+    if r and r["type"] == "table":
+        old = [x["name"] for x in conn.execute("PRAGMA table_info(checks)")]
+        new = {x["name"] for x in conn.execute("PRAGMA table_info(triggers)")}
+        cols = ",".join(c for c in old if c in new)
+        conn.execute(f"INSERT OR IGNORE INTO triggers({cols}) SELECT {cols} FROM checks")
+        books = [dict(x) for x in conn.execute("SELECT * FROM checks ORDER BY id")]
+        conn.execute("DROP TABLE checks")
+        for b in books:
+            pid, area = _trigger_home(conn, b["scope_kind"], b["scope"], "migration")
+            conn.execute("UPDATE triggers SET area_id=? WHERE id=?", (area, b["id"]))
+            _trigger_playbook(conn, b["id"], pid, b["name"], b.get("runbook"), b.get("repair"), None,
+                              b.get("created_by") or "migration")
+        for p in {_trigger_home(conn, b["scope_kind"], b["scope"], "migration")[0] for b in books}:
+            _default_playbook(conn, p, "migration")  # one for each project, also when every check has a runbook
+    elif r:
+        conn.execute("DROP VIEW checks")
+    conn.execute(_CHECKS_VIEW)
+
+
 def _migrate(conn):
     """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     _pipeline_migrate(conn)  # the pipeline package's own tables (#6113)
@@ -2431,8 +2551,7 @@ def _migrate(conn):
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
     # MaximizePM rings no phone for a fault (#6650): a check of severity page opens an item like the others.
     conn.execute(f"DELETE FROM settings WHERE key IN ({','.join('?' * len(OPS_GONE_SETTINGS))})", OPS_GONE_SETTINGS)
-    if conn.execute("SELECT 1 FROM checks WHERE severity='page' LIMIT 1").fetchone():
-        conn.execute("UPDATE checks SET severity='item' WHERE severity='page'")
+    # (its checks of severity page become item after _migrate_triggers, below)
     # The scope of a session (#5973).
     if "scope" not in {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}:
         for c in ("scope", "scope_by", "scope_at", "scope_told"):
@@ -2484,15 +2603,10 @@ def _migrate(conn):
         conn.execute("ALTER TABLE secrets ADD COLUMN two_step TEXT NOT NULL DEFAULT 'person'")
         conn.execute("ALTER TABLE secrets ADD COLUMN fail_at TEXT")
         conn.execute("ALTER TABLE secrets ADD COLUMN fail_why TEXT")
-    # Operations checks (#5430): a check of the form beat keeps its last beat; a run keeps each subject's status.
-    if "last_beat" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
-        conn.execute("ALTER TABLE checks ADD COLUMN last_beat TEXT")
-    # The kinds of problems (#5509): a check's layer says what a fault of it means for the other checks.
-    if "layer" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
-        conn.execute("ALTER TABLE checks ADD COLUMN layer TEXT NOT NULL DEFAULT 'app'")
-    # Cron schedules (#5506): a check's cron expression; a run after a stop records the times that passed.
-    if "cron" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
-        conn.execute("ALTER TABLE checks ADD COLUMN cron TEXT")
+    # The checks table of an older queue moves into triggers (#6625); a column it lacks takes the default there.
+    _migrate_triggers(conn)
+    if conn.execute("SELECT 1 FROM triggers WHERE severity='page' LIMIT 1").fetchone():  # #6650
+        conn.execute("UPDATE triggers SET severity='item' WHERE severity='page'")
     scols = {r["name"] for r in conn.execute("PRAGMA table_info(schedules)")}
     for c in ("pipeline", "release_kind"):  # #6603: a schedule that starts a release of a pipeline
         if c not in scols:
@@ -2501,12 +2615,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE ops_runs ADD COLUMN subjects TEXT")
     if "missed" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN missed TEXT")
-    # The watchdog (#5441): a check marked outside runs in maxpm ops check --outside, not in maxpm serve.
-    if "outside" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
-        conn.execute("ALTER TABLE checks ADD COLUMN outside INTEGER NOT NULL DEFAULT 0")
-    # The kind of error of a check (#5505), and the run that confirms a new fault before it opens an item.
-    if "errors" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
-        conn.execute("ALTER TABLE checks ADD COLUMN errors TEXT NOT NULL DEFAULT 'runs'")
+    # The run that confirms a new fault before it opens an item (#5505).
     if "confirms" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN confirms INTEGER")
     # The process that runs an ops run (#5627): a run whose process ended or started again was cut, not lost.
@@ -6072,15 +6181,19 @@ def _ops_refuse(conn, actor, *checks):
             raise RiverError(why)
 
 
-def _ops_insert(conn, kind, scope, name, col, actor):
-    """Write a new check (inside the caller's tx; the caller checked the rights)."""
-    conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                 "severity,runbook,subject,repair,layer,outside,cron,errors,created_by,created_at) "
-                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
-                  col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"),
-                  col.get("errors") or "runs", actor, iso(now())))
+def _ops_insert(conn, kind, scope, name, col, actor, area=None, playbook=None):
+    """Write a new check, a state trigger that MaximizePM polls (inside the caller's tx; the caller checked the
+    rights). area and playbook: names in the check's project; none: its general (or target) area, and its own
+    playbook when it has a runbook or a repair, else the project's default playbook."""
+    pid, area_id = _trigger_home(conn, kind, scope, actor, area)
+    cur = conn.execute(
+        "INSERT INTO triggers(scope_kind,scope,name,area_id,condition,arrival,form,config,every,fail_after,"
+        "recover_after,timeout,severity,subject,layer,outside,cron,errors,created_by,created_at) "
+        "VALUES (?,?,?,?,'state','poll',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (kind, scope, name, area_id, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
+         col["recover_after"], col["timeout"], col["severity"], int(col["subject"]), col.get("layer") or "app",
+         int(bool(col.get("outside"))), col.get("cron"), col.get("errors") or "runs", actor, iso(now())))
+    _trigger_playbook(conn, cur.lastrowid, pid, name, col.get("runbook"), col.get("repair"), playbook, actor)
     c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
     _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else ""))
@@ -6096,13 +6209,14 @@ def _ops_update(conn, old, col, actor):
     changed = [k for k in _OPS_COLS if col[k] != old[k]]
     if not changed:
         return [], old
-    conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                 " runbook=?, subject=?, repair=?, layer=?, outside=?, cron=?, errors=?, changed_by=?, changed_at=?"
-                 " WHERE id=?",
+    conn.execute("UPDATE triggers SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
+                 " subject=?, layer=?, outside=?, cron=?, errors=?, changed_by=?, changed_at=? WHERE id=?",
                  (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
-                  col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"],
-                  col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), col["errors"], actor,
-                  iso(now()), old["id"]))
+                  col["timeout"], col["severity"], int(col["subject"]), col.get("layer") or "app",
+                  int(bool(col.get("outside"))), col.get("cron"), col["errors"], actor, iso(now()), old["id"]))
+    if "runbook" in changed or "repair" in changed:
+        pid, _ = _trigger_home(conn, old["scope_kind"], old["scope"], actor)
+        _trigger_playbook(conn, old["id"], pid, old["name"], col["runbook"], col["repair"], None, actor)
     c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
@@ -6110,32 +6224,192 @@ def _ops_update(conn, old, col, actor):
 
 
 def _ops_delete(conn, c, actor):
-    conn.execute("DELETE FROM checks WHERE id=?", (c["id"],))
+    conn.execute("DELETE FROM triggers WHERE id=?", (c["id"],))
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} removed (was: {_ops_summary(c)})")
 
 
-def ops_add(conn, scope, name, form, fields=None, actor=None):
-    """maxpm ops add: a new check of a project or a deploy target (OPS_FORMS). It does not run yet: maxpm serve
-    runs the checks that are due (#5430)."""
+# Operations areas, playbooks, triggers and events (#6625, plan: canvas operations-tab).
+TRIGGER_CONDITIONS = {"state": "a check changes state", "time": "a time comes (its cron or every)",
+                      "event": "an outside system reports an event"}
+TRIGGER_ARRIVALS = {"poll": "MaximizePM runs its routine", "push": "the outside system posts its events to it"}
+TRIGGER_PRIORITY = {"state": 1, "event": 1, "time": 2}  # mark 2026-11-21 (#6642); a trigger can set its own
+OPS_GENERAL_AREA = "general"
+OPS_DEFAULT_PLAYBOOK = "default"
+OPS_DEFAULT_KNOWLEDGE = ("Find the cause of the event: read the event's data, the trigger's last runs (maxpm ops "
+                         "history), the logs and the state of the system, and the project's system description "
+                         "(maxpm ops system show). Follow maxpm guide ops.")
+OPS_DEFAULT_DONE = ("The cause is on the item with its proof (maxpm ops cause), and its fix is done or in the queue; "
+                    "the trigger's check passes again.")
+OPS_NO_LIMITS = "investigate and propose only"
+OPS_NO_TOOLS = "none: the agent reads the project and the event, with no secrets or accounts"
+
+
+def trigger_priority(t):
+    """The priority of the item of a trigger's event: its own, else by its condition (#6642)."""
+    return t["priority"] if t.get("priority") is not None else TRIGGER_PRIORITY.get(t.get("condition"), 1)
+
+
+def _project_id_by_name(conn, name):
+    r = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()
+    return r["id"] if r else None
+
+
+def _ops_home_project(conn, kind, scope, actor):
+    """The project id of a trigger's scope: the project itself; for a deploy target, the project its faults go to
+    (_ops_project), and when that is a deploy project that does not exist yet, it is made, as maxpm ship does."""
+    name = scope if kind == "project" else _ops_project(conn, {"scope_kind": kind, "scope": scope})
+    pid = _project_id_by_name(conn, name)
+    if pid is None and kind == "target":
+        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM projects WHERE archived=0").fetchone()["m"]
+        pid = conn.execute("INSERT INTO projects(name,rank,notes,target,created_at) VALUES (?,?,?,?,?)",
+                           (name, top + 1, f"Deploys to target {scope}; made for its operations area.", scope,
+                            iso(now()))).lastrowid
+        _event(conn, None, actor, f"project {name} added for the operations area of target {scope}")
+    if pid is None:
+        raise RiverError(f"no project {name!r}: maxpm project list")
+    return pid
+
+
+def _area_insert(conn, pid, name, actor, description="", place=None, target=None):
+    aid = conn.execute("INSERT INTO ops_areas(project_id,name,description,place,target,created_by,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)", (pid, name, description, place, target, actor, iso(now()))).lastrowid
+    return aid  # a general or target area made by itself writes no history line; maxpm ops area add does
+
+
+def _project_name(conn, pid):
+    r = conn.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()
+    return r["name"] if r else f"project {pid}"
+
+
+def _trigger_home(conn, kind, scope, actor, area=None):
+    """(project id, area id) of a trigger of the scope (inside a tx). area names an area of the project; none: the
+    project's general area, or the deploy target's area (#6639). A missing general or target area is made."""
+    pid = _ops_home_project(conn, kind, scope, actor)
+    if area:
+        r = conn.execute("SELECT * FROM ops_areas WHERE project_id=? AND name=?", (pid, area)).fetchone()
+        if r is None:
+            raise RiverError(f"{_project_name(conn, pid)} has no area {area!r}: maxpm ops area list "
+                             f"{_project_name(conn, pid)}, or add it: maxpm ops area add {_project_name(conn, pid)} {area}")
+        if (r["target"] or None) != (scope if kind == "target" else None):
+            raise RiverError(f"the area {area} is " + (f"the deploy target {r['target']}: its triggers have the scope "
+                             f"target:{r['target']}" if r["target"] else f"no deploy target: its triggers have the "
+                             f"scope project:{_project_name(conn, pid)}"))
+        return pid, r["id"]
+    if kind == "target":
+        r = conn.execute("SELECT id FROM ops_areas WHERE project_id=? AND target=? ORDER BY id LIMIT 1",
+                         (pid, scope)).fetchone()
+        return pid, r["id"] if r else _area_insert(conn, pid, _area_free_name(conn, pid, scope), actor,
+                                                   f"The deploy target {scope}.", target=scope)
+    r = conn.execute("SELECT id FROM ops_areas WHERE project_id=? AND name=?", (pid, OPS_GENERAL_AREA)).fetchone()
+    return pid, r["id"] if r else _area_insert(conn, pid, OPS_GENERAL_AREA, actor, "The project's own checks.")
+
+
+def _area_free_name(conn, pid, name):
+    n, base = 1, name
+    while conn.execute("SELECT 1 FROM ops_areas WHERE project_id=? AND name=?", (pid, name)).fetchone():
+        n += 1
+        name = f"{base}-{n}"
+    return name
+
+
+def _default_playbook(conn, pid, actor):
+    """The id of the project's default playbook (inside a tx); made when the project has none yet."""
+    r = conn.execute("SELECT id FROM ops_playbooks WHERE project_id=? AND is_default=1", (pid,)).fetchone()
+    if r:
+        return r["id"]
+    name = OPS_DEFAULT_PLAYBOOK
+    n = 1
+    while conn.execute("SELECT 1 FROM ops_playbooks WHERE project_id=? AND name=?", (pid, name)).fetchone():
+        n += 1
+        name = f"{OPS_DEFAULT_PLAYBOOK}-{n}"
+    bid = conn.execute("INSERT INTO ops_playbooks(project_id,name,knowledge,done_means,is_default,created_by,created_at)"
+                       " VALUES (?,?,?,?,1,?,?)", (pid, name, OPS_DEFAULT_KNOWLEDGE, OPS_DEFAULT_DONE, actor,
+                                                   iso(now()))).lastrowid
+    return bid  # made by itself: no history line
+
+
+def _trigger_playbook(conn, tid, pid, name, runbook, repair, playbook, actor):
+    """Point a trigger at its playbook (inside a tx). playbook: a playbook's name in the project. Else a runbook or a
+    repair (maxpm ops add|edit --runbook, --repair) is the knowledge and the repair of the trigger's own playbook,
+    named after it: changed in place when no other trigger serves it, else a new one (with a repair and no runbook,
+    its knowledge is empty: the agent reads the default knowledge). Else the default playbook."""
+    if playbook:
+        r = conn.execute("SELECT id FROM ops_playbooks WHERE project_id=? AND name=?", (pid, playbook)).fetchone()
+        if r is None:
+            raise RiverError(f"{_project_name(conn, pid)} has no playbook {playbook!r}: maxpm ops playbook list "
+                             f"{_project_name(conn, pid)}")
+        bid = r["id"]
+    elif (runbook or "").strip() or (repair or "").strip():
+        cur = conn.execute("SELECT p.* FROM triggers t JOIN ops_playbooks p ON p.id=t.playbook_id WHERE t.id=?",
+                           (tid,)).fetchone()
+        alone = cur is not None and not cur["is_default"] and not conn.execute(
+            "SELECT 1 FROM triggers WHERE playbook_id=? AND id!=?", (cur["id"], tid)).fetchone()
+        if alone:
+            bid = cur["id"]
+            conn.execute("UPDATE ops_playbooks SET knowledge=?, repair=?, changed_by=?, changed_at=? WHERE id=?",
+                         ((runbook or "").strip(), (repair or "").strip() or None, actor,
+                          iso(now()), bid))
+        else:
+            book, n = name, 1
+            while conn.execute("SELECT 1 FROM ops_playbooks WHERE project_id=? AND name=?", (pid, book)).fetchone():
+                n += 1
+                book = f"{name}-{n}"
+            bid = conn.execute(
+                "INSERT INTO ops_playbooks(project_id,name,knowledge,done_means,repair,created_by,created_at) "
+                "VALUES (?,?,?,?,?,?,?)", (pid, book, (runbook or "").strip(),
+                                           OPS_DEFAULT_DONE, (repair or "").strip() or None, actor,
+                                           iso(now()))).lastrowid  # the check's own history line names it
+    else:
+        bid = _default_playbook(conn, pid, actor)
+    conn.execute("UPDATE triggers SET playbook_id=? WHERE id=?", (bid, tid))
+    return bid
+
+
+def ops_add(conn, scope, name, form, fields=None, actor=None, area=None, playbook=None):
+    """maxpm ops add: a new check of a project or a deploy target (OPS_FORMS), a state trigger in an area with a
+    playbook (#6625). It does not run yet: maxpm serve runs the checks that are due (#5430)."""
     _ops_name(name)
     with tx(conn):
         kind, scope = _ops_scope(conn, scope)
-        if conn.execute("SELECT 1 FROM checks WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)).fetchone():
+        if conn.execute("SELECT 1 FROM triggers WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)
+                        ).fetchone():
             raise RiverError(f"{scope} has a check {name!r}; change it: maxpm ops edit {scope} {name} ...")
         col = _ops_build(form, fields or {})
+        _ops_playbook_or_runbook(col, playbook)
         _ops_refuse(conn, actor, dict(col, scope_kind=kind, scope=scope))
-        c = _ops_insert(conn, kind, scope, name, col, actor)
+        c = _ops_insert(conn, kind, scope, name, col, actor, area, playbook)
     return {"changed": "added", "check": c}
 
 
-def ops_edit(conn, scope, name, fields=None, form=None, actor=None):
-    """maxpm ops edit: change the settings of a check. The rights hold for the check before and after the change,
-    so an agent cannot turn a url check into a command, nor change a command check."""
+def _ops_playbook_or_runbook(col, playbook):
+    if playbook and (col.get("runbook") or col.get("repair")):
+        raise RiverError("--runbook and --repair are the check's own playbook; with --playbook, change that "
+                         f"playbook instead: maxpm ops playbook edit <project> {playbook} --knowledge ...")
+
+
+def ops_edit(conn, scope, name, fields=None, form=None, actor=None, area=None, playbook=None):
+    """maxpm ops edit: change the settings of a check, its area or its playbook. The rights hold for the check
+    before and after the change, so an agent cannot turn a url check into a command, nor change a command check."""
     with tx(conn):
         old = _ops_row(_ops_check(conn, scope, name))
         col = _ops_build(form or old["form"], fields or {}, old)
+        if playbook and ((fields or {}).get("runbook") is not None or (fields or {}).get("repair") is not None):
+            _ops_playbook_or_runbook({"runbook": True}, playbook)
         _ops_refuse(conn, actor, old, dict(col, scope_kind=old["scope_kind"], scope=old["scope"]))
         changed, c = _ops_update(conn, old, col, actor)
+        if area or playbook:
+            pid, area_id = _trigger_home(conn, old["scope_kind"], old["scope"], actor, area)
+            if area and area_id != old["area_id"]:
+                conn.execute("UPDATE triggers SET area_id=? WHERE id=?", (area_id, old["id"]))
+                changed.append("area")
+            if playbook:
+                bid = old["playbook_id"]
+                if _trigger_playbook(conn, old["id"], pid, name, None, None, playbook, actor) != bid:
+                    changed.append("playbook")
+            if changed:
+                _event(conn, None, actor, f"ops check {old['scope']}/{name}: "
+                       + ", ".join(f"{k} {area if k == 'area' else playbook}" for k in changed if k in ("area", "playbook")))
+            c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     return {"changed": "changed" if changed else None, "fields": changed, "check": c}
 
 
@@ -6324,12 +6598,12 @@ def ops_pause(conn, scope, name, until=None, resume=False, actor=None):
         if resume:
             if not c["paused_until"]:
                 raise RiverError(f"{c['scope']}/{name} is not paused")
-            conn.execute("UPDATE checks SET paused_until=NULL, state='new', changed_by=?, changed_at=? WHERE id=?",
+            conn.execute("UPDATE triggers SET paused_until=NULL, state='new', changed_by=?, changed_at=? WHERE id=?",
                          (actor, iso(now()), c["id"]))
             state, note = "resumed", "resumed"
         else:
             at = iso(parse_when(until, setting(conn, "timezone")))
-            conn.execute("UPDATE checks SET paused_until=?, state='paused', changed_by=?, changed_at=? WHERE id=?",
+            conn.execute("UPDATE triggers SET paused_until=?, state='paused', changed_by=?, changed_at=? WHERE id=?",
                          (at, actor, iso(now()), c["id"]))
             state, note = "paused", f"paused until {at}"
         conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
@@ -6636,6 +6910,10 @@ def ops_show(conn, scope, name, n=10):
     """maxpm ops show: one check, its last runs, and its last changes of state."""
     c = _ops_row(_ops_check(conn, scope, name))
     c["summary"] = _ops_summary(c)
+    a = conn.execute("SELECT name FROM ops_areas WHERE id=?", (c["area_id"],)).fetchone() if c["area_id"] else None
+    b = conn.execute("SELECT name FROM ops_playbooks WHERE id=?", (c["playbook_id"],)).fetchone() \
+        if c["playbook_id"] else None
+    c["area"], c["playbook"] = (a["name"] if a else None), (b["name"] if b else None)
     c["runs"] = [dict(r) for r in conn.execute("SELECT * FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT ?",
                                                (c["id"], n))]
     c["events"] = [dict(r) for r in conn.execute("SELECT * FROM ops_events WHERE check_id=? ORDER BY id DESC LIMIT ?",
@@ -7188,7 +7466,7 @@ def ops_due(conn, at=None, outside=False, slack=None):
             if parse_iso(c["paused_until"]) > at:
                 continue
             with tx(conn):
-                conn.execute("UPDATE checks SET paused_until=NULL, state='new' WHERE id=? AND paused_until=?",
+                conn.execute("UPDATE triggers SET paused_until=NULL, state='new' WHERE id=? AND paused_until=?",
                              (c["id"], c["paused_until"]))
                 conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
                              (c["id"], c["key"], "resumed", iso(at), "maxpm", f"the pause until {c['paused_until']} ended"))
@@ -7625,7 +7903,7 @@ def ops_record(conn, run, res, at=None, hold=False):
             new, out["confirm"] = "failing", True
         changes = []
         if new != cur["state"]:
-            conn.execute("UPDATE checks SET state=? WHERE id=?", (new, c["id"]))
+            conn.execute("UPDATE triggers SET state=? WHERE id=?", (new, c["id"]))
             changes.append((c["key"], cur["state"], new, res["summary"]))
         if cur["subject"] and res["subjects"] is not None and res["status"] not in ("unknown",):
             # A subject that this run does not name passes: its line is gone. One that never failed needs no row.
@@ -9008,7 +9286,7 @@ def ops_beat(conn, scope_or_name, name=None, actor=None):
     if c["form"] != "beat":
         raise RiverError(f"{c['scope']}/{c['name']} is a {c['form']} check; only a beat check takes a beat")
     with tx(conn):
-        conn.execute("UPDATE checks SET last_beat=? WHERE id=?", (iso(now()), c["id"]))
+        conn.execute("UPDATE triggers SET last_beat=? WHERE id=?", (iso(now()), c["id"]))
     return {"check": f"{c['scope']}/{c['name']}", "beat": iso(now()), "period": c["config"]["period"]}
 
 
