@@ -944,15 +944,41 @@ def _report_marks(conn, agent):
         return []
 
 
+def compacts_at(conn, agent, ad):
+    """The token count at which the agent's CLI compacts this session (claude --autocompact N), or None (#6608).
+    From its recorded command line; with no command line recorded, a manager compacts at manager_autocompact,
+    as start_manager and a resume launch it. None for an adapter that takes no autocompact."""
+    r = conn.execute("SELECT role, pid_cmd FROM agents WHERE name=?", (agent,)).fetchone()
+    if r is None or ad is None or not ad.launch.get("autocompact"):
+        return None
+    try:
+        if r["pid_cmd"]:
+            m = re.search(r"(?:^|\s)--autocompact[ =]['\"]?([0-9A-Za-z]+)", r["pid_cmd"])
+            return core.autocompact_tokens(m.group(1)) if m else None
+        return core.autocompact_tokens(core.setting(conn, "manager_autocompact")) if r["role"] == "manager" else None
+    except core.RiverError:
+        return None
+
+
+def _meter_window(conn, agent, ad, model):
+    """(window, compacts_at): the total of the context meter. A session that compacts below the model's window
+    fills at its compact point, so that is the total (#6608: the manager compacts at 250k of opus's 1M)."""
+    window = ad.context_window(model) if ad and model else None
+    cap = compacts_at(conn, agent, ad)
+    if cap and (window is None or cap < window):
+        return cap, cap
+    return window, None
+
+
 def context_meter(conn, agent, kind, path):
     """{"used", "window", "model"} of the session's last model call, for the context meter of its header (#5224);
-    None before its first call. window is None when the adapter does not know the model's."""
+    None before its first call. window is None when the adapter does not know the model's; a session that compacts
+    before the model's window is full has its compact point as window, and "compacts_at" says so (#6608)."""
     c = cache_state(conn, agent, found=(kind, path)) if path else None
     if not c:
         return None
-    ad = _adapter(kind)
-    return {"used": c["context"], "window": ad.context_window(c["model"]) if ad and c["model"] else None,
-            "model": c["model"]}
+    window, cap = _meter_window(conn, agent, _adapter(kind), c["model"])
+    return {"used": c["context"], "window": window, "model": c["model"], **({"compacts_at": cap} if cap else {})}
 
 
 def last_cwd(path, tail=1024 * 1024):
@@ -1064,7 +1090,7 @@ USAGE_TAIL = 2 * 1024 * 1024  # bytes of the log's end where the last plan limit
 
 
 def session_usage(conn, name, root=None, croot=None):
-    """{agent, label, model, context, window, percent, calls, input, output, cache_read, cache_write, eq, limits,
+    """{agent, label, model, context, window, compacts_at, percent, calls, input, output, cache_read, cache_write, eq, limits,
     limits_note, measured}: each number None when the logs do not give it. calls and the tokens sum every session id
     of the agent (a resume or a restart starts a new one); eq is input-token equivalents (core.usage_eq)."""
     a = conn.execute("SELECT name, model, agent_type, native_address FROM agents WHERE name=?", (name,)).fetchone()
@@ -1075,7 +1101,7 @@ def session_usage(conn, name, root=None, croot=None):
     cache = cache_state(conn, name, root, croot, found=(kind, path)) if path else None
     model = (cache or {}).get("model") or a["model"]
     context = (cache or {}).get("context")
-    window = ad.context_window(model) if ad and model else None
+    window, cap = _meter_window(conn, name, ad, model)
     tot = {"calls": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "eq": 0.0}
     measured = False
     sids = [r[0] for r in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen",
@@ -1134,7 +1160,7 @@ def session_usage(conn, name, root=None, croot=None):
                 f"{label} has written no plan limit to this session's log yet.")
     pct = round(100 * context / window, 1) if context is not None and window else None
     return {"agent": name, "label": ad.label if ad else None, "adapter_id": ad.id if ad else None,
-            "model": model, "context": context, "window": window,
+            "model": model, "context": context, "window": window, "compacts_at": cap,
             "percent": pct, "measured": measured,
             **({k: (round(v) if k == "eq" and v is not None else v) for k, v in tot.items()} if measured else
                dict.fromkeys(tot)),

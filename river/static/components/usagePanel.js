@@ -13,11 +13,14 @@ import { openTerminal } from "./terminalDialog.js";
 
 const k = (n) => n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? Math.round(n / 1000) + "k" : String(n);
 const pctOf = (c) => c && c.window ? Math.min(100, Math.round(100 * c.used / c.window)) : null;
+// A session that compacts before the model's window is full (claude --autocompact) has its compact point as the
+// window (#6608): the text says so.
+const compacts = (c) => c.compacts_at ? ` (compacts at ${k(c.compacts_at)})` : "";
 
 export function contextMeter(c) {
   if (!c || c.used == null) return "";
   const p = pctOf(c);
-  const tip = `Context of its last model call: ${k(c.used)} tokens` + (c.window ? ` of ${k(c.window)} (${p}%)` : "")
+  const tip = `Context of its last model call: ${k(c.used)} tokens` + (c.window ? ` of ${k(c.window)}${compacts(c)} (${p}%)` : "")
     + ` on ${c.model || "its model"}. Click for its usage.`;
   return button(`ctx ${p != null ? p + "%" : k(c.used)}`, { cls: `ctx-b${p != null && p >= 80 ? " full" : ""}`,
     data: { usage: "1" }, title: tip });
@@ -53,9 +56,9 @@ function limitRow(l) {
 }
 
 export function usageHtml(u) {
-  const ctx = u.context != null ? { used: u.context, window: u.window, model: u.model } : null;
+  const ctx = u.context != null ? { used: u.context, window: u.window, model: u.model, compacts_at: u.compacts_at } : null;
   const p = pctOf(ctx);
-  const head = ctx ? `<div class="usage-ctx">${row("Context", `${k(ctx.used)}${ctx.window ? ` of ${k(ctx.window)} · ${p}%` : " tokens"}`,
+  const head = ctx ? `<div class="usage-ctx">${row("Context", `${k(ctx.used)}${ctx.window ? ` of ${k(ctx.window)}${compacts(ctx)} · ${p}%` : " tokens"}`,
       "The tokens of its last model call: the context the next call reads again")}${ctx.window ? bar(p) : ""}</div>`
     : `<p class="muted">No model call yet.</p>`;
   const tokens = u.measured ? [

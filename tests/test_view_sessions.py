@@ -3491,6 +3491,25 @@ class SessionUsage(Base):
         meter = sessions.context_meter(self.c, "ag", "claude", self.path)
         self.assertEqual(meter, {"used": 121_205, "window": 1_000_000, "model": "claude-opus-5-5"})
 
+    def test_a_session_that_compacts_early_fills_against_its_compact_point(self):
+        # #6608: the manager compacts at manager_autocompact (250k), not at opus's 1M window.
+        self.write(self.call("m1", 5, 200_000, 4_800, 200, "2026-11-08T10:00:05Z"))
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='ag'")
+        u = sessions.session_usage(self.c, "ag", self.root, self.croot)
+        self.assertEqual((u["window"], u["compacts_at"], u["percent"]), (250_000, 250_000, 82.0))
+        self.assertEqual(sessions.context_meter(self.c, "ag", "claude", self.path),
+                         {"used": 205_005, "window": 250_000, "model": "claude-opus-5-5", "compacts_at": 250_000})
+        # Its recorded command line wins: a worker profile with --autocompact, and a manager started without one.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role=NULL, pid_cmd='claude --model opus --autocompact 400k go' "
+                           "WHERE name='ag'")
+        self.assertEqual(sessions.context_meter(self.c, "ag", "claude", self.path)["window"], 400_000)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager', pid_cmd='claude --model opus manage' WHERE name='ag'")
+        u = sessions.session_usage(self.c, "ag", self.root, self.croot)
+        self.assertEqual((u["window"], u["compacts_at"]), (1_000_000, None))
+
     def test_an_agent_with_no_log_yet_and_an_unknown_one(self):
         core.register(self.c, "new")
         u = sessions.session_usage(self.c, "new", self.root, self.croot)
