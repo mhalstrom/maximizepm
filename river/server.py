@@ -4779,6 +4779,7 @@ def _typing_pane(conn, agent, who, shell=False, manager=False):
 # paths in the prompt. Keep a safe version of the filename so the agent can identify the file and its format.
 UPLOAD_MAX = 10 * 1024 * 1024
 UPLOADS_PER_SEND = 5
+SEND_TEXT_MAX = 200_000  # characters of one message from the composer (mark 2026-11-22: 4000 cut a pasted reply)
 UPLOAD_DAYS = 7  # auto_tidy removes older uploads
 UPLOAD_KINDS = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"), (b"GIF89a", ".gif"))
 UPLOAD_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
@@ -4922,8 +4923,8 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
     hold (#5587, mark 2026-11-12): the session runs a turn now, so maxpm serve holds the message (pending_sends) and
     types it when the turn has ended (paste_pending); its Send now in the chat stops the turn and sends it at once
     (pending_send_now). A slash command is not held: the agent CLI runs it at once."""
-    if not isinstance(text, str) or len(text) > 4000:
-        raise RiverError("text is at most 4000 characters")
+    if not isinstance(text, str) or len(text) > SEND_TEXT_MAX:
+        raise RiverError(f"text is at most {SEND_TEXT_MAX} characters")
     text = text.replace("\r\n", "\n").strip()
     attachments = files if files is not None else images  # accept the previous image-only page too
     if attachments is not None and (not isinstance(attachments, list) or len(attachments) > UPLOADS_PER_SEND):
@@ -5177,8 +5178,8 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
     in STOPPED and says 'Stop again to <does>'; a second Stop before its next turn types that command and Enter
     (after the keys only while the pane still shows the turn running: a second Esc at Codex's empty prompt starts
     its edit of the last message). Send now is always a first Stop: its message starts a new turn."""
-    if message is not None and (not isinstance(message, str) or len(message) > 4000):
-        raise RiverError("text is at most 4000 characters")  # before the keys: a refused message stops nothing
+    if message is not None and (not isinstance(message, str) or len(message) > SEND_TEXT_MAX):
+        raise RiverError(f"text is at most {SEND_TEXT_MAX} characters")  # before the keys: a refused message stops nothing
     pane = _typing_pane(conn, agent, who, manager=manager)
     ad = core.state_adapter(conn, agent)
     keys = list((ad.input.get("interrupt") if ad else None) or [])

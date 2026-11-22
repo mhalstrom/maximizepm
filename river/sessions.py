@@ -24,6 +24,7 @@ TAIL_BYTES = 2 * 1024 * 1024  # the first read of the large view: the last part 
 CARD_BYTES = 256 * 1024      # the read of a card: its last few lines
 LIMIT = 300               # at most this many lines in one answer
 TEXT_MAX = 4000           # a longer text is cut
+USER_TEXT_MAX = 200_000   # a person's own message shows whole in the chat (server.SEND_TEXT_MAX)
 TOOL_MAX = 160            # the one line of a tool call
 DETAIL_MAX = 4000         # a tool call's input, and its result, when the page opens it
 PREVIEW = 4               # the lines a card shows
@@ -345,7 +346,7 @@ def _user_turn(at, text, images=0):
     import re
     root = re.escape(str(Path(core.river_dir()) / "uploads"))
     found = re.findall(root + r"/([^/\s]+)/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}(?:-[a-zA-Z0-9_.-]+|\.(?:png|jpg|gif|webp)))", text)
-    e = {"at": at, "role": "user", "text": _clip(text, TEXT_MAX)}
+    e = {"at": at, "role": "user", "text": _clip(text, USER_TEXT_MAX)}
     for a, f in dict.fromkeys(found):
         path = f"{a}/{f}"
         if Path(f).suffix.lower() in {".png", ".jpg", ".gif", ".webp"}:

@@ -2873,8 +2873,8 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(pane["keys"][1:], ["Escape", "use the other file", "Enter"])
         self.assertEqual(r["sent"]["text"], "use the other file")
         # A message that Send would refuse stops nothing; maxpm interrupt of another queue is refused.
-        with self.assertRaisesRegex(RiverError, "at most 4000"):
-            server.OPS["session_interrupt"](self.c, {"agent": name, "text": "x" * 4001}, "mark")
+        with self.assertRaisesRegex(RiverError, f"at most {server.SEND_TEXT_MAX}"):
+            server.OPS["session_interrupt"](self.c, {"agent": name, "text": "x" * (server.SEND_TEXT_MAX + 1)}, "mark")
         with self.assertRaisesRegex(RiverError, "uses another queue"):
             server.OPS["agent_interrupt"](self.c, {"agent": name, "db": "/elsewhere/t.db"}, "mark")
         self.assertEqual(len(pane["keys"]), 4)
@@ -3077,8 +3077,8 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(pane["keys"][5:], [])
         with self.assertRaisesRegex(RiverError, "only a person types"):
             server.session_send(self.c, name, "rm -rf /", "other-agent")
-        with self.assertRaisesRegex(RiverError, "at most 4000"):
-            server.session_send(self.c, name, "x" * 4001, "mark")
+        with self.assertRaisesRegex(RiverError, f"at most {server.SEND_TEXT_MAX}"):
+            server.session_send(self.c, name, "x" * (server.SEND_TEXT_MAX + 1), "mark")
         del pane["keys"][3:]
         # An agent that runs in no pane, and a pane of no agent, have no terminal on the page.
         with self.assertRaisesRegex(RiverError, "other-agent does not run in a tmux pane"):
