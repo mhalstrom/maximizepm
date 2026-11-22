@@ -754,7 +754,7 @@ def _act(conn, a, who):
             if url and url != "about:blank":
                 b.open(url)
         else:
-            b._switch_keep(window, url)
+            b._switch_keep(window, url, save=not window)
             browser.mark_window(b, who, person, window)  # the panel says who opened the window, and when (#5650)
         return b.info()
     if action == "close":
@@ -768,7 +768,8 @@ def _act(conn, a, who):
         if not person:
             raise RiverError("only a person saves a browser's sign-ins for the project: the Browser pane has the "
                              "button Save sign-ins for the project")
-        from .. import vault  # #5827: a site with a saved sign-in in a set goes only to the sessions it is granted to
+        from .. import signin, vault  # #5827: a site with a saved sign-in in a set goes only to the sessions it is granted to
+        signin.save_account_cookies(b, conn=conn, force=True)
         return browser.save_signins(b, skip=[s for _, s in vault.cookie_sites(conn)])
     if action == "freeze":  # Annotate's background (#5660): a PNG of the tab and the size of its view in CSS pixels,
         # read together: a frame that the pane shows can be older than the pane's last resize

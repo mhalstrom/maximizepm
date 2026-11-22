@@ -69,6 +69,7 @@ VALUES_JS = ("(() => { const out = []; const look = d => { try { d.querySelector
 
 SITES_AGAIN = 30.0  # seconds that soon() keeps the list of sign-in sites before it reads the queue again
 _SITES = {"at": 0.0, "sites": (), "db": None}
+_ACCOUNT_SITES = {"at": 0.0, "sites": (), "db": None}
 
 
 def _sites():
@@ -83,6 +84,53 @@ def _sites():
             conn.close()
         _SITES.update(at=time.time(), db=db)
     return _SITES["sites"]
+
+
+def _all_account_sites():
+    """All sites listed in browser_accounts at any scope, cached for SITES_AGAIN."""
+    db = os.environ.get("MAXPM_DB")
+    if time.time() - _ACCOUNT_SITES["at"] > SITES_AGAIN or _ACCOUNT_SITES["db"] != db:
+        from .browser import parse_accounts
+        conn = core.connect()
+        try:
+            found = []
+            for r in conn.execute("SELECT value FROM settings WHERE key='browser_accounts'"):
+                for s, _a in parse_accounts(r["value"]):
+                    ns = vault.norm_site(s)
+                    if ns and ns not in found:
+                        found.append(ns)
+            _ACCOUNT_SITES["sites"] = tuple(found)
+        finally:
+            conn.close()
+        _ACCOUNT_SITES.update(at=time.time(), db=db)
+    return _ACCOUNT_SITES["sites"]
+
+
+def soon_save_accounts(b, url=None):
+    """#6909: after a person interacts with a browser (or while a window is open) and lands on a non-sign-in page
+    of a browser_accounts site, save its cookies to the vault in a background thread."""
+    from .browser import SIGNIN
+    u = urlsplit(url or "")
+    host = (u.hostname or "").lower().removeprefix("www.")
+    if u.scheme != "https" or not host or SIGNIN.search(host + u.path):
+        return
+    if not any(_on(host, s) for s in _all_account_sites()):
+        return
+
+    def run():
+        lock = b.__dict__.setdefault("account_save_lock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            time.sleep(SETTLE)
+            if b.running():
+                save_account_cookies(b, url=url)
+        except Exception:  # noqa: BLE001 - a browser that closed mid-save
+            pass
+        finally:
+            lock.release()
+
+    threading.Thread(target=run, daemon=True, name=f"browser-acct-save-{b.project}").start()
 
 
 def soon(b, url=None):
@@ -603,42 +651,145 @@ def _context(b):
     return {"browserContextId": b.context} if getattr(b, "attached", False) and getattr(b, "context", None) else {}
 
 
-def site_cookies(b, site):
+def site_cookies(b, site, cookies=None):
     """The cookies of one site in this browser, as Storage.setCookies takes them."""
-    from .browser import cookie_params
-    got = b.call("Storage.getCookies", _context(b)).get("cookies") or []
-    return cookie_params([c for c in got if _on(c.get("domain"), site)])
+    from .browser import _cookie_host, cookie_params
+    got = cookies if cookies is not None else (b.call("Storage.getCookies", _context(b)).get("cookies") or [])
+    return cookie_params([c for c in got if _on(_cookie_host(c), site)])
 
 
 def _drop(b, site):
     """Delete this browser's cookies of one site (a grant that ended)."""
     for c in site_cookies(b, site):  # a method of a page (the shown tab), not of the browser
-        b.page("Network.deleteCookies", {"name": c["name"], "domain": c.get("domain"), "path": c.get("path") or "/"})
+        params = {"name": c["name"], "path": c.get("path") or "/"}
+        if c.get("domain"):
+            params["domain"] = c["domain"]
+        elif c.get("url"):
+            params["url"] = c["url"]
+        b.page("Network.deleteCookies", params)
+
+
+def _account_sites(conn, project):
+    """Normalized sites listed in maxpm browser accounts for project (global + project) (#6909)."""
+    from .browser import accounts
+    seen = []
+    for s, _a in accounts(conn, project):
+        ns = vault.norm_site(s)
+        if ns and ns not in seen:
+            seen.append(ns)
+    return seen
+
+
+def _by_account(site, acct_sites):
+    """Whether site is covered by an entry in browser_accounts."""
+    return any(_on(site, a) for a in acct_sites)
+
+
+def _save_account_site(conn, site, cookies):
+    """Save or update the vault cookie secret for a browser_accounts site (#6909)."""
+    site = vault.norm_site(site)
+    old = conn.execute("SELECT name FROM secrets WHERE kind='cookies' AND site=? ORDER BY created_at LIMIT 1",
+                       (site,)).fetchone()
+    name = old["name"] if old else f"account-{site}"
+    vault.cookies_save(conn, name, site, cookies, by_serve=True)
+    if not old:
+        with core.tx(conn):
+            conn.execute("UPDATE secrets SET ask='allow' WHERE name=?", (name,))
+    return name
+
+
+def _harvest_account_cookies(conn, b, acct_sites):
+    """#6909: when browser_accounts allows a site that has no saved cookie secret yet, copy its cookies from
+    another running browser (in any project) into the vault so this session gets them without asking."""
+    if not acct_sites:
+        return
+    have = {s for _, s in vault.cookie_sites(conn)}
+    missing = [s for s in acct_sites if not any(_on(hs, s) for hs in have)]
+    if not missing:
+        return
+    from . import browser
+    for other in list(browser.BROWSERS.values()):
+        if other is b or not other.running():
+            continue
+        for site in list(missing):
+            try:
+                cookies = site_cookies(other, site)
+            except Exception:  # noqa: BLE001
+                continue
+            if cookies:
+                _save_account_site(conn, site, cookies)
+                missing.remove(site)
+        if not missing:
+            break
+
+
+def save_account_cookies(b, conn=None, cookies=None, force=False, url=None, prev_url=None):
+    """#6909: save cookies of any maxpm browser accounts site from browser b into the vault so later sessions
+    in any project start signed in without asking. When force is False, skip a site if b is currently on a
+    sign-in page of that site (so an empty sign-in page never overwrites a saved sign-in)."""
+    from .browser import SIGNIN
+    mine = conn is None
+    conn = conn or core.connect()
+    try:
+        acct_sites = _account_sites(conn, getattr(b, "project", None))
+        if not acct_sites:
+            return []
+        cur_url = url if url is not None else (b.info().get("url") if b.running() else "")
+        u = urlsplit(cur_url or "")
+        cur_host = (u.hostname or "").lower().removeprefix("www.")
+        prev_host = (urlsplit(prev_url or "").hostname or "").lower().removeprefix("www.")
+        on_signin = bool(cur_host and SIGNIN.search(cur_host + u.path))
+        loaded = b.__dict__.setdefault("cookie_loaded", set())
+        saved = []
+        for site in acct_sites:
+            if not force and on_signin and _on(cur_host, site):
+                continue
+            old = conn.execute("SELECT name FROM secrets WHERE kind='cookies' AND site=? ORDER BY created_at LIMIT 1",
+                               (site,)).fetchone()
+            if old and not (old["name"] in loaded or _on(cur_host, site) or _on(prev_host, site)
+                            or (force and not cur_host)):
+                continue
+            c = site_cookies(b, site, cookies=cookies)
+            if not c:
+                continue
+            name = _save_account_site(conn, site, c)
+            loaded.add(name)
+            saved.append(name)
+        return saved
+    finally:
+        if mine:
+            conn.close()
 
 
 def enforce_cookies(b, conn=None):
-    """Match this session browser's sign-in cookies to its grants: a saved sign-in that a grant gives it now and that
-    is not loaded goes in (Storage.setCookies); one that it may not use (no grant, a revoke, the end of its goal or
-    task, a request under another name) comes out, also when the project's profile copy brought its cookies.
+    """Match this session browser's sign-in cookies to its grants and browser_accounts: a saved sign-in that a
+    grant or maxpm browser accounts (#6909) gives it now and that is not loaded goes in (Storage.setCookies); one
+    that it may not use (no grant, not in browser_accounts, a revoke, the end of its goal or task, a request under
+    another name) comes out, also when the project's profile copy brought its cookies.
     At the browser's start before the first page, and at each later action and page load of the session."""
     if not getattr(b, "owner", None):
         return None
     mine = conn is None
     conn = conn or core.connect()
     try:
+        acct_sites = _account_sites(conn, getattr(b, "project", None))
+        _harvest_account_cookies(conn, b, acct_sites)
         sites = vault.cookie_sites(conn)
         if not sites:
             return None
         loaded = b.__dict__.setdefault("cookie_loaded", set())
         first = not b.__dict__.get("cookie_checked")
         me = {"name": b.owner, "person": False}
-        confirmed = bool(b.__dict__.get("signin_confirmed"))
+        confirmed_val = b.__dict__.get("signin_confirmed")
+        confirmed = bool(confirmed_val)
         out = {"loaded": [], "removed": []}
         skipped = b.__dict__.setdefault("cookie_skipped", set())
+        from .browser import set_cookies
         for name, site in sites:
-            granted = vault.allowed(conn, name, b.owner, me)["ok"]
-            ok = confirmed and granted
-            if granted and not confirmed and name not in skipped:
+            by_acct = _by_account(site, acct_sites)
+            granted = by_acct or vault.allowed(conn, name, b.owner, me)["ok"]
+            ok = (confirmed_val is not False and by_acct) or (confirmed and granted)
+            if granted and not ok and name not in skipped:
                 # #5845: a grant covers the session, but its browser's last command was not confirmed as its own
                 # (#5823): say so once for this Chrome, so a session that finds no sign-in can read why
                 skipped.add(name)
@@ -650,7 +801,7 @@ def enforce_cookies(b, conn=None):
             if ok and name not in loaded:
                 cookies = vault.unpack_cookies(vault.backend().get(conn, name))
                 if cookies:
-                    b.call("Storage.setCookies", {"cookies": cookies, **_context(b)})
+                    set_cookies(b, cookies, context=_context(b).get("browserContextId"))
                 loaded.add(name)
                 out["loaded"].append(name)
                 with core.tx(conn):

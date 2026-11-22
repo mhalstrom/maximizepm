@@ -551,6 +551,12 @@ def accounts(conn, project=None):
     return out
 
 
+def account_allowed(conn, project, site):
+    """Whether browser_accounts allows an account on site for project (or every project) (#6909)."""
+    site = (site or "").lower().removeprefix("www.")
+    return bool(site and any(on_site(site, s) for s, _a in accounts(conn, project)))
+
+
 def account_note(conn, project, url, opened=False):
     """The line of a session's reply when it arrives at a page (#5811): on a sign-in page (or a page it opened), the
     accounts that the person allowed on its site; on a sign-in page of a site with none, how to record the one the
@@ -1074,7 +1080,7 @@ class Browser:
                 self.context = self.call("Target.createBrowserContext", {"disposeOnDetach": True})["browserContextId"]
                 cookies = cookie_params(self.call("Storage.getCookies").get("cookies") or [])
                 if cookies:
-                    self.call("Storage.setCookies", {"cookies": cookies, "browserContextId": self.context})
+                    set_cookies(self, cookies, context=self.context)
                 self.state.pop("tab", None)  # the tab of an earlier connection went with its context
             own = [t for t in pages if t["targetId"] == self.state.get("tab")]
             if own:
@@ -1338,9 +1344,13 @@ class Browser:
         if fn:
             fn(method, p)
             return
-        if method in ("Page.loadEventFired", "Page.navigatedWithinDocument") and session == self.session and self.owner:
+        if method in ("Page.loadEventFired", "Page.navigatedWithinDocument") and session == self.session:
             from . import signin  # #5826: a sign-in page of a site that a granted sign-in names fills by itself
-            signin.soon(self, (self.targets.get(self.target) or {}).get("url") or p.get("url"))
+            ev_url = (self.targets.get(self.target) or {}).get("url") or p.get("url")
+            if self.owner:
+                signin.soon(self, ev_url)
+            if self._windowed() or (self.person_at and time.time() - self.person_at < 300):
+                signin.soon_save_accounts(self, ev_url)
         if method == "Runtime.bindingCalled" and p.get("name") == PASSKEY_BINDING:  # #5814: the page asks for a passkey
             if session == self.session:
                 threading.Thread(target=self.passkey, args=(p.get("payload") or "",), daemon=True,
@@ -1719,7 +1729,7 @@ class Browser:
                 nxt = u if u.startswith(("http://", "https://")) and u != url else nxt
             else:
                 self.passkey_skip = (url, now)
-            self.passkey_back(hidden=True, url=nxt)
+            self.passkey_back(hidden=True, url=nxt, save=(kind == "done"))
 
     def _passkey_limit(self, at):
         """The window never stays: it closes when its page asks for no passkey within PASSKEY_START, and in any case
@@ -1734,7 +1744,7 @@ class Browser:
             self.passkey_skip = (self.info()["url"] if self.running() else "", time.time())
             self.passkey_back()
 
-    def passkey_back(self, hidden=False, url=None):
+    def passkey_back(self, hidden=False, url=None, save=False):
         """Close the window of a passkey step: the panel goes on, headless, with its cookies, at url (the page after
         the passkey), else the window's page, else the page that asked: never a blank page (seen 2026-11-13 17:26).
         hidden: the window is hidden already."""
@@ -1750,11 +1760,12 @@ class Browser:
             u = self._page_url()
             url = u if u.startswith(("http://", "https://")) else self.passkey_url
         saved_replay = self.passkey_replay if url == self.passkey_url else None
+        prev_url = self.passkey_url
         self._say_passkey(f"the window closed; the panel goes on at {_host(url)}")
         self.passkey_at = None
         self.passkey_replay = None
         self.state.pop("window_by", None)
-        self._switch_keep(False, url, replay=saved_replay)
+        self._switch_keep(False, url, replay=saved_replay, save=save, prev_url=prev_url)
         _notify(self)
 
     def _page_url(self):
@@ -1856,7 +1867,7 @@ class Browser:
                 return
         self.send("Fetch.continueRequest", {"requestId": rid}, session=session)
 
-    def _switch_keep(self, window, url, replay=None):
+    def _switch_keep(self, window, url, replay=None, save=False, prev_url=None):
         """Start Chrome again with or without a window; its cookies, sessionStorage, POST response and page go along."""
         cookies, ss = [], None
         if self.running():
@@ -1879,15 +1890,18 @@ class Browser:
                             ss = (orig, items)
                 except (RiverError, ValueError, TypeError):
                     pass
+        if save and cookies:  # #6909: persist fresh browser_accounts sign-ins before restarting Chrome
+            from . import signin
+            try:
+                signin.save_account_cookies(self, cookies=cookies, force=True, url=url, prev_url=prev_url)
+            except Exception:  # noqa: BLE001 - never block the window switch on a DB error
+                pass
         if window:
             self.passkey_wait = ""
         self.start(window=window)
         self._save()
         if cookies:
-            try:
-                self.call("Storage.setCookies", {"cookies": cookies})
-            except RiverError:
-                pass
+            set_cookies(self, cookies)
         if url and url != "about:blank":
             ss_script = None
             if ss and self.session:
@@ -5722,19 +5736,66 @@ def close_tab(b, target=None):
 
 
 # The fields of a cookie that Storage.setCookies takes (CDP CookieParam); getCookies gives more (size, session).
-COOKIE_PARAMS = ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expires", "priority",
+COOKIE_PARAMS = ("name", "value", "url", "domain", "path", "secure", "httpOnly", "sameSite", "expires", "priority",
                  "sameParty", "sourceScheme", "sourcePort", "partitionKey")
 
 
+def _cookie_host(c):
+    """The host of a cookie dict (either from domain or from url for __Host- cookies)."""
+    d = (c.get("domain") or "").lstrip(".").lower()
+    if d:
+        return d
+    return (urlsplit(c.get("url") or "").hostname or "").lower()
+
+
 def cookie_params(cookies):
-    """Cookies of Storage.getCookies as Storage.setCookies takes them; a session cookie stays one."""
+    """Cookies of Storage.getCookies as Storage.setCookies takes them; a session cookie stays one.
+    #6909: __Host- cookies (such as Google's __Host-GAPS) cannot carry a Domain attribute in CDP
+    Storage.setCookies: Chrome requires a host-only url with no domain, secure=True and path='/'."""
     keep = []
     for c in cookies:
         p = {k: c[k] for k in COOKIE_PARAMS if k in c}
         if c.get("session") or (p.get("expires") or 0) <= 0:
             p.pop("expires", None)  # a cookie for this run of Chrome only: it stays one
+        if "sourcePort" in p and (p["sourcePort"] is None or p["sourcePort"] <= 0):
+            p.pop("sourcePort", None)
+        if (p.get("name") or "").startswith("__Host-"):
+            host = (p.pop("domain", "") or "").lstrip(".")
+            if host and not p.get("url"):
+                p["url"] = f"https://{host}/"
+            p["path"] = "/"
+            p["secure"] = True
         keep.append(p)
     return keep
+
+
+def set_cookies(b, cookies, context=None):
+    """Load cookies into browser b via Storage.setCookies. Fast path: one batch call. If Chrome rejects
+    any cookie in the batch, fall back to setting cookies one by one so one bad cookie never drops the
+    rest (#6909)."""
+    if not cookies:
+        return 0
+    extra = {"browserContextId": context} if context else {}
+    try:
+        b.call("Storage.setCookies", {"cookies": cookies, **extra})
+        return len(cookies)
+    except RiverError:
+        pass
+    ok = 0
+    strip = ("partitionKey", "sameParty", "sourcePort", "sourceScheme", "priority")
+    for c in cookies:
+        try:
+            b.call("Storage.setCookies", {"cookies": [c], **extra})
+            ok += 1
+        except RiverError:
+            trimmed = {k: v for k, v in c.items() if k not in strip}
+            if trimmed != c:
+                try:
+                    b.call("Storage.setCookies", {"cookies": [trimmed], **extra})
+                    ok += 1
+                except RiverError:
+                    pass
+    return ok
 
 
 def _skip(cookies, skip):
@@ -5742,7 +5803,7 @@ def _skip(cookies, skip):
     def on(d, s):
         d = (d or "").lstrip(".").lower()
         return d == s or d.endswith("." + s)
-    return [c for c in cookies if not any(on(c.get("domain"), s) for s in skip)]
+    return [c for c in cookies if not any(on(_cookie_host(c), s) for s in skip)]
 
 
 def save_signins(b, skip=()):
@@ -5761,7 +5822,7 @@ def save_signins(b, skip=()):
         keep = _skip(cookie_params(b.call("Storage.getCookies", {"browserContextId": b.context}).get("cookies") or []),
                      skip)
         if keep:
-            b.call("Storage.setCookies", {"cookies": keep})
+            set_cookies(b, keep)
         return {**b.info(), "saved": len(keep)}
     keep = _skip(cookie_params(b.call("Storage.getCookies").get("cookies") or []), skip)
     project = get(b.project)
@@ -5769,7 +5830,7 @@ def save_signins(b, skip=()):
     try:
         project.start()
         if keep:
-            project.call("Storage.setCookies", {"cookies": keep})
+            set_cookies(project, keep)
     finally:
         if started:
             project.close()

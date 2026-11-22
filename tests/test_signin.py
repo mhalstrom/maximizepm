@@ -301,8 +301,11 @@ class CookieBrowser(FakeBrowser):
         if method == "Storage.getCookies":
             return {"cookies": [dict(c) for c in self.jar]}
         if method == "Storage.setCookies":
+            from river import browser
             for c in params["cookies"]:
-                self.jar = [x for x in self.jar if (x["name"], x["domain"]) != (c["name"], c["domain"])] + [dict(c)]
+                d = c.get("domain") or browser._cookie_host(c)
+                entry = {**c, "domain": d} if "domain" not in c and d else dict(c)
+                self.jar = [x for x in self.jar if (x["name"], x.get("domain")) != (c["name"], d)] + [entry]
             return {}
         raise AssertionError(method)
 
@@ -704,6 +707,120 @@ class SecretFill(Base):
         self.b.dialog = {"type": "alert"}  # a box of the page holds every script call: no look
         self.assertIsNone(self.browser.secret_field(self.b))
         self.assertEqual(self.b.looks, 1)
+
+
+class AccountSignInSharing(Base):
+    """#6909: __Host- cookie preservation, passkey/window sign-in persistence, and cross-project browser_accounts sharing."""
+
+    GOOGLE = [
+        {"name": "SID", "value": "sid-fresh", "domain": ".google.com", "path": "/", "secure": True, "httpOnly": False},
+        {"name": "__Host-GAPS", "value": "1:gaps-token", "domain": "accounts.google.com", "path": "/",
+         "secure": True, "httpOnly": True, "sourcePort": -1},
+    ]
+
+    def test_cookie_params_formats_host_prefix_cookies_and_set_cookies_falls_back(self):
+        from river import browser
+        params = browser.cookie_params(self.GOOGLE)
+        gaps = next(c for c in params if c["name"] == "__Host-GAPS")
+        self.assertNotIn("domain", gaps)
+        self.assertEqual(gaps["url"], "https://accounts.google.com/")
+        self.assertEqual(gaps["path"], "/")
+        self.assertTrue(gaps["secure"])
+        self.assertNotIn("sourcePort", gaps)
+
+        # Simulate Chrome rejecting a batch containing one bad cookie (e.g. bad partitionKey)
+        kept = []
+        class PickyBrowser:
+            def call(self, method, p=None):
+                assert method == "Storage.setCookies"
+                cs = p["cookies"]
+                if any(c.get("name") == "bad" and "partitionKey" in c for c in cs):
+                    raise RiverError("Invalid cookie fields")
+                kept.extend(cs)
+                return {}
+
+        batch = params + [{"name": "bad", "value": "x", "domain": ".google.com", "path": "/",
+                           "partitionKey": {"topLevelSite": "opaque"}}]
+        n = browser.set_cookies(PickyBrowser(), batch)
+        self.assertEqual(n, 3)
+        self.assertEqual(sorted(c["name"] for c in kept), ["SID", "__Host-GAPS", "bad"])
+
+    def test_browser_accounts_shares_sign_in_across_projects_without_grant_or_request(self):
+        from river import browser
+        browser.account_change(self.c, "google.com", "markhlstrm@gmail.com", actor="mark")
+        core.project_add(self.c, "other")
+        core.register(self.c, "other-dev")
+
+        # Existing stale r1-google.com in vault (in a set NOT granted to either session)
+        vault.cookies_save(self.c, "r1-google.com", "google.com",
+                           [{"name": "SID", "value": "stale", "domain": ".google.com", "path": "/"}],
+                           "mark", "req1")
+
+        # Session 1 in project 'site' completes a passkey / window sign-in
+        b1 = CookieBrowser(self.GOOGLE, owner="dev")
+        b1.project = "site"
+        saved = signin.save_account_cookies(b1, self.c, cookies=browser.cookie_params(self.GOOGLE),
+                                            force=True, url="https://accounts.google.com/signin/oauth/warning")
+        self.assertEqual(saved, ["r1-google.com"])
+
+        # A brand-new session in ANOTHER project ('other') starts with NO grant and NO request
+        b2 = CookieBrowser([], owner="other-dev")
+        b2.project = "other"
+        out = signin.enforce_cookies(b2, self.c)
+        self.assertEqual(out["loaded"], ["r1-google.com"])
+        self.assertEqual(out["removed"], [])
+        self.assertEqual(sorted(c["name"] for c in b2.jar), ["SID", "__Host-GAPS"])
+        self.assertEqual(next(c["value"] for c in b2.jar if c["name"] == "SID"), "sid-fresh")
+
+        # An hour later, Chrome restarts (cookie_loaded & cookie_checked cleared, person opens panel: signin_confirmed=None)
+        b2.jar = []
+        b2.__dict__.pop("cookie_loaded", None)
+        b2.__dict__.pop("cookie_checked", None)
+        b2.__dict__.pop("signin_confirmed", None)
+        out2 = signin.enforce_cookies(b2, self.c)
+        self.assertEqual(out2["loaded"], ["r1-google.com"])
+        self.assertEqual(sorted(c["name"] for c in b2.jar), ["SID", "__Host-GAPS"])
+
+        # Explicit impersonation (signin_confirmed=False) is still refused
+        b3 = CookieBrowser([], owner="other-dev")
+        b3.project = "other"
+        b3.signin_confirmed = False
+        self.assertEqual(signin.enforce_cookies(b3, self.c)["loaded"], [])
+        self.assertEqual(b3.jar, [])
+
+    def test_harvests_account_cookies_from_another_running_project_browser(self):
+        from river import browser
+        browser.account_change(self.c, "google.com", "markhlstrm@gmail.com", actor="mark")
+        core.project_add(self.c, "other")
+        core.register(self.c, "other-dev")
+        self.addCleanup(lambda saved=dict(browser.BROWSERS): (browser.BROWSERS.clear(), browser.BROWSERS.update(saved)))
+
+        b1 = CookieBrowser(self.GOOGLE, owner="dev")
+        b1.project = "site"
+        browser.BROWSERS[("site", "dev")] = b1
+
+        b2 = CookieBrowser([], owner="other-dev")
+        b2.project = "other"
+        out = signin.enforce_cookies(b2, self.c)
+        self.assertEqual(out["loaded"], ["account-google.com"])
+        self.assertEqual(sorted(c["name"] for c in b2.jar), ["SID", "__Host-GAPS"])
+
+    def test_signed_out_page_and_unrelated_site_do_not_clobber_saved_account_cookies(self):
+        from river import browser
+        browser.account_change(self.c, "google.com", "markhlstrm@gmail.com", actor="mark")
+        vault.cookies_save(self.c, "r1-google.com", "google.com",
+                           browser.cookie_params(self.GOOGLE), "mark", "req1")
+
+        # Empty sign-in page (force=False) must NOT overwrite r1-google.com
+        b_out = CookieBrowser([{"name": "NID", "value": "anon", "domain": ".google.com", "path": "/"}], owner="dev")
+        b_out.project = "site"
+        self.assertEqual(signin.save_account_cookies(b_out, self.c, force=False,
+                                                     url="https://accounts.google.com/v3/signin/identifier"), [])
+        # Stray 3rd-party cookie on an unrelated site (portal.azure.com) must NOT overwrite r1-google.com
+        self.assertEqual(signin.save_account_cookies(b_out, self.c, force=True,
+                                                     url="https://portal.azure.com/"), [])
+        got = vault.unpack_cookies(vault.Files().get(self.c, "r1-google.com"))
+        self.assertEqual(sorted(c["name"] for c in got), ["SID", "__Host-GAPS"])
 
 
 if __name__ == "__main__":
