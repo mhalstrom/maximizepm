@@ -129,9 +129,17 @@ class Check(Base):
         self.assertEqual(self.ran, [])
         au.later(self.c, "codex", "mark")
         self.assertFalse(self.row()["dialog"])
-        self.latest["@openai/codex"] = "0.172.0"  # a newer version again: the dialog comes back
+        # Within a day, a newer release still stays hidden in the dialog while Settings > Agents shows it (#6900).
+        self.latest["@openai/codex"] = "0.172.0"
         au.check_now(self.c)
-        self.assertTrue(self.row()["dialog"])
+        r = self.row()
+        self.assertEqual((r["latest"], r["newer"], r["can_update"], r["later"], r["dialog"]),
+                         ("0.172.0", True, True, True, False))
+        # After a day, the dialog opens again for the then-newest version.
+        au.change(self.c, lambda d: d["agents"]["codex"]["later"].update(
+            at=d["agents"]["codex"]["later"]["at"] - au.LATER - 1))
+        r = self.row()
+        self.assertEqual((r["latest"], r["newer"], r["later"], r["dialog"]), ("0.172.0", True, False, True))
 
     def test_a_failed_lookup_keeps_the_last_newest_version(self):
         au.check_now(self.c)

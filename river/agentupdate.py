@@ -39,7 +39,7 @@ FILE = "agent-versions.json"  # beside the queue
 LOCK_FILE = "agent-versions.lock"  # the page's process and the loop's process both write the file
 EVERY = 24 * 3600  # a check a day
 AFTER_ERROR = 3600  # a check with an error tries again after an hour
-LATER = 24 * 3600  # Later hides the dialog of one version for a day
+LATER = 24 * 3600  # Later or closing hides the dialog of that agent for a day
 VERSION_TIMEOUT = 20
 UPDATE_TIMEOUT = 900
 SMOKE_TIMEOUT = 180
@@ -724,7 +724,7 @@ def cancel(conn, aid, who=None):
 
 
 def later(conn, aid, who=None):
-    """Later in the dialog: no dialog for this newest version of the agent for a day."""
+    """Later or closing the dialog: no dialog for this agent for a day, whatever newer version arrives."""
     ad = _find(aid)
     change(conn, lambda d: d["agents"].setdefault(ad.id, {}).update(
         later={"version": (d["agents"].get(ad.id) or {}).get("latest"), "at": time.time(), "by": who}))
@@ -891,8 +891,7 @@ def agent_status(conn, aid, d=None):
            "newer": newer(a.get("latest"), a.get("installed")),
            "can_update": bool(a.get("path")) and a.get("how") in ("npm", "brew", "cask", "uv", "pipx", "self"),
            "auto": aid in auto_ids(conn), "update": u or None,
-           "later": bool(lat and lat.get("version") == a.get("latest") and time.time() - float(lat.get("at") or 0)
-                         < LATER)}
+           "later": bool(lat and lat.get("at") and time.time() - float(lat["at"]) < LATER)}
     out["dialog"] = out["newer"] and out["can_update"] and not out["later"] and u.get("state") not in ACTIVE
     return out
 

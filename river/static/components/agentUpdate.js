@@ -2,7 +2,7 @@
 // update now button"). maxpm serve reads each agent CLI's installed and newest version when it starts and once a day
 // (river/agentupdate.py); GET api/agent-versions gives the rows. When one is out of date, the dialog 'Update <Agent>'
 // ('Updates for N agents') opens: a row for each agent with both versions and Update now, Update all for more than
-// one, and Later (no dialog for that version for a day). The update runs when no session of the agent runs (the row
+// one, and Later (no dialog for that agent for a day). The update runs when no session of the agent runs (the row
 // says how many it waits for; new sessions of the agent wait for the update), then a short test request; the row
 // shows each step and the end in a few words (#6460), a failed one with its message in Details. Settings > Agents
 // lists every agent (versionsHtml).
@@ -106,8 +106,8 @@ function dialog() {
   root = d.firstElementChild;
   dlg = makeDialog(d, { draft: false, onClose: () => {
     closedSig = sigOf();
-    // Closing the dialog of an out-of-date agent hides it for that version on the server the way Later does (#6899),
-    // so a reload, a new tab or a restart of serve does not open it again.
+    // Closing the dialog of an out-of-date agent hides it for a day on the server the way Later does (#6899, #6900),
+    // so a reload, a new tab, a newer release that day or a restart of serve does not open it again.
     const hide = rowsOf(shown).filter(r => r.dialog).map(r => r.id);
     shown = [];
     if (hide.length) run("agent_update_later", { agents: hide });
