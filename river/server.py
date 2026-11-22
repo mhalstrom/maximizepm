@@ -4950,6 +4950,9 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
             raise RiverError(f"/{cmd['name']} with no argument opens a picker in the terminal: change the "
                              f"{cmd['setting']} in the session's Settings, or type /{cmd['name']} <value>")
         pane = _no_question(conn, agent, _typing_pane(conn, agent, who, manager=manager))
+        if not manager and text.lstrip().startswith("!"):
+            from . import vault
+            vault.record_bang(agent, text, person=who or vault._default_person(conn))
         send_keys(pane, [{"text": text}])
         time.sleep(ENTER_PAUSE)
         send_keys(pane, [{"key": "Enter"}])
@@ -4965,6 +4968,9 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.
     pane = _no_question(conn, agent, _typing_pane(conn, agent, who, manager=manager))
+    if not manager and text.lstrip().startswith("!"):
+        from . import vault
+        vault.record_bang(agent, text, person=who or vault._default_person(conn))
     _tmux("set-buffer", "-b", "maxpm-send", "--", text)
     _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
     time.sleep(ENTER_PAUSE)
@@ -5036,6 +5042,11 @@ def _type_held(conn, agent, pane, row, who=None):
     if row["files"]:
         return _type_files(conn, agent, pane, row["text"], row["files"], who, held=True)
     text = row["text"]
+    if text.lstrip().startswith("!"):
+        sender = who or row.get("sender")
+        if not sender or core._is_person(conn, sender):
+            from . import vault
+            vault.record_bang(agent, text, person=sender or vault._default_person(conn))
     if "\n" not in text:
         send_keys(pane, [{"text": text}])
         time.sleep(ENTER_PAUSE)
@@ -6933,6 +6944,49 @@ DICTATE_OPS = ("dictate_start", "dictate_audio", "dictate_stop")
 MCP_PATHS = ("/mcp", "/mcp/plan")  # the agent tools, and the planner tools of a chat app (#6190)
 
 
+def _peer_session(conn):
+    """The recorded AI session above this HTTP request, from the kernel (vault._chain_now): (name, session_pid,
+    client_proc), or (None, None, None) when no recorded session is above it or the kernel cannot tell."""
+    from . import vault
+    ch = vault._chain_now(conn)
+    if not ch:
+        return None, None, None
+    host = core.this_host()
+    rows = {r["pid"]: r for r in conn.execute(
+        "SELECT name, pid, pid_start FROM agents WHERE kind='ai' AND host=? AND pid IN (%s)" % ",".join("?" * len(ch)),
+        [host] + [c[0] for c in ch])}
+    for pid, _ppid, _comm, start in ch:
+        r = rows.get(pid)
+        if r and (r["pid_start"] is None or r["pid_start"] == start):
+            proc = (ch[0][0], ch[0][3]) if ch[0][0] != pid else None
+            return r["name"], pid, proc
+    return None, None, None
+
+
+def person_bang_op(conn, a, who):
+    """Record a person's '!' maxpm command from a UserPromptSubmit hook (#6912). The process tree must prove it came
+    from that session (not a sandboxed Bash call or another session)."""
+    from . import vault
+    name, _spid, _proc = _peer_session(conn)
+    want = a.get("agent")
+    if not name or (want and want != name):
+        return {"recorded": 0, "agent": name}
+    n = vault.record_bang(name, a.get("text") or "", person=vault._default_person(conn))
+    return {"recorded": n, "agent": name}
+
+
+def bang_claim_op(conn, a, who):
+    """Consume one recorded '!' maxpm command for the session above this CLI process (#6912)."""
+    from . import vault
+    name, _spid, proc = _peer_session(conn)
+    if not name:
+        return {"ok": False, "person": None, "agent": None}
+    hit = vault.claim_bang(name, a.get("argv") or (), proc=proc)
+    if not hit:
+        return {"ok": False, "person": None, "agent": name}
+    return {"ok": True, "person": hit["person"] or vault._default_person(conn), "agent": name}
+
+
 def op_rights(conn, op, actor, page):
     """Why this caller may not run the page action op (river/rights.py, #5974), or None. The page acts as the person.
     A command that asks serve (cli.ask_server) has the rights of the session that the processes holding its connection
@@ -7041,6 +7095,9 @@ OPS = {
     "start_session": lambda c, a, who: start_session(c, a.get("folder"), agent=a.get("agent"), actor=who,
                                                      prompt=a.get("prompt"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
+    # A person's '!' command in a session's chat (#6912): recorded by UserPromptSubmit and claimed once by the command.
+    "person_bang": person_bang_op,
+    "bang_claim": bang_claim_op,
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,
     "ops_trigger_run": ops_trigger_run_op,
@@ -8044,12 +8101,22 @@ class Handler(BaseHTTPRequestHandler):
                                         ((vault.TAILNET_PAGE, self.client_address[1], srv[1], ts) if ts else
                                          (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid")))
                                         if srv and len(self.client_address) > 1 else (None, None, None))
+                    raw_argv = self.headers.get("X-Maxpm-Argv")
+                    try:
+                        parsed_argv = json.loads(raw_argv) if raw_argv else None
+                    except ValueError:
+                        parsed_argv = None
+                    vault.PEER.argv = (tuple(parsed_argv) if isinstance(parsed_argv, list) and len(parsed_argv) <= 100
+                                       and all(isinstance(x, str) for x in parsed_argv) else None)
+                    vault.PEER.bang = None
                     why = op_rights(conn, body.get("op"), actor, page)  # the permission table (#5974)
                     if why:
                         raise RiverError(why)
                     result = op(conn, body.get("args", {}), actor)
                 finally:
                     vault.PEER.value = None
+                    vault.PEER.argv = None
+                    vault.PEER.bang = None
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
                 if body.get("op") in LIGHT_OPS and time.time() - _light_at.get(actor, 0) < LIGHT_GAP:
                     return self._send(200, {"ok": True, "result": result})

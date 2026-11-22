@@ -373,36 +373,48 @@ INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{te
 
 HOOK_TIMEOUT = 5
 _HOOK_KEY = "/<session-flags>/config.toml:pre_tool_use:0:0"  # the key of a hook from -c (discovery.rs)
+_PROMPT_HOOK_KEY = "/<session-flags>/config.toml:user_prompt_submit:0:0"
 
 
-def hook_hash(command, timeout=HOOK_TIMEOUT):
-    """The trust hash that Codex computes for a PreToolUse command hook with no matcher."""
+def hook_hash(command, timeout=HOOK_TIMEOUT, event="pre_tool_use"):
+    """The trust hash that Codex computes for a command hook with no matcher."""
     import hashlib
     import json
-    identity = {"event_name": "pre_tool_use",
+    identity = {"event_name": event,
                 "hooks": [{"type": "command", "command": command, "timeout": timeout, "async": False}]}
     text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(text.encode()).hexdigest()
 
 
 def install_hooks(folder, report):
-    """The -c words that add the PreToolUse hook (maxpm report --hook codex) and its trust, for one start or resume."""
+    """The -c words that add the PreToolUse and UserPromptSubmit hooks (maxpm report --hook codex) and their trust,
+    for one start or resume."""
     import json
     import shlex
     command = " ".join(shlex.quote(w) for w in [*report, "--hook", "codex"])
     return ["-c", f'hooks.PreToolUse=[{{hooks=[{{type="command",command={json.dumps(command)},'
                   f'timeout={HOOK_TIMEOUT}}}]}}]',
-            "-c", "hooks.state={" + f'{json.dumps(_HOOK_KEY)}={{trusted_hash={json.dumps(hook_hash(command))}}}' + "}"]
+            "-c", f'hooks.UserPromptSubmit=[{{hooks=[{{type="command",command={json.dumps(command)},'
+                  f'timeout={HOOK_TIMEOUT}}}]}}]',
+            "-c", "hooks.state={"
+                  f'{json.dumps(_HOOK_KEY)}={{trusted_hash={json.dumps(hook_hash(command))}}},'
+                  f'{json.dumps(_PROMPT_HOOK_KEY)}={{trusted_hash={json.dumps(hook_hash(command, event="user_prompt_submit"))}}}'
+                  "}"]
 
 
 def read_hook(payload):
     """A Codex hook's JSON input as a hook report (river/agents HOOK_REPORT_KEYS): a Bash call before it runs, with its
-    command; None for another tool or event."""
-    if payload.get("hook_event_name") != "PreToolUse" or payload.get("tool_name") != "Bash":
+    command, or a UserPromptSubmit with its prompt; None for another tool or event."""
+    ev = payload.get("hook_event_name")
+    sid = payload.get("session_id")
+    if ev == "UserPromptSubmit":
+        prompt = payload.get("prompt")
+        return {"event": "UserPromptSubmit", "session_id": sid if isinstance(sid, str) and sid else None,
+                "state": None, "prompt": prompt if isinstance(prompt, str) else ""}
+    if ev != "PreToolUse" or payload.get("tool_name") != "Bash":
         return None
     inp = payload.get("tool_input")
     cmd = inp.get("command") if isinstance(inp, dict) else None
-    sid = payload.get("session_id")
     return {"event": "PreToolUse", "session_id": sid if isinstance(sid, str) and sid else None, "state": None,
             "run": cmd if isinstance(cmd, str) else ""}
 

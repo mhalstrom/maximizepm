@@ -3111,6 +3111,13 @@ def activity_command(stdin=None, agent_id="claude"):
             res["deliver"] = core.turn_end_messages(conn, res["agent"])
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
+        if res.get("bang") and res["agent"] and not in_sandbox():
+            from . import vault
+            if vault.bang_commands(res["bang"]):
+                try:
+                    ask_server(conn, "person_bang", {"agent": res["agent"], "text": res["bang"]}, timeout=1, retries=0)
+                except Exception:  # noqa: BLE001 - a hook must never fail the session
+                    pass
         if res["state"] == "idle" and not res.get("deliver") and core.pending_waits(conn, res["agent"]):
             # A message that the person sent during this turn waits (#5587): maxpm serve types it at the idle prompt.
             try:
@@ -3222,12 +3229,23 @@ def _rights(conn, args, actor):
     session within REPEAT_WINDOW_MIN alerts the manager."""
     from . import rights
     key = rights.command_key(args)
+    def _bang_person():
+        from . import vault
+        hit = vault.claim_bang_for_cli(conn)
+        if not hit:
+            return False
+        if not (args.actor and core._is_person(conn, args.actor)):
+            args.actor = hit.get("person") or vault._default_person(conn)
+        return True
+
     if not _inside_agent():
         caller, name = rights.PERSON, actor
     else:
         name = core.TOKEN_AGENT.get() or _session_self(conn) or actor
         r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
         if r and r["kind"] == "human":
+            if _bang_person():
+                return
             _refuse_again(conn, name or actor, f"{rights.REFUSED}: a command inside an agent session never runs as a "
                                                f"person (--as {actor}). Run it as the session; a person acts on the "
                                                f"page or in their own terminal")
@@ -3243,14 +3261,20 @@ def _rights(conn, args, actor):
             why = (f"{rights.REFUSED}: {name} is not the manager: a manager is a session that maxpm serve started as "
                    f"the manager (the page's Start manager). Ask the manager, or the person")
         if why:
+            if _bang_person():
+                return
             _refuse_again(conn, name, why)
     # Several tries start N sessions for one task (#5996): the person or the manager decides that cost.
     if args.cmd == "add" and getattr(args, "tries", None) and caller == rights.SESSION:
+        if _bang_person():
+            return
         _refuse_again(conn, name, f"{rights.REFUSED}: maxpm add --tries is for the person or the manager, as it starts "
                                   f"a session for each try. Add the task, and ask the manager: maxpm alert <manager> "
                                   f"\"<why it needs several tries>\"")
     why = rights.refusal(key, caller, name)
     if why:
+        if _bang_person():
+            return
         _refuse_again(conn, name, why)
 
 
@@ -3658,6 +3682,7 @@ def _run(args, conn):
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
     _rights(conn, args, actor)  # the permission table (#5974)
+    actor = args.actor
     _say_replaced(conn, args, actor)
     # Escalation by state (#5976, mark 2026-11-15: the session does not set the priority): an agent's --blocked and
     # --level of a message change nothing; its message escalates when it stops working (core.escalate_by_state).
@@ -4124,7 +4149,8 @@ def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     def post(proxy=None):
         # X-Maxpm-Pid: where serve looks first for the process that holds this connection (#5823); only a hint,
         # serve confirms it from the kernel.
-        headers = {"Content-Type": "application/json", "X-Maxpm-Pid": str(os.getpid())}
+        headers = {"Content-Type": "application/json", "X-Maxpm-Pid": str(os.getpid()),
+                   "X-Maxpm-Argv": json.dumps(sys.argv[1:])}
         if core.CALLER_TOKEN:  # in a runner of serve (#5845): serve checks the session of the caller's connection
             headers["X-Maxpm-Caller"] = core.CALLER_TOKEN
         req = urllib.request.Request(f"http://{host}/api/action", data=body, headers=headers)

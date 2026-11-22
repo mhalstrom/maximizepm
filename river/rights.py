@@ -100,14 +100,14 @@ READS = {"plugin list", "plugin show", "project show", "project list","canvas li
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
 OPS = {op: ANY for op in (
-    "accept", "activate", "answer", "backlog", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
+    "accept", "activate", "answer", "backlog", "bang_claim", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
     "browser_input", "browser_secret", "browser_steps", "canvas_answer", "canvas_comment", "canvas_comments",
     "canvas_discard", "canvas_edit", "canvas_kit", "canvas_list", "canvas_open", "canvas_publish", "canvas_put",
     "canvas_accept", "canvas_edit_html", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
     "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "item_reply", "launch_agent", "message_read", "move",
     "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_playbook_edit", "ops_repair",
-    "ops_run", "ops_trigger_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
+    "ops_run", "ops_trigger_run", "ops_trial", "pending_deliver", "pending_send_now", "person_bang", "prio", "push", "push_cancel", "queue_remove",
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
     "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",

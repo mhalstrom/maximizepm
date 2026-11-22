@@ -19653,7 +19653,8 @@ def hook_report(conn, agent_id, payload, env=None):
     if rep and rep["run"] is not None:
         # A hook before a shell command: a check only, nothing recorded (it runs before every Bash call).
         return {"agent": agent, "event": rep["event"], "state": None, "prompt": False, "alert": None, "answered": [],
-                "remind": None, "deny": tmux_guard(rep["run"]) or (push_guard(conn, agent, rep["run"]) if agent else None)}
+                "remind": None, "deny": tmux_guard(rep["run"]) or hook_guard(rep["run"])
+                or (push_guard(conn, agent, rep["run"]) if agent else None)}
     if not agent or not rep:
         return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
                 "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
@@ -19715,8 +19716,10 @@ def hook_report(conn, agent_id, payload, env=None):
                 remind = "MaximizePM: " + asked_line(agent, due) + ". If it still waits for the person, end your turn again."
     if answered:
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
+    bang = typed if (rep["event"] == "UserPromptSubmit" and isinstance(typed, str)
+                     and typed.lstrip().startswith("!")) else None
     return {"agent": agent, "event": rep["event"], "state": state, "prompt": typed is not None, "alert": alert,
-            "answered": answered, "remind": remind}
+            "answered": answered, "remind": remind, **({"bang": bang} if bang else {})}
 
 
 # The words that may come before the program of a shell command: env and its options, VAR=value, and wrappers.
@@ -19768,6 +19771,31 @@ def tmux_guard(command):
                     "of every agent session, this one too. In a tmux pane the variable TMUX names that server, and "
                     "TMUX_TMPDIR does not change it. Name your own server on every tmux command of the test: "
                     "tmux -L <name> ... and tmux -L <name> kill-server (or -S <socket path>).")
+    return None
+
+
+def hook_guard(command):
+    """Refuse an agent's shell tool from invoking maxpm report --hook or maxpm activity directly (#6912): only the
+    agent CLI's own hook runner runs those."""
+    if not command or ("report" not in command and "activity" not in command):
+        return None
+    for words in _shell_commands(command):
+        i = 0
+        while i < len(words) and (words[i] in _RUN_WRAPPERS or words[i].startswith("-")
+                                  or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[i])):
+            i += 2 if words[i] in ("-u", "-C", "-S") else 1
+        if i >= len(words):
+            continue
+        base = os.path.basename(words[i])
+        if base in ("maxpm", "river"):
+            rest = words[i + 1:]
+        elif base.startswith("python") and i + 3 < len(words) and words[i + 1] == "-m" and words[i + 2] == "river":
+            rest = words[i + 3:]
+        else:
+            continue
+        if "activity" in rest or ("report" in rest and "--hook" in rest):
+            return ("MaximizePM refuses this command: maxpm report --hook is run only by the agent CLI's hook runner, "
+                    "not by a session's shell tool.")
     return None
 
 

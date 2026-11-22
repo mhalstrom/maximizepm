@@ -463,10 +463,16 @@ class HookState(Env):
             "python3 /tmp/claude-501/cxhook/probe.py /tmp/claude-501/cxhook/log.jsonl"),
             "sha256:08e0fbd3682ecce55affa95aaa6ade528c63c1bea22f4f8971cc56675d87ce18")
         words = core.hook_words(a)
-        self.assertEqual([words[0], words[2]], ["-c", "-c"])
+        self.assertEqual([words[0], words[2], words[4]], ["-c", "-c", "-c"])
         self.assertTrue(words[1].startswith("hooks.PreToolUse=[{hooks=[{type=\"command\",command=") and
                         " report --hook codex\"" in words[1], words[1])
-        self.assertIn('"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:', words[3])
+        self.assertTrue(words[3].startswith("hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=") and
+                        " report --hook codex\"" in words[3], words[3])
+        self.assertIn('"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:', words[5])
+        self.assertIn('"/<session-flags>/config.toml:user_prompt_submit:0:0"={trusted_hash="sha256:', words[5])
+        self.assertEqual(a.read_hook({"hook_event_name": "UserPromptSubmit", "session_id": "t1",
+                                      "prompt": "! maxpm secret grant s --item 1"})["prompt"],
+                         "! maxpm secret grant s --item 1")
         cmd = core.build_command("codex", {"prompt": "maxpm go"})
         self.assertTrue(cmd.startswith("codex -c "), cmd)
         payload = {"session_id": "t1", "hook_event_name": "PreToolUse", "tool_name": "Bash",

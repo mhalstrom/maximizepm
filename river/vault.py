@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import core
@@ -377,9 +378,11 @@ def set_level(conn, name, level=None, add_commands=(), remove_commands=(), add_h
     """Change a secret's level, its allowed commands and hosts, whether env may write it, and its variable. Only a
     person."""
     check_name(name)
-    if not session_of(conn, actor)["person"]:
+    who = session_of(conn, actor)
+    if not who["person"]:
         raise RiverError("only a person changes a secret's protection. Ask the manager to bring it to the person: "
                          + _ask_line(conn, f"Please change the protection of the secret {name}: <what, why>"))
+    actor = who["name"] or actor
     r = conn.execute("SELECT * FROM secrets WHERE name=?", (name,)).fetchone()
     if not r:
         raise RiverError(f"no secret {name}: maxpm secret list shows the names")
@@ -499,9 +502,12 @@ def signin_save(conn, name, site=None, account=None, password=None, totp=None, t
     if not row and not (site and account and password):
         raise RiverError("a new sign-in needs --site, --account and the password: maxpm secret signin <name> "
                          "--site <site> --account <account> (it asks for the password)")
-    if (two_step == "agents" or reset) and not session_of(conn, actor)["person"]:
-        raise RiverError("only a person lets agents pass a 2-step check or resets a failed sign-in. Ask the manager: "
-                         + _ask_line(conn, f"Please check the sign-in {name}: <what>"))
+    if two_step == "agents" or reset:
+        who = session_of(conn, actor)
+        if not who["person"]:
+            raise RiverError("only a person lets agents pass a 2-step check or resets a failed sign-in. Ask the manager: "
+                             + _ask_line(conn, f"Please check the sign-in {name}: <what>"))
+        actor = who["name"] or actor
     if two_step is not None and two_step not in TWO_STEP:
         raise RiverError(f"--two-step is person or agents, not {two_step!r}")
     site = norm_site(site) if site else None
@@ -571,9 +577,12 @@ def cookies_save(conn, name, site, cookies, actor=None, set_name=None, by_serve=
     row = conn.execute("SELECT kind FROM secrets WHERE name=?", (name,)).fetchone()
     if row and row["kind"] != "cookies":
         raise RiverError(f"the secret {name} is a {row['kind']}, not saved sign-in cookies: give them another name")
-    if not by_serve and not session_of(conn, actor)["person"]:
-        raise RiverError("only a person saves a browser's sign-in into a set. Ask the manager: "
-                         + _ask_line(conn, f"Please save the sign-in of {site} into a set"))
+    if not by_serve:
+        who_s = session_of(conn, actor)
+        if not who_s["person"]:
+            raise RiverError("only a person saves a browser's sign-in into a set. Ask the manager: "
+                             + _ask_line(conn, f"Please save the sign-in of {site} into a set"))
+        actor = who_s["name"] or actor
     data = pack_cookies(cookies)  # bytes as they are: put()'s clean() would cut a last line end of the packed data
     who = "maxpm" if by_serve else actor
     backend().put(conn, name, data)
@@ -622,6 +631,132 @@ AGENT_PROGRAMS = {"claude", "codex", "agy", "antigravity", "copilot", "cursor-ag
 VERSION_NAME = re.compile(r"^\d+\.\d+\.\d+")
 
 
+# A person's '!' command typed in a session's chat (#6912): recorded in maxpm serve with a short life (by
+# server.session_send or a UserPromptSubmit hook) so that one exact maxpm command counts as the person once, while the
+# agent's own Bash calls stay refused even when they type the same text.
+BANG_TTL = 30.0
+BANG_CLAIMED_TTL = 15.0
+_BANG_LOCK = threading.Lock()
+_BANGS = []
+_CLI_BANG = None  # (argv_tuple, result_dict) cached for this CLI process
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_ARG_FLAGS = {"-u", "-C", "-S"}
+
+
+def bang_commands(text):
+    """The maxpm command argvs inside a person's '!' chat input (each a tuple of words after 'maxpm'), or [] when text
+    does not start with '!' or runs no maxpm command."""
+    if not isinstance(text, str):
+        return []
+    s = text.lstrip()
+    if not s.startswith("!"):
+        return []
+    body = s[1:].strip()
+    if not body:
+        return []
+    out = []
+    for words in core._shell_commands(body):
+        i = 0
+        while i < len(words):
+            w = words[i]
+            if _ENV_ASSIGN.match(w) or w in core._RUN_WRAPPERS:
+                i += 1
+            elif w in _ENV_ARG_FLAGS and i + 1 < len(words):
+                i += 2
+            elif w == "--" or (w.startswith("-") and i > 0):
+                i += 1
+            else:
+                break
+        if i >= len(words):
+            continue
+        base = os.path.basename(words[i])
+        if base in ("maxpm", "river") and i + 1 < len(words):
+            out.append(tuple(words[i + 1:]))
+        elif base.startswith("python") and i + 3 < len(words) and words[i + 1] == "-m" and words[i + 2] == "river":
+            out.append(tuple(words[i + 3:]))
+    return out
+
+
+def record_bang(agent, text, person=None, ttl=BANG_TTL):
+    """Record each maxpm command in a person's '!' chat input for agent, with a short life. Returns how many were
+    recorded."""
+    cmds = bang_commands(text)
+    if not agent or not cmds:
+        return 0
+    now_m = time.monotonic()
+    exp = now_m + float(ttl)
+    with _BANG_LOCK:
+        _BANGS[:] = [e for e in _BANGS if e["expires"] > now_m]
+        for argv in cmds:
+            _BANGS.append({"agent": agent, "person": person, "argv": argv, "expires": exp, "claimed": None})
+    return len(cmds)
+
+
+def claim_bang(agent, argv, proc=None):
+    """Match and consume one recorded '!' command of agent with exact argv. When proc is (pid, pid_start), the entry is
+    bound to that one CLI process (so repeated checks in the same command succeed, while no second process can use it);
+    when proc is None (a sandbox proxy), it is removed at once. Returns {'person': name} or None."""
+    argv = tuple(argv or ())
+    if not agent or not argv:
+        return None
+    now_m = time.monotonic()
+    with _BANG_LOCK:
+        _BANGS[:] = [e for e in _BANGS if e["expires"] > now_m]
+        if proc is not None:
+            for e in _BANGS:
+                if e["agent"] == agent and e["argv"] == argv and e["claimed"] == proc:
+                    return {"person": e["person"]}
+        for idx, e in enumerate(_BANGS):
+            if e["agent"] == agent and e["argv"] == argv and e["claimed"] is None:
+                if proc is not None:
+                    e["claimed"] = proc
+                    e["expires"] = min(e["expires"], now_m + BANG_CLAIMED_TTL)
+                else:
+                    _BANGS.pop(idx)
+                return {"person": e["person"]}
+    return None
+
+
+def clear_bangs():
+    """Reset the in-memory '!' allowances (tests)."""
+    global _CLI_BANG
+    with _BANG_LOCK:
+        _BANGS.clear()
+    _CLI_BANG = None
+
+
+def _default_person(conn):
+    r = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC LIMIT 1").fetchone()
+    return r["name"] if r else None
+
+
+def _claim_bang_cli(conn, argv):
+    """Ask maxpm serve whether this CLI process matches a recorded '!' command of its session. Fails closed (None) when
+    serve is not running or refuses."""
+    global _CLI_BANG
+    argv = tuple(argv or ())
+    if not argv:
+        return None
+    if _CLI_BANG is not None and _CLI_BANG[0] == argv:
+        return _CLI_BANG[1]
+    if not core.running_serve(conn):
+        return None
+    try:
+        from . import cli
+        res = cli.ask_server(conn, "bang_claim", {"argv": list(argv)}, timeout=1, retries=0)
+    except Exception:  # noqa: BLE001 - fail closed when serve does not answer
+        return None
+    if isinstance(res, dict) and res.get("ok"):
+        _CLI_BANG = (argv, res)
+        return res
+    return None
+
+
+def claim_bang_for_cli(conn, argv=None):
+    """For cli._rights: when a person typed '! maxpm ...' inside a session, confirm it with maxpm serve."""
+    return _claim_bang_cli(conn, sys.argv[1:] if argv is None else argv)
+
+
 def _chain_now(conn):
     """The processes that run this request, from the kernel: in serve, those above the process that holds the
     request's connection (the CLI's pid first, then the recorded sessions': the Claude Code sandbox's proxy runs
@@ -659,6 +794,8 @@ def session_of(conn, actor):
         if actor and not core._is_person(conn, actor):
             raise RiverError(f"the page through the relay acts as a person, not as the session {actor}")
         return {"name": actor, "person": True, "how": "the page through the relay"}
+    if getattr(PEER, "bang", None) is not None:
+        return PEER.bang
     ch = _chain_now(conn)
     p = getattr(PEER, "value", None)
     if not ch and isinstance(p, tuple) and p[0] == TAILNET_PAGE and p[1] and p[2]:
@@ -681,6 +818,17 @@ def session_of(conn, actor):
     for pid, _ppid, comm, start in ch:
         r = rows.get(pid)
         if r and (r["pid_start"] is None or r["pid_start"] == start):
+            if getattr(PEER, "value", None) is not None:
+                proc = (ch[0][0], ch[0][3]) if ch and ch[0][0] != pid else None
+                hit = claim_bang(r["name"], getattr(PEER, "argv", None), proc=proc)
+            else:
+                hit = _claim_bang_cli(conn, sys.argv[1:])
+            if hit:
+                person = actor if (actor and core._is_person(conn, actor)) else (hit.get("person") or _default_person(conn))
+                res = {"name": person, "person": True, "how": f"! command in {r['name']}"}
+                if getattr(PEER, "value", None) is not None:
+                    PEER.bang = res
+                return res
             if actor and actor != r["name"]:
                 raise RiverError(f"this command runs in the session {r['name']}, not {actor}: MaximizePM confirms the "
                                  f"session from its processes, not from --as. Run it as maxpm --as {r['name']} ...")
@@ -916,7 +1064,7 @@ def set_ask(conn, name, ask, actor=None):
     question): one setting per credential, a person only (#5842)."""
     if ask not in ASKS:
         raise RiverError(f"a credential is 'ask' (Ask me) or 'allow' (Allow without asking), not {ask!r}")
-    _person_only(conn, actor, "change when a credential is asked for")
+    actor = _person_only(conn, actor, "change when a credential is asked for")["name"] or actor
     with core.tx(conn):
         row = conn.execute("SELECT ask FROM secrets WHERE name=?", (name,)).fetchone()
         if not row:
@@ -949,9 +1097,11 @@ def _may_grant(conn, actor, s, what):
 
 def _person_only(conn, actor, what):
     """what: the step as a verb, for example 'change a credential set'."""
-    if not session_of(conn, actor)["person"]:
+    who = session_of(conn, actor)
+    if not who["person"]:
         raise RiverError(f"only a person may {what}. Ask the manager to bring it to the person: "
                          + _ask_line(conn, f"Please {what}: <which set, to what, why>"))
+    return who
 
 
 def _set(conn, name):
@@ -982,7 +1132,7 @@ def set_change(conn, name, add=(), remove=(), note=None, manager_may_grant=None,
     if re.match(r"^[gG]\d+$", name):
         raise RiverError(f"{name} looks like a grant id (maxpm secret revoke g12): give the set another name")
     if not checked:
-        _person_only(conn, actor, "change a credential set")
+        actor = _person_only(conn, actor, "change a credential set")["name"] or actor
     for n in list(add) + list(remove):
         check_name(n)
     with core.tx(conn):
@@ -1380,6 +1530,8 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
             raise RiverError(f"the person answers each request for {', '.join(asked)} (Ask me): put it to the "
                              f"person: maxpm secret propose r{r['id']} --offer {','.join(pick)}")
         actor = who["name"]
+    else:
+        actor = who["name"] or actor
     existing = _find_matching_set(conn, pick, r["set_name"])
     if existing:
         name = existing

@@ -557,6 +557,137 @@ class Identity(Base):
         if r["pid_start"] is not None:  # the kernel answers here: another process cannot take dev's place
             self.assertFalse(core.set_process(self.c, "dev", os.getppid(), "zsh", env={"MAXPM_AGENT": "dev"}))
 
+    def test_bang_commands_parses_wrappers_and_chains(self):
+        """#6912: extract exact maxpm argvs from a person's '!' chat input, stripping env/wrappers."""
+        self.assertEqual(
+            vault.bang_commands("! maxpm secret grant toolscaled-services-dev --item 6910"),
+            [("secret", "grant", "toolscaled-services-dev", "--item", "6910")],
+        )
+        self.assertEqual(
+            vault.bang_commands("! env -u MAXPM_TOKEN maxpm secret set s --add k"),
+            [("secret", "set", "s", "--add", "k")],
+        )
+        self.assertEqual(
+            vault.bang_commands("  ! MAXPM_AGENT= maxpm secret set s --add k && maxpm secret grant s --item 1"),
+            [("secret", "set", "s", "--add", "k"), ("secret", "grant", "s", "--item", "1")],
+        )
+        self.assertEqual(vault.bang_commands("maxpm secret grant s --item 1"), [])
+        self.assertEqual(vault.bang_commands("! git status"), [])
+        self.assertEqual(vault.bang_commands("!"), [])
+
+    def test_person_bang_allows_grant_once_and_refuses_agent_bash(self):
+        """#6912: mark typing '! maxpm secret grant ...' in a session's chat counts as mark once; the agent's own
+        Bash call with the exact same command is refused."""
+        vault.clear_bangs()
+        self.addCleanup(vault.clear_bangs)
+        core.project_add(self.c, "site")
+        it = core.item_add(self.c, "site", "Use secret", actor="mark")["id"]
+        vault.BACKEND.put(self.c, "k", b"v")
+        self.c.execute("INSERT INTO secrets (name, created_at) VALUES ('k', 'x')")
+        self.chain = [(700, 1, "login", 1)]
+        vault.set_change(self.c, "devset", add=["k"], actor="mark")
+
+        # Agent dev tries to grant the set from its Bash tool: refused.
+        argv = ("secret", "grant", "devset", "--item", str(it))
+        self.chain = [(900, 500, "Python", 10), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51000, 7766, "900")
+        vault.PEER.argv = argv
+        vault.PEER.bang = None
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        self.addCleanup(setattr, vault.PEER, "argv", None)
+        self.addCleanup(setattr, vault.PEER, "bang", None)
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 900):
+            with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                vault.grant(self.c, "devset", "item", str(it), actor="dev")
+
+            # Mark types '! maxpm secret grant devset --item <it>' in dev's chat: succeeds as mark.
+            self.assertEqual(vault.record_bang("dev", f"! maxpm secret grant devset --item {it}", person="mark"), 1)
+            g = vault.grant(self.c, "devset", "item", str(it), actor="dev")
+            self.assertEqual(g["granted_by"], "mark")
+
+            # Now dev runs the exact same command from its Bash tool (new process pid 901): refused!
+            vault.PEER.bang = None
+            self.chain = [(901, 500, "Python", 20), (500, 1, "2.1.325", 111)]
+            with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 901):
+                with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                    vault.grant(self.c, "devset", "item", str(it), actor="dev")
+
+            # Wrong session or wrong argv is also refused.
+            vault.record_bang("other", f"! maxpm secret grant devset --item {it}", person="mark")
+            vault.record_bang("dev", "! maxpm secret list", person="mark")
+            with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 901):
+                with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                    vault.grant(self.c, "devset", "item", str(it), actor="dev")
+
+    def test_person_bang_set_change_and_server_ops_and_hook_guard(self):
+        """#6912: '! env -u MAXPM_TOKEN maxpm secret set ...' works through serve ops, and PreToolUse refuses an
+        agent's Bash tool from calling maxpm report --hook directly."""
+        from river import server
+        vault.clear_bangs()
+        self.addCleanup(vault.clear_bangs)
+        vault.BACKEND.put(self.c, "k2", b"v2")
+        self.c.execute("INSERT INTO secrets (name, created_at) VALUES ('k2', 'x')")
+
+        # PreToolUse refuses an agent calling maxpm report --hook directly.
+        self.assertIsNotNone(core.hook_guard("echo '{}' | maxpm report --hook claude"))
+        self.assertIsNotNone(core.hook_guard("python3 -m river report --hook codex"))
+        self.assertIsNone(core.hook_guard("maxpm report --state working"))
+
+        # UserPromptSubmit hook reports '!' text; person_bang_op records only when process tree proves that session.
+        rep = core.hook_report(self.c, "claude", {"hook_event_name": "UserPromptSubmit",
+                                                  "prompt": "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2"},
+                               {"MAXPM_AGENT": "dev"})
+        self.assertEqual(rep["bang"], "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2")
+
+        self.chain = [(910, 500, "Python", 30), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51001, 7766, "910")
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        self.addCleanup(setattr, vault.PEER, "argv", None)
+        self.addCleanup(setattr, vault.PEER, "bang", None)
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 910):
+            # Another session's name is rejected.
+            self.assertEqual(server.OPS["person_bang"](self.c, {"agent": "other", "text": rep["bang"]}, "dev")["recorded"], 0)
+            # Same session records it.
+            self.assertEqual(server.OPS["person_bang"](self.c, {"agent": "dev", "text": rep["bang"]}, "dev")["recorded"], 1)
+
+        # CLI claims it once via bang_claim_op from pid 920; a second process 921 is refused.
+        argv = ["secret", "set", "s2", "--add", "k2"]
+        self.chain = [(920, 500, "Python", 40), (500, 1, "2.1.325", 111)]
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 920):
+            r1 = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
+            self.assertTrue(r1["ok"])
+            self.assertEqual(r1["person"], "mark")
+            # Same CLI process can re-check (e.g. _rights + session_of).
+            r1b = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
+            self.assertTrue(r1b["ok"])
+        self.chain = [(921, 500, "Python", 50), (500, 1, "2.1.325", 111)]
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 921):
+            r2 = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
+            self.assertFalse(r2["ok"])
+
+        # Expired bang is refused.
+        vault.record_bang("dev", "! maxpm secret set s2 --add k2", person="mark", ttl=-1)
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 921):
+            self.assertFalse(server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")["ok"])
+
+    def test_session_send_records_person_bang_but_not_manager(self):
+        """#6912: typing '! maxpm ...' in the Sessions tab (server.session_send) records a one-shot person bang;
+        manager sends never do."""
+        from river import server
+        vault.clear_bangs()
+        self.addCleanup(vault.clear_bangs)
+        with mock.patch.object(server, "_typing_pane", lambda *a, **k: "%1"), \
+                mock.patch.object(server, "_no_question", lambda c, ag, p: p), \
+                mock.patch.object(server, "send_keys", lambda *a, **k: None), \
+                mock.patch.object(server, "_keep_prompt", lambda *a, **k: None), \
+                mock.patch.object(server, "ENTER_PAUSE", 0):
+            server.session_send(self.c, "dev", "! maxpm secret grant s --item 1", who="mark", manager=False)
+            hit = vault.claim_bang("dev", ("secret", "grant", "s", "--item", "1"))
+            self.assertEqual(hit, {"person": "mark"})
+            self.assertIsNone(vault.claim_bang("dev", ("secret", "grant", "s", "--item", "1")))
+            server.session_send(self.c, "dev", "! maxpm secret grant s --item 1", who="boss", manager=True)
+            self.assertIsNone(vault.claim_bang("dev", ("secret", "grant", "s", "--item", "1")))
+
 
 class CredentialsPanel(Base):
     """#5829: the Credentials panel of Settings reads names, levels, sets and grants in one GET, never a value; its
