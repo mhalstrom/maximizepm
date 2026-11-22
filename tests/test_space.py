@@ -144,20 +144,67 @@ class Database(SpaceBase):
         self.assertTrue(res["db"]["over"])
         self.assertIn("still over the limit: database", res["summary"])
 
-    def test_canvas_versions_between_first_and_newest(self):
+    def test_canvas_versions_archive_and_read_back(self):
         core.project_add(self.c, "p")
-        with core.tx(self.c):
-            self.c.execute("INSERT INTO canvases (id, project_id, name, kind, created_at, updated_at) "
-                           "VALUES (1,(SELECT id FROM projects WHERE name='p'),'c','md',?,?)", (OLD, OLD))
-            for v in range(1, 11):
-                self.c.execute("INSERT INTO canvas_versions (canvas_id, version, body, created_at) VALUES (1,?,?,?)",
-                               (v, "b" * 20000, OLD))
-            self.c.execute("INSERT INTO canvas_comments (canvas_id, version, author, body, state, created_at) "
-                           "VALUES (1, 4, 'mark', 'fix this', 'open', ?)", (OLD,))
+        done_id = self.closed_item("done work", n_events=1)
+        open_id = core.item_add(self.c, "p", "open work", 2, "", "any", (), "t")["id"]
+        recent = core.iso(core.now())
+        for v in range(1, 6):
+            core.canvas_put(self.c, "done-doc", f"# Plan\n- #{done_id} step {v}\n" + "b" * 20000, actor="t",
+                            kind="md", item=done_id, note=f"rev {v}")
+            core.canvas_put(self.c, "open-doc", f"open body {v}\n" + "c" * 20000, actor="t",
+                            kind="md", item=open_id, note=f"open {v}")
+        core.canvas_comment(self.c, "done-doc", "check v2", actor="t", version=2)
         core.config_set(self.c, "db_max_size", "16KB")
-        space.run(self.c)
-        left = [r[0] for r in self.c.execute("SELECT version FROM canvas_versions ORDER BY version")]
-        self.assertEqual(left, [1, 4, 10])  # the first, the commented one, the newest
+        # Dry run counts what would move, removes nothing, and creates no archive file.
+        dry = space.run(self.c, dry_run=True)
+        self.assertIn("canvas versions (archived)", [r["what"] for r in dry["db"]["removed"]])
+        self.assertFalse(space.archive_path(self.c).exists())
+        # Real run moves older versions of the done item's canvas to archive, keeping its newest
+        # version and every version of the open item's canvas in the live database (even when recent).
+        res = space.run(self.c)
+        self.assertIn("canvas versions (archived)", [r["what"] for r in res["db"]["removed"]])
+        self.assertTrue(space.archive_path(self.c).exists())
+        done_c = core._canvas_row(self.c, "done-doc")
+        open_c = core._canvas_row(self.c, "open-doc")
+        self.assertEqual([r[0] for r in self.c.execute(
+            "SELECT version FROM main.canvas_versions WHERE canvas_id=? ORDER BY version", (done_c["id"],))], [5])
+        self.assertEqual([r[0] for r in self.c.execute(
+            "SELECT version FROM archive.canvas_versions WHERE canvas_id=? ORDER BY version", (done_c["id"],))],
+            [1, 2, 3, 4])
+        self.assertEqual([r[0] for r in self.c.execute(
+            "SELECT version FROM main.canvas_versions WHERE canvas_id=? ORDER BY version", (open_c["id"],))],
+            [1, 2, 3, 4, 5])
+        # Read-back: canvas_show lists all 5 versions (1..4 marked archived) and reads archived bodies;
+        # canvas_version (used by /canvas/<id>/<version>) and plan_versions read archived versions too.
+        shown = core.canvas_show(self.c, "done-doc", version=2)
+        self.assertEqual([v["version"] for v in shown["versions"]], [1, 2, 3, 4, 5])
+        self.assertTrue(shown["versions"][1].get("archived"))
+        self.assertFalse(shown["versions"][4].get("archived"))
+        self.assertIn(f"#{done_id} step 2", shown["shown"]["body"])
+        _, v3 = core.canvas_version(self.c, done_c["id"], 3)
+        self.assertIn(f"#{done_id} step 3", v3["body"])
+        _, latest = core.canvas_version(self.c, done_c["id"], "latest")
+        self.assertEqual(latest["version"], 5)
+        plans = core.plan_versions(self.c, "done-doc")
+        self.assertEqual(plans["plans"][0]["version"], 1)
+        # Commenting on an archived version and putting a new version both still work.
+        core.canvas_comment(self.c, "done-doc", "still works", actor="t", version=1)
+        put = core.canvas_put(self.c, "done-doc", "# Plan\n- step 6", actor="t", kind="md", item=done_id)
+        self.assertEqual(put["version"], 6)
+        self.assertEqual([v["version"] for v in put["versions"]], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(self.c.execute("PRAGMA main.foreign_key_check").fetchall(), [])
+        # When the archive itself exceeds archive_max_size, old archived versions past space_canvas_after
+        # are trimmed, keeping version 1 and commented versions (v2).
+        with core.tx(self.c):
+            self.c.execute("UPDATE archive.canvas_versions SET created_at=? WHERE canvas_id=?", (OLD, done_c["id"]))
+        core.config_set(self.c, "archive_max_size", "16KB")
+        core.config_set(self.c, "db_max_size", "off")
+        res2 = space.run(self.c)
+        self.assertIn("archived canvas versions", [r["what"] for r in res2["archive_db"]["removed"]])
+        left_arch = [r[0] for r in self.c.execute(
+            "SELECT version FROM archive.canvas_versions WHERE canvas_id=? ORDER BY version", (done_c["id"],))]
+        self.assertEqual(left_arch, [1, 2])  # v1 and commented v2 stay; v3 and v4 trimmed
 
     def test_copies_of_test_results_go_first_at_any_age(self):
         """#6520: the test events that pipeline_events kept before go first, new ones too; other events stay."""

@@ -4,7 +4,7 @@ frame.)
 GET: (test, handler) pairs that Handler.do_GET tries in order; a handler answers with h._send. OPS: page actions,
 merged into server.OPS."""
 
-from .. import core, server  # noqa: F401  (server: read at call time, so tests that replace its globals still work)
+from .. import core, server, space  # noqa: F401  (server: read at call time, so tests that replace its globals still work)
 from ..core import RiverError  # noqa: F401
 import hmac  # noqa: F401
 
@@ -14,7 +14,10 @@ def canvas_rows(conn, agent=None, item=None, since=None):
     of; item: the canvases of that item; since: changed from then on (an ISO time)."""
     wrote = None
     if agent:
-        wrote = {r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM canvas_versions WHERE author=?", (agent,))}
+        wrote = {r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM main.canvas_versions WHERE author=?", (agent,))}
+        if space.has_canvas_archive(conn):
+            wrote |= {r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM archive.canvas_versions WHERE author=?",
+                                                 (agent,))}
     heads = [c for c in core.canvas_heads(conn) if (wrote is None or c["id"] in wrote)
              and (item is None or c["item_id"] == item)]
     rows = [{"kind": "canvas", "target": f"canvas:{c['id']}", "session": c["agent"], "how": "wrote",

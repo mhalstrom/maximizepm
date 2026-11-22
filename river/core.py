@@ -21719,8 +21719,47 @@ def _canvas_row(conn, ref, project=None, deleted=False):
 
 
 def _canvas_latest(conn, cid):
-    return conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? ORDER BY version DESC LIMIT 1",
+    return conn.execute("SELECT * FROM main.canvas_versions WHERE canvas_id=? ORDER BY version DESC LIMIT 1",
                         (cid,)).fetchone()
+
+
+def _canvas_version_row(conn, cid, version):
+    """One version of a canvas: the live database first, then the archive (#6898)."""
+    r = conn.execute("SELECT * FROM main.canvas_versions WHERE canvas_id=? AND version=?",
+                     (cid, int(version))).fetchone()
+    if r is not None:
+        return r
+    from . import space
+    if space.has_canvas_archive(conn):
+        return conn.execute("SELECT * FROM archive.canvas_versions WHERE canvas_id=? AND version=?",
+                            (cid, int(version))).fetchone()
+    return None
+
+
+def _canvas_versions_meta(conn, cid):
+    """Metadata of every version of a canvas (live and archived), oldest first; live wins on duplicate (#6898)."""
+    rows = {r["version"]: dict(r) for r in conn.execute(
+        "SELECT version, author, note, created_at, LENGTH(body) chars FROM main.canvas_versions WHERE canvas_id=?",
+        (cid,))}
+    from . import space
+    if space.has_canvas_archive(conn):
+        for r in conn.execute(
+            "SELECT version, author, note, created_at, LENGTH(body) chars FROM archive.canvas_versions "
+            "WHERE canvas_id=?", (cid,)):
+            rows.setdefault(r["version"], dict(r, archived=True))
+    return [rows[v] for v in sorted(rows)]
+
+
+def _canvas_all_versions(conn, cid):
+    """Every version of a canvas (live and archived) with its body, oldest first; live wins on duplicate (#6898)."""
+    rows = {r["version"]: dict(r) for r in conn.execute(
+        "SELECT version, body, author, note, created_at FROM main.canvas_versions WHERE canvas_id=?", (cid,))}
+    from . import space
+    if space.has_canvas_archive(conn):
+        for r in conn.execute(
+            "SELECT version, body, author, note, created_at FROM archive.canvas_versions WHERE canvas_id=?", (cid,)):
+            rows.setdefault(r["version"], dict(r))
+    return [rows[v] for v in sorted(rows)]
 
 
 def _held_item(conn, actor, project_id=None):
@@ -21770,9 +21809,15 @@ def _canvas_guard(conn, c, actor, base):
     if base is None:
         r = conn.execute("SELECT version FROM canvas_seen WHERE canvas_id=? AND agent=?", (c["id"], actor)).fetchone()
         base = r["version"] if r else 0
-    p = conn.execute("SELECT v.version, v.author FROM canvas_versions v JOIN agents a ON a.name=v.author WHERE "
-                     "v.canvas_id=? AND a.kind='human' AND v.version>? ORDER BY v.version DESC LIMIT 1",
+    p = conn.execute("SELECT v.version, v.author FROM main.canvas_versions v JOIN main.agents a ON a.name=v.author "
+                     "WHERE v.canvas_id=? AND a.kind='human' AND v.version>? ORDER BY v.version DESC LIMIT 1",
                      (c["id"], int(base))).fetchone()
+    if p is None:
+        from . import space
+        if space.has_canvas_archive(conn):
+            p = conn.execute("SELECT v.version, v.author FROM archive.canvas_versions v JOIN main.agents a "
+                             "ON a.name=v.author WHERE v.canvas_id=? AND a.kind='human' AND v.version>? "
+                             "ORDER BY v.version DESC LIMIT 1", (c["id"], int(base))).fetchone()
     if p:
         raise RiverError(f"refused: {p['author']} edited canvas {c['name']} in version {p['version']}, after the "
                          f"version your page is based on ({base or 'none read'}); nothing is stored, so the edit is "
@@ -21897,7 +21942,7 @@ def canvas_version(conn, cid, version=None):
     if version in (None, "", "latest"):
         v = _canvas_latest(conn, c["id"])
     else:
-        v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone()
+        v = _canvas_version_row(conn, c["id"], int(version))
     if v is None:
         raise RiverError(f"canvas c{cid} has no version {version}")
     return c, v
@@ -21930,17 +21975,14 @@ def canvas_show(conn, ref, project=None, version=None):
     """A canvas with the text of its latest version (or one version), its versions, and its comments."""
     c = _canvas_row(conn, ref, project)
     d = _canvas_info(conn, c)
-    v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone() \
-        if version else _canvas_latest(conn, c["id"])
+    v = _canvas_version_row(conn, c["id"], int(version)) if version else _canvas_latest(conn, c["id"])
+    versions = _canvas_versions_meta(conn, c["id"])
     if v is None:
-        kept = [str(r[0]) for r in conn.execute("SELECT version FROM canvas_versions WHERE canvas_id=? ORDER BY version",
-                                                (c["id"],))]
+        kept = [str(r["version"]) for r in versions]
         raise RiverError(f"canvas {c['name']} has no version {version}; it keeps {', '.join(kept)}")
     d["shown"] = {"version": v["version"], "author": v["author"], "note": v["note"], "created_at": v["created_at"],
                   "body": v["body"]}
-    d["versions"] = [dict(r) for r in conn.execute(
-        "SELECT version, author, note, created_at, LENGTH(body) chars FROM canvas_versions WHERE canvas_id=? "
-        "ORDER BY version", (c["id"],))]
+    d["versions"] = versions
     d["comments"] = _canvas_threads(conn, c["id"])
     d["tasks"] = artifact_tasks(conn, [f"canvas:{c['id']}"])[f"canvas:{c['id']}"]  # who reviews or names it (#6208)
     return d
@@ -22014,7 +22056,7 @@ def canvas_comment(conn, ref, body, actor=None, anchor=None, version=None, proje
     with tx(conn):
         latest = _canvas_latest(conn, c["id"])["version"]
         v = int(version) if version else latest
-        if not conn.execute("SELECT 1 FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], v)).fetchone():
+        if not _canvas_version_row(conn, c["id"], v):
             raise RiverError(f"canvas {c['name']} has no version {v}")
         same = conn.execute("SELECT id, state FROM canvas_comments WHERE canvas_id=? AND author=? AND parent_id IS NULL "
                             "AND body=? AND anchor IS ? AND created_at>=? ORDER BY id DESC LIMIT 1",
@@ -22587,8 +22629,7 @@ def plan_versions(conn, ref, project=None):
         raise RiverError(f"canvas {c['name']} is {c['kind']}: a plan is the Plan section of a Markdown canvas "
                          f"(maxpm canvas design <name>)")
     out, last = [], None
-    for v in conn.execute("SELECT version, body, author, note, created_at FROM canvas_versions WHERE canvas_id=? "
-                          "ORDER BY version", (c["id"],)):
+    for v in _canvas_all_versions(conn, c["id"]):
         body, refs = _plan_part(v["body"])
         if body is None:
             continue
@@ -22890,8 +22931,7 @@ def canvas_publish_begin(conn, ref, actor=None, version=None, project=None):
     if version in (None, "", "latest"):
         v = _canvas_latest(conn, c["id"])
     else:
-        v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?",
-                         (c["id"], int(version))).fetchone()
+        v = _canvas_version_row(conn, c["id"], int(version))
     if v is None:
         raise RiverError(f"canvas {c['name']} has no version {version}")
     with tx(conn):
@@ -22920,7 +22960,7 @@ def canvas_publish_send(conn, cid, version, actor, confirm=False):
     """The part of a publish that talks to realquicksite (seconds: it waits for the render check). A session never
     sends a new version of a shared page; a person does after a yes (confirm). Records the page or the failure."""
     c = conn.execute("SELECT * FROM canvases WHERE id=?", (int(cid),)).fetchone()
-    v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone()
+    v = _canvas_version_row(conn, c["id"], int(version))
     page = canvas_page(conn, c["id"]) or {}
     person = _is_person(conn, actor)
     try:

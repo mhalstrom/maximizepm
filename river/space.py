@@ -16,7 +16,8 @@ kept before #6520, which test_suites and test_results hold too):
   2. notices that were read, and the send records of closed needs-you rows;
   3. events of items closed before space_events_after; kept: the first and the last event of each item, events of
      a person, and events that hold a decision, an answer, a check, or the close;
-  4. canvas versions between the first and the newest (not a version that a comment was written on);
+  4. canvas versions older than the newest of canvases not on an open item: moved to the archive file
+     (maxpm-archive.db), where canvas pages and commands still read them on demand (#6898);
   5. ended sessions: agents not seen since space_sessions_after that hold nothing, their sent prompts, and old
      hook run records.
   Then VACUUM, so the file shrinks.
@@ -50,6 +51,7 @@ from .core import RiverError, iso, now, parse_duration, parse_iso, setting, tx
 UNITS = {"b": 1, "kb": 1024, "mb": 1024 ** 2, "gb": 1024 ** 3, "tb": 1024 ** 4}
 LOW_WATER = 0.9
 BATCH = 500  # rows in one transaction: a command that waits for the lock waits for one batch, not the cleanup
+CANVAS_BATCH = 50  # canvas versions hold full page bodies, so each archive batch is smaller
 ROW = 64  # bytes a row takes beside its text (the row header, its rowid and its index entries), for the estimate
 EVERY = timedelta(days=1)  # serve checks the limits at least this often, and measures the folder
 FOLDER_EVERY = timedelta(hours=1)  # a walk of the folder takes about half a second for 2 GB
@@ -264,14 +266,49 @@ def _events(conn, cutoff, n, s="main"):
     return _gone(conn, f"{s}.events", rows)
 
 
-def _canvases(conn, cutoff, n):
+def _canvases(conn, cutoff, n, dry_run=False):
+    """Move old canvas versions to the archive file (#6898): oldest first, keeping the newest version of each canvas
+    and every version of an open item's canvas in the live database. A dry run deletes only inside its rolled-back
+    transaction and creates no archive file."""
     rows = conn.execute(
-        "SELECT v.id, length(v.body)+COALESCE(length(v.note),0) FROM canvas_versions v WHERE v.created_at<? "
-        "AND v.version>(SELECT MIN(version) FROM canvas_versions x WHERE x.canvas_id=v.canvas_id) "
-        "AND v.version<(SELECT MAX(version) FROM canvas_versions x WHERE x.canvas_id=v.canvas_id) "
-        "AND NOT EXISTS (SELECT 1 FROM canvas_comments c WHERE c.canvas_id=v.canvas_id AND c.version=v.version) "
+        "SELECT v.id, length(CAST(v.body AS BLOB))+COALESCE(length(CAST(v.note AS BLOB)),0) "
+        "FROM main.canvas_versions v JOIN main.canvases c ON c.id=v.canvas_id "
+        f"WHERE NOT EXISTS (SELECT 1 FROM main.items i WHERE i.id=c.item_id AND i.status IN {core.OPEN_STATES}) "
+        "AND v.version<(SELECT MAX(version) FROM main.canvas_versions x WHERE x.canvas_id=v.canvas_id) "
+        "ORDER BY v.created_at, v.id LIMIT ?", (n,)).fetchall()
+    if not rows:
+        return 0, 0
+    if dry_run:
+        return _gone(conn, "main.canvas_versions", rows)
+    ids = [r[0] for r in rows]
+    attach(conn, create=True)
+    with tx(conn):
+        _sync_tables(conn)
+        cols = ",".join(f'"{c}"' for c in _cols(conn, "main", "canvas_versions"))
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            marks = ",".join("?" * len(part))
+            conn.execute(
+                f"DELETE FROM archive.canvas_versions WHERE (canvas_id, version) IN "
+                f"(SELECT canvas_id, version FROM main.canvas_versions WHERE id IN ({marks}))", part)
+            conn.execute(
+                f"INSERT INTO archive.canvas_versions ({cols}) "
+                f"SELECT {cols} FROM main.canvas_versions WHERE id IN ({marks})", part)
+    with tx(conn):
+        return _gone(conn, "main.canvas_versions", rows)
+
+
+def _archived_canvases(conn, cutoff, n, s="archive"):
+    """When the archive file itself crosses archive_max_size: drop archived canvas versions older than
+    space_canvas_after, keeping version 1 and any version that a comment was written on."""
+    if not has_canvas_archive(conn):
+        return 0, 0
+    rows = conn.execute(
+        f"SELECT v.id, length(CAST(v.body AS BLOB))+COALESCE(length(CAST(v.note AS BLOB)),0) "
+        f"FROM {s}.canvas_versions v WHERE v.created_at<? AND v.version>1 "
+        "AND NOT EXISTS (SELECT 1 FROM main.canvas_comments c WHERE c.canvas_id=v.canvas_id AND c.version=v.version) "
         "ORDER BY v.created_at, v.id LIMIT ?", (cutoff, n)).fetchall()
-    return _gone(conn, "canvas_versions", rows)
+    return _gone(conn, f"{s}.canvas_versions", rows)
 
 
 def _sessions(conn, cutoff, n):
@@ -324,13 +361,14 @@ STAGES = (("copies of test results", None, _test_events),
           ("ops records", "space_ops_after", _ops),
           ("read notices", "space_notices_after", _notices),
           ("events of closed items", "space_events_after", _events),
-          ("canvas versions", "space_canvas_after", _canvases),
+          ("canvas versions (archived)", None, _canvases),
           ("ended sessions", "space_sessions_after", _sessions))
 
 
 # The archive file over archive_max_size: its oldest history goes; items, their titles, outputs and decisions stay.
 ARCHIVE_STAGES = (("archived read notices", "space_notices_after", _notices),
-                  ("archived events", "space_events_after", _events))
+                  ("archived events", "space_events_after", _events),
+                  ("archived canvas versions", "space_canvas_after", _archived_canvases))
 
 
 def _vacuum(conn, s="main"):
@@ -366,7 +404,9 @@ def _db_part(conn, dry_run, t, s="main"):
             cutoff = iso(t - parse_duration(setting(conn, key))) if key else iso(t)
             rows = freed = 0
             while est > target:
-                if dry_run:
+                if fn is _canvases:
+                    k, b = _canvases(conn, cutoff, CANVAS_BATCH, dry_run)
+                elif dry_run:
                     k, b = fn(conn, cutoff, BATCH) if s == "main" else fn(conn, cutoff, BATCH, s)
                 else:
                     with tx(conn):
@@ -595,24 +635,35 @@ def attach(conn, create=False):
     return True
 
 
+def has_canvas_archive(conn):
+    """True when the archive is attached and holds the canvas_versions table (#6898)."""
+    return attach(conn) and bool(conn.execute(
+        "SELECT 1 FROM archive.sqlite_master WHERE type='table' AND name='canvas_versions'").fetchone())
+
+
 def _cols(conn, s, table):
     return [r[1] for r in conn.execute(f"PRAGMA {s}.table_info({table})")]
+
+
+def _sync_table(conn, t, indexes):
+    have = _cols(conn, ARCHIVE, t)
+    main = list(conn.execute(f"PRAGMA main.table_info({t})"))
+    if not have:
+        conn.execute(f"CREATE TABLE archive.{t} (" + ", ".join(f'"{r[1]}" {r[2] or ""}' for r in main) + ")")
+        for name, cols in indexes:
+            conn.execute(f"CREATE INDEX archive.{name} ON {t}({cols})")
+        return
+    for r in main:
+        if r[1] not in have:
+            conn.execute(f'ALTER TABLE archive.{t} ADD COLUMN "{r[1]}" {r[2] or ""}')
 
 
 def _sync_tables(conn):
     """The archive's tables have the main tables' columns (a later release adds columns to the main ones), without
     their constraints: a foreign key cannot reach across two files."""
     for t, keys, _ in ARCHIVE_TABLES:
-        have = _cols(conn, ARCHIVE, t)
-        main = list(conn.execute(f"PRAGMA main.table_info({t})"))
-        if not have:
-            conn.execute(f"CREATE TABLE archive.{t} (" + ", ".join(f'"{r[1]}" {r[2] or ""}' for r in main) + ")")
-            for k in keys:
-                conn.execute(f"CREATE INDEX archive.{t}_{k} ON {t}({k})")
-            continue
-        for r in main:
-            if r[1] not in have:
-                conn.execute(f'ALTER TABLE archive.{t} ADD COLUMN "{r[1]}" {r[2] or ""}')
+        _sync_table(conn, t, [(f"{t}_{k}", k) for k in keys])
+    _sync_table(conn, "canvas_versions", [("canvas_versions_canvas", "canvas_id, version")])
 
 
 def _ids(conn, sql, params=()):
