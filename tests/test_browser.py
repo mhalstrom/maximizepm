@@ -1168,6 +1168,170 @@ class Passkey(Base):
         timing.wait_for(lambda: kinds, what="the passkey report of the page's script")
         self.assertEqual(kinds, ["get"])
 
+    def test_post_loaded_passkey_page_replays_body_and_falls_back_to_post(self):
+        """#6902: Microsoft's /consumers/fido/get rejects GET with AADSTS900561. Switching to the passkey window
+        fulfills the paused navigation with the captured POST response (keeping single-use tokens valid), and falls
+        back to replaying the POST request when the body is unavailable."""
+        import base64
+        b, st, log = self.fake()
+        b._passkey_limit = lambda at: None
+        st["url"] = "https://login.microsoft.com/consumers/fido/get"
+        b.target = "T1"
+        b.session = "S1"
+        sent = []
+        b.send = lambda method, params=None, session=None: sent.append((method, params, session))
+        html = "<html><title>FIDO</title></html>"
+        body_ok = True
+
+        def call(method, params=None, **k):
+            if method == "Storage.getCookies":
+                return {"cookies": st["jar"]}
+            if method == "Network.getResponseBody":
+                if not body_ok:
+                    raise RiverError("evicted")
+                return {"body": html, "base64Encoded": False}
+            if method == "Runtime.evaluate":
+                return {"result": {"value": ""}}
+            log.append((method, params))
+            return {}
+        b.call = call
+        b._track_doc("Network.requestWillBeSent", {
+            "requestId": "R1", "type": "Document", "frameId": "T1",
+            "request": {"url": st["url"], "method": "POST", "postData": "ctx=abc&flowToken=xyz",
+                        "headers": {"Content-Type": "application/x-www-form-urlencoded",
+                                    "Referer": "https://login.microsoft.com/bridge/fido"}},
+        })
+        b._track_doc("Network.responseReceived", {
+            "requestId": "R1",
+            "response": {"status": 200, "url": st["url"],
+                         "headers": {"Content-Type": "text/html; charset=utf-8", "Content-Encoding": "gzip",
+                                     "Content-Length": "99", "Set-Cookie": "a=1", "Vary": "Accept-Encoding\nOrigin"}},
+        })
+
+        def open_and_pause(u):
+            log.append(("open", u))
+            b._on_fetch_paused({"requestId": "F1", "request": {"url": u}}, "S1")
+        b.open = open_and_pause
+        b.person_at = time.time()
+        b.passkey("get")
+        self.assertTrue(any(x[0] == "Fetch.enable" for x in log))
+        self.assertTrue(any(x[0] == "Fetch.disable" for x in log))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "Fetch.fulfillRequest")
+        p = sent[0][1]
+        self.assertEqual(p["responseCode"], 200)
+        self.assertEqual(base64.b64decode(p["body"]).decode("utf-8"), html)
+        hdr_names = [h["name"].lower() for h in p["responseHeaders"]]
+        self.assertIn("content-type", hdr_names)
+        self.assertNotIn("content-encoding", hdr_names)
+        self.assertNotIn("content-length", hdr_names)
+        self.assertNotIn("set-cookie", hdr_names)
+        self.assertEqual([h["value"] for h in p["responseHeaders"] if h["name"] == "Vary"],
+                         ["Accept-Encoding", "Origin"])
+        # Cancel returns to headless with the same saved replay, never a GET to /consumers/fido/get
+        sent.clear()
+        b.passkey("ended")
+        self.assertEqual(sent[0][0], "Fetch.fulfillRequest")
+        # Fallback when getResponseBody fails: Fetch.continueRequest with method=POST and postData
+        body_ok = False
+        b.passkey_skip = None
+        sent.clear()
+        b.person_at = time.time()
+        b.passkey("get")
+        self.assertEqual(sent[0][0], "Fetch.continueRequest")
+        self.assertEqual(sent[0][1]["method"], "POST")
+        self.assertEqual(base64.b64decode(sent[0][1]["postData"]).decode("utf-8"), "ctx=abc&flowToken=xyz")
+
+    def test_passkey_done_waits_for_multi_hop_redirect_to_settle(self):
+        """#6902: after Touch ID, multi-hop redirects (login.microsoft.com -> login.live.com -> portal.azure.com)
+        must finish before the hidden window closes."""
+        b, st, log = self.fake()
+        b._passkey_limit = lambda at: None
+        st["url"] = "https://login.microsoft.com/consumers/fido/get"
+        b.person_at = time.time()
+        b.passkey("get")
+        log.clear()
+        hops = iter([
+            "https://login.microsoft.com/consumers/fido/get",
+            "https://login.live.com/ppsecure/post.srf",
+            "https://login.live.com/ppsecure/post.srf",
+            "https://portal.azure.com/",
+        ])
+        b.info = lambda: {"url": next(hops, "https://portal.azure.com/")}
+        with mock.patch.object(browser, "PASSKEY_DONE_WAIT", 1.5), mock.patch.object(browser, "PASSKEY_SETTLE", 0.15):
+            b.passkey("done")
+        self.assertEqual(log[-1], ("open", "https://portal.azure.com/"))
+
+    def test_passkey_waiting_flag_when_session_triggered_page(self):
+        """#6902: when a session's action lands on a passkey page, no window opens unprompted, and info() sets
+        passkey_waiting so the panel tells the person and highlights Open as a window."""
+        b = browser.get("web", "ag1")
+        b.running = lambda: True
+        b.target = "T1"
+        b.targets["T1"] = {"url": "https://login.microsoft.com/consumers/fido/get", "title": "Sign in", "opener": None}
+        b.passkey("get")
+        self.assertTrue(b.info()["passkey_waiting"])
+        b._track_doc("Network.requestWillBeSent", {
+            "requestId": "R2", "type": "Document", "frameId": "T1",
+            "request": {"url": "https://portal.azure.com/", "method": "GET"},
+        })
+        b.targets["T1"]["url"] = "https://portal.azure.com/"
+        self.assertFalse(b.info()["passkey_waiting"])
+
+    def test_real_chrome_switch_keep_preserves_post_only_page(self):
+        """#6902 end-to-end: a POST-only endpoint (rejecting GET with 400 AADSTS900561) survives _switch_keep
+        without sending a GET request to the server."""
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(("GET", self.path))
+                if self.path == "/fido/get":
+                    body = b"<title>Error</title>AADSTS900561: The endpoint only accepts POST requests. Received a GET request."
+                    self.send_response(400)
+                else:
+                    body = (b"<title>Start</title><form id=f method=POST action='/fido/get'>"
+                            b"<input name=ctx value=ok><button id=go type=submit>Go</button></form>")
+                    self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                data = self.rfile.read(n).decode("utf-8", "replace")
+                hits.append(("POST", self.path, data))
+                body = b"<title>FIDO Ready</title><p id=ok>passkey-ok</p>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        b.open(f"http://127.0.0.1:{port}/start")
+        b.evaluate("document.getElementById('f').submit()", 5)
+        timing.wait_for(lambda: b.info().get("url", "").endswith("/fido/get") and b.doc_req and b.doc_req["method"] == "POST",
+                        what="the POST navigation to /fido/get")
+        b._switch_keep(False, f"http://127.0.0.1:{port}/fido/get")
+        self.assertEqual(b.evaluate("document.getElementById('ok')?.textContent", 5), "passkey-ok")
+        self.assertNotIn(("GET", "/fido/get"), hits)
+
 
 class ChromePages(Base):
     """#6301 (mark 2026-11-20: 'it works in other sessions ... that is a bug'): after a Google sign-in with a passkey,

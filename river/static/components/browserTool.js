@@ -197,7 +197,7 @@ function render(box, project, session) {
     win.dataset.br = j.window ? "headless" : "window";
     win.classList.toggle("hidden", !j.modes || !!v.noChrome);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
     $$(".br-save").classList.toggle("hidden", !(j.running && j.owner));  // a session's browser (#5633, #5634)
-    win.classList.toggle("primary", !!j.refused && !j.window);
+    win.classList.toggle("primary", (!!j.refused || !!j.passkey_waiting) && !j.window);
     v.forced = j.forced || null;  // #5885: a fixed size; a window has its own size
     $$(".br-size").classList.toggle("hidden", !j.running || !!j.window);
     stage.classList.toggle("br-fixed", !!v.forced && !j.window);
@@ -210,6 +210,7 @@ function render(box, project, session) {
     const wby = $$(".br-wby");
     wby.textContent = wb && wb.passkey ? "Passkey: press Continue in the window over this panel, then touch the sensor. The window closes by itself after the touch."
       : wb ? `${wb.who} opened it as a window at ${hm(wb.at)}. It comes back here after ${j.window_idle} with no input in it, or when the window closes.`
+      : !j.window && j.passkey_waiting ? "This page asks for a passkey: press Open as a window to use Touch ID or your phone."
       : we && Date.now() - Date.parse(we.at) < 600000 ? `Back in the panel at ${hm(we.at)}: ${we.why}.` : "";
     wby.classList.toggle("hidden", !wby.textContent);
     stage.classList.toggle("br-locked", !v.mine);

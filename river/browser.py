@@ -845,6 +845,11 @@ class Browser:
         self.passkey_asked = False  # the page in that window asked for the passkey
         self.passkey_url = ""       # the page that asked for it
         self.passkey_skip = None  # (url, time) of a passkey step that ended with no passkey: no window again there
+        self.passkey_wait = ""    # #6902: url of a page that asked for a passkey while a session drove
+        self.passkey_replay = None  # #6902: POST capture of the page that opened the passkey window (for Cancel)
+        self.passkey_lock = threading.Lock()
+        self.doc_req = None       # #6902: main-frame Document request {id, url, method, post_data, req_headers, status, resp_headers}
+        self._replay = None       # #6902: one-shot Fetch reply for a POST-loaded page across _switch_keep
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
         self.cast_quality = None  # the JPEG quality of the running screencast (#5658)
@@ -1108,6 +1113,7 @@ class Browser:
         self.call("Page.enable", session=s)
         self.call("Network.enable", session=s)
         self.req_info = {}
+        self.doc_req = None
         for m in ("Runtime.enable", "Log.enable"):  # #5675: the page's errors, for the replies of actions
             try:
                 self.call(m, session=s)
@@ -1340,6 +1346,9 @@ class Browser:
                 threading.Thread(target=self.passkey, args=(p.get("payload") or "",), daemon=True,
                                  name=f"browser-passkey-{self.project}").start()
             return
+        if method == "Fetch.requestPaused" and session == self.session:  # #6902: replay a POST-loaded page
+            self._on_fetch_paused(p, session)
+            return
         if method == "Page.screencastFrame":
             self.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]}, session=session)
             if session == self.session:
@@ -1367,6 +1376,8 @@ class Browser:
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
                     self.cond.notify_all()
         elif session == self.session and (method in NAV_EVENTS or method in ERROR_EVENTS):
+            if method in ("Network.requestWillBeSent", "Network.responseReceived"):
+                self._track_doc(method, p)
             if method in ERROR_EVENTS:  # #5675
                 track_errors(self, method, p)
             if method in NAV_EVENTS:
@@ -1497,6 +1508,7 @@ class Browser:
                 "source": f"cdp:{self.attached}" if self.attached else None,
                 "modes": not self.attached or self.modes,  # the panel offers Open as a window and Back to the panel
                 "refused": any(r.match(url) for r in REFUSED),  # the site refuses a browser with no window
+                "passkey_waiting": bool(self.passkey_wait and self.passkey_wait == url and not self._windowed()),
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "before": before.get("who"),
                 # #5650: who opened it as a window and when; why it went back into the panel by itself
@@ -1642,26 +1654,33 @@ class Browser:
         PASSKEY_PERSON: a session that meets a passkey page opens no window on the person's screen."""
         now = time.time()
         if kind in ("get", "create"):
-            if self._windowed():  # a window shows already: the request runs there
-                if self.passkey_at:
-                    self.passkey_asked = True
-                return
-            url = self.info()["url"]
-            if self.passkey_skip and self.passkey_skip[0] == url and now - self.passkey_skip[1] < PASSKEY_SKIP:
-                return
-            if screen_kind() != "screen":  # #5878: a host with no display: no person sits at a window there
-                self.said = getattr(self, "said", []) + [
-                    "the page asks for a passkey, and this computer has no screen for its window: sign in to this "
-                    "site with a passkey on a computer with a screen, or use another sign-in way of the site"]
-                return
-            if now - self.person_at > PASSKEY_PERSON or self.agent_at >= self.person_at:
-                self.said = getattr(self, "said", []) + [
-                    "the page asks for a passkey: only the person signs in; ask them in the panel"]
-                return
-            self.passkey_at, self.passkey_asked, self.passkey_url = now, False, url
-            self.state["window_by"] = {"who": "A passkey step", "person": True, "passkey": True, "at": core.iso(core.now())}
+            with self.passkey_lock:
+                if self._windowed():  # a window shows already: the request runs there
+                    if self.passkey_at:
+                        self.passkey_asked = True
+                    return
+                if self.passkey_at:  # a switch to the passkey window is already underway
+                    return
+                url = self.info()["url"]
+                if self.passkey_skip and self.passkey_skip[0] == url and now - self.passkey_skip[1] < PASSKEY_SKIP:
+                    return
+                if screen_kind() != "screen":  # #5878: a host with no display: no person sits at a window there
+                    self.said = getattr(self, "said", []) + [
+                        "the page asks for a passkey, and this computer has no screen for its window: sign in to this "
+                        "site with a passkey on a computer with a screen, or use another sign-in way of the site"]
+                    return
+                if now - self.person_at > PASSKEY_PERSON or self.agent_at >= self.person_at:
+                    self.passkey_wait = url
+                    self.said = getattr(self, "said", []) + [
+                        "the page asks for a passkey: only the person signs in; ask them in the panel"]
+                    _notify(self)
+                    return
+                self.passkey_at, self.passkey_asked, self.passkey_url = now, False, url
+                self.passkey_wait = ""
+                self.passkey_replay = self._capture_post(url)
+                self.state["window_by"] = {"who": "A passkey step", "person": True, "passkey": True, "at": core.iso(core.now())}
             self._say_passkey(f"the page asked for a passkey: a window opens over the panel ({_host(url)})")
-            self._switch_keep(True, url)
+            self._switch_keep(True, url, replay=self.passkey_replay)
             threading.Thread(target=self._passkey_limit, args=(now,), daemon=True,
                              name=f"browser-passkey-limit-{self.project}").start()
         elif kind in ("done", "ended") and self.passkey_at and self._windowed():
@@ -1678,7 +1697,24 @@ class Browser:
                         nxt = u
                         break
                     time.sleep(0.2)
-                time.sleep(PASSKEY_SETTLE)
+                if PASSKEY_SETTLE > 0:
+                    # #6902: wait for multi-hop OAuth/OIDC redirects (e.g. login.microsoft.com -> login.live.com ->
+                    # login.microsoftonline.com -> portal.azure.com) to settle before closing the hidden window.
+                    last_u = nxt or url
+                    quiet = time.time()
+                    settle_end = time.time() + max(PASSKEY_SETTLE, PASSKEY_DONE_WAIT)
+                    while time.time() < settle_end and self.running():
+                        u = self._page_url()
+                        if u.startswith(("http://", "https://")) and u != last_u:
+                            last_u = u
+                            if u != url:
+                                nxt = u
+                            quiet = time.time()
+                        elif self.navs != self.stops:
+                            quiet = time.time()
+                        elif time.time() - quiet >= PASSKEY_SETTLE:
+                            break
+                        time.sleep(0.2)
                 u = self._page_url()
                 nxt = u if u.startswith(("http://", "https://")) and u != url else nxt
             else:
@@ -1706,16 +1742,19 @@ class Browser:
             return
         if not self._windowed():  # the person pressed Back to the panel already
             self.passkey_at = None
+            self.passkey_replay = None
             return
         if not hidden:
             hide_app(self.state.get("pid"))  # out of sight at once; the start below takes a second or two
         if not url:
             u = self._page_url()
             url = u if u.startswith(("http://", "https://")) else self.passkey_url
+        saved_replay = self.passkey_replay if url == self.passkey_url else None
         self._say_passkey(f"the window closed; the panel goes on at {_host(url)}")
         self.passkey_at = None
+        self.passkey_replay = None
         self.state.pop("window_by", None)
-        self._switch_keep(False, url)
+        self._switch_keep(False, url, replay=saved_replay)
         _notify(self)
 
     def _page_url(self):
@@ -1727,14 +1766,121 @@ class Browser:
     def _say_passkey(self, what):
         print(f"browser {self.project}/{self.owner or '-'}: {what}", flush=True)
 
-    def _switch_keep(self, window, url):
-        """Start Chrome again with or without a window; its cookies, those of this run too, and the page go along."""
-        cookies = []
+    def _track_doc(self, method, p):
+        """#6902: remember the shown tab's main-frame Document request so _switch_keep can replay a POST-loaded page."""
+        if method == "Network.requestWillBeSent" and p.get("type") == "Document" and p.get("frameId") == self.target:
+            req = p.get("request") or {}
+            url = req.get("url") or ""
+            self.doc_req = {
+                "id": p.get("requestId"),
+                "url": url,
+                "method": (req.get("method") or "GET").upper(),
+                "post_data": req.get("postData"),
+                "req_headers": dict(req.get("headers") or {}),
+                "status": 200,
+                "resp_headers": {},
+            }
+            if self.passkey_wait and url.split("#", 1)[0] != self.passkey_wait.split("#", 1)[0]:
+                self.passkey_wait = ""
+        elif method == "Network.responseReceived" and self.doc_req and p.get("requestId") == self.doc_req["id"]:
+            resp = p.get("response") or {}
+            self.doc_req["status"] = int(resp.get("status") or 200)
+            self.doc_req["resp_headers"] = dict(resp.get("headers") or {})
+            if resp.get("url"):
+                self.doc_req["url"] = resp["url"]
+
+    def _capture_post(self, url):
+        """#6902: a page loaded by POST (such as Microsoft's /consumers/fido/get) fails when opened again with GET.
+        Capture its response body (preferred: single-use tokens stay valid) or fall back to its POST body."""
+        doc = self.doc_req
+        base = (url or "").split("#", 1)[0]
+        if not doc or doc.get("method") != "POST" or (doc.get("url") or "").split("#", 1)[0] != base:
+            return None
+        if self.session:
+            try:
+                got = self.call("Network.getResponseBody", {"requestId": doc["id"]}, session=self.session, timeout=5)
+                body = got.get("body")
+                if body is not None:
+                    b64 = body if got.get("base64Encoded") else base64.b64encode(body.encode("utf-8")).decode("ascii")
+                    skip = {"content-encoding", "content-length", "transfer-encoding", "set-cookie", "connection",
+                            "keep-alive"}
+                    hdrs = []
+                    for k, v in (doc.get("resp_headers") or {}).items():
+                        if not k or k.startswith(":") or k.lower() in skip:
+                            continue
+                        for part in str(v).splitlines():
+                            part = part.strip()
+                            if part:
+                                hdrs.append({"name": k, "value": part})
+                    if not any(h["name"].lower() == "content-type" for h in hdrs):
+                        hdrs.append({"name": "Content-Type", "value": "text/html; charset=utf-8"})
+                    return {"kind": "body", "url": base, "status": doc.get("status") or 200, "headers": hdrs,
+                            "body_b64": b64}
+            except (RiverError, ValueError, TypeError):
+                pass
+        post = doc.get("post_data")
+        if post is None and self.session:
+            try:
+                post = self.call("Network.getRequestPostData", {"requestId": doc["id"]}, session=self.session,
+                                 timeout=3).get("postData")
+            except RiverError:
+                post = None
+        if post is not None:
+            keep = {"content-type", "referer", "origin"}
+            hdrs = [{"name": k, "value": str(v)} for k, v in (doc.get("req_headers") or {}).items()
+                    if k and k.lower() in keep]
+            return {"kind": "post", "url": base,
+                    "post_b64": base64.b64encode(post.encode("utf-8")).decode("ascii"), "headers": hdrs}
+        return None
+
+    def _on_fetch_paused(self, p, session):
+        """#6902: fulfill or replay one paused POST-loaded Document navigation during _switch_keep."""
+        rid = p.get("requestId")
+        req_url = ((p.get("request") or {}).get("url") or "").split("#", 1)[0]
+        r = self._replay
+        if r and r.get("url") == req_url:
+            self._replay = None
+            if r["kind"] == "body":
+                self.send("Fetch.fulfillRequest", {
+                    "requestId": rid,
+                    "responseCode": r["status"],
+                    "responseHeaders": r["headers"],
+                    "body": r["body_b64"],
+                }, session=session)
+                return
+            if r["kind"] == "post":
+                params = {"requestId": rid, "method": "POST", "postData": r["post_b64"]}
+                if r.get("headers"):
+                    params["headers"] = r["headers"]
+                self.send("Fetch.continueRequest", params, session=session)
+                return
+        self.send("Fetch.continueRequest", {"requestId": rid}, session=session)
+
+    def _switch_keep(self, window, url, replay=None):
+        """Start Chrome again with or without a window; its cookies, sessionStorage, POST response and page go along."""
+        cookies, ss = [], None
         if self.running():
+            if replay is None:
+                replay = self._capture_post(url)
             try:
                 cookies = cookie_params(self.call("Storage.getCookies").get("cookies") or [])
             except RiverError:
                 pass
+            if self.session and url and url.startswith(("http://", "https://")):
+                try:
+                    raw = self.call("Runtime.evaluate", {
+                        "expression": ("(() => { try { return JSON.stringify([location.origin, "
+                                       "Object.entries(sessionStorage)]); } catch (e) { return ''; } })()"),
+                        "returnByValue": True,
+                    }, session=self.session, timeout=2).get("result", {}).get("value")
+                    if raw:
+                        orig, items = json.loads(raw)
+                        if orig and items:
+                            ss = (orig, items)
+                except (RiverError, ValueError, TypeError):
+                    pass
+        if window:
+            self.passkey_wait = ""
         self.start(window=window)
         self._save()
         if cookies:
@@ -1743,7 +1889,43 @@ class Browser:
             except RiverError:
                 pass
         if url and url != "about:blank":
-            self.open(url)
+            ss_script = None
+            if ss and self.session:
+                try:
+                    js = (f"(() => {{ if (location.origin === {json.dumps(ss[0])}) {{ "
+                          f"for (const [k, v] of {json.dumps(ss[1])}) {{ "
+                          f"try {{ if (sessionStorage.getItem(k) === null) sessionStorage.setItem(k, v); }} "
+                          f"catch (e) {{}} }} }} }})()")
+                    ss_script = self.call("Page.addScriptToEvaluateOnNewDocument", {"source": js},
+                                          session=self.session).get("identifier")
+                except RiverError:
+                    pass
+            fetch_on = False
+            if replay and self.session:
+                try:
+                    self._replay = replay
+                    self.call("Fetch.enable", {
+                        "patterns": [{"urlPattern": replay["url"], "requestStage": "Request",
+                                      "resourceType": "Document"}]
+                    }, session=self.session)
+                    fetch_on = True
+                except RiverError:
+                    self._replay = None
+            try:
+                self.open(url)
+            finally:
+                self._replay = None
+                if fetch_on and self.session:
+                    try:
+                        self.call("Fetch.disable", session=self.session)
+                    except RiverError:
+                        pass
+                if ss_script and self.session:
+                    try:
+                        self.call("Page.removeScriptToEvaluateOnNewDocument", {"identifier": ss_script},
+                                  session=self.session)
+                    except RiverError:
+                        pass
         _notify(self)
 
     def drive(self, pane):

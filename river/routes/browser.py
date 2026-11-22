@@ -750,11 +750,12 @@ def _act(conn, a, who):
             browser.may_open_window(conn, b, who)
         if b._attached_now():  # a Chrome that serve did not start: its browser_mode, under the lock (#5619)
             browser.attached_mode(conn, b, who, window)
+            browser.mark_window(b, who, person, window)  # the panel says who opened the window, and when (#5650)
+            if url and url != "about:blank":
+                b.open(url)
         else:
-            b.start(window=window)
-        browser.mark_window(b, who, person, window)  # the panel says who opened the window, and when (#5650)
-        if url and url != "about:blank":
-            b.open(url)
+            b._switch_keep(window, url)
+            browser.mark_window(b, who, person, window)  # the panel says who opened the window, and when (#5650)
         return b.info()
     if action == "close":
         if not person:
