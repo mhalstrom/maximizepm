@@ -3131,7 +3131,8 @@ class EmailRemoved(Base):
                 core.config_set(self.c, k, "x")
         with core.tx(self.c):
             self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'email_to', 'me@example.com')")
-        self.assertIn("email_to", str(core.config_list(self.c)["overrides"]))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotIn("email_to", str(core.config_list(self.c)["overrides"]))
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
@@ -3139,7 +3140,7 @@ class EmailRemoved(Base):
             cli.run(["config", "get"])
         self.assertIn("notify_channels", out.getvalue())
         core.config_unset(self.c, "email_to")
-        self.assertNotIn("email_to", str(core.config_list(self.c)["overrides"]))
+        self.assertEqual(self.c.execute("SELECT count(*) FROM settings WHERE key='email_to'").fetchone()[0], 0)
 
 
 class Mac(Base):
@@ -6851,7 +6852,7 @@ class Stop(Base):
 def sync_manager(c):
     """The waits of the manager's watch before the async manager (#5977): these tests check how levels, findings
     and the beat work, with the shorter times that they were written for. ManagerBeat checks the new defaults."""
-    for k, v in (("manage_every", "30m"), ("manage_wait_high", "10m"), ("manage_wait_low", "30m"),
+    for k, v in (("manage_every", "30m"),
                  ("manage_wake_count", "0"), ("manage_quiet_after", "0s")):
         core.config_set(c, k, v)
 
@@ -6878,8 +6879,8 @@ class ManagerBeat(Base):
 
     def test_manager_beat_defaults_and_a_note_waits_for_the_beat(self):
         d = core.DEFAULT_SETTINGS
-        self.assertEqual((d["manage_every"], d["manage_wait_high"], d["manage_wait_low"], d["manage_wake_count"],
-                          d["manage_quiet_every"]), ("50m", "50m", "50m", "5", "4h"))
+        self.assertEqual((d["manage_every"], d["manage_wake_count"],
+                          d["manage_quiet_every"]), ("50m", "5", "4h"))
         self.assertEqual(self.watch(), ("tick", 50))  # a beat with nothing new
         core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
         self.assertEqual(self.watch(), ("messages", 50))
@@ -6954,13 +6955,13 @@ class NativeDelivery(Base):
         t0, naps = core.now(), []
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
-            self.assertEqual((w["result"], len(naps), w["unanswered"]), ("messages", 10, []))
+            self.assertEqual((w["result"], len(naps), w["unanswered"]), ("messages", 30, []))
             self.assertLessEqual({"#12 is on main", "the build is red"}, {x["body"] for x in w["messages"]})
             # A blocked question that the platform brought and the manager did not answer wakes the watch
             # again after manage_rewake (#5685).
             q = core.send(self.c, "question", "which port?", to="cx", actor="cc", blocked=True)
             w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
-        self.assertEqual((w["result"], len(naps), [x["id"] for x in w["unanswered"]]), ("unanswered", 12, [q["id"]]))
+        self.assertEqual((w["result"], len(naps), [x["id"] for x in w["unanswered"]]), ("unanswered", 32, [q["id"]]))
         # A worker gets every message at once, as before.
         core.set_native(self.c, "cc", "Codex", "thread-3")
         self.assertEqual(core.send(self.c, "note", "fyi", to="cc", actor="cx", level="low")["native_status"], "sent")
@@ -8077,7 +8078,7 @@ class Manager(Base):
         self.add("a", "first")
         core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1")
         core.send(self.c, "note", "fyi", to="boss", actor="w1")
-        with mock.patch.object(core, "now", return_value=core.now() + timedelta(minutes=11)):  # both are due
+        with mock.patch.object(core, "now", return_value=core.now() + timedelta(minutes=31)):  # both are due
             out = watch()
         self.assertEqual(out[0], "NEW MESSAGES (2)")
         self.assertTrue(out[1].startswith("CHANGED: uncovered:a"), out[1])
@@ -8085,7 +8086,7 @@ class Manager(Base):
         self.assertTrue(out[-1].startswith("Act on what is new: 2 new messages above, then start"), out[-1])
         # Only a message: no CHANGED line, and no blocked count when none is blocked.
         core.send(self.c, "note", "later", to="boss", actor="w1")
-        later = core.now() + timedelta(minutes=11)  # after manage_wait_high: the note is due
+        later = core.now() + timedelta(minutes=31)  # after manage_every: the note is due
         with mock.patch.object(core, "now", return_value=later):
             out = watch()
         self.assertEqual(out[0], "NEW MESSAGES (1)")
@@ -8307,16 +8308,16 @@ class Manager(Base):
             core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
             self.assertEqual(core.manager_view(self.c)["no_watch"], "6m")
             self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "woke": {}, "told": [], "closed": []})
-        with at(47):  # the note is due (manage_wait_high, 10m)
+        with at(67):  # the note is due (manage_every, 30m)
             r = core.tell_watch_late(self.c)
             # This manager has no channel into its session (#5747): the wake cannot reach it, so the person hears at once.
             self.assertEqual((r["late"], r["woke"], r["told"], r["closed"]),
                              ({"boss": 1}, {"boss": "no native channel"}, ["boss"], []))
             (a,) = alerts()
-            self.assertTrue(a["body"].startswith("runs no watch (maxpm manage --watch) for 17m: 1 message waits for it. "
+            self.assertTrue(a["body"].startswith("runs no watch (maxpm manage --watch) for 37m: 1 message waits for it. "
                                                  "MaximizePM could not wake it (no native channel). "), a["body"])
             (wake,) = [m for m in core.inbox(self.c, "boss", mark_read=False) if m["from_agent"] == "maxpm"]
-            self.assertTrue(wake["body"].startswith("Your watch stopped 17m ago and 1 message waits for you. "), wake["body"])
+            self.assertTrue(wake["body"].startswith("Your watch stopped 37m ago and 1 message waits for you. "), wake["body"])
             self.assertIn("maxpm --as boss manage --watch", a["body"])
             self.assertEqual(core.prompt_alert_agent(self.c, a["id"]), "boss")  # the link opens its Terminal
             self.assertTrue(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
@@ -8324,14 +8325,14 @@ class Manager(Base):
             core.send(self.c, "question", "may I run the probe?", to="boss", actor="w2", blocked=True)
             self.assertEqual(core.tell_watch_late(self.c), {"late": {"boss": 2}, "woke": {}, "told": [], "closed": []})
         # The watch runs again: both alerts close.
-        with at(48):
+        with at(68):
             # The blocked question comes alone (#5666); the note comes with the next watch.
             self.assertEqual(len(core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)["messages"]), 1)
             self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "woke": {}, "told": [], "closed": [a["id"], wake["id"]]})
             self.assertIsNotNone(alerts()[0]["read_at"])
             self.assertFalse(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
         # The next time, a blocked message is in the alert; a manager that is stopped gets none.
-        with at(60):
+        with at(80):
             core.send(self.c, "alert", "the build is red", to="boss", actor="w1", blocked=True)
             self.assertEqual(core.tell_watch_late(self.c)["told"], ["boss"])
             # 2: the note that waited behind the blocked question at minute 48 waits too.
@@ -8348,7 +8349,7 @@ class Manager(Base):
         core.NATIVE_RUNNER = lambda args: (sent.append(args[-1]), (0, ""))[1]
         self.addCleanup(setattr, core, "NATIVE_RUNNER", None)
         core.manage(self.c, self.dir.name, "boss")
-        # The watch records the session's channel: a manager that started before its platform had one gets it.
+        core.config_set(self.c, "manage_every", "10m")
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "t-9"}):
             with contextlib.redirect_stdout(io.StringIO()):
                 cli.run(["--as", "boss", "manage", "--watch", "--step", "0s"])
@@ -8404,14 +8405,14 @@ class Manager(Base):
         # #1583: on 2026-10-08, 124 of 181 wakes of the manager were messages, most of them one note.
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        self.assertEqual((core.MESSAGE_LEVELS, core.setting(self.c, "manage_wait_high"),
-                          core.setting(self.c, "manage_wait_low")), (("high", "low"), "10m", "30m"))  # sync_manager
-        # A note is high: it wakes the watch ten minutes after it was sent.
+        self.assertEqual((core.MESSAGE_LEVELS, core.setting(self.c, "manage_every")),
+                         (("high", "low"), "30m"))  # sync_manager
+        # A note is high: it wakes the watch after manage_every (30m in sync_manager).
         m = core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
-        self.assertEqual((m["level"], m["level_set"], m["blocked"], m["manager_wait"]), ("high", False, None, "10m"))
+        self.assertEqual((m["level"], m["level_set"], m["blocked"], m["manager_wait"]), ("high", False, None, "30m"))
         w, minutes = self.watch_minutes(step="2h")
-        self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes), ("messages", ["#12 is on main"], 10))
-        # A low message waits thirty minutes; the time limit of the watch (manage_every) brings it sooner.
+        self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes), ("messages", ["#12 is on main"], 30))
+        # A low message waits manage_every too; a shorter step brings it sooner.
         low = core.send(self.c, "note", "for your records", to="boss", actor="w1", level="low")
         self.assertEqual((low["level"], low["level_set"], low["manager_wait"]), ("low", True, "30m"))
         w, minutes = self.watch_minutes(step="2h")
@@ -8425,12 +8426,14 @@ class Manager(Base):
         for old in ("urgent", "normal", "info"):
             with self.assertRaisesRegex(RiverError, "the level is one of high, low"):
                 core.send(self.c, "note", "x", to="boss", actor="w1", level=old)
-        # The waits are settings; 0s is at once.
+        # manage_every controls the wait; 0s is at once.
         core.inbox(self.c, "boss")
-        core.config_set(self.c, "manage_wait_high", "0s")
+        core.config_set(self.c, "manage_every", "0s")
         core.send(self.c, "note", "three", to="boss", actor="w1")
         self.assertEqual(self.watch_minutes(step="2h")[1], 0)
-        with self.assertRaisesRegex(RiverError, "bad duration"):
+        with self.assertRaisesRegex(RiverError, "unknown setting 'manage_wait_high'"):
+            core.config_set(self.c, "manage_wait_high", "5m")
+        with self.assertRaisesRegex(RiverError, "unknown setting 'manage_wait_low'"):
             core.config_set(self.c, "manage_wait_low", "later")
         with self.assertRaisesRegex(RiverError, "unknown setting 'manage_wait_normal'"):
             core.config_set(self.c, "manage_wait_normal", "5m")
@@ -8441,10 +8444,10 @@ class Manager(Base):
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         a = core.send(self.c, "alert", "main is red since #12", to="boss", actor="w1")
         q = core.send(self.c, "question", "may I also rename the table?", to="boss", actor="w1")
-        self.assertEqual([(m["level"], m["blocked"], m["manager_wait"]) for m in (a, q)], [("high", None, "10m")] * 2)
+        self.assertEqual([(m["level"], m["blocked"], m["manager_wait"]) for m in (a, q)], [("high", None, "30m")] * 2)
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual(([x["body"] for x in w["messages"]], minutes),
-                         (["main is red since #12", "may I also rename the table?"], 10))
+                         (["main is red since #12", "may I also rename the table?"], 30))
         # With the flag it wakes the watch at once, and comes alone (#5666): the ones that wait come with the next
         # watch, when the first of them is due (a high note after 10m brings the low one too).
         core.send(self.c, "note", "one", to="boss", actor="w1")
@@ -8455,7 +8458,7 @@ class Manager(Base):
         self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["which db? I cannot go on"], 0))
         core.answer(self.c, b["id"], "postgres", actor="boss")  # else it wakes the watch again after 2m (#5685)
         w, minutes = self.watch_minutes(step="2h")
-        self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["one", "two"], 10))
+        self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["one", "two"], 30))
         self.assertEqual(self.watch_minutes(step="5m")[0]["result"], "tick")
         # A low message with the flag does not wait either; the shortcut commands pass the flag.
         up = core.message(self.c, "note", "the disk is full", to="boss", actor="w1", level="low", blocked=True)[0]
@@ -8529,7 +8532,6 @@ class Manager(Base):
         self.addCleanup(c2.close)
         self.assertEqual([(m["level"], m["level_set"], m["blocked"]) for m in map(lambda i: core.message_show(c2, i), ids)],
                          [("high", False, "sender"), ("high", False, None), ("low", True, None)])
-        self.assertEqual(core.setting(c2, "manage_wait_high"), "7m")
         self.assertEqual(c2.execute("SELECT count(*) FROM settings WHERE key='manage_wait_normal'").fetchone()[0], 0)
         # One time only: a later level is not touched.
         self.c.execute("UPDATE messages SET level='low' WHERE id=?", (ids[0],))
@@ -8573,7 +8575,7 @@ class Manager(Base):
         self.assertRegex(run("--as", "mark", "note", "boss", "no action needed", "--level", "low"), r"^sent #\d+ note to boss\n")
         # An alert or a question to the manager says how long it waits, and when it wakes the manager at once.
         self.assertRegex(run("--as", "w1", "alert", "boss", "main is red"),
-                         r"^sent #\d+ alert to boss \(the manager's watch brings it within 10m; at once when you stop "
+                         r"^sent #\d+ alert to boss \(the manager's watch brings it within 30m; at once when you stop "
                          r"working: maxpm wait, the end of your turn, a release of its item\)\n")
         # An agent's --blocked counts no more (#5976); a person's does.
         self.assertNotIn("blocked", run("--as", "w1", "ask", "boss", "which db? I cannot go on", "--blocked"))
@@ -12453,14 +12455,13 @@ class Health(Base):
 
     def test_one_project_and_the_minutes_setting(self):
         self.seed()
-        core.config_set(self.c, "health_person_minutes", "10")
         h = core.health(self.c, "7d", until=self.end, project="b")
         self.assertEqual(h["now"]["done"], 2)
         self.assertEqual(h["now"]["needs_you_opened"], 1)
-        self.assertAlmostEqual(h["now"]["person_minutes_per_item"], 10 / 2)
+        self.assertAlmostEqual(h["now"]["person_minutes_per_item"], core.HEALTH_PERSON_MINUTES / 2)
         self.assertEqual(h["now"]["rework_rate"], 0)
         with self.assertRaises(core.RiverError):
-            core.config_set(self.c, "health_person_minutes", "a few")
+            core.config_set(self.c, "health_person_minutes", "10")
         with self.assertRaises(core.RiverError):
             core.health(self.c, "7d", until=self.end, project="nope")
 
@@ -12500,7 +12501,7 @@ class Health(Base):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render_health(h)
-        self.assertIn("4 prompts typed, 1 messages and 1 stops by a person x 1 min (health_prompt_minutes)",
+        self.assertIn("4 prompts typed, 1 messages and 1 stops by a person x 1 min",
                       out.getvalue())
 
     def test_health_prompts_from_the_page_box_are_copied_once(self):
@@ -12577,7 +12578,7 @@ class Health(Base):
             cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--since", "7d"])
         text = out.getvalue()
         self.assertIn("HEADLINE  person minutes per done item: 1.50  (before 1.50)", text)
-        self.assertIn("3 needs-you rows x 3 min (health_person_minutes)", text)
+        self.assertIn("3 needs-you rows x 3 min", text)
         self.assertIn("a proxy, not measured time", text)
         self.assertIn("rework rate          50.0%", text)
         self.assertIn("session idle         no samples", text)

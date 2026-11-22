@@ -58,7 +58,7 @@ export function healthHtml(H, period) {
   const was = (pick, f) => b && pick(b) != null ? f(pick(b)) : null;
   const minutes = (v) => unit(v, x => num(x, 2), " min"), hours = (v) => unit(v, num, "h");
   const tiles = [
-    tile("Your time per task", `Minutes of your time per task done: ${H.person_minutes} min for each needs-you row (health_person_minutes)`,
+    tile("Your time per task", `Minutes of your time per task done: ${H.person_minutes} min for each needs-you row`,
          minutes(n.person_minutes_per_item), was(x => x.person_minutes_per_item, minutes), true),
     tile("Tasks done a day", `${n.done} tasks done`, num(n.per_day), was(x => x.per_day, num)),
     tile("Redone", `${n.reopens} reopens, ${n.lost_claims} lost claims and ${n.review_fixes} review fixes in ${n.done} tasks done`,

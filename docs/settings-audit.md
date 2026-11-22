@@ -4,10 +4,10 @@ Audit of every key in `river/core.py` `DEFAULT_SETTINGS` (#6866).
 
 ## Summary
 
-- Total keys in `DEFAULT_SETTINGS`: **282** (189 built-in + 93 agent-adapter option keys).
+- Total keys in `DEFAULT_SETTINGS`: **275** (182 built-in + 93 agent-adapter option keys).
 - **REMOVE (no reader)**: **0** — every key in `DEFAULT_SETTINGS` has a live code reader that changes behavior. `tests/test_settings_audit.py` enforces this so an unused setting cannot be added.
+- **FOLD (applied in #6871)**: **7** keys removed and folded into constants or `manage_every`: `manage_wait_high`, `manage_wait_low`, `serve_runners`, `serve_loop_process`, `wait_step`, `health_person_minutes`, `health_prompt_minutes`.
 - **NORMAL**: **15** common settings shown on the normal tabs of the Settings dialog and Settings page.
-- **FOLD (proposed)**: **7** implemented settings that duplicate another setting or whose only sensible value is the default (kept in Advanced until approved).
 - **ADVANCED**: **260** implemented, rarely changed settings shown only inside the closed, searchable Advanced section.
 
 ## All settings
@@ -76,7 +76,6 @@ Audit of every key in `river/core.py` `DEFAULT_SETTINGS` (#6866).
 | `native_message` | Send messages into sessions | `river/core.py::native_from_env`, `river/core.py::deliver_native`, `river/core.py::has_native` | no | ADVANCED |
 | `setup_done` | Setup guide finished | `river/server.py::setup_status` | yes | ADVANCED |
 | `wait_max` | End a waiting session after | `river/core.py::wait`, `river/core.py::capacity` | no | ADVANCED |
-| `wait_step` | One wait lasts | `river/core.py::wait` | no | FOLD (internal 9m chunking of maxpm wait (--step flag exists)) |
 | `wait_too_long` | Waiting too long after | `river/core.py::manager_findings`, `river/core.py::manage` | no | ADVANCED |
 | `unpushed_after` | Unpushed commits are a finding after | `river/core.py::release_waits` | no | ADVANCED |
 | `connect_within` | A started session must connect within | `river/core.py::owner_can_deploy`, `river/core.py::_sweep`, `river/core.py::not_connected` | no | ADVANCED |
@@ -114,8 +113,6 @@ Audit of every key in `river/core.py` `DEFAULT_SETTINGS` (#6866).
 | `push_guard` | Commands held while an alert is unread | `river/core.py::push_guard` | no | ADVANCED |
 | `idle_after` | Idle after | `river/core.py::tell_manager_waits`, `river/core.py::owner_can_deploy`, `river/server.py::auto_tidy` | no | ADVANCED |
 | `fresh_sessions` | Start a fresh session after an answer | `river/core.py::_want_fresh_comments`, `river/core.py::_want_fresh`, `river/core.py::_go` | no | ADVANCED |
-| `serve_runners` | Fast commands (runners) | `river/server.py::serve` | no | FOLD (internal architecture switch, only sensible value is on) |
-| `serve_loop_process` | Run the loop in its own process | `river/server.py::serve` | no | FOLD (internal architecture switch, only sensible value is on) |
 | `tmux_adopt` | Move sessions into tmux | `river/sessions.py::adopt_check` | no | ADVANCED |
 | `revive_sessions` | Resume a session that crashed | `river/server.py::revive_sessions` | no | ADVANCED |
 | `revive_within` | Resume only within | `river/server.py::revive_sessions` | no | ADVANCED |
@@ -159,15 +156,11 @@ Audit of every key in `river/core.py` `DEFAULT_SETTINGS` (#6866).
 | `space_canvas_after` | Keep old canvas versions at least | `river/space.py::<module>` | no | ADVANCED |
 | `space_sessions_after` | Keep session records at least | `river/space.py::_candidates`, `river/space.py::<module>` | no | ADVANCED |
 | `space_files_after` | Keep uploaded files at least | `river/space.py::_folder_part` | no | ADVANCED |
-| `health_person_minutes` | Person minutes per item that needs you | `river/core.py::health` | no | FOLD (internal proxy weight for Health tab) |
-| `health_prompt_minutes` |  | `river/core.py::health` | no | FOLD (internal proxy weight for Health tab) |
-| `manage_every` | Manager looks every | `river/core.py::manage_watch`, `river/core.py::manage` | no | ADVANCED |
+| `manage_every` | Manager looks every | `river/core.py::manage_watch`, `river/core.py::send`, `river/core.py::manage` | no | ADVANCED |
 | `manage_wake_count` |  | `river/core.py::manage`, `river/core.py::manage_watch` | no | ADVANCED |
 | `manage_quiet_after` |  | `river/core.py::manage_watch` | no | ADVANCED |
 | `manage_quiet_every` |  | `river/core.py::manage_watch`, `river/core.py::manage` | no | ADVANCED |
 | `manage_settle` | Manager waits for more findings | `river/core.py::manage_watch`, `river/core.py::manage` | no | ADVANCED |
-| `manage_wait_high` | Wake the manager for a high message after | `river/core.py::_migrate_levels`, `river/core.py::manage`, `river/core.py::manage_watch` | no | FOLD (same 50m default as manage_every; fold into manage_every) |
-| `manage_wait_low` | Wake the manager for a low message after | `river/core.py::manage`, `river/core.py::manage_watch`, `river/core.py::tell_watch_late` | no | FOLD (same 50m default as manage_every; fold into manage_every) |
 | `manage_rewake` | Wake the manager again for an open message after | `river/core.py::manage_watch` | no | ADVANCED |
 | `manage_unanswered` | An unanswered message is a finding after | `river/core.py::manage_watch`, `river/core.py::tell_unanswered` | no | ADVANCED |
 | `manager_autocompact` | Manager context compacts at | `river/core.py::resume_command`, `river/server.py::start_manager`, `river/sessions.py::compacts_at` | no | ADVANCED |

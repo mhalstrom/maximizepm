@@ -5786,7 +5786,7 @@ class ServeReload(unittest.TestCase):
                 self.returncode = 0 if self.returncode is None else self.returncode
                 return self.returncode
         procs, restarts, stop = [], [], threading.Event()
-        self.assertEqual(core.setting(self.c, "serve_loop_process"), "on")
+        # Loop runs in its own process by default (#5569, #6871).
         self.addCleanup(server.LOOP_THREAD.update, {"thread": None, "stop": None, "at": 0.0, "proc": None,
                                                     "child": False, "restart": None})
         said = io.StringIO()

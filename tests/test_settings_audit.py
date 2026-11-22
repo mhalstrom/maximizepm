@@ -94,6 +94,9 @@ class SettingsAuditGuardTest(unittest.TestCase):
         self.assertLessEqual(len(core.NORMAL_SETTINGS), 15)
         for k in core.NORMAL_SETTINGS:
             self.assertIn(k, core.DEFAULT_SETTINGS)
+        for folded in ("manage_wait_high", "manage_wait_low", "serve_runners", "serve_loop_process",
+                       "wait_step", "health_person_minutes", "health_prompt_minutes"):
+            self.assertNotIn(folded, core.DEFAULT_SETTINGS)
         with tempfile.TemporaryDirectory() as d:
             conn = core.connect(Path(d) / "q.db")
             try:

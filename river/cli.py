@@ -698,8 +698,8 @@ def render_health(res):
     acts = n.get("person_acts") or {"prompts": 0, "messages": 0, "stops": 0}
     print(f"          = needs-you rows {_num(n.get('needs_you_minutes_per_item'), '{:.2f}')} + prompts and messages "
           f"{_num(n.get('prompt_minutes_per_item'), '{:.2f}')}: {n['needs_you_opened']} needs-you rows x "
-          f"{res['person_minutes']} min (health_person_minutes); {acts['prompts']} prompts typed, {acts['messages']} "
-          f"messages and {acts['stops']} stops by a person x {res.get('prompt_minutes', 0)} min (health_prompt_minutes)")
+          f"{res['person_minutes']} min; {acts['prompts']} prompts typed, {acts['messages']} "
+          f"messages and {acts['stops']} stops by a person x {res.get('prompt_minutes', 0)} min")
     print("          a proxy, not measured time"
           + (f"; prompts are counted from {res['prompts_since'][:16]} UTC" if res.get("prompts_since")
              and res["prompts_since"] > n["since"] else "")
@@ -2651,10 +2651,10 @@ def build_parser(only=None):
     x.add_argument("--no-proof", metavar="WHY", help="the result has no commit or test: why (setting done_proof)")
     x.add_argument("--choice", metavar="LABEL", help="a person's item with options (maxpm forward --option): the "
                    "option chosen; --output adds words to it")
-    x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
+    x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to 9m); "
                        "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
     x.add_argument("--project", help="project name(s) to wait on (default: this folder's)")
-    x.add_argument("--step", help="return after this long (default: the wait_step setting)")
+    x.add_argument("--step", help="return after this long (default: 9m)")
     x = sub.add_parser("cleanup", help="open items that may be done or stale: expired leases, commits that name them, ...")
     x.add_argument("--project"); x.add_argument("--no-git", action="store_true", help="skip the git log checks")
     x.add_argument("--space", action="store_true", help="the size limits instead (db_max_size, folder_max_size): "

@@ -8438,8 +8438,8 @@ def serve(port: int, open_browser=False, dev=False):
     threading.Thread(target=wake_loop, args=(stop,), daemon=True, name="maxpm-wake").start()
     threading.Thread(target=shells_loop, args=(stop,), daemon=True, name="maxpm-shells").start()
     try:
-        runners = core.setting(conn, "serve_runners") == "on"
-        child = core.setting(conn, "serve_loop_process") == "on"
+        runners = True
+        child = True
         # Before the loop process, the runners and any pane start: they inherit this PATH (#5611).
         added = core.adopt_login_path(conn)
         if added:

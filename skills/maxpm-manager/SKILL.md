@@ -54,7 +54,7 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    the top (UNANSWERED, with its age) and wakes you again after
    `manage_rewake` (2m); after `manage_unanswered` (10m) its sender hears that
    you did not answer. A person's message always wakes you at once. The findings "an agent waits" and "an item is
-   ready for a person" wait `manage_wait_low`; another finding waits
+   ready for a person" wait `manage_every`; another finding waits
    `manage_settle`. Each exit of the watch brings every message and finding
    that waits, so they do not wake you again; an exit for a blocked message
    brings only the blocked ones, and the next watch the rest. Send your own notes that need

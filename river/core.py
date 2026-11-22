@@ -297,9 +297,7 @@ DEFAULT_SETTINGS = {
     # A session with no work runs maxpm wait (in Claude Code as a background command, so a typed message reaches it;
     # elsewhere in the foreground; a blocking command costs no tokens), never idle at its prompt: it takes new work
     # when it comes, and ends after wait_max without any (0: end at once); a person's prompt starts that clock again.
-    # One maxpm wait call returns after wait_step, below a shell time limit.
     "wait_max": "45m",
-    "wait_step": "9m",
     # The manager (maxpm manage): an agent that waits for work longer than wait_too_long is a finding, and
     # maxpm manage --watch returns on a new finding, or after manage_every with nothing new (it runs as a
     # background command, so the manager's session wakes only then).
@@ -438,15 +436,6 @@ DEFAULT_SETTINGS = {
     # (river unregisters it and closes the tmux pane river started for it). 0s: never.
     "idle_after": "2m",
     "fresh_sessions": "on",
-    # serve_runners on: maxpm serve keeps a few runner processes with the code and the queue in memory, and a maxpm
-    # command hands its words to one of them (river/client.py), so it answers in tens of milliseconds (#5501). off:
-    # every command runs in its own process. MAXPM_LOCAL=1 does that for one command or shell. It counts when serve
-    # starts.
-    "serve_runners": "on",
-    # serve_loop_process on: maxpm serve runs the passes of its loop (watch, fresh sessions, checks, notices) in a process
-    # of its own (river/loop.py), so a page action does not wait on a pass for Python's GIL (#5569: 172 ms against
-    # 67 ms). off: in a thread of serve, as before. It counts when serve starts.
-    "serve_loop_process": "on",
     # tmux_adopt on: maxpm serve moves an agent session that runs outside tmux (a Terminal tab) into a tmux pane, so
     # the Sessions page can type into it (#4598). It waits until the session's turn has ended and it has written
     # nothing for ADOPT_QUIET, with no prompt, question or background work open; then it ends the old process and
@@ -604,13 +593,6 @@ DEFAULT_SETTINGS = {
     "space_canvas_after": "30d",
     "space_sessions_after": "30d",
     "space_files_after": "14d",
-    # maxpm health (#5353): the person's minutes that one needs-you row stands for. The headline 'person minutes per
-    # done item' is needs-you rows x this / items done: a proxy, since MaximizePM cannot see the person's real time.
-    "health_person_minutes": "3",
-    # maxpm health (#5990): the person's minutes that one typed prompt, one message or one stop by the person stands
-    # for. The headline adds them to the needs-you part (mark typed about one prompt per done task in a week that the
-    # needs-you rows alone gave 0.74 minutes per task). Answers are not counted again: their rows are needs-you rows.
-    "health_prompt_minutes": "1",
     # The async manager (#5977, mark 2026-11-15: 'less sync and more async except to keep its cache active'): its
     # watch returns at once only for an escalation (a blocked message, a person's message, a notice of level now, a
     # stop, an URGENT finding after manage_settle). Everything else waits for the beat, manage_every after the last
@@ -628,16 +610,6 @@ DEFAULT_SETTINGS = {
     # read its whole context again (#1312). A finding that goes away in this time wakes nothing. Messages and a
     # stop request still return at once. 0s: return at the first finding.
     "manage_settle": "2m",
-    # How long a message to the manager of the level high or low waits before it wakes maxpm manage --watch
-    # (#1583, #1608). A message is high (also an alert and a question) unless the sender gives --level low; a
-    # ship request, a review passed, a deploy done and a deploy hook that failed wake it at once (#4289, #5382); a
-    # deploy hook that started comes with the next wake. A blocked message (--blocked, or MaximizePM sees that its item stands still)
-    # and a person's message wake the watch at once. The new findings "an agent waits" and "an item is ready
-    # for a person" wait manage_wait_low; another finding waits manage_settle. A wake brings every message that
-    # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once. With the
-    # async manager (#5977) both wait for the beat by default.
-    "manage_wait_high": "50m",
-    "manage_wait_low": "50m",
     # A blocked message stays open for the manager until it answers it (an answer, send --reply, or an action on
     # its item): each watch lists it at the top with its age, and the watch wakes the manager again for it
     # manage_rewake after it last showed it, until manage_unanswered after the send. Then maxpm serve tells the
@@ -748,6 +720,11 @@ DEFAULT_SETTINGS = {
 
 # The roles that agent_for.<role> names (#5168).
 AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert")
+
+# Folded internal constants (#6871): formerly wait_step, health_person_minutes, health_prompt_minutes.
+WAIT_STEP = "9m"
+HEALTH_PERSON_MINUTES = 3
+HEALTH_PROMPT_MINUTES = 1
 
 # The agents MaximizePM starts, and their options, come from the agent adapters (river/agents, #5169, #5185): see
 # launch_platforms() and the end of this module, where the built-in adapters' setting defaults go in DEFAULT_SETTINGS.
@@ -3456,7 +3433,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key not in DEFAULT_SETTINGS:
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
-            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
+            "wait_max", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_rewake", "manage_unanswered", "connect_within",
             "prompt_wait", "prompt_end", "command_hang_kill", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "stage_timeout", "deps_timeout", "similar_days", "usage_probe_every"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
@@ -3485,7 +3462,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "conflict_max_lines", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes", "health_prompt_minutes",
+                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions",
                  "manage_wake_count"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
@@ -3579,7 +3556,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         bad = [n for n in re.split(r"[,\s]+", value) if n and _adapters().find(n) is None]
         if bad:
             raise RiverError(f"agent_auto_update: no agent {', '.join(bad)}; all, or names of {', '.join(_adapters().ids())}")
-    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check",
+    elif key in ("fresh_sessions", "serve_reload", "update_check",
                  "agent_update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
@@ -20582,7 +20559,7 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                 res["then"] = "wait at your prompt for the answer (question_wait_end is 0s: maxpm serve ends no session)"
     if manager and not res["blocked"] and not _is_person(conn, actor):
         # For the sender: how long the manager's watch lets it wait (the command says how to shorten that).
-        res["manager_wait"] = setting(conn, "manage_wait_" + res["level"], agent=to)
+        res["manager_wait"] = setting(conn, "manage_every", agent=to)
     return res
 
 
@@ -23430,8 +23407,8 @@ def health(conn, since="7d", until=None, project=None, by=None, days=False):
     if t0 >= t1:
         raise RiverError("maxpm health: since must be before until (for example --since 7d, or --since 30d)")
     pid = _project(conn, project)["id"] if project else None
-    minutes = int(setting(conn, "health_person_minutes", project_id=pid))
-    pminutes = int(setting(conn, "health_prompt_minutes", project_id=pid))
+    minutes = HEALTH_PERSON_MINUTES
+    pminutes = HEALTH_PROMPT_MINUTES
     now_r = _health_range(conn, t0, t1, pid, minutes, pminutes)
     before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes, pminutes)
     first = conn.execute("SELECT MIN(at) AS t FROM person_prompts").fetchone()["t"]
@@ -24309,7 +24286,7 @@ def _migrate_levels(conn):
         conn.execute("INSERT INTO meta(key, value) VALUES ('message_levels_1608', ?)", (iso(now()),))
         conn.execute("UPDATE messages SET blocked='sender', level=NULL WHERE level='urgent'")
         conn.execute("UPDATE messages SET level=NULL WHERE level='normal'")
-        conn.execute("UPDATE OR REPLACE settings SET key='manage_wait_high' WHERE key='manage_wait_normal'")
+        conn.execute("DELETE FROM settings WHERE key='manage_wait_normal'")
 
 
 def _migrate_launch_agents(conn):
@@ -26827,7 +26804,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         state.update(started=_agent(conn, actor)["wait_at"], scope_at=_agent(conn, actor)["scope_at"])
     since = parse_iso(_agent(conn, actor)["waiting_since"] or iso(now()))
     limit = parse_duration(setting(conn, "wait_max", agent=actor))
-    step = parse_duration(step or setting(conn, "wait_step", agent=actor))
+    step = parse_duration(step or WAIT_STEP)
     deadline = min(parse_iso(state["started"]) + step, since + limit)
     # The ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205).
     seen = {int(k): (parse_iso(v[0]), v[1]) for k, v in state.get("seen", {}).items()}
@@ -27949,8 +27926,8 @@ def manage(conn, cwd, actor=None, takeover=None):
             "handed": handed,
             "policies": pol, "other_policies": len(policy_list(conn)) - len(pol),
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
-            "wait_high": setting(conn, "manage_wait_high", agent=actor),
-            "wait_low": setting(conn, "manage_wait_low", agent=actor),
+            "wait_high": setting(conn, "manage_every", agent=actor),
+            "wait_low": setting(conn, "manage_every", agent=actor),
             "wake_count": setting(conn, "manage_wake_count", agent=actor),  # #5977
             "quiet_every": setting(conn, "manage_quiet_every", agent=actor),
             "wait_too_long": setting(conn, "wait_too_long"),
@@ -27993,8 +27970,8 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     quiet_every = parse_duration(setting(conn, "manage_quiet_every", agent=actor))
     settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
-    waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=actor)),
-             "low": parse_duration(setting(conn, "manage_wait_low", agent=actor))}
+    wait_every = parse_duration(setting(conn, "manage_every", agent=actor))
+    waits = {"high": wait_every, "low": wait_every}
     rewake = parse_duration(setting(conn, "manage_rewake", agent=actor))
     limit = parse_duration(setting(conn, "manage_unanswered", agent=actor))
     # When the first new finding that is not low has waited manage_settle; when the first new low finding has waited
@@ -28140,8 +28117,8 @@ def tell_watch_late(conn):
         gap = watch_gap(conn, a["name"])
         if gap is None or gap < WATCH_LATE or _agent_state(conn, a) not in ("active", "away"):
             continue
-        waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=a["name"])),
-                 "low": parse_duration(setting(conn, "manage_wait_low", agent=a["name"]))}
+        wait_every = parse_duration(setting(conn, "manage_every", agent=a["name"]))
+        waits = {"high": wait_every, "low": wait_every}
         due = _watch_mail(conn, a["name"], has_native(conn, a["name"]), waits)[1]
         # One wake for each time with no watch, also when the manager read it (#5747).
         wake = conn.execute(wake_q + " AND to_agent=? AND created_at>=? ORDER BY id DESC LIMIT 1",
