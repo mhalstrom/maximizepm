@@ -636,7 +636,7 @@ VERSION_NAME = re.compile(r"^\d+\.\d+\.\d+")
 # agent's own Bash calls stay refused even when they type the same text.
 BANG_TTL = 30.0
 BANG_CLAIMED_TTL = 15.0
-BANG_ASK_TTL = 300.0
+BANG_ASK_TTL = 120.0
 BANG_ASK_MAX = 20
 _BANG_ASK_DENY = frozenset({"serve", "mcp", "wait", "report", "activity"})
 _BANG_LOCK = threading.Lock()
@@ -737,29 +737,45 @@ def ask_bang(agent, argv, cwd=None, ttl=BANG_ASK_TTL):
         return None
     now_m = time.monotonic()
     exp = now_m + float(ttl)
+    created_at = core.iso(core.now())
     command = shlex.join(["maxpm", *words])
     with _BANG_LOCK:
         _BANG_ASKS[:] = [e for e in _BANG_ASKS if e["expires"] > now_m]
         for e in _BANG_ASKS:
             if e["agent"] == agent and e["argv"] == words:
                 e["expires"] = exp
+                e["created_at"] = created_at
                 return {"id": e["id"], "agent": e["agent"], "command": e["command"], "argv": list(e["argv"]),
                         "cwd": e["cwd"]}
         if len(_BANG_ASKS) >= BANG_ASK_MAX:
             _BANG_ASKS.pop(0)
         _BANG_ASK_NEXT += 1
-        entry = {"id": _BANG_ASK_NEXT, "agent": agent, "argv": words, "command": command,
-                 "cwd": cwd if isinstance(cwd, str) else None, "expires": exp}
+        entry = {"id": _BANG_ASK_NEXT, "agent": agent, "argv": words, "cmd": cmd_word, "command": command,
+                 "cwd": cwd if isinstance(cwd, str) else None, "expires": exp, "created_at": created_at}
         _BANG_ASKS.append(entry)
     return {"id": entry["id"], "agent": entry["agent"], "command": entry["command"], "argv": list(entry["argv"]),
             "cwd": entry["cwd"]}
 
 
-def list_bang_asks():
-    """The pending command approvals for the page's Allow/Deny dialog (#6912)."""
+def list_bang_asks(conn=None):
+    """The pending command approvals for the page's Allow/Deny dialog (#6912, #6934). Drops expired asks and any ask
+    whose command later succeeded for that agent."""
     now_m = time.monotonic()
     with _BANG_LOCK:
         _BANG_ASKS[:] = [e for e in _BANG_ASKS if e["expires"] > now_m]
+        if conn is not None and _BANG_ASKS:
+            keep = []
+            for e in _BANG_ASKS:
+                try:
+                    done = conn.execute(
+                        "SELECT 1 FROM runs WHERE actor=? AND cmd=? AND exit=0 AND at>=? LIMIT 1",
+                        (e["agent"], e.get("cmd") or "", e.get("created_at") or ""),
+                    ).fetchone()
+                except core.sqlite3.OperationalError:
+                    done = None
+                if not done:
+                    keep.append(e)
+            _BANG_ASKS[:] = keep
         return [{"id": e["id"], "agent": e["agent"], "command": e["command"]} for e in _BANG_ASKS]
 
 

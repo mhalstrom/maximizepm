@@ -6985,14 +6985,39 @@ _AGENT_ENV_STRIP = (
 )
 
 
+def _pane_has_bang(conn, agent, argv):
+    """Whether agent's tmux pane currently shows a person-typed '! ...' line running this exact maxpm argv (#6934).
+    An agent's own tool call (Bash / run_command) never appears as a '!' line in the pane."""
+    from . import vault
+    if not agent or not isinstance(argv, (list, tuple)) or not argv:
+        return False
+    words = tuple(str(w) for w in argv if isinstance(w, str))
+    if len(words) != len(argv):
+        return False
+    pane = agent_terminals(conn).get(agent)
+    if not pane:
+        return False
+    raw = _tmux("capture-pane", "-p", "-J", "-t", pane, check=False) or ""
+    if not raw:
+        return False
+    lines = [ln for ln in _plain(raw).splitlines() if ln.strip()][-40:]
+    for ln in reversed(lines):
+        s = re.sub(r"^[❯›>│┃\s]+", "", ln)
+        if s.startswith("!") and words in vault.bang_commands(s):
+            return True
+    return False
+
+
 def bang_ask_op(conn, a, who):
-    """Queue a refused person-only maxpm command for the person's Allow/Deny dialog on the page (#6912). Grants
-    nothing on its own: the command runs only after the person clicks Allow (bang_decide)."""
+    """Queue a refused person-only maxpm command for the person's Allow/Deny dialog on the page (#6912, #6934).
+    Only a command proven as a person's '!' input in the session's tmux pane may queue an ask; an agent's own
+    refused tool call queues nothing. Grants nothing until the person clicks Allow (bang_decide)."""
     from . import vault
     name, _spid, _proc = _peer_session(conn)
-    if not name:
+    argv = a.get("argv") or ()
+    if not name or not _pane_has_bang(conn, name, argv):
         return {"queued": False, "ask": None}
-    row = vault.ask_bang(name, a.get("argv") or (), a.get("cwd"))
+    row = vault.ask_bang(name, argv, a.get("cwd"))
     if row:
         state_changed()
     return {"queued": bool(row), "ask": row}
@@ -7016,7 +7041,7 @@ def bang_decide_op(conn, a, who):
     env["MAXPM_DB"] = str(core.db_path())
     cwd = row["cwd"] if row["cwd"] and os.path.isdir(row["cwd"]) else None
     try:
-        r = subprocess.run([sys.executable, "-m", "river", *row["argv"]],
+        r = subprocess.run([sys.executable, "-m", "river.cli", *row["argv"]],
                            capture_output=True, text=True, timeout=30, env=env, cwd=cwd)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RiverError(f"command failed to run: {e}")
@@ -7420,7 +7445,7 @@ def page_state(closed, timing=None):
             st["signin_asks"] = [r[0] for r in conn.execute(
                 "SELECT id FROM secret_requests WHERE state='asked' ORDER BY id")]
             from . import vault as _vault
-            st["bang_asks"] = _vault.list_bang_asks()  # #6912: CLI '!' commands waiting for Allow/Deny on the page
+            st["bang_asks"] = _vault.list_bang_asks(conn)  # #6912, #6934: CLI '!' commands waiting for Allow/Deny
             from .routes import browser as browser_routes
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
             # #5879: how many browsers run now, for the Browsers row of the session list (its view reads the list)

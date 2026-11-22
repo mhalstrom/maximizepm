@@ -3711,7 +3711,8 @@ def _run(args, conn):
     except RiverError as e:
         msg = str(e)
         if (_inside_agent() and args.cmd not in ("serve", "mcp", "wait", "report", "activity")
-                and ("only a person" in msg or "for a person" in msg or "never runs as a person" in msg)
+                and ("only a person" in msg or "never runs as a person" in msg
+                     or "is for a person" in msg or "is for the person" in msg)
                 and sys.argv[1:] and core.running_serve(conn)):
             try:
                 q = ask_server(conn, "bang_ask", {"argv": sys.argv[1:], "cwd": os.getcwd()}, timeout=1, retries=0)

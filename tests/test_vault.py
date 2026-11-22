@@ -690,12 +690,15 @@ class Identity(Base):
         self.addCleanup(vault.clear_bangs)
         self.assertIs(rights.OPS["bang_decide"], rights.ONLY_PERSON)
 
-        # Agent dev queues a refused command via bang_ask_op (process tree confirms dev).
+        # Person's '!' in dev's terminal pane queues a refused command via bang_ask_op (process tree confirms dev).
         argv = ["secret", "grant", "devset", "--item", "6910"]
+        pane_bang = "! maxpm secret grant devset --item 6910\n"
         self.chain = [(930, 500, "Python", 60), (500, 1, "2.1.325", 111)]
         vault.PEER.value = (51002, 7766, "930")
         self.addCleanup(setattr, vault.PEER, "value", None)
-        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930):
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930), \
+                mock.patch.object(server, "agent_terminals", lambda conn: {"dev": "%9"}), \
+                mock.patch.object(server, "_tmux", lambda *a, **kw: pane_bang):
             q = server.OPS["bang_ask"](self.c, {"argv": argv, "cwd": "/tmp"}, "dev")
             self.assertTrue(q["queued"])
             ask_id = q["ask"]["id"]
@@ -737,7 +740,7 @@ class Identity(Base):
             res = server.OPS["bang_decide"](self.c, {"id": ask_id, "allow": True}, "mark")
         self.assertTrue(res["allowed"])
         self.assertEqual(res["output"], "granted g1")
-        self.assertEqual(ran["cmd"][1:], ["-m", "river", *argv])
+        self.assertEqual(ran["cmd"][1:], ["-m", "river.cli", *argv])
         self.assertNotIn("MAXPM_TOKEN", ran["env"])
         self.assertNotIn("MAXPM_AGENT", ran["env"])
         self.assertNotIn("CLAUDECODE", ran["env"])
@@ -746,7 +749,9 @@ class Identity(Base):
         # Person clicks Deny: runs nothing and removes the ask.
         self.chain = [(930, 500, "Python", 60), (500, 1, "2.1.325", 111)]
         vault.PEER.value = (51002, 7766, "930")
-        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930):
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930), \
+                mock.patch.object(server, "agent_terminals", lambda conn: {"dev": "%9"}), \
+                mock.patch.object(server, "_tmux", lambda *a, **kw: pane_bang):
             ask2 = server.OPS["bang_ask"](self.c, {"argv": argv}, "dev")["ask"]["id"]
         vault.PEER.value = vault.RELAY_PAGE
         with mock.patch("subprocess.run") as mrun:
@@ -774,6 +779,93 @@ class Identity(Base):
                            env={**os.environ, "MAXPM_DB": str(core.db_path()), "PYTHONPATH": repo}, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIsNone(vault.claim_bang("dev", tuple(argv)))
+
+    def test_agent_refusal_queues_no_bang_ask_and_done_mistakes_never_ask(self):
+        """#6934: an agent's own refused maxpm command (person-only refusal, done --changed 'for a person', or wrong
+        --commit) must never queue a bang_ask dialog; only a command shown as '! ...' in the session's terminal pane
+        queues one, and a queued ask drops when the same command later succeeds or expires."""
+        from river import cli, server
+        vault.clear_bangs()
+        self.addCleanup(vault.clear_bangs)
+        core.project_add(self.c, "site")
+        it = core.item_add(self.c, "site", "ship something")["id"]
+        core.claim(self.c, it, "dev")
+
+        # 1) Agent's own done mistakes (--changed with path/too long -> CHANGED_RULE says 'for a person',
+        #    and wrong --commit) must never call bang_ask.
+        asked = []
+        fake_ask = lambda conn, op, payload, **kw: asked.append((op, payload)) or {"queued": True}
+        def fake_commits(folder, item_id, given=None):
+            if given:
+                raise RiverError(f"--commit: unknown revision {given[0]!r} (in {folder}); name commits of the project's git folder")
+            return []
+        with mock.patch.object(cli, "_inside_agent", lambda: True), \
+                mock.patch.object(core, "running_serve", lambda conn: True), \
+                mock.patch.object(core, "_git_folder", lambda conn, pid: "/tmp/repo"), \
+                mock.patch.object(core, "proof_commits", fake_commits), \
+                mock.patch.object(cli, "ask_server", fake_ask):
+            for argv in (
+                ["--as", "dev", "done", str(it), "--output", "done",
+                 "--changed", "Added GET /v1/llm-catalog/revisions endpoint for updates"],
+                ["--as", "dev", "done", str(it), "--output", "done",
+                 "--changed", " ".join(["word"] * 35)],
+                ["--as", "dev", "done", str(it), "--commit", "715dd34", "--output", "done"],
+            ):
+                with mock.patch.object(sys, "argv", ["maxpm", *argv]):
+                    with self.assertRaises(RiverError):
+                        cli.run(argv)
+        self.assertEqual(asked, [])
+        self.assertEqual(vault.list_bang_asks(), [])
+
+        # 1b) An actual agent subprocess getting a person-only refusal prints no dialog notice and queues no bang_ask.
+        import subprocess
+        repo = str(Path(core.__file__).resolve().parent.parent)
+        sub = subprocess.run(
+            [sys.executable, "-m", "river.cli", "--as", "mark", "list"],
+            capture_output=True, text=True, timeout=15,
+            env={**os.environ, "MAXPM_DB": str(core.db_path()), "PYTHONPATH": repo,
+                 "CLAUDECODE": "1", "MAXPM_AGENT": "dev"},
+        )
+        self.assertEqual(sub.returncode, 2, sub.stderr)
+        self.assertIn("never runs as a person", sub.stderr)
+        self.assertNotIn("Allow/Deny dialog", sub.stderr)
+        self.assertEqual(vault.list_bang_asks(), [])
+
+        # 2) Agent subprocess hitting a person-only refusal with no '!' in its terminal pane queues no bang_ask
+        #    (both with no tmux pane and with a pane showing an agent Bash tool call).
+        argv = ["secret", "grant", "devset", "--item", str(it)]
+        self.chain = [(930, 500, "Python", 60), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51002, 7766, "930")
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930):
+            with mock.patch.object(server, "agent_terminals", lambda conn: {}):
+                q = server.OPS["bang_ask"](self.c, {"argv": argv, "cwd": "/tmp"}, "dev")
+                self.assertFalse(q["queued"])
+            with mock.patch.object(server, "agent_terminals", lambda conn: {"dev": "%9"}), \
+                    mock.patch.object(server, "_tmux", lambda *a, **kw: "● Bash(maxpm secret grant devset --item "
+                                                                        f"{it})\n  ⎿  Running...\n"):
+                q = server.OPS["bang_ask"](self.c, {"argv": argv, "cwd": "/tmp"}, "dev")
+                self.assertFalse(q["queued"])
+        self.assertEqual(vault.list_bang_asks(), [])
+
+        # 3) A person's '!' in the session's terminal pane proves it and opens the dialog.
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930), \
+                mock.patch.object(server, "agent_terminals", lambda conn: {"dev": "%9"}), \
+                mock.patch.object(server, "_tmux", lambda *a, **kw: f"! maxpm secret grant devset --item {it}\n"):
+            q = server.OPS["bang_ask"](self.c, {"argv": argv, "cwd": "/tmp"}, "dev")
+            self.assertTrue(q["queued"])
+        self.assertEqual(len(vault.list_bang_asks(self.c)), 1)
+
+        # 4) If the same command later succeeds for that agent, the queued ask is dropped.
+        later = core.iso(core.now() + core.timedelta(seconds=2))
+        self.c.execute("INSERT INTO runs(at, actor, cmd, words, exit) VALUES (?,?,?,?,0)",
+                       (later, "dev", "secret", json.dumps(argv)))
+        self.c.commit()
+        self.assertEqual(vault.list_bang_asks(self.c), [])
+
+        # 5) Expired asks are dropped.
+        vault.ask_bang("dev", argv, cwd="/tmp", ttl=-1)
+        self.assertEqual(vault.list_bang_asks(self.c), [])
 
 
 class CredentialsPanel(Base):
