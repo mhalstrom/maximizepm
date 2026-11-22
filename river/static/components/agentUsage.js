@@ -250,18 +250,22 @@ export function openAgentUsage(agentType, rowKey, rowLabel) {
 // Settings > Agents and the Settings dialog's Agents tab (#6856): every row that can appear in the bottom-left usage
 // list (each model group row of agent_order and every other agent with a usage row), with its real saved Show in usage
 // list choice.
-export function usageListSettingsHtml(state) {
+// Checkboxes for Show/Hide in the bottom-left usage list (#6856, #6865): used inside usage_list_hide's setting row.
+export function usageListRowsHtml(state) {
   const rows = allUsageRows(state);
-  const body = rows.length
+  return rows.length
     ? `<div class="ul-rows">${rows.map(r => `<label class="ul-row">
         <input type="checkbox" data-ul-key="${esc(r.key)}" data-ul-label="${esc(r.label)}"${r.hidden ? "" : " checked"}>
         <span class="ul-name">${r.prov ? `<span class="muted t-s" title="Launch order">${r.prov.pos}</span> ` : ""}${esc(r.label)}</span>
         <span class="muted t-s ul-st">${r.hidden ? "hidden" : "shown"}</span>
       </label>`).join("")}</div>`
     : `<div class="muted t-s">No agents in the usage list yet.</div>`;
+}
+
+export function usageListSettingsHtml(state) {
   return `<div class="cred-sub">Usage list</div>
     <div class="muted t-s set-note">Choose which agents show in the bottom-left usage list. Hiding one changes only the list; launch order, limits and usage reading stay as they are.</div>
-    ${body}`;
+    ${usageListRowsHtml(state)}`;
 }
 
 export function wireUsageListSettings(host, onChanged) {

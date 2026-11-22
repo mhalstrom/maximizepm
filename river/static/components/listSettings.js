@@ -7,9 +7,9 @@ import { $, esc, store } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button, iconButton } from "./button.js";
 import { S, nav } from "../page.js";
-import { settingRow, saveRow, groupOf } from "../views/settings.js";
-import { programOf } from "../views/settingLabels.js";
-import { usageListSettingsHtml, wireUsageListSettings } from "./agentUsage.js";
+import { settingRow, groupOf } from "../views/settings.js";
+import { labelOf, programOf } from "../views/settingLabels.js";
+import { wireSettingControls } from "./settingControl.js";
 
 // [tab key, name, the test of a key, the group of the Settings tab that holds the rest]
 const PARTS = [
@@ -37,45 +37,37 @@ function el() {
   dlg = makeDialog(d, { draft: false });
   d.addEventListener("click", (e) => {
     if (e.target.closest("[data-ls-close]")) return dlg.close();
-    if (e.target.closest("[data-unset]")) { setTimeout(draw, 400); return; }  // ↺ (settings.js onClick unsets it)
+    if (e.target.closest("[data-unset]")) { setTimeout(() => draw(true), 400); return; }  // ↺ / ✕ (settings.js onClick unsets it)
     const t = e.target.closest("[data-ls-part]");
-    if (t) { part = t.dataset.lsPart; store(KEY, part); return draw(); }
+    if (t) { part = t.dataset.lsPart; store(KEY, part); return draw(true); }
     if (e.target.closest("[data-ls-all]")) {
       store("river.settingsTab", PARTS.find(p => p[0] === part)[3]);
       dlg.close();
       nav.setTab("settings");
     }
   });
-  d.addEventListener("change", async (e) => {
-    if (!e.target.dataset.setInput) return;
-    await saveRow(e.target);
-    draw();
-  });
-  d.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && e.target.dataset.setInput) { e.preventDefault(); e.target.blur(); }
-  });
-  wireUsageListSettings($("#listSetRows"), draw);
+  wireSettingControls($("#listSetRows"), () => S, labelOf, () => draw(true));
   return d;
 }
 
-function draw() {
+function draw(force = false) {
   if (!S || !S.settings) return;
   $("#listSetTabs").innerHTML = PARTS.map(([k, name]) => button(esc(name), { cls: "set-tab", pressed: part === k,
     data: { "ls-part": k }, attrs: `role="tab" aria-selected="${part === k}"` })).join("");
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};
   const test = PARTS.find(p => p[0] === part)[2];
-  const usage = part === "agents" ? `<div class="ls-usage">${usageListSettingsHtml(S)}</div>` : "";
   const rows = Object.keys(d).filter(test).map(k => settingRow(k, d, o.filter(x => x.key === k), now)).join("");
   const box = $("#listSetRows");
   const focused = document.activeElement;
-  if (!box.contains(focused) || (focused && focused.type === "checkbox")) {
-    box.innerHTML = (usage + rows) || `<div class="muted">No settings here.</div>`;
+  const typing = !force && box.contains(focused) && (focused.tagName === "INPUT" || focused.tagName === "SELECT");
+  if (!typing) {
+    box.innerHTML = rows || `<div class="muted">No settings here.</div>`;
   }
 }
 
 export function openListSettings(tab) {
   if (tab && PARTS.some(p => p[0] === tab)) { part = tab; store(KEY, part); }
   el();
-  draw();
+  draw(true);
   dlg.open();
 }

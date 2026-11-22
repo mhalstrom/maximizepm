@@ -3648,6 +3648,58 @@ def mask(key, value):
     return value
 
 
+def setting_choices(conn):
+    """Valid choices and control kinds for settings, from the same lists config_set validates against (#6865)."""
+    agents = agent_types()
+    efforts = _levels(setting(conn, "effort_levels"))
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    ladder_models = [m for ms in ladder.values() for m in ms]
+    price_models = list(parse_prices(setting(conn, "model_prices")).keys())
+    default_models = list(dict.fromkeys(price_models + ladder_models))
+    keys = {
+        "default_model": {"kind": "model", "values": default_models, "allow_empty": True},
+        "default_effort": {"kind": "select", "values": efforts, "allow_empty": True},
+        "default_min_model": {"kind": "select", "values": ladder_models, "allow_empty": True},
+        "default_max_model": {"kind": "select", "values": ladder_models, "allow_empty": True},
+        "default_agent": {"kind": "agent", "values": agents, "allow_empty": True},
+        **{f"agent_for.{r}": {"kind": "agent", "values": agents, "allow_empty": True} for r in AGENT_ROLES},
+        "usage_list_hide": {"kind": "usage_list"},
+        "agent_order": {"kind": "agent_order"},
+        "agent_rules": {"kind": "agent_rules"},
+        "launch_agents": {"kind": "launch_agents"},
+        "browser_pace": {"kind": "select", "values": ["watch", "person", "fast"], "allow_empty": False},
+        "auto_continue": {"kind": "select", "values": ["tree", "on", "off"], "allow_empty": False},
+        "action_type": {"kind": "select", "values": ["auto", *ACTION_TYPES], "allow_empty": False},
+        "result_look": {"kind": "select", "values": ["ask_first", "push_first"], "allow_empty": False},
+        "done_proof": {"kind": "select", "values": ["require", "ask", "off"], "allow_empty": False},
+        "goal_approval": {"kind": "select", "values": ["person", "off"], "allow_empty": False},
+        "workspace": {"kind": "select", "values": ["shared", "worktree", "setup"], "allow_empty": False},
+        "review_at": {"kind": "select", "values": ["off", "push", "release"], "allow_empty": False},
+        "default_prerequisite_mode": {"kind": "select", "values": ["keep", "release"], "allow_empty": False},
+        "notify_open": {"kind": "select", "values": ["maxpm", "agent"], "allow_empty": False},
+        "ntfy_priority": {"kind": "select", "values": list(NTFY_PRIORITIES), "allow_empty": False},
+        "release_approval": {"kind": "select", "values": list(RELEASE_APPROVALS), "allow_empty": True},
+    }
+    for plat, pl in launch_platforms().items():
+        for opt, sp in pl["options"].items():
+            k = pl["prefix"] + opt
+            if sp["kind"] == "choice":
+                keys[k] = {"kind": "select", "values": list(sp.get("choices") or ()), "allow_empty": True}
+            elif sp["kind"] == "toggle":
+                keys[k] = {"kind": "select", "values": ["on", "off"], "allow_empty": False}
+            elif opt == "model":
+                keys[k] = {"kind": "agent_model", "platform": plat, "values": default_models, "allow_empty": True}
+            elif opt == "effort":
+                keys[k] = {"kind": "agent_effort", "platform": plat, "values": efforts, "allow_empty": True}
+    return {
+        "agent_types": agents,
+        "efforts": efforts,
+        "ladder_models": ladder_models,
+        "price_models": price_models,
+        "keys": keys,
+    }
+
+
 def config_list(conn):
     rows = [dict(r) for r in conn.execute("SELECT scope,key,value FROM settings ORDER BY scope,key")]
     for r in rows:
@@ -3656,7 +3708,7 @@ def config_list(conn):
     extra = {k: v for k, v in agent_setting_defaults().items() if k not in DEFAULT_SETTINGS}
     from . import space
     return {"defaults": {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS, "overrides": rows,
-            "now": space.current(conn)}  # the sizes beside their limits (#5711)
+            "now": space.current(conn), "choices": setting_choices(conn)}  # sizes (#5711), choices (#6865)
 
 
 # ---------------------------------------------------------------- models

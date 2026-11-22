@@ -28,6 +28,31 @@
 .set-ctl input, .set-ctl select { flex: 1; min-width: 0; width: 100%; }
 .set-ov { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--sp-2); min-width: 0; }
 .set-ov .chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }  /* a long value wraps (a prompt) */
+/* #6865: full-width controls (usage-list checkboxes, structured row editors) and per-scope override controls. */
+.set-row-wide { grid-template-columns: minmax(0, 1fr); }
+.set-row-wide .set-ctl { align-items: flex-start; }
+.se-box { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.se-row { display: grid; gap: var(--sp-2); align-items: end; padding: var(--sp-2) 0;
+  border-bottom: var(--hair) solid var(--line); }
+.se-order { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) var(--w-s) var(--w-xs) auto; }
+.se-rules { grid-template-columns: var(--w-m) minmax(0, 1fr) auto; }
+.se-launch { grid-template-columns: var(--w-m) var(--w-m) minmax(0, 1fr) auto; }
+.se-f { display: flex; flex-direction: column; gap: var(--sp-0); font-size: var(--fs-s); color: var(--muted); min-width: 0; }
+.se-f input, .se-f select { background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s);
+  padding: var(--sp-1) var(--sp-2); box-sizing: border-box; width: 100%; min-width: 0; color: var(--ink); }
+.se-acts { display: flex; gap: var(--sp-0); align-self: end; }
+.se-add { display: flex; gap: var(--sp-2); align-items: center; }
+.se-usage { flex: 1; min-width: 0; }
+.set-raw { grid-column: 1 / -1; margin-top: var(--sp-1); }
+.set-raw > summary { cursor: pointer; }
+.set-raw input { width: 100%; margin-top: var(--sp-1); }
+.set-ov-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); width: 100%; min-width: 0; }
+.set-ov-row > select { flex: 1; min-width: var(--w-m); max-width: var(--w-l); }
+.set-ov-block { flex-direction: column; align-items: stretch; padding: var(--sp-2) var(--sp-3);
+  border: var(--hair) solid var(--line); border-radius: var(--r-s); }
+.set-ov-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+#setValueWrap { display: block; min-width: 0; }
+#setValueWrap > select, #setValueWrap > input { width: 100%; }
 .set-scoped { margin-top: var(--sp-6); }
 /* #6361: the agent providers in launch order: place, name, model, effort, max sessions, running, ↑ ↓ ✕. A phone puts
    the fields under the name, two to a line. */
@@ -60,6 +85,10 @@
   .prov-acts { grid-row: 1; grid-column: 2; justify-content: flex-end; }
   .prov-f input, .prov-f select, .prov-add select { min-height: var(--tap); }
   .set-ctl input, .set-ctl select { min-height: var(--tap); }
+  .se-order, .se-rules, .se-launch { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .se-acts { grid-column: 1 / -1; justify-content: flex-end; }
+  .se-f input, .se-f select, .set-ov-row > select { min-height: var(--tap); }
+  .set-ov-row > select { max-width: none; }
 }
 /* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
 .cred-sub { font-weight: 600; margin: var(--sp-6) 0 var(--sp-2); }

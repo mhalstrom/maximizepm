@@ -13,7 +13,7 @@ import { loadAgents } from "../components/agents.js";
 import { modelChoices } from "../components/modelPick.js";
 import { effortsFor } from "../components/launchDialog.js";
 import { versionsHtml, wireVersions, onVersions, versionsNow } from "../components/agentUpdate.js";
-import { usageListSettingsHtml, wireUsageListSettings } from "../components/agentUsage.js";
+import { settingRowHtml, settingControlHtml, formatEditorValue, saveSettingValue, wireSettingControls } from "../components/settingControl.js";
 
 const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -65,24 +65,13 @@ function renderTabs() {
 // small under it, its value for every project in a field (empty: the default, which the field shows greyed), and the
 // values for one project, agent or item as chips whose × removes them. Enter or leaving the field saves it. On/off
 // keys have a select. The Agents tab puts each agent program's options under its own heading.
-const ONOFF = new Set(["on", "off"]);
 let tableGroup = null;
 // Also in the settings dialog of the Sessions list (components/listSettings.js, #5883).
-export function settingRow(k, d, ov, now) {
-  const glob = ov.find(x => x.scope === "global"), rest = ov.filter(x => x.scope !== "global");
-  const def = String(d[k]);
-  const ctl = ONOFF.has(def)
-    ? `<select data-set-input="${esc(k)}" aria-label="${esc(labelOf(k))}">${["on", "off"].map(v =>
-        `<option value="${v}"${(glob ? glob.value : def) === v ? " selected" : ""}>${v}${v === def ? " (default)" : ""}</option>`).join("")}</select>`
-    : `<input data-set-input="${esc(k)}" value="${esc(glob ? glob.value : "")}" placeholder="${esc(def || "empty")}" aria-label="${esc(labelOf(k))}">`;
-  return `<div class="set-row">
-    <div class="set-label">${esc(labelOf(k))}<div class="muted t-s set-key">${esc(k)}${now[k] ? ` · now ${esc(now[k])}` : ""}</div></div>
-    <div class="set-ctl">${ctl}${glob ? iconButton("↺", `Back to the default for ${k}`, { data: { unset: k, scope: "global" } }) : ""}</div>
-    ${rest.length ? `<div class="set-ov">${rest.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(k)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ")}</div>` : ""}
-  </div>`;
+export function settingRow(k, d, ov, now, opts) {
+  return settingRowHtml(k, d, ov, now, S, labelOf(k), opts);
 }
 
-export function renderSettings() {
+export function renderSettings(force = false) {
   renderTabs();
   const g = KEY_GROUPS.find(x => x[0] === current);
   if (!g) return;
@@ -91,10 +80,9 @@ export function renderSettings() {
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
   $("#setProviders").classList.toggle("hidden", current !== "agents");
-  $("#setUsageList").classList.toggle("hidden", current !== "agents");
   $("#setVersions").classList.toggle("hidden", current !== "agents");
   $("#setDevices").classList.toggle("hidden", current !== "notifications");
-  if (current === "agents") { renderProviders(); renderUsageList(); renderVersions(); }
+  if (current === "agents") { renderProviders(force); renderVersions(); }
   if (current === "notifications") renderDevices();
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
@@ -103,11 +91,12 @@ export function renderSettings() {
   for (const k of keys) {
     const p = current === "agents" ? programOf(k) : null;
     if (current === "agents" && p !== head) { html += `<div class="cred-sub">${esc(p || "Every agent")}</div>`; head = p; }
-    html += settingRow(k, d, o.filter(x => x.key === k), now);
+    html += settingRow(k, d, o.filter(x => x.key === k), now, { rawText: true });
   }
   // A field the person types in keeps its text: the rows are not drawn again while one has focus.
-  const rows = $("#setRows");
-  if (!rows.contains(document.activeElement) && rows.dataset.sig !== html) { rows.innerHTML = html; rows.dataset.sig = html; }
+  const rows = $("#setRows"), a = document.activeElement;
+  const typing = !force && rows.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT");
+  if (!typing && rows.dataset.sig !== html) { rows.innerHTML = html; rows.dataset.sig = html; }
   // The form for one project, agent or item lists the keys of this group; the key chosen before stays when it is in it.
   const sel = $("#setKey"), sig = keys.join("|");
   if (sel.dataset.sig !== sig || tableGroup !== current) {
@@ -116,7 +105,17 @@ export function renderSettings() {
     if (keys.includes(keep)) sel.value = keep;
     sel.dataset.sig = sig;
     tableGroup = current;
+    renderScopedValue();
   }
+}
+
+function renderScopedValue() {
+  const wrap = $("#setValueWrap"), key = $("#setKey").value;
+  if (!wrap || !key || !S || !S.settings) return;
+  const sc = $("#setScope").value, nm = $("#setScopeName").value.trim();
+  const scope = sc === "global" ? "global" : (nm ? `${sc}:${nm}` : "global");
+  const def = String((S.settings.defaults || {})[key] ?? "");
+  wrap.innerHTML = settingControlHtml(key, "", def, labelOf(key), S, scope, { id: "setValue", form: true });
 }
 
 // The agent providers (#6361, mark 2026-11-20: 'we should be able to set the agent usage priority and when all the
@@ -160,12 +159,6 @@ function renderVersions() {
   wireVersions(host, () => draw(versionsNow()));
   if (!versionsOff) versionsOff = onVersions(draw);
   draw(versionsNow());
-}
-function renderUsageList() {
-  const host = $("#setUsageList");
-  const html = usageListSettingsHtml(S);
-  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
-  wireUsageListSettings(host);
 }
 function renderProviders(force) {
   const host = $("#setProviders"), a = document.activeElement;
@@ -255,22 +248,21 @@ $("#setProviders").addEventListener("click", (e) => {
   saveOrder(L, `[data-prov-${up ? "up" : "down"}="${j}"]`);  // the arrow follows its provider
 });
 
-// A row's field: Enter or leaving it saves the value for every project; an empty field goes back to the default.
+// A row's field: Enter or leaving it saves the value; an empty field goes back to the default.
 export async function saveRow(el) {
-  const key = el.dataset.setInput, v = el.value.trim();
-  const glob = S.settings.overrides.find(x => x.key === key && x.scope === "global");
-  if (v === (glob ? glob.value : "")) return;
-  if (el.tagName === "SELECT" && !glob && v === String(S.settings.defaults[key])) return;
+  const key = el.dataset.setInput, scope = el.dataset.setScope || "global", v = el.value.trim();
+  const cur = S.settings.overrides.find(x => x.key === key && x.scope === scope);
+  if (v === (cur ? cur.value : "")) return;
+  if (el.tagName === "SELECT" && !cur && scope === "global" && v === String(S.settings.defaults[key])) return;
   try {
-    if (v) await act("config_set", { key, value: v });
-    else await act("config_unset", { key });
-    toast(v ? `${labelOf(key)}: ${v}` : `${labelOf(key)}: back to the default`);
-  } catch (e) { el.value = glob ? glob.value : ""; }  // act showed the error
+    await saveSettingValue(key, v, scope, S, labelOf(key));
+  } catch (e) { el.value = cur ? cur.value : ""; }  // act showed the error
 }
-$("#setRows").addEventListener("change", (e) => { if (e.target.dataset.setInput) saveRow(e.target); });
-$("#setRows").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && e.target.dataset.setInput) { e.preventDefault(); e.target.blur(); }
-});
+wireSettingControls($("#setRows"), () => S, labelOf, () => renderSettings(true));
+wireSettingControls($("#setValueWrap"), () => S, labelOf);
+$("#setKey").addEventListener("change", renderScopedValue);
+$("#setScope").addEventListener("change", renderScopedValue);
+$("#setScopeName").addEventListener("change", renderScopedValue);
 
 $("#setTabs").addEventListener("click", (e) => {
   const t = e.target.closest("[data-set-tab]");
@@ -366,9 +358,11 @@ const run = (f) => { f(); return true; };
 
 $("#setGo").addEventListener("click", async () => {
   const scope = $("#setScope").value, nm = $("#setScopeName").value.trim();
-  const args = { key: $("#setKey").value, value: $("#setValue").value.trim() };
+  const ed = $("#setValueWrap [data-set-editor]");
+  const value = ed ? formatEditorValue(ed) : ($("#setValue") ? $("#setValue").value.trim() : "");
+  const args = { key: $("#setKey").value, value };
   if (scope !== "global") { if (!nm) return toast("Give the project, agent, or item", true); args[scope] = scope === "item" ? +nm : nm; }
-  await act("config_set", args).then(() => toast("Saved")).catch(() => {});
+  await act("config_set", args).then(() => { toast("Saved"); renderSettings(true); }).catch(() => {});
 });
 
 
