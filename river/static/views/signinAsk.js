@@ -9,9 +9,13 @@ import { button, iconButton } from "../components/button.js";
 import { makeDialog } from "../components/dialog.js";
 
 const host = $("#signinDlg");
-const dlg = makeDialog(host, { draft: false, onClose: () => { if (shown) later.add(shown); shown = null; shownSignin = false; } });
+let shown = null, shownSignin = false, reading = false, busy = false, closeTimer = null;
 const later = new Set();  // requests that the person closed without an answer, on this page load
-let shown = null, shownSignin = false, reading = false;
+const dlg = makeDialog(host, { draft: false, onClose: () => {
+  if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+  if (shown) later.add(shown);
+  shown = null; shownSignin = false; busy = false;
+} });
 
 // Its line in Needs you (#6002): the person closed the modal before, and opens it again from the list.
 export async function openSignin(id) {
@@ -23,8 +27,8 @@ export async function openSignin(id) {
 // Each refresh: the first request at the person that this page has not shown or closed opens the modal.
 export async function signinAsks(ids) {
   const next = (ids || []).find(id => !later.has(id));
-  if (shown && !(ids || []).includes(shown)) { shown = null; shownSignin = false; dlg.close(); }  // answered elsewhere
-  if (next === undefined || shown !== null || reading) return;
+  if (shown && !busy && !(ids || []).includes(shown)) { shown = null; shownSignin = false; dlg.close(); }  // answered elsewhere
+  if (next === undefined || shown !== null || reading || busy) return;
   reading = true;
   let data, r;
   try {
@@ -83,7 +87,7 @@ function draw(r, allCreds) {
     <div class="cred-req">
       <div>${lead}</div>
       ${r.reason ? `<div class="muted t-s">Reason: ${esc(r.reason)}</div>` : ""}
-      <div class="muted t-s">Allow puts the ticked credentials into a set and grants it to ${esc(r.covers)}.</div>
+      <div class="muted t-s">Allow grants the ticked credentials to ${esc(r.covers)}.</div>
       <div class="cred-picks">${rows}</div>
       ${more.length ? `<details class="t-s"><summary>More credentials</summary><div class="cred-picks">${moreRows}</div></details>` : ""}
       <div class="actions">${button("Allow", { kind: "primary", data: { "signin-ok": r.id } })}
@@ -91,24 +95,54 @@ function draw(r, allCreds) {
     </div>`;
 }
 
+// #6916: one clear result line shown inside the dialog after Allow, before it closes.
+function allowedLine(res, count, isSignin) {
+  const unit = isSignin ? (count === 1 ? "sign-in" : "sign-ins") : (count === 1 ? "key" : "keys");
+  const target = res && res.item_id ? `#${res.item_id}` : (res && res.scope !== "agent" && res.covers ? res.covers : "");
+  const who = res && res.asked_by ? res.asked_by : "";
+  if (target && who) return `Allowed: ${count} ${unit} for ${target}, session ${who}`;
+  if (who) return `Allowed: ${count} ${unit} for session ${who}`;
+  if (target) return `Allowed: ${count} ${unit} for ${target}`;
+  return `Allowed: ${count} ${unit}`;
+}
+
+function setControlsDisabled(disabled) {
+  for (const el of host.querySelectorAll("input, button[data-signin-ok], button[data-signin-deny]")) el.disabled = disabled;
+}
+
 host.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   if (t.dataset.signinClose) return dlg.close();
   const id = +(t.dataset.signinOk || t.dataset.signinDeny || 0);
-  if (!id) return;
+  if (!id || busy) return;
   const only = [...host.querySelectorAll("input[data-signin-site]:checked")].map(i => i.value);
   if (t.dataset.signinOk && !only.length) return toast(shownSignin ? "Tick the sites to allow, or press Deny" : "Tick the credentials to allow, or press Deny", true);
   const always = [...host.querySelectorAll("input[data-signin-always]:checked")].map(i => i.value).filter(s => only.includes(s));
+  busy = true;
+  setControlsDisabled(true);
   try {
     if (t.dataset.signinOk) {
-      await act("secret", { action: "approve", request: id, only, always });
-      toast(`Allowed ${only.join(", ")}`);
+      const res = await act("secret", { action: "approve", request: id, only, always });
+      const line = allowedLine(res, only.length, shownSignin);
+      const actions = host.querySelector(".actions");
+      if (actions) actions.outerHTML = `<div class="signin-result" role="status" aria-live="polite" data-signin-result>${esc(line)}</div>`;
+      toast(line);
+      shown = null;
+      shownSignin = false;
+      later.add(id);
+      closeTimer = setTimeout(() => { closeTimer = null; busy = false; dlg.close(); }, 1800);
+      return;
     } else {
       await act("secret", { action: "refuse", request: id, note: shownSignin ? "denied in the sign-in modal" : "denied in the credentials dialog" });
       toast("Denied");
     }
-  } catch (err) { return; }  // act showed the error; the modal stays for another try
+  } catch (err) {
+    busy = false;
+    setControlsDisabled(false);
+    return;  // act showed the error; the modal stays for another try
+  }
+  busy = false;
   shown = null;
   shownSignin = false;
   later.add(id);

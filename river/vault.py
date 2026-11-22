@@ -1067,7 +1067,7 @@ def _set_name(conn, set_id):
     return r["name"] if r else None
 
 
-def grant(conn, set_name, scope, value, until=None, note=None, actor=None, checked_by=None):
+def grant(conn, set_name, scope, value, until=None, note=None, actor=None, checked_by=None, skip_request=None):
     """Grant a set to one scope, until a revoke or until (a time a person types: 7d, 2026-12-01). A person, or the
     manager for a set marked 'the manager may grant' (#5828). checked_by: a pipeline's trigger rule grants the set
     to the task it adds (#6150); _may_grant checked the person or the manager who named the set on the rule then,
@@ -1099,6 +1099,8 @@ def grant(conn, set_name, scope, value, until=None, note=None, actor=None, check
         # #5834: the requests for this set and scope are answered by the grant
         for r in conn.execute("SELECT * FROM secret_requests WHERE state IN ('open','asked') AND scope=? AND value=? "
                               "AND set_name=?", (scope, v, set_name)).fetchall():
+            if skip_request is not None and r["id"] == skip_request:
+                continue
             conn.execute("UPDATE secret_requests SET state='granted', decided_by=?, decided_at=?, grant_id=? WHERE id=?",
                          (actor, at, g["id"], r["id"]))
             if r["asked_by"]:
@@ -1321,9 +1323,43 @@ def propose(conn, rid, offered=None, ticked=None, reason=None, actor=None):
     return {**request_info(conn, _request(conn, rid)), "to": people[0]}
 
 
+def _find_matching_set(conn, pick, preferred=None):
+    """#6916: return the name of an existing set whose members are exactly pick (preferring preferred), or None."""
+    want = set(pick)
+    if preferred:
+        s = conn.execute("SELECT id, name FROM secret_sets WHERE name=?", (preferred,)).fetchone()
+        if s and set(_members(conn, s["id"])) == want:
+            return s["name"]
+    for s in conn.execute("SELECT id, name FROM secret_sets ORDER BY id"):
+        if set(_members(conn, s["id"])) == want:
+            return s["name"]
+    return None
+
+
+def _new_set_name(conn, r):
+    """#6916: a readable name from the request's item (or session) for a new set of loose keys, not reqN."""
+    if r["item_id"]:
+        it = conn.execute("SELECT short, title FROM items WHERE id=?", (r["item_id"],)).fetchone()
+        raw = ((it["short"] or it["title"]) if it else "") or ""
+        slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40].strip("-")
+        base = f"task-{r['item_id']}-{slug}" if slug else f"task-{r['item_id']}"
+    else:
+        raw = r["asked_by"] or r["value"] or "session"
+        slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40].strip("-")
+        base = f"session-{slug}" if slug else "session-keys"
+    name = base
+    n = 2
+    while conn.execute("SELECT 1 FROM secret_sets WHERE name=?", (name,)).fetchone():
+        name = f"{base}-{n}"
+        n += 1
+    return name
+
+
 def approve(conn, rid, chosen=None, actor=None, note=None):
-    """The person's OK: a set of exactly the chosen credentials (default: the ticked ones), granted to the request's
-    scope. A person; or the manager, when the person allows each chosen credential without asking (#5842)."""
+    """The person's OK: grants the chosen credentials (default: the ticked ones) to the request's scope. When the
+    chosen credentials are exactly an existing set, grants that set with no new set; otherwise creates a set named
+    from the item (#6916). A person; or the manager, when the person allows each chosen credential without asking
+    (#5842)."""
     import json
     who = session_of(conn, actor)
     r = _request(conn, rid)
@@ -1344,10 +1380,15 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
             raise RiverError(f"the person answers each request for {', '.join(asked)} (Ask me): put it to the "
                              f"person: maxpm secret propose r{r['id']} --offer {','.join(pick)}")
         actor = who["name"]
-    name = f"req{r['id']}"
-    set_change(conn, name, add=pick, note=f"request r{r['id']} of {r['asked_by']} for "
-               + (f"#{r['item_id']}" if r["item_id"] else r["value"]), actor=actor, checked=True)
-    g = grant(conn, name, r["scope"], r["value"], note=note or f"request r{r['id']}", actor=actor)
+    existing = _find_matching_set(conn, pick, r["set_name"])
+    if existing:
+        name = existing
+    else:
+        name = _new_set_name(conn, r)
+        set_change(conn, name, add=pick, note=f"request r{r['id']} of {r['asked_by']} for "
+                   + (f"#{r['item_id']}" if r["item_id"] else r["value"]), actor=actor, checked=True)
+    g = grant(conn, name, r["scope"], r["value"], note=note or f"request r{r['id']}", actor=actor,
+              skip_request=r["id"])
     at = core.iso(core.now())
     with core.tx(conn):
         conn.execute("UPDATE secret_requests SET state='granted', decided_by=?, decided_at=?, chosen=?, set_id="
@@ -1365,7 +1406,7 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
             conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, "
                          "blocked_set_by=NULL WHERE id=?", (r["item_id"],))
             core._event(conn, r["item_id"], actor, f"outside blocker cleared: request r{r['id']} allowed")
-    return {**request_info(conn, _request(conn, rid)), "grant": g["grant"]}
+    return {**request_info(conn, _request(conn, rid)), "grant": g["grant"], "set": name}
 
 
 def refuse(conn, rid, note=None, actor=None):

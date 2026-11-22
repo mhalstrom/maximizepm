@@ -2948,6 +2948,7 @@ try {
         c = core.connect()
         try:
             core.register(c, "mark", human=True)
+            iid = core._held_item(c, "ag")["id"]
             with patch.object(vault, "BACKEND", vault.Files()), \
                  patch.object(vault, "IDENTITY", lambda conn, actor: {"name": actor, "person": not actor or actor == "mark"}):
                 vault.put(c, "svc-key-1", b"secret-1", "mark")
@@ -2967,8 +2968,11 @@ try {
   const box = q("#signinDlg .box").getBoundingClientRect();
   const over = box.right > window.innerWidth + 1;
   q("#signinDlg [data-signin-ok]").click();
+  await until(() => q("#signinDlg [data-signin-result]"), "result line shown before close");
+  const result = q("#signinDlg [data-signin-result]").textContent.trim();
+  const stillOpen = !q("#signinDlg").classList.contains("hidden");
   await until(() => q("#signinDlg").classList.contains("hidden"), "dialog closed after Allow");
-  post({ title, checked, over, errors });
+  post({ title, checked, over, result, stillOpen, errors });
 } catch (e) { post({ error: String(e && e.stack || e), errors }); }'''
 
         for size in ("1280,900", "390,844"):
@@ -2990,10 +2994,15 @@ try {
                 self.assertEqual(r["title"], "Allow credentials?", (size, r))
                 self.assertEqual(r["checked"], ["svc-key-1", "svc-key-2"], (size, r))
                 self.assertFalse(r["over"], (size, r))
+                self.assertTrue(r["stillOpen"], (size, r))
+                self.assertEqual(r["result"], f"Allowed: 2 keys for #{iid}, session ag", (size, r))
                 c = core.connect()
                 try:
                     self.assertEqual(vault.get(c, "svc-key-1", "ag"), b"secret-1")
                     self.assertEqual(vault.get(c, "svc-key-2", "ag"), b"secret-2")
+                    set_names = [s["name"] for s in vault.sets(c)["sets"]]
+                    self.assertEqual(len(set_names), 1)
+                    self.assertTrue(set_names[0].startswith(f"task-{iid}-"), set_names)
                 finally:
                     c.close()
 

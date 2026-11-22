@@ -522,7 +522,7 @@ class SigninRequests(Base):
         self.assertEqual([x["name"] for x in vault.listing(self.c)["secrets"] if x["kind"] == "cookies"], ["gh-cookies"])
         got = vault.unpack_cookies(vault.Files().get(self.c, "gh-cookies"))
         self.assertEqual(sorted(c["name"] for c in got), ["_gh_sess", "user_session"])  # the new sign-in
-        self.assertEqual([x["grant"] for x in vault.grants(self.c, "gh-saved")["grants"]], [g["grant"]])  # stays
+        self.assertEqual([x["grant"] for x in vault.grants(self.c, "gh-saved")["grants"]], [g["grant"], out["grant"]])  # stays, and Allow reuses gh-saved (#6916)
 
 
 class NewPasswordInTheBrowser(Base):

@@ -823,7 +823,8 @@ class Requests(Base):
         self.assertEqual(rc, 0, out)
         self.assertIn("allowed stripe-key", out)
         rc, out = self.run_cli(["--as", "mark", "secret", "check", "dev"])
-        self.assertIn("set req2 to task #", out)
+        self.assertIn(f"set task-{self.iid}-", out)
+        self.assertNotIn("req2", out)
         rc, out = self.run_cli(["secret", "requests", "--all"])
         self.assertIn("r1 refused", out)
 
@@ -899,6 +900,40 @@ class Requests(Base):
         notice = self.last("dev", "notice")
         self.assertIn("the secrets loose-x", notice)
         self.assertNotIn("the set None", notice)
+
+    def test_approve_reuses_exact_existing_set_and_names_new_set_from_item(self):
+        # #6916: approving the exact members of an existing set grants that set with no copy;
+        # loose keys with no matching set get a name from the item, not reqN.
+        before_sets = [s["name"] for s in vault.sets(self.c)["sets"]]
+        self.assertEqual(before_sets, ["stripe-live"])
+        r = vault.request(self.c, "stripe-live", "billing", "dev")
+        vault.propose(self.c, r["request"], ["stripe-key", "stripe-webhook"], ["stripe-key", "stripe-webhook"],
+                      actor="manager-1")
+        notices_before = self.c.execute("SELECT COUNT(*) FROM messages WHERE kind='notice' AND to_agent='dev'").fetchone()[0]
+        res = vault.approve(self.c, r["request"], ["stripe-key", "stripe-webhook"], actor="mark")
+        self.assertEqual(res["set"], "stripe-live")
+        self.assertEqual([s["name"] for s in vault.sets(self.c)["sets"]], ["stripe-live"])
+        notices_after = self.c.execute("SELECT COUNT(*) FROM messages WHERE kind='notice' AND to_agent='dev'").fetchone()[0]
+        self.assertEqual(notices_after - notices_before, 1)  # no duplicate notice from grant()
+
+        # Loose keys that match an existing set also reuse that set with no copy.
+        r_match = vault.request(self.c, ["stripe-key", "stripe-webhook"], "also billing", "dev")
+        res_match = vault.approve(self.c, r_match["request"], ["stripe-key", "stripe-webhook"], actor="mark")
+        self.assertEqual(res_match["set"], "stripe-live")
+        self.assertEqual([s["name"] for s in vault.sets(self.c)["sets"]], ["stripe-live"])
+
+        # Loose keys with no matching set create a set named from the item, not reqN.
+        vault.put(self.c, "loose-1", b"v1", None)
+        vault.put(self.c, "loose-2", b"v2", None)
+        r_loose1 = vault.request(self.c, ["loose-1"], "one key", "dev")
+        res_loose1 = vault.approve(self.c, r_loose1["request"], ["loose-1"], actor="mark")
+        self.assertTrue(res_loose1["set"].startswith(f"task-{self.iid}-"), res_loose1["set"])
+        self.assertFalse(res_loose1["set"].startswith("req"), res_loose1["set"])
+
+        # A second distinct set for the same item gets a -2 suffix instead of colliding.
+        r_loose2 = vault.request(self.c, ["loose-1", "loose-2"], "two keys", "dev")
+        res_loose2 = vault.approve(self.c, r_loose2["request"], ["loose-1", "loose-2"], actor="mark")
+        self.assertEqual(res_loose2["set"], f"{res_loose1['set']}-2")
 
 
 if __name__ == "__main__":
