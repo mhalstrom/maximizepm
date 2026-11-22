@@ -6,6 +6,9 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from river import agentupdate as au
+from tests import test_page, test_view_sessions
+
 STATIC = Path(__file__).resolve().parent.parent / "river" / "static"
 
 
@@ -67,6 +70,102 @@ class AgentUpdateTexts(unittest.TestCase):
             self.assertIn('<details class="au-why t-s" data-au-more="grok"><summary>Details</summary>', html)
             self.assertIn("The update failed (exit 1); 1.0.0 still runs", html)
         self.assertNotIn("<details", run("m.dialogHtml(D.rows)", rows=[row(update={"state": "queued"})]))
+
+    def test_an_old_done_update_yields_to_a_newer_version(self):
+        # After an earlier update to g00d70a, a newer version gbb6f68 arrived (#6899): the row must offer Update now
+        # and Later for installed → latest, not 'Updated ✓' with only Close.
+        r = row("Amp", installed="0.0.1795204834-g00d70a", latest="0.0.1795363233-gbb6f68", newer=True, update={
+            "state": "done", "old": "0.0.1795190440-gf3619d", "new": "0.0.1795204834-g00d70a",
+            "message": "updated 0.0.1795190440-gf3619d → 0.0.1795204834-g00d70a; the test answered OK"})
+        self.assertEqual(run("m.stateText(D.r)", r=r), "")
+        self.assertEqual(run("m.verText(D.r)", r=r), "0.0.1795204834-g00d70a → 0.0.1795363233-gbb6f68")
+        dlg = run("m.dialogHtml(D.rows)", rows=[r])
+        self.assertIn(">Update Amp</h2>", dlg)
+        self.assertIn("0.0.1795204834-g00d70a → 0.0.1795363233-gbb6f68", dlg)
+        self.assertIn('data-au-go="amp">Update now</button>', dlg)
+        self.assertIn('data-au-later="1"', dlg)
+        self.assertNotIn("Updated ✓", dlg)
+        self.assertNotIn("gf3619d", dlg)
+        self.assertNotIn(">Close</button>", dlg)
+        lst = run("m.versionsHtml(D.s)", s={"agents": [r]})
+        self.assertIn("0.0.1795204834-g00d70a → <b>0.0.1795363233-gbb6f68</b>", lst)
+        self.assertNotIn("Updated ✓", lst)
+
+
+class AgentUpdateDialogBrowser(test_view_sessions.TmuxBase):
+    drive = test_page.PageBrowser.drive
+
+    def _seed_amp(self):
+        au.change(self.c, lambda d: d["agents"].update(amp={
+            "installed": "0.0.1795204834-g00d70a",
+            "latest": "0.0.1795363233-gbb6f68",
+            "how": "npm",
+            "package": "@sourcegraph/amp",
+            "path": "/usr/local/bin/amp",
+            "checked_at": 1795363300.0,
+            "update": {
+                "state": "done",
+                "old": "0.0.1795190440-gf3619d",
+                "new": "0.0.1795204834-g00d70a",
+                "message": "updated 0.0.1795190440-gf3619d → 0.0.1795204834-g00d70a; the test answered OK",
+            },
+        }))
+
+    def _run_dialog_close_test(self, size=None):
+        self._seed_amp()
+        driver = r'''
+const errors = window.__pageErrors;
+try {
+  await until(() => window.__appReady, "page ready");
+  if (!sessionStorage.getItem("au_reloaded")) {
+    await until(() => q("#auDlg") && !q("#auDlg").classList.contains("hidden") && q("#auTitle"), "update dialog opens");
+    const dlg = q("#auDlg");
+    check(q("#auTitle").textContent.trim() === "Update Amp", "title: " + q("#auTitle").textContent);
+    const txt = dlg.textContent;
+    check(txt.includes("0.0.1795204834-g00d70a → 0.0.1795363233-gbb6f68"), "shows installed → latest: " + txt);
+    check(!txt.includes("Updated ✓"), "no stale Updated ✓: " + txt);
+    check(!txt.includes("gf3619d"), "no old version: " + txt);
+    const go = q('#auDlg [data-au-go="amp"]');
+    check(go && go.textContent.trim() === "Update now", "Update now button");
+    const later = q('#auDlg [data-au-later]');
+    check(later && later.textContent.trim() === "Later", "Later button");
+    check(document.documentElement.scrollWidth <= window.innerWidth + 1, "no horizontal overflow");
+    q('#auDlg [data-au-close]').click();
+    await until(() => q("#auDlg").classList.contains("hidden"), "dialog closes on X");
+    let hidden = false;
+    for (let i = 0; i < 40 && !hidden; i++) {
+      const r = await fetch("api/agent-versions").then(x => x.json());
+      const a = r.agents.find(x => x.id === "amp");
+      if (a && a.later && !a.dialog) hidden = true;
+      else await sleep(50);
+    }
+    check(hidden, "X persisted later on server");
+    sessionStorage.setItem("au_reloaded", "1");
+    location.reload();
+  } else {
+    await sleep(400);
+    const r = await fetch("api/agent-versions").then(x => x.json());
+    const a = r.agents.find(x => x.id === "amp");
+    check(a && a.later && !a.dialog, "still hidden after reload");
+    check(!q("#auDlg") || q("#auDlg").classList.contains("hidden"), "dialog stays closed after reload");
+    check(!errors.length, "page errors: " + errors.join("; "));
+    post({ ok: true });
+  }
+} catch (e) {
+  post({ error: String(e && e.stack || e) });
+}
+'''
+        res = self.drive(driver, size=size)
+        self.assertTrue(res.get("ok"))
+        row = next(r for r in au.status(self.c)["agents"] if r["id"] == "amp")
+        self.assertTrue(row["later"])
+        self.assertFalse(row["dialog"])
+
+    def test_old_done_update_opens_with_update_now_and_x_persists_across_reload(self):
+        self._run_dialog_close_test(size="1240,820")
+
+    def test_old_done_update_dialog_on_phone_width(self):
+        self._run_dialog_close_test(size="390,844")
 
 
 if __name__ == "__main__":

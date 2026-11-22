@@ -19,10 +19,19 @@ const iso = (t) => t ? new Date(t * 1000).toISOString() : null;
 const active = (r) => r.update && ACTIVE.includes(r.update.state);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+// A done update whose new version is older than the current latest is from an earlier release: when a newer version
+// exists, ignore it so the row offers Update now for installed → latest (#6899).
+function updateOf(r) {
+  const u = r.update;
+  if (!u) return null;
+  if (u.state === "done" && r.newer && r.latest && u.new !== r.latest) return null;
+  return u;
+}
+
 // What the row says of its update, in a few words; "" with no update. The long message of the update stays in
 // Details (failed rows), the alert and the history (mark 2026-11-20, #6460: 'the wordyness of the text is really bad').
 export function stateText(r) {
-  const u = r.update;
+  const u = updateOf(r);
   if (!u) return "";
   if (u.state === "queued") return u.waits ? `Waits for ${plural(u.waits, "session", "sessions")}` : "Queued";
   if (u.state === "updating") return "Updating…";
@@ -36,7 +45,7 @@ const changed = (u) => !!(u.old && u.new && u.old !== u.new);
 
 // The versions beside the name: installed → newest; after an update, the old → the new version.
 export function verText(r) {
-  const u = r.update || {};
+  const u = updateOf(r) || {};
   if (u.state === "done" && changed(u)) return `${esc(u.old)} → ${esc(u.new)}`;
   return `${esc(r.installed || "?")}${r.newer ? ` → ${esc(r.latest)}` : ""}`;
 }
@@ -45,7 +54,7 @@ export function verText(r) {
 // the dialog or the Settings list draws again (keepOpen).
 const opened = new Set();
 function detailsHtml(r) {
-  const u = r.update || {};
+  const u = updateOf(r) || {};
   if (u.state !== "failed" || !u.message) return "";
   const m = u.message[0].toUpperCase() + u.message.slice(1);
   return `<details class="au-why t-s" data-au-more="${esc(r.id)}"${opened.has(r.id) ? " open" : ""}><summary>Details</summary>
@@ -62,7 +71,7 @@ function keepOpen(host) {
 const taskLink = (u) => u && u.task ? ` · <span class="link" data-open="${+u.task}">task #${+u.task}</span>` : "";
 
 function rowHtml(r, one) {
-  const u = r.update || {}, run = active(r);
+  const u = updateOf(r) || {}, run = active(r);
   const go = u.state === "queued" ? button("Cancel", { data: { "au-cancel": r.id }, title: "Cancel the update" })
     : run || u.state === "done" ? ""
     : button(u.state === "failed" ? "Try again" : "Update now", { kind: one ? "primary" : "", data: { "au-go": r.id } });
@@ -74,13 +83,13 @@ function rowHtml(r, one) {
 }
 
 export function dialogHtml(rows) {
-  const left = rows.filter(r => !active(r) && !["done"].includes((r.update || {}).state));
+  const left = rows.filter(r => !active(r) && (updateOf(r) || {}).state !== "done");
   const one = rows.length === 1;
   // The title counts the agents that are still out of date: after an update its row stays, with how it ended.
   const old = rows.filter(r => r.newer);
   const title = !old.length ? (one ? `${rows[0].label} is up to date` : "Agents are up to date")
     : old.length === 1 ? `Update ${old[0].label}` : `Updates for ${old.length} agents`;
-  const done = rows.every(r => r.update && ["done", "failed", "cancelled"].includes(r.update.state));
+  const done = rows.every(r => { const u = updateOf(r); return u && ["done", "failed", "cancelled"].includes(u.state); });
   return `<div class="dlg-head"><h2 id="auTitle">${esc(title)}</h2>${iconButton("✕", "Close", { data: { "au-close": "1" } })}</div>
     <div class="au-rows">${rows.map(r => rowHtml(r, one)).join("")}</div>
     <div class="actions">${done ? button("Close", { kind: "primary", data: { "au-close": "1" } })
@@ -95,7 +104,14 @@ function dialog() {
   d.innerHTML = '<div class="box au-box" role="dialog" aria-modal="true" aria-labelledby="auTitle"></div>';
   document.body.appendChild(d);
   root = d.firstElementChild;
-  dlg = makeDialog(d, { draft: false, onClose: () => { closedSig = sigOf(); shown = []; } });
+  dlg = makeDialog(d, { draft: false, onClose: () => {
+    closedSig = sigOf();
+    // Closing the dialog of an out-of-date agent hides it for that version on the server the way Later does (#6899),
+    // so a reload, a new tab or a restart of serve does not open it again.
+    const hide = rowsOf(shown).filter(r => r.dialog).map(r => r.id);
+    shown = [];
+    if (hide.length) run("agent_update_later", { agents: hide });
+  } });
   keepOpen(d);
   d.addEventListener("click", async (e) => {
     if (e.target === d) return;
@@ -109,7 +125,7 @@ function dialog() {
     if (go) await run("agent_update", { agent: go.dataset.auGo });
     else if (cancel) await run("agent_update_cancel", { agent: cancel.dataset.auCancel });
     else if (e.target.closest("[data-au-all]")) {
-      const ids = rowsOf(shown).filter(r => !active(r) && (r.update || {}).state !== "done").map(r => r.id);
+      const ids = rowsOf(shown).filter(r => !active(r) && (updateOf(r) || {}).state !== "done").map(r => r.id);
       await run("agent_update", { agents: ids });
     }
   });
@@ -173,7 +189,7 @@ export function versionsHtml(s) {
       ${button("Check now", { cls: "plain", data: { "au-check": "1" } })}</div>`;
   if (!rows.length) return head + `<div class="muted">No agents installed</div>`;
   return head + `<div class="au-rows au-list">${rows.map(r => {
-    const u = r.update || {}, run = active(r);
+    const u = updateOf(r) || {}, run = active(r);
     const ver = u.state === "done" && changed(u) ? verText(r)
       : `${esc(r.installed || "?")}${r.newer ? ` → <b>${esc(r.latest)}</b>` : r.latest ? " · newest" : ""}`;
     const go = u.state === "queued" ? button("Cancel", { data: { "au-cancel": r.id }, title: "Cancel the update" })
