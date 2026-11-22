@@ -1088,14 +1088,14 @@ try {
   await until(() => location.pathname === "/settings" && !q("header").classList.contains("more")
     && q("#setTabs [data-set-tab]"), "the settings from the ⋯, at /settings, the menu closed");
   q('#setTabs [data-set-tab="sessions"]').click();
-  await until(() => q("#setRows").textContent.includes("lease_ttl")
+  await until(() => q("#setRows").textContent.includes("auto_continue")
     && !q("#setRows").textContent.includes("ntfy_topic") && !q("#setPanel").classList.contains("hidden")
-    && q("#credPanel").classList.contains("hidden"), "Settings > Sessions shows only its keys");
+    && q("#credPanel").classList.contains("hidden"), "Settings > Sessions shows only its normal keys");
   check([...q("#setKey").options].some(o => o.value === "lease_ttl")
     && ![...q("#setKey").options].some(o => o.value === "ntfy_topic"), "the form lists the keys of the tab");
-  // #5850: each key a row with its plain label, its field and the key small under it
-  check(q("#setRows").textContent.includes("How long a claim lasts") && q('#setRows [data-set-input="lease_ttl"]'),
-    "Settings > Sessions: lease_ttl is a row with its label and field");
+  // #5850, #6866: each normal key is a row with its plain label, its control and the key small under it
+  check(q('#setRows [data-set-input="auto_continue"]') && !q('#setRows [data-set-input="lease_ttl"]'),
+    "Settings > Sessions: normal keys show on the tab, rare keys stay in Advanced");
   q('#setTabs [data-set-tab="people"]').click();
   await until(() => !q("#peoplePanel").classList.contains("hidden") && q("#setPanel").classList.contains("hidden"),
     "Settings > People");

@@ -77,11 +77,10 @@ try {
   q('#listSetTabs [data-ls-part="agents"]').click();
   await until(() => q('#listSetRows [data-set-input="default_effort"]'), "dialog agents tab");
 
-  const dlgSelKeys = [
-    "default_model", "default_effort", "default_min_model", "default_max_model", "default_agent",
-    "agent_for.worker", "agent_for.manager", "agent_for.reviewer", "agent_for.deployer", "agent_for.expert"
+  const dlgNormalSelKeys = [
+    "default_model", "default_effort", "default_max_model", "default_agent", "agent_for.expert"
   ];
-  for (const k of dlgSelKeys) {
+  for (const k of dlgNormalSelKeys) {
     const el = q(`#listSetRows select[data-set-input="${k}"]`);
     check(el, `dialog: ${k} is a select`);
     check(el.options[0].value === "", `dialog: ${k} has empty first option`);
@@ -96,9 +95,18 @@ try {
   check(!q('#listSetRows input[data-set-input="usage_list_hide"]'), "usage_list_hide is not a text input");
   check(q('#listSetRows [data-set-usage="usage_list_hide"]'), "usage_list_hide renders checkboxes container");
 
-  // Structured lists render row editors
-  for (const k of ["agent_order", "agent_rules", "launch_agents"]) {
-    check(q(`#listSetRows [data-set-editor="${k}"]`), `dialog: ${k} renders row editor`);
+  // agent_order renders row editor on normal Agents tab; agent_rules & launch_agents render row editors in Advanced
+  check(q('#listSetRows [data-set-editor="agent_order"]'), "dialog: agent_order renders row editor");
+
+  // Open Advanced in dialog to verify remaining selects & row editors
+  q("#listSetAdv > summary").click();
+  await until(() => q("#listSetAdv").open && q('#listSetAdvRows select[data-set-input="default_min_model"]'), "dialog advanced");
+  for (const k of ["default_min_model", "agent_for.worker", "agent_for.manager", "agent_for.reviewer", "agent_for.deployer"]) {
+    const el = q(`#listSetAdvRows select[data-set-input="${k}"]`);
+    check(el && el.options[0].value === "", `dialog advanced: ${k} is a select`);
+  }
+  for (const k of ["agent_rules", "launch_agents"]) {
+    check(q(`#listSetAdvRows [data-set-editor="${k}"]`), `dialog advanced: ${k} renders row editor`);
   }
 
   // Project overrides use the same controls
@@ -126,10 +134,10 @@ try {
   maxEl.value = "4"; maxEl.dispatchEvent(new Event("change", { bubbles: true }));
   await sleep(300);
 
-  // Add an agent_rules row via the row editor
-  q('#listSetRows [data-set-editor="agent_rules"] [data-ed-add]').click();
-  await until(() => q('#listSetRows [data-set-editor="agent_rules"] [data-ed-row="0"] [data-ed-field="patterns"]'), "agent_rules row added");
-  const pat = q('#listSetRows [data-set-editor="agent_rules"] [data-ed-row="0"] [data-ed-field="patterns"]');
+  // Add an agent_rules row via the row editor in Advanced
+  q('#listSetAdvRows [data-set-editor="agent_rules"] [data-ed-add]').click();
+  await until(() => q('#listSetAdvRows [data-set-editor="agent_rules"] [data-ed-row="0"] [data-ed-field="patterns"]'), "agent_rules row added");
+  const pat = q('#listSetAdvRows [data-set-editor="agent_rules"] [data-ed-row="0"] [data-ed-field="patterns"]');
   pat.value = "*.css, logo"; pat.dispatchEvent(new Event("change", { bubbles: true }));
   await sleep(300);
 
@@ -143,8 +151,9 @@ try {
   check(q('#setRows select[data-set-input="default_effort"]').value === "high", "Settings > Agents shows saved default_effort");
   check(q('#setRows select[data-set-input="default_agent"]').value === "codex", "Settings > Agents shows saved default_agent");
   check(q('#setRows [data-set-editor="agent_order"]'), "Settings > Agents shows agent_order row editor");
-  check(q('#setRows [data-set-editor="agent_rules"]'), "Settings > Agents shows agent_rules row editor");
-  check(q('#setRows [data-set-editor="launch_agents"]'), "Settings > Agents shows launch_agents row editor");
+  q("#setAdvanced > summary").click();
+  await until(() => q('#setAdvRows [data-set-editor="agent_rules"]'), "Settings Advanced shows agent_rules row editor");
+  check(q('#setAdvRows [data-set-editor="launch_agents"]'), "Settings Advanced shows launch_agents row editor");
 
   post({ ok: true, errors });
 } catch (e) { post({ error: String(e.stack || e) + " errors: " + errors.join(" | ") }); }

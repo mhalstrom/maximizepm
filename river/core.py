@@ -3648,6 +3648,25 @@ def mask(key, value):
     return value
 
 
+def _platform_setting_choices():
+    """Cached control specs for agent-adapter option settings (choice, toggle, model, effort)."""
+    def build():
+        out = {}
+        for plat, pl in launch_platforms().items():
+            for opt, sp in pl["options"].items():
+                k = pl["prefix"] + opt
+                if sp["kind"] == "choice":
+                    out[k] = {"kind": "select", "values": list(sp.get("choices") or ()), "allow_empty": True}
+                elif sp["kind"] == "toggle":
+                    out[k] = {"kind": "select", "values": ["on", "off"], "allow_empty": False}
+                elif opt == "model":
+                    out[k] = {"kind": "agent_model", "platform": plat, "allow_empty": True}
+                elif opt == "effort":
+                    out[k] = {"kind": "agent_effort", "platform": plat, "allow_empty": True}
+        return out
+    return _memo("platform_setting_choices", build)
+
+
 def setting_choices(conn):
     """Valid choices and control kinds for settings, from the same lists config_set validates against (#6865)."""
     agents = agent_types()
@@ -3657,6 +3676,7 @@ def setting_choices(conn):
     price_models = list(parse_prices(setting(conn, "model_prices")).keys())
     default_models = list(dict.fromkeys(price_models + ladder_models))
     keys = {
+        **_platform_setting_choices(),
         "default_model": {"kind": "model", "values": default_models, "allow_empty": True},
         "default_effort": {"kind": "select", "values": efforts, "allow_empty": True},
         "default_min_model": {"kind": "select", "values": ladder_models, "allow_empty": True},
@@ -3680,17 +3700,6 @@ def setting_choices(conn):
         "ntfy_priority": {"kind": "select", "values": list(NTFY_PRIORITIES), "allow_empty": False},
         "release_approval": {"kind": "select", "values": list(RELEASE_APPROVALS), "allow_empty": True},
     }
-    for plat, pl in launch_platforms().items():
-        for opt, sp in pl["options"].items():
-            k = pl["prefix"] + opt
-            if sp["kind"] == "choice":
-                keys[k] = {"kind": "select", "values": list(sp.get("choices") or ()), "allow_empty": True}
-            elif sp["kind"] == "toggle":
-                keys[k] = {"kind": "select", "values": ["on", "off"], "allow_empty": False}
-            elif opt == "model":
-                keys[k] = {"kind": "agent_model", "platform": plat, "values": default_models, "allow_empty": True}
-            elif opt == "effort":
-                keys[k] = {"kind": "agent_effort", "platform": plat, "values": efforts, "allow_empty": True}
     return {
         "agent_types": agents,
         "efforts": efforts,
@@ -3700,15 +3709,37 @@ def setting_choices(conn):
     }
 
 
+# Common settings shown on the normal Settings tabs and Settings dialog (#6866); every other setting lives in the
+# closed, searchable Advanced section.
+NORMAL_SETTINGS = (
+    "default_agent", "default_model", "default_effort", "default_max_model",
+    "agent_order", "agent_for.expert", "usage_list_hide",
+    "max_sessions", "auto_continue", "web_terminal",
+    "browser_pace", "browser_size",
+    "notifications", "notify_channels",
+    "cost_limit",
+)
+
+_IGNORED_UNKNOWN_SETTINGS = set()
+
+
 def config_list(conn):
-    rows = [dict(r) for r in conn.execute("SELECT scope,key,value FROM settings ORDER BY scope,key")]
-    for r in rows:
-        r["value"] = mask(r["key"], r["value"])
     # The settings of the agents that are not built in (#5169) follow the built-in ones.
     extra = {k: v for k, v in agent_setting_defaults().items() if k not in DEFAULT_SETTINGS}
+    defaults = {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS
+    rows = []
+    for r in conn.execute("SELECT scope,key,value FROM settings ORDER BY scope,key"):
+        if r["key"] not in defaults:
+            if r["key"] not in _IGNORED_UNKNOWN_SETTINGS:
+                _IGNORED_UNKNOWN_SETTINGS.add(r["key"])
+                print(f"maxpm: ignoring saved value for removed setting {r['key']!r}", file=sys.stderr)
+            continue
+        row = dict(r)
+        row["value"] = mask(row["key"], row["value"])
+        rows.append(row)
     from . import space
-    return {"defaults": {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS, "overrides": rows,
-            "now": space.current(conn), "choices": setting_choices(conn)}  # sizes (#5711), choices (#6865)
+    return {"defaults": defaults, "overrides": rows, "normal": list(NORMAL_SETTINGS),
+            "now": space.current(conn), "choices": setting_choices(conn)}  # sizes (#5711), choices (#6865), normal (#6866)
 
 
 # ---------------------------------------------------------------- models

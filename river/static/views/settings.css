@@ -53,6 +53,12 @@
 .set-ov-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 #setValueWrap { display: block; min-width: 0; }
 #setValueWrap > select, #setValueWrap > input { width: 100%; }
+.set-adv { margin-top: var(--sp-5); border-top: var(--hair) solid var(--line); padding-top: var(--sp-3); }
+.set-adv > summary { cursor: pointer; font-weight: 600; padding-left: 0; }
+.set-adv-bar { margin: var(--sp-3) 0 var(--sp-2); }
+.set-adv-bar input { width: 100%; max-width: var(--w-form); box-sizing: border-box;
+  background-color: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); }
+.ls-adv-rows { max-height: 40vh; overflow-y: auto; }
 .set-scoped { margin-top: var(--sp-6); }
 /* #6361: the agent providers in launch order: place, name, model, effort, max sessions, running, ↑ ↓ ✕. A phone puts
    the fields under the name, two to a line. */

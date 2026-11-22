@@ -20,33 +20,31 @@ const has = (...keys) => (k) => keys.includes(k);
 // [tab key, tab name, one line for its heading, test of a settings key (none: not a group of keys)]
 export const GROUPS = [
   ["credentials", "Credentials", ""],
-  ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
+  ["agents", "Agents", "Which agents the Start button opens, their models, and their launch order.",
     (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
       || has("launch_agents", "agent_rules", "agent_order", "usage_list_hide", "agent_update_check", "agent_auto_update",
              "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
              "prompt_wait", "stuck_after")(k)],
-  ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
+  ["sessions", "Sessions", "How many sessions run, whether they keep taking work, and the web terminal.",
     (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)
       || has("max_leases", "max_sessions", "busy_max", "gone_after", "away_after", "owner_ttl", "reserve_ttl",
              "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every",
              "command_hang_after", "command_hang_kill")(k)],
-  ["work", "Work", "Reviews, releases, deploys, and how items are added, checked and cleaned up.",
-    (k) => /^(review|release_|similar_|list_cleanup_)/.test(k)
-      || has("auto_review", "deploy_timeout", "result_look", "push_guard", "due_warn_before",
-             "replan_threshold", "keep_prereq_limit", "default_prerequisite_mode", "stale_after", "unpushed_after",
-             "conflict_max_lines", "hook_timeout", "cost_limit")(k)],
-  ["monitoring", "Monitoring", "The checks that watch your projects, and what a fault does.",
-    (k) => k.startsWith("ops_") || has("health_person_minutes", "activity_silence")(k)],
-  ["browser", "Browser", "The browser of each session, and the canvases it shows.",
+  ["browser", "Browser", "The browser of each session, and its default size and speed.",
     (k) => /^(browser_|canvas_)/.test(k)],
-  ["notifications", "Notifications", "Where MaximizePM sends what needs you, and how often.",
-    (k) => /^(notify_|ntfy_)/.test(k) || k === "timezone"],
+  ["notifications", "Notifications", "Where MaximizePM sends what needs you, and paired phones.",
+    (k) => /^(notify_|ntfy_)/.test(k) || k === "notifications" || k === "timezone"],
+  ["cost", "Cost", "Spending limits for your sessions.",
+    (k) => k === "cost_limit"],
   ["policies", "Policies", ""],
   ["people", "People", ""],
-  ["advanced", "Advanced", "maxpm serve, storage limits and upkeep.", () => true],
 ];
 const KEY_GROUPS = GROUPS.filter(g => g[3]);
-export const groupOf = (key) => KEY_GROUPS.find(g => g[3](key))[0];
+export const groupOf = (key) => {
+  const g = KEY_GROUPS.find(g => g[3](key));
+  return g ? g[0] : "advanced";
+};
+export const normalSet = () => new Set((S && S.settings && S.settings.normal) || []);
 
 let current = store("river.settingsTab");
 if (!GROUPS.some(g => g[0] === current)) current = "credentials";  // Credentials first (#5848)
@@ -84,29 +82,46 @@ export function renderSettings(force = false) {
   $("#setDevices").classList.toggle("hidden", current !== "notifications");
   if (current === "agents") { renderProviders(force); renderVersions(); }
   if (current === "notifications") renderDevices();
-  const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
-  const keys = Object.keys(d).filter(k => groupOf(k) === current)
-    .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
-  let html = "", head = undefined;
-  for (const k of keys) {
-    const p = current === "agents" ? programOf(k) : null;
-    if (current === "agents" && p !== head) { html += `<div class="cred-sub">${esc(p || "Every agent")}</div>`; head = p; }
-    html += settingRow(k, d, o.filter(x => x.key === k), now, { rawText: true });
-  }
+  const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {}, norm = normalSet();  // now: a size limit's size (#5711)
+  const keys = Object.keys(d).filter(k => norm.has(k) && groupOf(k) === current)
+    .sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
+  const html = keys.map(k => settingRow(k, d, o.filter(x => x.key === k), now, { rawText: true })).join("");
   // A field the person types in keeps its text: the rows are not drawn again while one has focus.
   const rows = $("#setRows"), a = document.activeElement;
   const typing = !force && rows.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT");
   if (!typing && rows.dataset.sig !== html) { rows.innerHTML = html; rows.dataset.sig = html; }
+  renderAdvanced(force);
   // The form for one project, agent or item lists the keys of this group; the key chosen before stays when it is in it.
-  const sel = $("#setKey"), sig = keys.join("|");
+  const allGroupKeys = Object.keys(d).filter(k => groupOf(k) === current)
+    .sort((a, b) => (norm.has(a) ? 0 : 1) - (norm.has(b) ? 0 : 1) || labelOf(a).localeCompare(labelOf(b)));
+  const sel = $("#setKey"), sig = allGroupKeys.join("|");
   if (sel.dataset.sig !== sig || tableGroup !== current) {
     const keep = sel.value;
-    sel.innerHTML = keys.map(k => `<option value="${esc(k)}">${esc(labelOf(k))}</option>`).join("");
-    if (keys.includes(keep)) sel.value = keep;
+    sel.innerHTML = allGroupKeys.map(k => `<option value="${esc(k)}">${esc(labelOf(k))}</option>`).join("");
+    if (allGroupKeys.includes(keep)) sel.value = keep;
     sel.dataset.sig = sig;
     tableGroup = current;
     renderScopedValue();
   }
+}
+
+function renderAdvanced(force = false) {
+  const det = $("#setAdvanced");
+  if (!det || !S || !S.settings) return;
+  const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {}, norm = normalSet();
+  const advKeys = Object.keys(d).filter(k => !norm.has(k))
+    .sort((a, b) => (programOf(a) || "").localeCompare(programOf(b) || "") || labelOf(a).localeCompare(labelOf(b)));
+  $("#setAdvSummary").textContent = `Advanced settings (${advKeys.length})`;
+  if (!det.open) return;
+  const rows = $("#setAdvRows"), a = document.activeElement;
+  const typing = !force && rows.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT");
+  if (typing) return;
+  const q = ($("#setAdvSearch").value || "").trim().toLowerCase();
+  const shown = q ? advKeys.filter(k => k.toLowerCase().includes(q) || labelOf(k).toLowerCase().includes(q)
+    || (programOf(k) || "").toLowerCase().includes(q)) : advKeys;
+  const html = shown.map(k => settingRow(k, d, o.filter(x => x.key === k), now, { rawText: true })).join("")
+    || `<div class="muted t-s">No matching settings.</div>`;
+  if (rows.dataset.sig !== html) { rows.innerHTML = html; rows.dataset.sig = html; }
 }
 
 function renderScopedValue() {
@@ -259,7 +274,10 @@ export async function saveRow(el) {
   } catch (e) { el.value = cur ? cur.value : ""; }  // act showed the error
 }
 wireSettingControls($("#setRows"), () => S, labelOf, () => renderSettings(true));
+wireSettingControls($("#setAdvRows"), () => S, labelOf, () => renderAdvanced(true));
 wireSettingControls($("#setValueWrap"), () => S, labelOf);
+$("#setAdvanced").addEventListener("toggle", () => renderAdvanced(true));
+$("#setAdvSearch").addEventListener("input", () => renderAdvanced(true));
 $("#setKey").addEventListener("change", renderScopedValue);
 $("#setScope").addEventListener("change", renderScopedValue);
 $("#setScopeName").addEventListener("change", renderScopedValue);

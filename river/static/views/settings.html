@@ -35,8 +35,13 @@
     <div id="setVersions" class="set-providers hidden"></div>
     <!-- #6471: paired phones (Settings > Notifications), each with name, platform, last seen and Remove. -->
     <div id="setDevices" class="set-providers hidden"></div>
-    <!-- #5850: one row per setting: its label, its value for every project, the values for one project, agent or item. -->
+    <!-- #5850, #6866: common settings of this tab; rarely changed settings live in the closed Advanced section below. -->
     <div id="setRows" class="set-rows"></div>
+    <details class="set-adv" id="setAdvanced">
+      <summary id="setAdvSummary">Advanced settings</summary>
+      <div class="set-adv-bar"><input type="search" id="setAdvSearch" placeholder="Search settings…" aria-label="Search advanced settings"></div>
+      <div id="setAdvRows" class="set-rows"></div>
+    </details>
     <details class="set-scoped"><summary>Set one for a single project, agent or item</summary>
       <div class="muted t-s">The most specific value wins: item, then agent, then project, then every project, then the default.</div>
       <div class="form set-form">
