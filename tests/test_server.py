@@ -1157,9 +1157,12 @@ class LaunchAgent(unittest.TestCase):
         core.project_add(self.c, "web", path=root)
         add = lambda title: core.item_add(self.c, "web", title)["id"]
         sent = []
-        server.dispatch_item(self.c, add("shared folder"), runner=sent.append)
-        self.assertIn(f"cd {root} && ", sent[-1])  # shared, the default: the project folder
-        core.config_set(self.c, "workspace", "worktree", project="web")
+        # worktree is the default for git repositories (#6863); shared is opt-in.
+        core.config_set(self.c, "workspace", "shared", project="web")
+        t0 = server.dispatch_item(self.c, add("shared folder"), runner=sent.append)
+        self.assertIn(f"cd {root} && ", sent[-1])
+        core.unregister(self.c, t0["session_name"])
+        core.config_unset(self.c, "workspace", project="web")
         t = server.dispatch_item(self.c, add("own worktree"), runner=sent.append)
         name = t["session_name"]
         wt = os.path.join(os.path.dirname(root), "web.worktrees", name)
@@ -1211,6 +1214,109 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "shared"):
             core.config_set(self.c, "workspace", "own")
 
+    def test_every_tier1_agent_and_hermes_gets_its_own_worktree_and_dirty_shared_folder_is_refused(self):
+        """#6863: every agent launch (Claude Code, Codex, Antigravity CLI, Hermes) of a git project gets its own
+        worktree outside the project folder by default, even when the project folder has uncommitted changes; a launch
+        into a shared folder with uncommitted changes that are not its own is refused, while a session's own worktree
+        keeps its uncommitted changes on continuation."""
+        import json
+        import shlex
+        import subprocess
+        root = os.path.join(os.path.realpath(self.dir.name), "web")
+        os.makedirs(root)
+
+        def git(*a, cwd=root):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        Path(root, "app.txt").write_text("v1\n", encoding="utf-8")
+        git("add", "app.txt")
+        git("commit", "-q", "-m", "first")
+        # Person's own uncommitted changes (modified tracked file + untracked file) in the project folder.
+        Path(root, "app.txt").write_text("v1-wip\n", encoding="utf-8")
+        Path(root, "scratch.tmp").write_text("untracked\n", encoding="utf-8")
+
+        core.project_add(self.c, "web", path=root)
+        core.config_set(self.c, "launch_agents",
+                        "Claude Code=@claude-code; Codex=@codex; Antigravity=@antigravity; Hermes=@hermes")
+        add = lambda title: core.item_add(self.c, "web", title)["id"]
+        agents_under_test = ("Claude Code", "Codex", "Antigravity", "Hermes")
+
+        # Default workspace (worktree): each agent gets its own clean worktree outside root before starting.
+        for label in agents_under_test:
+            sent = []
+            t = server.dispatch_item(self.c, add(f"worktree {label}"), agent=label, runner=sent.append)
+            name = t["session_name"]
+            wt = t["workspace"]
+            expected_wt = os.path.join(os.path.dirname(root), "web.worktrees", name)
+            self.assertEqual(wt, expected_wt)
+            self.assertEqual(t["path"], wt)
+            self.assertFalse(Path(wt).resolve().is_relative_to(Path(root).resolve()))
+            self.assertIn(f"cd {wt} && ", sent[-1])
+            self.assertIn(f"MAXPM_WORKSPACE={wt}", sent[-1])
+            self.assertIn(f"MAXPM_PROJECT_DIR={root}", sent[-1])
+            self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt), f"maxpm/{name}")
+            self.assertEqual(git("status", "--porcelain", cwd=wt), "")
+            self.assertEqual(Path(wt, "app.txt").read_text(encoding="utf-8"), "v1\n")
+            if label == "Antigravity":
+                words = shlex.split(t["command"])
+                cfg = json.loads(words[words.index("--settings") + 1])
+                self.assertIn(wt, cfg["trustedWorkspaces"])
+            elif label == "Codex":
+                words = shlex.split(t["command"])
+                table = words[words.index("-c") + 1]
+                self.assertIn(f'{json.dumps(wt)}={{trust_level="trusted"}}', table)
+                self.assertIn(f'{json.dumps(root)}={{trust_level="trusted"}}', table)
+            core.unregister(self.c, name)
+        # The person's uncommitted changes in the project folder are untouched.
+        self.assertEqual(Path(root, "app.txt").read_text(encoding="utf-8"), "v1-wip\n")
+        self.assertTrue(Path(root, "scratch.tmp").exists())
+
+        # Continuation in a session's own worktree (reuse_workspace_from) allows its own uncommitted changes.
+        first_item = add("own dirty wt")
+        sent = []
+        t1 = server.dispatch_item(self.c, first_item, agent="Antigravity", runner=sent.append)
+        wt1 = t1["workspace"]
+        Path(wt1, "app.txt").write_text("agent-wip\n", encoding="utf-8")
+        second_item = add("continue own dirty wt")
+        t2 = server.dispatch_item(self.c, second_item, agent="Claude Code", reuse_workspace_from=t1["session_name"],
+                                  runner=sent.append)
+        self.assertEqual(t2["workspace"], wt1)
+        self.assertIn(f"cd {wt1} && ", sent[-1])
+        core.unregister(self.c, t1["session_name"])
+        core.unregister(self.c, t2["session_name"])
+
+        # Explicit shared mode on a dirty git folder refuses every agent and takes the start back.
+        core.config_set(self.c, "workspace", "shared", project="web")
+        for label in agents_under_test:
+            it_id = add(f"dirty shared {label}")
+            with self.assertRaisesRegex(RiverError, "2 uncommitted changes that are not its own"):
+                server.dispatch_item(self.c, it_id, agent=label, runner=[].append)
+            shown = core.item_show(self.c, it_id)
+            self.assertEqual(shown["status"], "open")
+            self.assertIsNone(shown["reserved_for"])
+        with self.assertRaisesRegex(RiverError, "uncommitted changes that are not its own"):
+            server.start_session(self.c, root, agent="Antigravity", runner=[].append)
+
+        # Unlinked dirty git folder also refuses start_session.
+        other = os.path.join(os.path.realpath(self.dir.name), "unlinked")
+        os.makedirs(other)
+        git("init", "-q", "-b", "main", cwd=other)
+        Path(other, "a.txt").write_text("a\n", encoding="utf-8")
+        git("add", "a.txt", cwd=other)
+        git("commit", "-q", "-m", "init", cwd=other)
+        Path(other, "a.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(RiverError, "1 uncommitted change that are not its own"):
+            server.start_session(self.c, other, agent="Antigravity", runner=[].append)
+
+        # Once the shared folder is clean, an explicit shared launch succeeds.
+        Path(root, "app.txt").write_text("v1\n", encoding="utf-8")
+        Path(root, "scratch.tmp").unlink()
+        sent = []
+        t_clean = server.dispatch_item(self.c, add("clean shared"), agent="Antigravity", runner=sent.append)
+        self.assertIn(f"cd {root} && ", sent[-1])
+        core.unregister(self.c, t_clean["session_name"])
+
     def test_a_worktree_made_by_maxpm_is_trusted_before_antigravity_codex_copilot_and_grok_start(self):
         """#6339: a worktree maxpm makes is trusted before the agent starts (agy --settings trustedWorkspaces,
         codex -c projects={<wt>={trust_level=...}}, copilot config.json trustedFolders, grok trusted_folders.toml); a folder
@@ -1250,6 +1356,7 @@ class LaunchAgent(unittest.TestCase):
             # Shared folder (not made by maxpm): Codex (#6432, its -c flag) and agy (#6456, its session-only
             # --settings) trust the project's linked folder for this start only, and write no file; Copilot and
             # Grok keep their trust prompt.
+            core.config_set(self.c, "workspace", "shared", project="web")
             for label in ("Antigravity", "Codex", "Copilot", "Grok"):
                 sent = []
                 t = server.dispatch_item(self.c, add(f"shared {label}"), agent=label, runner=sent.append)

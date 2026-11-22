@@ -146,6 +146,7 @@ class Launch(Env):
         core.project_add(c, "web", path=root)
         core.config_set(c, "launch_agents", "Cursor=@cursor")
         add = lambda title: core.item_add(c, "web", title)["id"]
+        core.config_set(c, "workspace", "shared", project="web")
         t = server.dispatch_item(c, add("shared"), agent="Cursor", runner=lambda line: None)
         self.assertNotIn("--trust", shlex.split(t["command"]))
         self.assertFalse((Path(root) / ".cursor" / "cli.json").exists())

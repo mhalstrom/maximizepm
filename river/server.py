@@ -329,6 +329,8 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
     try:
         if project:
             t = _workspace(conn, t, name, project["id"])
+        else:
+            _refuse_dirty_folder(t["path"], name)
         _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner, conn)
     except Exception as e:
@@ -336,19 +338,38 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
     return {**t, "session_name": name, "folder": t["path"]}
 
 
+def _refuse_dirty_folder(path, name, project=None):
+    """Refuse to start an agent in a git folder that is not its own worktree and has uncommitted changes (#6863)."""
+    top = _git(path, "rev-parse", "--show-toplevel", check=False)
+    if not top:
+        return
+    dirty = _git(top, "status", "--porcelain", check=False)
+    if not dirty:
+        return
+    n = len(dirty.splitlines())
+    hint = (f"use a worktree (maxpm config set workspace worktree --project {project})"
+            if project else "use a worktree or commit/clean the folder first")
+    raise RiverError(f"refusing to start {name} in {path}: {n} uncommitted change{'s' if n != 1 else ''} "
+                     f"that are not its own; {hint}")
+
+
 def _workspace(conn, t, name, project_id, make=True):
-    """The folder a session that changes code starts in (setting workspace, #5856). shared: t as it is. worktree or
+    """The folder a session that changes code starts in (setting workspace, #5856, #6863). worktree (the default) or
     setup: the session's own git worktree, made now from the project folder's HEAD at
     <parent>/<folder>.worktrees/<name> on the branch maxpm/<name> (a start in a subfolder starts in the same subfolder
-    of it); a session that has one keeps it. setup: t['setup'] is the project's workspace_setup command, which
-    _open_terminal runs in the worktree before the agent. The session gets MAXPM_WORKSPACE and MAXPM_PROJECT_DIR.
-    make=False (a resumed chat): only a worktree that the session has already."""
+    of it); a session that has one keeps it. A non-git folder stays as it is unless workspace was set explicitly.
+    shared: t as it is, refused on a fresh start when the git folder has uncommitted changes that are not its own.
+    setup: t['setup'] is the project's workspace_setup command, which _open_terminal runs in the worktree before the
+    agent. The session gets MAXPM_WORKSPACE and MAXPM_PROJECT_DIR. make=False (a resumed chat): only a worktree that
+    the session has already."""
     # The item's own value first: each try of a task works in a worktree (#5996), also in a shared project.
     item_id = (t.get("item") or {}).get("id") if isinstance(t.get("item"), dict) else t.get("task")
     mode = core.setting(conn, "workspace", item_id=item_id, project_id=project_id)
-    if mode == "shared":
-        return t
     project = core._project_name(conn, project_id)
+    if mode == "shared":
+        if make:
+            _refuse_dirty_folder(t["path"], name, project)
+        return t
     setup = core.setting(conn, "workspace_setup", project_id=project_id).strip()
     if mode == "setup" and not setup:
         raise RiverError(f"workspace is setup for project {project}, and workspace_setup names no command: maxpm "
@@ -363,8 +384,10 @@ def _workspace(conn, t, name, project_id, make=True):
     else:
         top = _git(t["path"], "rev-parse", "--show-toplevel", check=False)
         if not top:
-            raise RiverError(f"workspace is {mode} for project {project}, and {t['path']} is no git repository, so it has "
-                             f"no worktrees: maxpm config set workspace shared --project {project}")
+            if core.setting_explicit(conn, "workspace", item_id=item_id, project_id=project_id):
+                raise RiverError(f"workspace is {mode} for project {project}, and {t['path']} is no git repository, so it has "
+                                 f"no worktrees: maxpm config set workspace shared --project {project}")
+            return t
         root = Path(top).resolve()
         rel = Path(t["path"]).resolve().relative_to(root)
         wt = root.parent / f"{root.name}.worktrees" / name

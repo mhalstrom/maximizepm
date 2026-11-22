@@ -474,13 +474,15 @@ DEFAULT_SETTINGS = {
     # queue off (a project, or global): the project uses sessions only (#5851). Its maxpm go gives no item, goal or
     # wait: the session becomes a session with no item, and the page shows New session, not the queue's Start.
     "queue": "on",
-    # workspace (a project, or global; #5856): where a session that changes code works. shared: the project folder,
-    # as before. worktree: a git worktree of its own, <parent>/<folder>.worktrees/<session>, on the branch
-    # maxpm/<session>. setup: a worktree, then workspace_setup runs in it before the agent (with MAXPM_WORKSPACE and
-    # MAXPM_PROJECT_DIR set): the project's own script copies .env files, picks ports, starts a dev server. The manager,
-    # deployers and reviewers work in the project folder. maxpm serve removes a worktree when its
-    # session has ended and its branch is merged or has no commit (workspace_sweep); else maxpm workspace list says why.
-    "workspace": "shared",
+    # workspace (a project, or global; #5856, #6863): where a session that changes code works. worktree (the default):
+    # a git worktree of its own, <parent>/<folder>.worktrees/<session>, on the branch maxpm/<session> (a non-git folder
+    # uses the folder as it is unless workspace was set to worktree or setup explicitly). setup: a worktree, then
+    # workspace_setup runs in it before the agent (with MAXPM_WORKSPACE and MAXPM_PROJECT_DIR set): the project's own
+    # script copies .env files, picks ports, starts a dev server. shared: the project folder itself (refused when it
+    # has uncommitted git changes that are not the session's own). The manager, deployers and reviewers work in the
+    # project folder. maxpm serve removes a worktree when its session has ended and its branch is merged or has no
+    # commit (workspace_sweep); else maxpm workspace list says why.
+    "workspace": "worktree",
     "workspace_setup": "",
     # session_builds (#6398, mark 2026-11-20: 'builds are not allowed to be in the scratch folder'): each session that
     # maxpm starts gets <session_builds>/<session>/ as MAXPM_BUILD_DIR, for a build outside the checkout's own target
@@ -3387,6 +3389,37 @@ def setting(conn, key: str, item_id: int | None = None, agent: str | None = None
         if r:
             return r["value"]
     return default
+
+
+def setting_explicit(conn, key: str, item_id: int | None = None, agent: str | None = None,
+                     project_id: int | None = None, kind: str | None = None) -> bool:
+    """True when `key` is set in the settings table at any matching scope (not just DEFAULT_SETTINGS)."""
+    if item_id is not None and (project_id is None or kind is None):
+        r = conn.execute("SELECT project_id, kind FROM items WHERE id=?", (item_id,)).fetchone()
+        if r:
+            project_id = r["project_id"] if project_id is None else project_id
+            kind = r["kind"] if kind is None else kind
+    scopes = []
+    if item_id is not None:
+        scopes.append(f"item:{item_id}")
+    if agent:
+        scopes.append(f"agent:{agent}")
+    if kind:
+        scopes.append(f"kind:{kind}")
+    snap = _settings_rows(conn)
+    if snap:
+        rows, names = snap
+        if project_id is not None and project_id in names:
+            scopes.append(f"project:{names[project_id]}")
+        scopes.append("global")
+        return any((sc, key) in rows for sc in scopes)
+    if project_id is not None:
+        r = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+        if r:
+            scopes.append(f"project:{r['name']}")
+    scopes.append("global")
+    return any(conn.execute("SELECT 1 FROM settings WHERE scope=? AND key=?", (sc, key)).fetchone()
+               for sc in scopes)
 
 
 def _scope(conn, project=None, item=None, agent=None, kind=None) -> str:
