@@ -362,8 +362,8 @@ What each agent's list came from on this Mac on 2026-11-20 (#6257):
 
 ## Tier 1 agents
 
-mark 2026-11-19: 'we should add it and have a definitive feature set'. The tier 1 agents are Claude Code, Codex and
-Antigravity CLI: `agents.TIER1 = ("claude", "codex", "antigravity")` in `river/agents/__init__.py`, and
+mark 2026-11-19: 'we should add it and have a definitive feature set'. The tier 1 agents are Claude Code, Codex,
+Antigravity CLI and Hermes: `agents.TIER1 = ("claude", "codex", "antigravity", "hermes")` in `river/agents/__init__.py`, and
 `agents.is_tier1(name)` for an id, an alias or a platform name. Each one has every feature below. The setup guide
 shows the tier 1 agents first (Choose an agent); the other agents are under More agents and have the features their
 adapter gives.
@@ -407,6 +407,11 @@ Exceptions (each also in `EXCEPTIONS` of the test):
   pane, which works at its prompt. With the setting `agy_activity_hooks` on (#6351), a maxpm message that comes
   during a turn reaches the session at the end of that turn: the Stop hook answers `{"decision": "continue",
   "reason": <the messages>}`, and agy gives the model the text as a system message.
+- Hermes, `shell_guard`: Hermes v0.22.7 loads hooks only from ~/.hermes/config.yaml (#6685), with no per-launch flag
+  and no project hook file, and policy p140 forbids writing into a CLI's home from a launch. `river/agents/hermes.py`
+  implements `read_hook()` and `hook_answer()` for Hermes's `pre_tool_call` shell hook.
+- Hermes, `read_dirs`: Hermes v0.22.7 has no per-launch file permission flag (#6686) to allow read-only folders and
+  deny their secret files.
 
 Antigravity CLI's `shell_guard` is behind the setting `agy_activity_hooks` (off by default, mark 2026-11-20). agy
 loads hooks only from `hooks.json` in its home or in the project, and an adapter installs nothing in a CLI's home
@@ -431,6 +436,7 @@ server, driven through the page's API and the page itself, with its desktop and 
 | Claude Code | pass | pass | pass (the Dispatch runs) | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | Codex | pass | pass | pass (the Dispatch runs) | pass | pass | pass; a typed "tell instead" answer is not sent (#6259) | fail: a question during a turn shows no card (#6258) | pass | pass | pass | pass | pass (#6254) |
 | Antigravity CLI | pass | fail with an effort: the model is lost (#6260); pass without | fail before #6278 (its maxpm go ran in the queue folder, which --add-dir named); pass after it (no --add-dir) | pass | pass | pass; still working after a Stop (#6261) | pass | pass | pass | pass | pass | setting off: not reached, the model refused the command itself (#6251); `agy_activity_hooks` on (#6351, 2026-11-20, claude-sonnet-5-5 low in agy): a `git push` refused while an alert was unread, the alert brought in at the turn's end, working and idle from the hooks in the second of each |
+| Hermes | pass (`hermes status` + `hermes setup --portal`) | pass (`gpt-6.1-terra`, `low`, `openai-codex`; Settings shows live model from screen and effort from command line; context meter `14.6k / 500k`) | pass (#6681, 2026-11-21, worktree of a scratch repo, no question: `go`, `claim`, commit and `done` in 34 s; `AGENTS.md` root and subfolder 2 of 2) | pass | pass (`pong` in 10 s via `native` wake) | pass (no folder trust prompt; approval mode `smart` in `~/.hermes/config.yaml` auto-approved `rm -rf` of a test folder in #5190, `manual` is Hermes's default) | pass (`ask_forms.Hermes` for `clarify`) | pass (100 commands, `/model` and `/reasoning` open Settings) | pass (ended turn at STOP; idle end in 4.3 min) | pass (`--resume <id>`; creation flags fixed on resume, `/model` and `/reasoning` live) | pass | exception (#6685: loads hooks only from `~/.hermes/config.yaml`, `read_hook`/`hook_answer` ready) |
 
 The runs of 2026-11-19, with Claude Code 2.1.329 (haiku, low), codex-cli 0.159.1 (gpt-6-luna, low) and agy 1.5.13
 (gemini-3.8-flash-medium). Each run: Dispatch of a worker item from the page (the agent asks the person a date format

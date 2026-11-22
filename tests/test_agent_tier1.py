@@ -55,13 +55,17 @@ def _chat(a):
     return None
 
 
+# Agents that have no folder trust prompt (Hermes v0.22.7 never asks 'trust this folder'; checked in source, #6681).
+NO_TRUST = {"hermes"}
+
+
 def _states(a):
     d = a.layout()
     if (a.state or {}).get("state") not in agents.STATE_SOURCES:
         return "STATE needs one source of the state: hook or detect"
     if not d.get("idle") or not d.get("working") or not d.get("blocked"):
         return "DETECT needs idle, working and blocked rules (the pane watcher reads blocked screens of every agent)"
-    if not any(re.search(r"(?i)trust", b) for b in d["blocked"]):
+    if a.id not in NO_TRUST and not any(re.search(r"(?i)trust", b) for b in d["blocked"]):
         return "no DETECT['blocked'] rule reads the folder trust question"
     return None
 
@@ -218,6 +222,8 @@ FEATURES = {
 # (agent, feature) -> why it lacks the feature: its fix item, or why it cannot have it. The doc's section lists each.
 EXCEPTIONS = {
     ("antigravity", "native_message"): "no command, socket or flag",
+    ("hermes", "shell_guard"): "loads hooks only from ~/.hermes/config.yaml (#6685)",
+    ("hermes", "read_dirs"): "no per-launch file permission flag (#6686)",
 }
 
 

@@ -102,17 +102,22 @@ ALLOW = ("Read Edit Write Glob Grep Bash(git status:*) Bash(git diff:*) Bash(git
          "Bash(git add:*) Bash(git commit:*)")
 # The repository secret of the model key. Antigravity CLI (agy, #6249) takes a Gemini API key with its model provider
 # gemini (antigravity.google/docs/install), which agy_line sets for the run alone.
-SECRET = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY", "agy": "GEMINI_API_KEY"}
+SECRET = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY", "agy": "GEMINI_API_KEY",
+          "hermes": "OPENROUTER_API_KEY"}
 PACKAGE = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"}  # npm, inside the job only
 # agy is no npm package: Google's script puts its one program into the folder that --dir names (its install.sh, read
 # 2026-11-20). The jobs put it where the agent's own user reads it.
 AGY_INSTALL = "curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir {dir}"
+HERMES_INSTALL = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
 
 
 def install_line(cli, folder="/usr/local/bin"):
-    """The shell command that installs the job's agent CLI: npm for Claude Code and Codex; agy into `folder`."""
+    """The shell command that installs the job's agent CLI: npm for Claude Code and Codex; agy into `folder`; hermes
+    via its official install script."""
     if cli == "agy":
         return AGY_INSTALL.format(dir=folder)
+    if cli == "hermes":
+        return HERMES_INSTALL
     return f"npm install -g {PACKAGE[cli]}"
 
 
@@ -484,6 +489,9 @@ def _agent_cmd(cli, tools, max_cost):
     if cli == "agy":
         return (agy_line(tools) + ' > "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" '
                 '|| echo $? > "$MAXPM_OUT/agent-exit"')
+    if cli == "hermes":
+        return ('hermes chat -q "$MAXPM_PROMPT" --format stream-json --yolo '
+                '> "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit"')
     return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
             f'--max-budget-usd {float(max_cost):g} --add-dir {OUT} --allowedTools '
             + " ".join(shlex.quote(t) for t in tools)
@@ -544,7 +552,7 @@ def workflow_text(pipeline, repo, ref, names, cli="claude", secret=None, test=No
         '          mkdir -p "$MAXPM_OUT"',
         f'          gh run view {run} --repo "$GITHUB_REPOSITORY" --log-failed 2>&1 | tail -c 200000 > "$MAXPM_OUT/failed.log" || true',
         "      - name: Install the agent CLI",
-        *([f"        run: {install_line(cli)}"] if cli != "agy" else [
+        *([f"        run: {install_line(cli)}"] if cli not in ("agy", "hermes") else [
             "        run: |",
             f'          {install_line(cli, "$HOME/.local/bin")}',
             '          echo "$HOME/.local/bin" >> "$GITHUB_PATH"']),
@@ -851,6 +859,9 @@ def gitlab_script(cli, secret, max_cost, tools):
     elif cli == "agy":
         agent = (f'(cd "$WORK/repo" && agent {key} {agy_line(tools)} > "$MAXPM_OUT/transcript.jsonl" '
                  '2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit")')
+    elif cli == "hermes":
+        agent = (f'(cd "$WORK/repo" && agent {key} hermes chat -q "$MAXPM_PROMPT" --format stream-json --yolo '
+                 '> "$MAXPM_OUT/transcript.jsonl" 2> "$MAXPM_OUT/agent.err" || echo $? > "$MAXPM_OUT/agent-exit")')
     else:
         agent = (f'(cd "$WORK/repo" && agent {key} claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose '
                  f'--permission-mode dontAsk --max-budget-usd {float(max_cost):g} --add-dir "$MAXPM_OUT" '

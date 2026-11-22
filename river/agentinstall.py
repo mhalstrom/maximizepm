@@ -13,6 +13,7 @@ the panes, so the Start button finds what the guide found."""
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -59,7 +60,8 @@ METHODS = {
     "pi": {"install": "curl -fsSL https://pi.dev/install.sh | sh",
            "signin": None, "status": None, "dirs": ["~/.local/bin"]},  # sign-in: /login inside pi
     "hermes": {"install": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
-               "signin": "hermes setup --portal", "status": None, "dirs": ["~/.local/bin", "~/.hermes/bin"]},
+               "signin": "hermes setup --portal", "status": ["status"],
+               "status_not": r"Providers:\s*none connected", "dirs": ["~/.local/bin", "~/.hermes/bin"]},
     # Two programs are named grok (xAI's Grok Build, the community grok-cli); this is xAI's own.
     "grok": {"install": "curl -fsSL https://x.ai/cli/install.sh | bash",
              "signin": "grok login --device-auth", "status": None, "dirs": ["~/.local/bin", "~/.grok/bin"]},
@@ -139,9 +141,11 @@ def signed_in(platform, exe):
     if STATUS_RUNNER is not None:
         ok = STATUS_RUNNER(argv) == 0
     else:
+        bad = METHODS.get(platform, {}).get("status_not")
         try:
-            ok = subprocess.run(argv, capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
-                                env={**os.environ, "PATH": extra_path()}).returncode == 0
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+                               env={**os.environ, "PATH": extra_path()})
+            ok = r.returncode == 0 and (not bad or not re.search(bad, (r.stdout or "") + (r.stderr or "")))
         except (OSError, subprocess.SubprocessError):
             ok = False
     with _lock:

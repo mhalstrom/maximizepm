@@ -586,7 +586,7 @@ DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str,
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
                "fixed": str, "ask": str, "ask_form": str, "ask_open": (dict, type(None))}
-ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity")
+ASK_FORMS = ("claude", "codex", "copilot", "opencode", "antigravity", "hermes")
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -1592,7 +1592,7 @@ def page_list():
 # The tier 1 agents, by adapter id. Each one has every feature of the Tier 1 section of docs/agent-adapters.md;
 # tests/test_agent_tier1.py fails when one lacks a feature that the section does not name as an exception. The setup
 # guide shows them first (Choose an agent).
-TIER1 = ("claude", "codex", "antigravity")
+TIER1 = ("claude", "codex", "antigravity", "hermes")
 
 
 def is_tier1(name):

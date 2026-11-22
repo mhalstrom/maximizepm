@@ -31,6 +31,11 @@ AGENTS = {
     # /docs/install, 'Over SSH'). agy models exits 0 only when it is signed in.
     "agy": {"name": "Antigravity CLI", "status": ["agy", "models"], "login": "agy", "paste": True,
             "choose": (r"Select login method", "Enter")},
+    # Hermes Agent (#6681): `hermes setup --portal` runs Nous Portal's OAuth device-code flow (prints the link and
+    # user code, polls until complete: paste False). `hermes status` exits 0 and prints 'Providers: none connected'
+    # when no provider is authenticated.
+    "hermes": {"name": "Hermes", "status": ["hermes", "status"], "status_not": r"Providers:\s*none connected",
+               "login": "hermes setup --portal", "paste": False},
 }
 STATUS_RUNNER = None  # tests: fn(argv) -> exit code (0: signed in)
 WAIT = 20.0  # seconds that start waits for the link on the window's screen
@@ -59,7 +64,9 @@ def signed_in(agent):
     if not shutil.which(argv[0]):
         return None
     try:
-        return subprocess.run(argv, capture_output=True, timeout=20, stdin=subprocess.DEVNULL).returncode == 0
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        bad = _agent(agent).get("status_not")
+        return r.returncode == 0 and (not bad or not re.search(bad, (r.stdout or "") + (r.stderr or "")))
     except (OSError, subprocess.SubprocessError):
         return False
 

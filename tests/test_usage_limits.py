@@ -285,8 +285,8 @@ class FallbackAndLaunchAvoidance(unittest.TestCase):
                                 source="screen")
         st = core.status(self.conn)
         self.assertEqual([r["agent_type"] for r in st["agent_limits"] if r["known"]], ["claude", "antigravity"])
-        # Codex has no reading: it shows too, as not known (mark 2026-11-20: also with no session of the agent)
-        self.assertEqual([r["agent_type"] for r in st["agent_limits"]], ["claude", "codex", "antigravity"])
+        # Codex and Hermes have no reading: they show too, as not known (mark 2026-11-20: also with no session of the agent)
+        self.assertEqual([r["agent_type"] for r in st["agent_limits"]], ["claude", "codex", "antigravity", "hermes"])
         buf = io.StringIO()
         with redirect_stdout(buf):
             cli.render_status(st)
@@ -303,7 +303,7 @@ class FallbackAndLaunchAvoidance(unittest.TestCase):
 
         # Page state carries agent_limits
         pst = core.state(self.conn)
-        self.assertEqual(len(pst["agent_limits"]), 3)
+        self.assertEqual(len(pst["agent_limits"]), 4)
         self.assertIn("Codex: not known", out)
 
         # Cost plans carries recorded agent limits

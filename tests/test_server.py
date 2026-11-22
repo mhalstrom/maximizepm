@@ -4859,7 +4859,8 @@ class SetupGuide(unittest.TestCase):
         self.assertEqual((agy["found"], agy["main"], agy["signin"], agy["install"]["command"]),
                          (False, True, True, "curl -fsSL https://antigravity.google/cli/install.sh | bash"))
         self.assertNotIn("Gemini CLI", clis)
-        self.assertEqual([a["label"] for a in clis.values() if a["main"]], ["Claude Code", "Codex", "Antigravity CLI"])
+        self.assertEqual([a["label"] for a in clis.values() if a["main"]],
+                         ["Claude Code", "Codex", "Antigravity CLI", "Hermes"])
         agentinstall.BREW = "/opt/homebrew/bin/brew"
         self.assertEqual(agentinstall.install_command("antigravity"), "/opt/homebrew/bin/brew install --cask antigravity-cli")
         core.PLATFORM = "linux"  # casks are for macOS

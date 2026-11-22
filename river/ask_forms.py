@@ -476,4 +476,101 @@ class Antigravity:
         return _move(ask["current"], n, "Right", "Left")
 
 
-FORMS = {"codex": Codex(), "copilot": Copilot(), "opencode": OpenCode(), "antigravity": Antigravity()}
+# Hermes Agent (clarify tool, #6681). A framed box titled '╭─ Hermes Agent needs your input ───╮', '1 question' or
+# 'N questions', then one status line per question ('✓' answered with its locked answer indented below, '▸' active,
+# '·' pending), and under the active question its numbered choices ('❯' marks the selected one; '[x]'/'[ ]' boxes
+# when multi_select), with 'Other (type your answer)' / 'Other (type below)' last, then '╰───╯' and the key line
+# ('↑/↓ to select, Enter to lock, Tab next question'). Enter locks the choice or opens the freetext composer on Other
+# (then type + Enter); Space toggles a checkbox; Tab / Shift+Tab move between questions. Checked against Hermes v0.22.7
+# (hermes_cli/cli_tui_mixin.py _get_clarify_display_fragments and tests/fixtures/hermes/pane_blocked_clarify.txt).
+class Hermes:
+    anchor = r"^\s*╭─\s*Hermes Agent needs your input\b"
+    _COUNT = re.compile(r"^\d+ questions?$")
+    _Q = re.compile(r"^([✓▸·])\s+(\S.*)$")
+    _OPT = re.compile(r"^\s*(❯\s*)?(?:\[([ x])\]\s+)?(\d+)\.\s+(\S.*?)\s*$")
+    _OTHER = re.compile(r"^Other(?:\s*\(type (?:your answer|below)\)|:\s*(.*))$")
+
+    @staticmethod
+    def _unbox(line):
+        s = line.strip()
+        if s.startswith("│"):
+            s = s[1:]
+        if s.endswith("│"):
+            s = s[:-1]
+        return s.rstrip()
+
+    def read(self, rows, t):
+        body = []
+        closed = False
+        for x in rows[t + 1:]:
+            st = x.strip()
+            if st.startswith("╰"):
+                closed = True
+                break
+            if st.startswith("│"):
+                body.append(self._unbox(x))
+        if not closed or not body:
+            return None
+        tabs, current, question, opts, at, typing = [], None, "", [], None, False
+        in_active = False
+        for raw in body:
+            st = raw.strip()
+            if not st or self._COUNT.match(st):
+                continue
+            qm = self._Q.match(st)
+            if qm:
+                mark, qtext = qm.group(1), qm.group(2).strip()
+                in_active = (mark == "▸")
+                if in_active:
+                    current = len(tabs)
+                    question = qtext
+                tabs.append({"header": qtext[:40], "done": mark == "✓", "submit": False})
+                continue
+            if in_active:
+                om = self._OPT.match(raw)
+                if om:
+                    if om.group(1):
+                        at = len(opts)
+                    label = om.group(4).strip()
+                    oth = self._OTHER.match(label)
+                    is_other = bool(oth)
+                    typed = (oth.group(1) or "").strip() if oth and oth.group(1) is not None else ""
+                    if is_other and "type below" in label.lower():
+                        typing = True
+                    opts.append(_opt(int(om.group(3)), label, len(opts),
+                                     checked=None if om.group(2) is None else om.group(2) == "x",
+                                     text=is_other, typed=typed))
+                elif not opts and question:
+                    question += " " + st
+        if not opts or current is None:
+            return None
+        ask = _dialog(tabs, question, opts, at, current, t, rows)
+        ask["typing"] = typing
+        return ask
+
+    def finish(self, ask, raw):
+        pass
+
+    def answer(self, ask, pick, text, picks):
+        at, box = _need_at(ask), _box_of(ask, text)
+        if ask.get("typing"):
+            if not text:
+                raise RiverError("the question waits for your own answer: write it")
+            return _rub(box.get("typed")) + _typed(text) + [{"key": "Enter"}], text
+        own = (lambda pos, t: _move(pos, box["stop"]) + [{"key": "Enter"}, {"pause": True}] + _typed(t)
+               + [{"key": "Enter"}])
+        if ask["multi"]:
+            keys, pos, picked = _toggles(ask, picks, "Space")
+            keys += own(pos, text) if text else [{"key": "Enter"}]
+            return keys, ", ".join(picked + ([text] if text else [])) or "nothing"
+        if text:
+            return own(at, text), text
+        o = _one(ask, pick)
+        return _move(at, o["stop"]) + [{"key": "Enter"}], o.get("typed") or o["label"]
+
+    def tab(self, ask, n):
+        return _move(ask["current"], n, "Tab", "BTab")
+
+
+FORMS = {"codex": Codex(), "copilot": Copilot(), "opencode": OpenCode(), "antigravity": Antigravity(),
+         "hermes": Hermes()}

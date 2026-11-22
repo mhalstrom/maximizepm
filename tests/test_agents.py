@@ -711,17 +711,17 @@ class PaneState(Env):
         fix = Path(__file__).resolve().parent / "fixtures" / "hermes" / "pane_blocked_clarify.txt"
         pane["screen"] = fix.read_text(encoding="utf-8")
         p = self.server.pane_prompts(self.c, {name: pane["id"]})[name]
-        self.assertEqual(p["options"][p["tell"]], "3. Other (type your answer)")
+        self.assertEqual(p["options"][p["tell"]], "Other (type your answer)")
         with mock.patch.object(self.server, "PROMPT_PAUSE", 0):
             got = self.server.prompt_answer(self.c, name, p["sig"], other="green", who="mark")
-        self.assertEqual((got["picked"], got["text"]), ("3. Other (type your answer)", "green"))
+        self.assertEqual((got["picked"], got["text"]), ("green", "green"))
         launcher = ("/Users/x/.hermes/tools/python-3.14.9/bin/python3 -I -c import os, re, sys\\012"
                     "sys.path.insert(0, '/Users/x/.hermes/hermes-agent')\\012main() -m gpt-6.1-terra --reasoning low")
         ttys = []
         self.server.TTY_PS_RUNNER = lambda t: ttys.append(t) or f"-zsh\n{launcher}\n"
         self.addCleanup(setattr, self.server, "TTY_PS_RUNNER", None)
         got = {s["key"]: s for s in sessions.session_settings(self.c, name)["settings"]}
-        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("gpt-6.1-terra", "command line"))
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("gpt-6.1-terra", "screen"))
         self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "command line"))
         self.assertEqual(ttys[-1], "ttys00" + pane["id"][1:])
         self.server.TTY_PS_RUNNER = lambda t: "-zsh\n"  # no Hermes on the terminal: nothing read

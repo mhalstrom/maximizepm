@@ -285,9 +285,13 @@ DETECT = {
         r"Hermes Agent needs your input",  # the clarify tool's question box
         r"⚠️? *Dangerous Command",  # a command approval
         r"↑/↓ to select, Enter to (?:lock|confirm)",  # every menu that waits for a person
+        r"Allow this hook to run\?",  # first-use consent prompt for a shell hook
     ],
     # The question box ends with an option that lets the person type the answer (a regex).
     "tell_instead": r"Other \(type your answer\)",
+    # The clarify question box (river/ask_forms.Hermes reads and answers it on a page card, #6681).
+    "ask": r"^\s*╭─\s*Hermes Agent needs your input\b",
+    "ask_form": "hermes",
     # The layout of a blocked screen (river/agents DETECT_LAYOUT; server._prompt_found reads it). The menu marks its
     # selected option with ❯ inside a frame of │ ╭ ╰, as the defaults say. The lines inside the box under the menu
     # (an approval's reason, " delete in root path") are the prompt's (#5213). Under the box the watcher accepts only
@@ -588,11 +592,75 @@ def chat_usage(lines):
 
 
 def chat_settings(lines):
-    """The provider that the session runs on (its billing provider) and its model (the session row's model, from its
-    start: gpt-6.1-terra on 2026-11-20, #6280)."""
+    """The provider that the session runs on (its billing provider), its model (the session row's model, from its
+    start: gpt-6.1-terra on 2026-11-20, #6280), and its effort when model_config records it."""
     s = _session(lines) or {}
-    got = {"provider": s.get("billing_provider"), "model": s.get("model")}
+    got = {"provider": s.get("billing_provider"), "model": s.get("model"), "effort": read_effort(lines)}
     return {k: v for k, v in got.items() if v}
+
+
+def screen_settings(lines):
+    """The model shown on Hermes's classic CLI status bar (' ☤ gpt-6.1-terra · 15.4K/500K · ...'), so a live /model
+    change shows at once in the Settings dialog (#6681)."""
+    for line in reversed(lines or ()):
+        m = re.match(r"^\s*☤\s+(\S+)\s+·", line)
+        if m:
+            return {"model": m.group(1)}
+    return {}
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of a Hermes chat copy into the prompt cache / context meter state (#6681). Hermes stores the
+    last call's prompt and completion tokens in sessions.model_config._usage_anchor."""
+    try:
+        r = json.loads(raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else raw)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(r, dict):
+        return
+    if r.get("type") == "message":
+        at = _at(r.get("timestamp"))
+        if at:
+            st["_msg_at"] = at
+            if st.get("last"):
+                st["last"] = {**st["last"], "start": at, "at": at}
+        return
+    if r.get("type") != "session":
+        return
+    if r.get("model"):
+        st["model"] = r["model"]
+    try:
+        cfg = json.loads(r.get("model_config") or "{}")
+    except (TypeError, ValueError):
+        return
+    anc = cfg.get("_usage_anchor") if isinstance(cfg, dict) else None
+    if not isinstance(anc, dict):
+        return
+    ctx = int(anc.get("prompt_tokens") or 0) + int(anc.get("completion_tokens") or 0)
+    at = st.get("_msg_at") or _at(r.get("ended_at") or r.get("started_at"))
+    if ctx > 0 and at:
+        st["last"] = {"start": at, "at": at, "context": ctx}
+
+
+def read_hook(payload):
+    """A Hermes pre_tool_call shell hook's JSON input (agent/shell_hooks.py) as a hook report, for terminal calls;
+    None for another event or tool (#6681)."""
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != "pre_tool_call":
+        return None
+    if payload.get("tool_name") != "terminal":
+        return None
+    inp = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    cmd = inp.get("command")
+    sid = payload.get("session_id")
+    return {"event": "pre_tool_call", "session_id": sid if isinstance(sid, str) and sid else None, "state": None,
+            "run": cmd if isinstance(cmd, str) else ""}
+
+
+def hook_answer(res):
+    """What `maxpm report --hook hermes` prints for Hermes's shell hook (agent/shell_hooks.py _parse_response)."""
+    if res.get("deny"):
+        return json.dumps({"decision": "block", "reason": res["deny"]})
+    return None
 
 
 def config_settings(env=None):
@@ -606,8 +674,8 @@ def config_settings(env=None):
     return {"effort": m.group(1)} if m else {}
 
 
-# Where the Settings dialog reads each setting of a running session (#6280).
-SETTINGS_READ = {"model": ("chat",), "effort": ("config",)}
+# Where the Settings dialog reads each setting of a running session (#6280, #6681).
+SETTINGS_READ = {"model": ("chat", "screen"), "effort": ("chat", "config")}
 
 
 def chat_texts(raw):
@@ -795,6 +863,80 @@ def read_commands(folder):
 SETUP = {"instructions": "AGENTS.md", "skills_dir": "~/.hermes/skills",
          "voice": "/voice on: Hermes listens and speaks (its own voice mode)",
          "open_link": None}
+
+
+def _yaml_mcp_entry(entry):
+    """Format one mcp_servers.maxpm block (2-space indented under mcp_servers:) without PyYAML."""
+    lines = ["  maxpm:", f"    command: {json.dumps(entry['command'])}"]
+    args = entry.get("args") or []
+    lines.append("    args: [" + ", ".join(json.dumps(str(a)) for a in args) + "]")
+    env = entry.get("env") or {}
+    if env:
+        lines.append("    env:")
+        for k, v in env.items():
+            lines.append(f"      {k}: {json.dumps(str(v))}")
+    return "\n".join(lines) + "\n"
+
+
+def _strip_mcp_maxpm(text):
+    """Remove an existing `  maxpm:` subsection inside top-level `mcp_servers:` (and empty `mcp_servers:` if nothing
+    else remains under it). Returns (new_text, had_maxpm, has_mcp_section)."""
+    lines = text.splitlines(keepends=True)
+    out, in_mcp, skip_maxpm, had, has_mcp = [], False, False, False, False
+    for ln in lines:
+        stripped = ln.strip()
+        indent = len(ln) - len(ln.lstrip(" "))
+        if stripped and not stripped.startswith("#") and indent == 0:
+            in_mcp = bool(re.match(r"^mcp_servers\s*:", ln))
+            skip_maxpm = False
+            if in_mcp:
+                has_mcp = True
+        elif in_mcp and stripped and not stripped.startswith("#"):
+            if indent == 2:
+                skip_maxpm = bool(re.match(r"^  maxpm\s*:", ln))
+                if skip_maxpm:
+                    had = True
+                    continue
+            elif skip_maxpm and indent > 2:
+                continue
+            else:
+                skip_maxpm = False
+        elif skip_maxpm:
+            continue
+        out.append(ln)
+    return "".join(out), had, has_mcp
+
+
+def write_mcp_config(path=None, remove=False):
+    """Add (or remove) MaximizePM's MCP server in $HERMES_HOME/config.yaml (or `path`) under `mcp_servers.maxpm`
+    (#6681). Keeps all other keys and comments, and saves the previous file as config.yaml.bak."""
+    from . import setup_entry
+    f = Path(path).expanduser() if path else hermes_home() / "config.yaml"
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    base, had, has_mcp = _strip_mcp_maxpm(old)
+    if remove:
+        if not had:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        new = base
+    else:
+        entry = setup_entry()
+        entry["env"].pop("MAXPM_CHAT", None)
+        block = _yaml_mcp_entry(entry)
+        if has_mcp:
+            new = re.sub(r"(?m)^(mcp_servers\s*:\s*\n)", r"\1" + block, base, count=1)
+        else:
+            new = base.rstrip("\n") + ("\n\n" if base.strip() else "") + "mcp_servers:\n" + block
+        if new == old:
+            return f"MaximizePM is already in {f}; nothing changed"
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(new, encoding="utf-8")
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Hermes session has no maxpm tools."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +
+            ". A new Hermes session has the maxpm tools.")
+
 
 # 12. Update (#6430): hermes update updates its own install (a git folder); no newest version can be read before it.
 UPDATE = {"self": ["update"]}

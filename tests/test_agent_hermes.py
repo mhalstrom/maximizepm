@@ -504,5 +504,97 @@ class Deliver(HomeCase):
                          ["hermes", "chat", "--resume", "local-zz", "-q", "hello"])
 
 
+class Tier1Parity(HomeCase):
+    """#6681: clarify ask_form, screen_settings, context meter (chat_cache_line), read_hook/hook_answer,
+    write_mcp_config, and runner/CI/login wiring."""
+
+    def test_clarify_dialog_reads_and_answers_through_ask_forms(self):
+        from river import ask_forms
+        form = ask_forms.FORMS["hermes"]
+        rows = screen("pane_blocked_clarify.txt").splitlines()
+        t = next(i for i, x in enumerate(rows) if re.search(form.anchor, x))
+        ask = form.read(rows, t)
+        self.assertIsNotNone(ask)
+        self.assertEqual(ask["question"], "Which color do you prefer?")
+        self.assertEqual([o["label"] for o in ask["options"]],
+                         ["red (Recommended)", "blue", "Other (type your answer)"])
+        self.assertEqual(ask["at"], 0)
+        self.assertEqual(ask["current"], 0)
+        self.assertFalse(ask["multi"])
+        keys, label = form.answer(ask, 1, None, None)
+        self.assertEqual(keys, [{"key": "Down"}, {"key": "Enter"}])
+        self.assertEqual(label, "blue")
+        keys_other, text = form.answer(ask, None, "green", None)
+        self.assertEqual(keys_other, [{"key": "Down"}, {"key": "Down"}, {"key": "Enter"}, {"pause": True},
+                                      {"text": "green"}, {"pause": True}, {"key": "Enter"}])
+        self.assertEqual(text, "green")
+
+        # Multi-question with multi-select checkboxes
+        multi_rows = [
+            "╭─ Hermes Agent needs your input ────────────────╮",
+            "│ 2 questions                                    │",
+            "│ ✓ Format?                                      │",
+            "│     ISO                                        │",
+            "│ ▸ Which checks?                                │",
+            "│   ❯ [ ] 1. unit                                │",
+            "│     [x] 2. lint                                │",
+            "│     [ ] 3. Other (type your answer)            │",
+            "╰────────────────────────────────────────────────╯",
+        ]
+        m_ask = form.read(multi_rows, 0)
+        self.assertEqual(m_ask["current"], 1)
+        self.assertTrue(m_ask["tabs"][0]["done"])
+        self.assertTrue(m_ask["multi"])
+        self.assertEqual(form.tab(m_ask, 0), [{"key": "BTab"}])
+        m_keys, m_picked = form.answer(m_ask, None, None, [0, 1])
+        self.assertEqual(m_keys, [{"key": "Space"}, {"key": "Enter"}])
+        self.assertEqual(m_picked, "unit, lint")
+
+    def test_screen_settings_and_context_meter(self):
+        self.assertEqual(hermes.screen_settings(screen("pane_idle.txt").splitlines()), {"model": "gpt-6.1-terra"})
+        self.assertEqual(hermes.screen_settings(screen("pane_working.txt").splitlines()), {"model": "gpt-6.1-terra"})
+        st = {"last": None, "ttl": None, "model": None}
+        sline = json.dumps({
+            "type": "session", "model": "gpt-6.1-terra", "started_at": 1790000000.0,
+            "model_config": json.dumps({"_usage_anchor": {"prompt_tokens": 13951, "completion_tokens": 171},
+                                        "reasoning_config": {"effort": "low"}}),
+        })
+        mline = json.dumps({"type": "message", "role": "assistant", "timestamp": 1790000120.0})
+        hermes.chat_cache_line(sline.encode(), st)
+        hermes.chat_cache_line(mline.encode(), st)
+        self.assertEqual(st["model"], "gpt-6.1-terra")
+        self.assertEqual(st["last"]["context"], 14122)
+        self.assertEqual(st["last"]["at"], "2026-09-21T14:15:20Z")
+        self.assertEqual(hermes.chat_settings([sline])["effort"], "low")
+
+    def test_read_hook_and_hook_answer(self):
+        got = hermes.read_hook({"hook_event_name": "pre_tool_call", "tool_name": "terminal",
+                                "tool_input": {"command": "tmux kill-server"}, "session_id": "local-ab"})
+        self.assertEqual(got, {"event": "pre_tool_call", "session_id": "local-ab", "state": None,
+                               "run": "tmux kill-server"})
+        self.assertIsNone(hermes.read_hook({"hook_event_name": "pre_tool_call", "tool_name": "read_file"}))
+        self.assertEqual(json.loads(hermes.hook_answer({"deny": "refused"})),
+                         {"decision": "block", "reason": "refused"})
+        self.assertIsNone(hermes.hook_answer({}))
+
+    def test_write_mcp_config_adds_updates_and_removes_cleanly(self):
+        cfg = self.home / "config.yaml"
+        cfg.write_text("model:\n  default: gpt-6.1-terra\nmcp_servers:\n  other:\n    command: other-mcp\n",
+                       encoding="utf-8")
+        msg = hermes.write_mcp_config(cfg)
+        self.assertIn("added MaximizePM", msg)
+        text = cfg.read_text(encoding="utf-8")
+        self.assertIn("  maxpm:\n", text)
+        self.assertIn("  other:\n", text)
+        self.assertIn("default: gpt-6.1-terra", text)
+        self.assertTrue((self.home / "config.yaml.bak").exists())
+        self.assertIn("already", hermes.write_mcp_config(cfg))
+        rm = hermes.write_mcp_config(cfg, remove=True)
+        self.assertIn("took MaximizePM out", rm)
+        after = cfg.read_text(encoding="utf-8")
+        self.assertNotIn("  maxpm:", after)
+        self.assertIn("  other:\n", after)
+
+
 if __name__ == "__main__":
     unittest.main()

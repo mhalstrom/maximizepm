@@ -73,6 +73,10 @@ CLIS = {
     # uses the model provider gemini, else agy's own sign-in on the runner.
     "agy": {"label": "Antigravity CLI", "type": "antigravity",
             "key": "a secret with --var GEMINI_API_KEY in a set granted to the runner, else agy signed in there"},
+    # Hermes Agent (#6681): `hermes chat -q <prompt> --format stream-json --yolo` runs a single-turn headless job.
+    "hermes": {"label": "Hermes", "type": "hermes",
+               "key": "a secret with --var OPENROUTER_API_KEY (or OPENAI_API_KEY / ANTHROPIC_API_KEY) in a set granted "
+                      "to the runner, else hermes signed in there"},
 }
 LOG_KEEP = 400      # transcript lines that maxpm runner log and the page show at most
 SPAWN = None        # tests: fn(argv, script, transcript_path) -> an object with pid, poll() and terminate()
@@ -443,6 +447,9 @@ def _cli_line(r, run, model, perm=None, gemini=False):
     if (run["cli"] or r["cli"]) == "agy":
         from .pipeline import agent_job
         return agent_job.agy_line(rules, (perm or {}).get("deny") or [], provider=bool(gemini))
+    if (run["cli"] or r["cli"]) == "hermes":
+        return ('hermes chat -q "$MAXPM_PROMPT" --format stream-json --yolo'
+                + (f" -m {shlex.quote(model)}" if model else ""))
     allow = " ".join(shlex.quote(t) for t in rules)
     deny = " ".join(shlex.quote(t) for t in (perm or {}).get("deny") or [])
     return ('claude -p "$MAXPM_PROMPT" --output-format stream-json --verbose --permission-mode dontAsk '
