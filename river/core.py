@@ -18248,6 +18248,7 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
                     + ". It is closed; record nothing. Go on to the next one.", it["id"], actor)
         if status == "done":
             res["acts_on_answer"] = _act_on_answer(conn, it, actor, said, choice)
+            _notify_waiting_on_answer(conn, it, actor, said, choice)
     return res
 
 
@@ -18548,6 +18549,7 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
     it = _item(conn, item_id)
     if it["status"] in CLOSED_STATES:
         raise RiverError(_already_closed(conn, it))
+    is_person_answer = it["doer"] == "human" and not (_is_ai(conn, actor) and not helper_person(conn, actor))
     if choice is not None:
         if it["doer"] != "human":
             raise RiverError(f"#{item_id} is no person's item; --choice is a person's pick of its options")
@@ -18555,8 +18557,20 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, force
         choice, output = decision_choice(decision_of(it), choice, output)
         if is_defer_choice(choice):
             return item_reply(conn, item_id, raw_output, actor=actor, choice=choice, postpone=True)
-    elif it["doer"] == "human" and not _is_ai(conn, actor) and is_defer_text(output):
-        return item_reply(conn, item_id, output, actor=actor, postpone=True)
+    if choice is None and is_person_answer:
+        if is_defer_text(output):
+            return item_reply(conn, item_id, output, actor=actor, postpone=True)
+        dec = decision_of(it)
+        if dec and dec.get("options") and it["kind"] == "work":
+            matched, full = _match_decision_option(dec, output)
+            if matched is not None:
+                choice, output = matched, full
+                if is_defer_choice(choice):
+                    return item_reply(conn, item_id, output, actor=actor, choice=choice, postpone=True)
+            else:
+                if not full:
+                    raise RiverError("pick an option or write your answer")
+                return _keep_open_no_option(conn, it, full, actor)
     changed = check_changed(changed) if changed else None
     proof, missing = done_proof(conn, item_id, actor, **proof) if proof is not None else (None, [])
     if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
@@ -20762,6 +20776,23 @@ def decision_choice(decision, choice, text=None):
     return got, f"{got}: {text}" if text else got
 
 
+def _match_decision_option(decision, text):
+    """Match a person's free-text answer against a decision's option labels (#6895): exact label (any case) or
+    '<label>: <rest>' / '<label> - <rest>'. Returns (canonical_label, full_text) or (None, stripped_text)."""
+    text = (text or "").strip()
+    labels = [o["label"] for o in (decision or {}).get("options") or []]
+    if not text or not labels:
+        return None, text
+    for lbl in sorted(labels, key=len, reverse=True):
+        if text.lower() == lbl.lower():
+            return lbl, lbl
+        m = re.match(r"^" + re.escape(lbl) + r"(?:\s*:\s*|\s+[—–-]\s+)(.+)$", text, re.I | re.S)
+        if m:
+            rest = m.group(1).strip()
+            return lbl, f"{lbl}: {rest}" if rest else lbl
+    return None, text
+
+
 # Option labels and whole-reply texts that postpone a person's item instead of finishing its outcome (#6526):
 # picking one keeps the item open and blocked, so items waiting on it do not become ready.
 _DEFER_CHOICE_RE = re.compile(
@@ -20842,6 +20873,37 @@ def item_reply(conn, item_id, body=None, actor=None, choice=None, postpone=False
     return res
 
 
+def _keep_open_no_option(conn, it, text, actor):
+    """A person's free-text answer on a Decide item with options matched no option label (#6895): keep the item open,
+    do not unblock waiting items, record the text, and send the active manager a blocked alert to judge it."""
+    person = helper_person(conn, actor) or actor or "the person"
+    with tx(conn):
+        conn.execute("UPDATE items SET decision=NULL WHERE id=?", (it["id"],))
+        _add_note(conn, it["id"], f"[{person} answered with no option] {text}")
+        _event(conn, it["id"], actor, f"answered with no option (kept open): {text}")
+        _send(conn, "note", actor or "maxpm", text, item_id=it["id"])
+    _tell_asker(conn, it, f"{person} answered #{it['id']} {it['title']} with no option (kept open): {text}. "
+                f"It stays open for the manager to judge; items waiting on it did not become ready.",
+                it["id"], actor)
+    boss = active_manager(conn)
+    alerted = None
+    if boss and actor != boss:
+        with tx(conn):
+            _send(conn, "alert", "maxpm",
+                  f"{person} answered #{it['id']} with no option: {text}. "
+                  f"Judge it: decide the item yourself if the question was not needed, "
+                  f"explain in plain words if he asks, or act if it is an instruction.",
+                  to=boss, item_id=it["id"], blocked="sender")
+        alerted = boss
+    res = item_show(conn, it["id"])
+    res["kept_open"] = True
+    res["postponed"] = False
+    res["now_ready"] = []
+    if alerted:
+        res["no_option_alert"] = alerted
+    return res
+
+
 def _tell_asker(conn, row, text, item_id=None, actor=None):
     """After the commit (#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to
     use the question asking modal'): the person answered, in the page's dialog, a decision that a session put for
@@ -20907,6 +20969,55 @@ def _act_on_answer(conn, it, actor, said, choice=None):
     with tx(conn):
         _event(conn, it["id"], "maxpm", f"#{task['id']} acts on the answer (no open item waits on it)")
     return {"task": task["id"]}
+
+
+def _notify_waiting_on_answer(conn, it, actor, said, choice=None):
+    """After the commit: a person answered (done) a Decide or Approve item that open items wait on (#6895).
+    (1) Add the person's answer as a note on every open item that waits on it, with the question and chosen option.
+    (2) For each waiting item that no live session holds, send the active manager a blocked alert naming the answer
+    and the waiting item; a held waiting item with a live session already gets a notice to its holder in _close."""
+    if it["doer"] != "human" or it["kind"] != "work":
+        return None
+    if _is_ai(conn, actor) and not helper_person(conn, actor):
+        return None  # an agent took it over: it does what follows itself
+    dec = decision_of(it)
+    if item_action_type(conn, it["id"], it["title"], _project_name(conn, it["project_id"])) not in ("decide", "approve") \
+            and not dec:
+        return None
+    waiting = _waiting_on(conn, it["id"])
+    if not waiting:
+        return None
+    person = helper_person(conn, actor) or actor or "the person"
+    answer = " ".join((said or "").split()) or "done, with no words"
+    if choice and not answer.lower().startswith(str(choice).lower()):
+        answer = f"{choice}: {answer}"
+    q = (dec or {}).get("question")
+    parts = [f"[{person} answered #{it['id']} {it['title']}]"]
+    if q:
+        parts.append(f"Question: {q}")
+    if choice:
+        parts.append(f"Option: {choice}")
+    parts.append(f"Answer: {answer}")
+    note_line = " | ".join(parts)
+    boss = active_manager(conn)
+    alerted = []
+    with tx(conn):
+        for w in waiting:
+            _add_note(conn, w["id"], note_line)
+            _event(conn, w["id"], "maxpm", f"{person} answered #{it['id']}: {answer}")
+            w_row = _item(conn, w["id"])
+            holder = w_row["assignee"] if w_row["status"] in ("in_progress", "held") else None
+            live_holder = False
+            if holder:
+                a = conn.execute("SELECT * FROM agents WHERE name=?", (holder,)).fetchone()
+                live_holder = bool(a and _agent_state(conn, a) not in ("stopped", "gone"))
+            if not live_holder and boss and boss != actor:
+                _send(conn, "alert", "maxpm",
+                      f"{person} answered #{it['id']}: {answer}. #{w['id']} waits on it and no session holds it: "
+                      f"launch it or act on the answer",
+                      to=boss, item_id=w["id"], blocked="sender")
+                alerted.append(w["id"])
+    return {"waiting": [w["id"] for w in waiting], "alerted": alerted}
 
 
 def _set_decision(conn, table, row_id, decision, actor):

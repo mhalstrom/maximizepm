@@ -498,8 +498,12 @@ def _print_show(a):
         if (a.get("ship_release") or {}).get("text") or (a.get("ship_release") or {}).get("in_cut"):
             print(f"  {_ship_line(a['ship_release'])}")
     if a.get("kept_open"):
-        print("  kept open (postponed; items waiting on it did not become ready)"
-              if a.get("postponed") else "  kept open (reply saved; items waiting on it did not become ready)")
+        if a.get("no_option_alert"):
+            print(f"  kept open (answer matched no option; alerted manager {a['no_option_alert']}; "
+                  f"items waiting on it did not become ready)")
+        else:
+            print("  kept open (postponed; items waiting on it did not become ready)"
+                  if a.get("postponed") else "  kept open (reply saved; items waiting on it did not become ready)")
     if a.get("now_ready"):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):

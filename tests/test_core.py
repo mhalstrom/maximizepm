@@ -7523,6 +7523,100 @@ class EscalationOptions(Base):
         self.assertIsNone(core.done(self.c, t, None, actor="w1", note="the brand guide decides")["acts_on_answer"])
         self.assertIsNone(core.done(self.c, own, "River", actor="mark")["acts_on_answer"])
 
+    def test_decide_answer_copies_note_and_alerts_manager_for_unheld_waiting_items(self):
+        """#6895: answering a Decide item copies the answer into every open waiting item and alerts the manager
+        for each waiting item that no live session holds."""
+        unheld = self.add("a", "Remove stale rows")
+        held_live = self.x  # already claimed by live w1 in setUp
+        held_gone = self.add("a", "Clean up logs")
+        core.register(self.c, "w2")
+        core.claim(self.c, held_gone, "w2")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET activity_event=? WHERE name='w2'", (core.REPORT_GONE,))  # w2 is gone
+        opts = ["Delete: remove them now", "Keep: leave them in place"]
+        n = core.item_add(self.c, "a", "Decide what to do with stale rows", doer="human", actor="boss")["id"]
+        for w in (unheld, held_live, held_gone):
+            core.dep_add(self.c, w, [n], "boss")
+        core.forward(self.c, item=n, actor="boss", options=opts, recommend="Delete", question="Delete the stale rows?")
+        res = core.done(self.c, n, "also drop the temp index", actor="mark", choice="Delete")
+        self.assertEqual(res["status"], "done")
+        self.assertIsNone(res["acts_on_answer"])  # #6484 case unchanged
+        for w in (unheld, held_live, held_gone):
+            notes = core.item_show(self.c, w)["notes"] or ""
+            self.assertIn("Delete the stale rows?", notes)
+            self.assertIn("Delete", notes)
+            self.assertIn("Delete: also drop the temp index", notes)
+        alerts = self.c.execute(
+            "SELECT item_id, body, blocked FROM messages WHERE kind='alert' AND to_agent='boss' ORDER BY id"
+        ).fetchall()
+        by_item = {r["item_id"]: (r["body"], r["blocked"]) for r in alerts}
+        self.assertIn(unheld, by_item)
+        self.assertIn(held_gone, by_item)
+        self.assertNotIn(held_live, by_item)  # live holder w1 gets a notice instead
+        self.assertEqual(by_item[unheld][1], "sender")
+        self.assertEqual(
+            by_item[unheld][0],
+            f"mark answered #{n}: Delete: also drop the temp index. #{unheld} waits on it and no session holds it: "
+            f"launch it or act on the answer",
+        )
+        self.assertEqual(by_item[held_gone][1], "sender")
+        holder_notice = self.c.execute(
+            "SELECT body FROM messages WHERE kind='notice' AND to_agent='w1' AND item_id=?", (held_live,)
+        ).fetchone()
+        self.assertIsNotNone(holder_notice)
+        self.assertIn("Delete: also drop the temp index", holder_notice["body"])
+
+    def test_free_text_matching_no_option_keeps_decide_open_and_alerts_manager(self):
+        """#6895 part 3: free-text answer that matches no option label keeps the Decide item open and alerts boss."""
+        unheld = self.add("a", "Remove stale rows")
+        opts = ["Delete: remove them now", "Keep: leave them in place"]
+        n = core.item_add(self.c, "a", "Decide what to do with stale rows", doer="human", actor="boss")["id"]
+        core.dep_add(self.c, unheld, [n], "boss")
+        core.forward(self.c, item=n, actor="boss", options=opts, recommend="Delete", question="Delete the stale rows?")
+        res = core.done(self.c, n, "wtf is this about????", actor="mark")
+        self.assertEqual(res["status"], "open")
+        self.assertTrue(res["kept_open"])
+        self.assertEqual(res["now_ready"], [])
+        self.assertIn("wtf is this about????", core.item_show(self.c, n)["notes"] or "")
+        self.assertEqual(core.item_show(self.c, unheld)["notes"] or "", "")
+        alert = self.c.execute(
+            "SELECT body, blocked FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=? ORDER BY id DESC LIMIT 1",
+            (n,),
+        ).fetchone()
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["blocked"], "sender")
+        self.assertEqual(
+            alert["body"],
+            f"mark answered #{n} with no option: wtf is this about????. "
+            f"Judge it: decide the item yourself if the question was not needed, "
+            f"explain in plain words if he asks, or act if it is an instruction.",
+        )
+        # Manager can close the Decide item with a note saying what was done.
+        closed = core.done(self.c, n, None, actor="boss", note="Question was not needed; keeping current rows")
+        self.assertEqual(closed["status"], "done")
+
+    def test_label_colon_text_answer_closes_decide_with_full_text(self):
+        """#6895 part 3: an answer starting with '<Label>: <text>' chooses that option and copies the full text."""
+        unheld = self.add("a", "Remove stale rows")
+        opts = ["Delete: remove them now", "Keep: leave them in place"]
+        n = core.item_add(self.c, "a", "Decide what to do with stale rows", doer="human", actor="boss")["id"]
+        core.dep_add(self.c, unheld, [n], "boss")
+        core.forward(self.c, item=n, actor="boss", options=opts, recommend="Delete", question="Delete the stale rows?")
+        res = core.done(self.c, n, "Delete: clean up the archive too", actor="mark")
+        self.assertEqual(res["status"], "done")
+        self.assertEqual(res["choice"], "Delete")
+        self.assertEqual(res["output"], "Delete: clean up the archive too")
+        notes = core.item_show(self.c, unheld)["notes"] or ""
+        self.assertIn("Delete the stale rows?", notes)
+        self.assertIn("Delete: clean up the archive too", notes)
+        alert = self.c.execute(
+            "SELECT body, blocked FROM messages WHERE kind='alert' AND to_agent='boss' AND item_id=?",
+            (unheld,),
+        ).fetchone()
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["blocked"], "sender")
+        self.assertIn(f"mark answered #{n}: Delete: clean up the archive too.", alert["body"])
+
 
 class NeedsYouDialog(Base):
     """#6436, mark 2026-11-20: 'the needs you agent that helps go through action items also needs to use the question
