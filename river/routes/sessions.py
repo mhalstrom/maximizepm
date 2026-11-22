@@ -205,6 +205,10 @@ OPS = {
     # Send now under a held message in the chat (#5587).
     "pending_send_now": lambda c, a, who: server.pending_send_now(c, a["agent"], a["id"], who),
     "usage_read": lambda c, a, who: server.usage_read_now(c, a["agent"]),  # Read now of the usage panel (#6387)
+    # Show or hide one row of the bottom-left usage list (#6856); saves in usage_list_hide.
+    "usage_list_show": lambda c, a, who: core.set_usage_list_show(
+        c, a.get("key") or (f"{a['agent']}:{a['model']}" if a.get("model") else a.get("agent", "")),
+        bool(a.get("show")), actor=who),
     "session_upload": lambda c, a, who: server.session_upload(c, a["agent"], a.get("data"), a.get("name"), who),
     "session_upload_drop": lambda c, a, who: server.session_upload_drop(c, a["agent"], a.get("id"), who),
     "session_setting": lambda c, a, who: server.session_setting_live(c, a["agent"], a["key"], a.get("value"), who),

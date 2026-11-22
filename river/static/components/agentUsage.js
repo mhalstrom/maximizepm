@@ -5,12 +5,12 @@
 // with their models (only when one runs), Details (#6427, closed: where and when each reading and limit stop came
 // from, with the agent's own words), and Read now (op usage_read), which reads the agent's usage at once.
 // Server: GET api/agent-usage?agent=<id> (server.agent_usage, core.agent_usage).
-import { esc, getJson, act, ago } from "../lib.js";
+import { esc, getJson, act, ago, toast } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button } from "./button.js";
 import { bar, usedText } from "./bar.js";
 import { OPEN_MARK } from "./rowOpen.js";
-import { nav } from "../page.js";
+import { S, nav } from "../page.js";
 
 // A weekday names a time within six days; further away, or in the past, the date too ('Fri, Nov 27, 09:04 AM': a
 // weekly reset is seven days on).
@@ -42,6 +42,28 @@ function summary(r) {
            note: resets(r) };
 }
 
+// Row key for Show/Hide in the bottom-left usage list (#6856): 'agent:model' for a model-specific provider entry,
+// else the agent adapter id.
+export const usageRowKey = (r) => r.prov && r.prov.model ? `${r.agent_type}:${r.prov.model}` : r.agent_type;
+
+// Every row that can appear in the bottom-left usage list (#6348, #6361, #6856): providers of agent_order first, then
+// the remaining agents from agent_limits, each annotated with its canonical key and saved hidden state.
+export function allUsageRows(state) {
+  const lims = (state && state.agent_limits) || [], provs = (state && state.providers) || [];
+  const hidden = new Set((state && state.usage_list_hide) || []);
+  const byId = Object.fromEntries(lims.map(r => [r.agent_type, r]));
+  const rows = provs.map(p => {
+    const r = byId[p.agent] || { known: false, agent_type: p.agent };
+    return { ...r, label: p.name, limited: p.limited, remaining_pct: p.remaining_pct, prov: p,
+             // #6441: the reset of the entry's own model group, not the reset of the agent's row.
+             resets_at: p.limited ? p.resets_at : null, resets_text: p.limited ? p.resets_text : null };
+  }).concat(lims.filter(r => !provs.some(p => p.agent === r.agent_type)));
+  return rows.map(r => {
+    const key = usageRowKey(r);
+    return { ...r, key, hidden: hidden.has(key) };
+  });
+}
+
 // r: a row of the list (sessions.js): an agent's usage, or a provider entry of agent_order (#6361: r.prov, with its
 // place, its sessions against its limit, and the usage of its own model in r). base: the agent's own usage row. An
 // entry with a model of its own shows that model's usage; any other row shows each model group of the agent.
@@ -53,28 +75,49 @@ export function limitRowHtml(r, base) {
   const slots = !p ? "" : p.max != null
     ? `<span class="${p.full ? "sl-lim-warn" : ""}">${p.used}/${p.max} sessions</span>`
     : `<span class="muted">${p.used} session${p.used === 1 ? "" : "s"}</span>`;
-  return `<div class="sl-lim-row clickrow" data-agent-usage="${esc(r.agent_type)}" tabindex="0" role="button"
+  const key = r.key || usageRowKey(r);
+  return `<div class="sl-lim-row clickrow" data-agent-usage="${esc(r.agent_type)}" data-usage-key="${esc(key)}"
+    data-usage-label="${esc(r.label)}" tabindex="0" role="button"
     aria-label="Usage of ${esc(r.label)}"><span class="sl-lim-text">${p ? `<span class="muted t-s" title="Launch order">${p.pos}</span>` : ""}<span
     class="sl-lim-name title">${esc(r.label)}</span>${slots}${s.html}${
     note ? `<span class="muted t-s">${esc(note)}</span>` : ""}</span>${OPEN_MARK}</div>`;
 }
 
 // detailsOpen: the Details toggle stays as the person left it while the dialog shows a new reading.
-let dlg = null, el = null, agent = null, timer = null, tried = false, detailsOpen = false;
+let dlg = null, el = null, agent = null, curKey = null, curLabel = "", timer = null, tried = false, detailsOpen = false;
+function syncVisBtn() {
+  const b = el && el.querySelector("[data-au-vis]");
+  if (!b) return;
+  const hidden = ((S && S.usage_list_hide) || []).includes(curKey);
+  b.textContent = hidden ? "Show in usage list" : "Hide from usage list";
+  b.title = hidden ? "Show in list" : "Hide from list";
+}
 function build() {
   el = document.createElement("div");
   el.id = "agentUsageDlg"; el.className = "hidden";
   el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-labelledby", "agentUsageTitle");
   el.innerHTML = `<div class="box"><h2 id="agentUsageTitle">Usage</h2><div class="au-body"></div>
-    <div class="actions">${button("Read now", { data: { "au-read": "1" }, title: "Read its usage now" })}${
+    <div class="actions">${button("Hide from usage list", { data: { "au-vis": "1" }, title: "Hide from list" })}${
+    button("Read now", { data: { "au-read": "1" }, title: "Read usage now" })}${
     button("Close", { data: { "au-close": "1" } })}</div></div>`;
   document.body.appendChild(el);
-  dlg = makeDialog(el, { onClose: () => { clearTimeout(timer); agent = null; } });
+  dlg = makeDialog(el, { onClose: () => { clearTimeout(timer); agent = null; curKey = null; curLabel = ""; } });
   el.addEventListener("click", async (e) => {
     if (e.target.closest("[data-au-close]")) { dlg.close(); return; }
     const s = e.target.closest("[data-au-session]");
     if (s) { dlg.close(); return nav.openSession(s.dataset.auSession); }
-    if (e.target.closest("[data-au-read]") && agent) readNow();
+    if (e.target.closest("[data-au-read]") && agent) { readNow(); return; }
+    if (e.target.closest("[data-au-vis]") && curKey) {
+      const b = el.querySelector("[data-au-vis]");
+      const show = ((S && S.usage_list_hide) || []).includes(curKey);
+      b.disabled = true;
+      try {
+        await act("usage_list_show", { key: curKey, show });
+        toast(show ? `Showing ${curLabel || curKey} in usage list` : `Hidden ${curLabel || curKey} from usage list`);
+      } catch (err) { /* act showed it */ }
+      b.disabled = false;
+      syncVisBtn();
+    }
   });
 }
 
@@ -170,7 +213,9 @@ async function load() {
     return;
   }
   if (agent !== mine) return;
-  el.querySelector("#agentUsageTitle").textContent = `Usage: ${u.label}`;
+  el.querySelector("#agentUsageTitle").textContent = `Usage: ${curLabel || u.label}`;
+  if (!curLabel) curLabel = u.label;
+  syncVisBtn();
   const more = body.querySelector(".au-more");
   if (more) detailsOpen = more.open;
   body.innerHTML = agentUsageHtml(u);
@@ -192,11 +237,46 @@ async function readNow() {
   return load();
 }
 
-export function openAgentUsage(agentType) {
+export function openAgentUsage(agentType, rowKey, rowLabel) {
   if (!dlg) build();
-  agent = agentType; tried = false; detailsOpen = false;
-  el.querySelector("#agentUsageTitle").textContent = "Usage";
+  agent = agentType; curKey = rowKey || agentType; curLabel = rowLabel || ""; tried = false; detailsOpen = false;
+  el.querySelector("#agentUsageTitle").textContent = curLabel ? `Usage: ${curLabel}` : "Usage";
   el.querySelector(".au-body").innerHTML = `<p class="muted">Reading…</p>`;
+  syncVisBtn();
   dlg.open();
   load();
+}
+
+// Settings > Agents and the Settings dialog's Agents tab (#6856): every row that can appear in the bottom-left usage
+// list (each model group row of agent_order and every other agent with a usage row), with its real saved Show in usage
+// list choice.
+export function usageListSettingsHtml(state) {
+  const rows = allUsageRows(state);
+  const body = rows.length
+    ? `<div class="ul-rows">${rows.map(r => `<label class="ul-row">
+        <input type="checkbox" data-ul-key="${esc(r.key)}" data-ul-label="${esc(r.label)}"${r.hidden ? "" : " checked"}>
+        <span class="ul-name">${r.prov ? `<span class="muted t-s" title="Launch order">${r.prov.pos}</span> ` : ""}${esc(r.label)}</span>
+        <span class="muted t-s ul-st">${r.hidden ? "hidden" : "shown"}</span>
+      </label>`).join("")}</div>`
+    : `<div class="muted t-s">No agents in the usage list yet.</div>`;
+  return `<div class="cred-sub">Usage list</div>
+    <div class="muted t-s set-note">Choose which agents show in the bottom-left usage list. Hiding one changes only the list; launch order, limits and usage reading stay as they are.</div>
+    ${body}`;
+}
+
+export function wireUsageListSettings(host, onChanged) {
+  if (!host || host.dataset.ulWired) return;
+  host.dataset.ulWired = "1";
+  host.addEventListener("change", async (e) => {
+    const cb = e.target.closest("[data-ul-key]");
+    if (!cb || cb.disabled) return;
+    const key = cb.dataset.ulKey, label = cb.dataset.ulLabel || key, show = cb.checked;
+    cb.disabled = true;
+    try {
+      await act("usage_list_show", { key, show });
+      toast(show ? `Showing ${label} in usage list` : `Hidden ${label} from usage list`);
+    } catch (err) { cb.checked = !show; }
+    cb.disabled = false;
+    if (onChanged) onChanged();
+  });
 }

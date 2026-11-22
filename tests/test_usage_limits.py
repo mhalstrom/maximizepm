@@ -1250,5 +1250,67 @@ class ModelRefused(unittest.TestCase):
         self.assertIn("model_reasoning_effort=medium", t["command"])
 
 
+class UsageListVisibility(unittest.TestCase):
+    """#6856: per-agent / per-model-group Show in usage list setting and page action."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "test.db"
+        self.conn = _db(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.conn.close)
+        core.config_set(self.conn, "launch_agents",
+                        "Antigravity=@antigravity; Codex=@codex; Claude Code=@claude-code; Hermes=@hermes")
+        core.config_set(self.conn, "agent_order",
+                        "antigravity model gemini-4-neon, antigravity model claude-opus-5-5-medium, "
+                        "codex model gpt-6.2-sol, claude-code")
+        core.record_agent_limit(self.conn, "hermes", limited=False, source="manual")
+
+    def test_parse_and_validate(self):
+        self.assertEqual(core.setting(self.conn, "usage_list_hide"), "")
+        self.assertEqual(core.parse_usage_list_hide("agy:gemini-4-neon, claude-code, hermes, antigravity:gemini-4-neon"),
+                         ["antigravity:gemini-4-neon", "claude", "hermes"])
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.conn, "usage_list_hide", "no-such-agent")
+        with self.assertRaises(core.RiverError):
+            core.set_usage_list_show(self.conn, "no-such-agent", False)
+
+    def test_page_api_hide_show_reload_and_no_side_effects(self):
+        from river import rights
+        self.assertEqual(rights.OPS.get("usage_list_show"), rights.LEAD)
+        before_order = core.setting(self.conn, "agent_order")
+        before_provs = core.agent_providers(self.conn)
+        before_lims = core.agent_limits_list(self.conn)
+        self.assertEqual(core.state(self.conn)["usage_list_hide"], [])
+
+        # Hide one model-group row of Antigravity and the Hermes row via the page action.
+        r1 = server.OPS["usage_list_show"](self.conn, {"key": "antigravity:gemini-4-neon", "show": False}, "mark")
+        self.assertEqual(r1, {"key": "antigravity:gemini-4-neon", "show": False, "hidden": ["antigravity:gemini-4-neon"]})
+        r2 = server.OPS["usage_list_show"](self.conn, {"agent": "hermes", "show": False}, "mark")
+        self.assertEqual(r2["hidden"], ["antigravity:gemini-4-neon", "hermes"])
+
+        # Survives reload / restart (fresh connection to the same SQLite DB).
+        conn2 = core.connect(self.db_path)
+        try:
+            st = core.state(conn2)
+            self.assertEqual(st["usage_list_hide"], ["antigravity:gemini-4-neon", "hermes"])
+            # Hiding changes only the list: agent_order, providers, limits and usage reading stay unchanged.
+            self.assertEqual(core.setting(conn2, "agent_order"), before_order)
+            self.assertEqual(core.agent_providers(conn2), before_provs)
+            self.assertEqual(core.agent_limits_list(conn2), before_lims)
+            self.assertEqual(core.agent_usage(conn2, "hermes")["agent_type"], "hermes")
+        finally:
+            conn2.close()
+
+        # Show Hermes again; Antigravity gemini row stays hidden.
+        r3 = server.OPS["usage_list_show"](self.conn, {"key": "hermes", "show": True}, "mark")
+        self.assertEqual(r3, {"key": "hermes", "show": True, "hidden": ["antigravity:gemini-4-neon"]})
+        # Show Antigravity gemini row again; setting returns to default empty.
+        r4 = server.OPS["usage_list_show"](self.conn, {"agent": "antigravity", "model": "gemini-4-neon", "show": True}, "mark")
+        self.assertEqual(r4, {"key": "antigravity:gemini-4-neon", "show": True, "hidden": []})
+        self.assertEqual(core.state(self.conn)["usage_list_hide"], [])
+        self.assertEqual(core.setting(self.conn, "usage_list_hide"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

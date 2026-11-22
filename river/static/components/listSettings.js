@@ -9,6 +9,7 @@ import { button, iconButton } from "./button.js";
 import { S, nav } from "../page.js";
 import { settingRow, saveRow, groupOf } from "../views/settings.js";
 import { programOf } from "../views/settingLabels.js";
+import { usageListSettingsHtml, wireUsageListSettings } from "./agentUsage.js";
 
 // [tab key, name, the test of a key, the group of the Settings tab that holds the rest]
 const PARTS = [
@@ -53,6 +54,7 @@ function el() {
   d.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.dataset.setInput) { e.preventDefault(); e.target.blur(); }
   });
+  wireUsageListSettings($("#listSetRows"), draw);
   return d;
 }
 
@@ -62,12 +64,17 @@ function draw() {
     data: { "ls-part": k }, attrs: `role="tab" aria-selected="${part === k}"` })).join("");
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};
   const test = PARTS.find(p => p[0] === part)[2];
+  const usage = part === "agents" ? `<div class="ls-usage">${usageListSettingsHtml(S)}</div>` : "";
   const rows = Object.keys(d).filter(test).map(k => settingRow(k, d, o.filter(x => x.key === k), now)).join("");
   const box = $("#listSetRows");
-  if (!box.contains(document.activeElement)) box.innerHTML = rows || `<div class="muted">No settings here.</div>`;
+  const focused = document.activeElement;
+  if (!box.contains(focused) || (focused && focused.type === "checkbox")) {
+    box.innerHTML = (usage + rows) || `<div class="muted">No settings here.</div>`;
+  }
 }
 
-export function openListSettings() {
+export function openListSettings(tab) {
+  if (tab && PARTS.some(p => p[0] === tab)) { part = tab; store(KEY, part); }
   el();
   draw();
   dlg.open();

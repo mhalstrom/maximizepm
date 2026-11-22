@@ -132,7 +132,8 @@ OPS.update({op: LEAD for op in (
     "pipeline_account_check", "pipeline_move_back", "pipeline_trigger",
     "runner_add", "runner_check", "runner_allow", "runner_stop",
     # #6430: an update changes the agent CLI of every session on this computer; a person or the manager decides it
-    "agent_update", "agent_update_cancel", "agent_update_later", "agent_update_auto", "agent_update_check")})
+    "agent_update", "agent_update_cancel", "agent_update_later", "agent_update_auto", "agent_update_check",
+    "usage_list_show")})  # #6856: show or hide one row in the bottom-left usage list
 OPS.update({op: ONLY_PERSON for op in (
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
     "device_remove",  # #6471: Remove a paired phone in Settings

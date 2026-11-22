@@ -734,6 +734,10 @@ DEFAULT_SETTINGS = {
     # launch_agents entries in their order, with no limits, and default_agent picks first. With a list,
     # a global default_agent gives way to it. An entry with no model runs the agent's own (agy_model, ...).
     "agent_order": "",
+    # Rows hidden from the bottom-left usage list (#6856): comma-separated adapter ids or 'agent:model' keys (for
+    # example 'hermes, antigravity:gemini-4-neon'). Empty shows every row (default). Hiding a row changes only the
+    # list: agent_order, launches, limits and usage reading stay as they are.
+    "usage_list_hide": "",
     # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
     # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
     # deployer a deploy item, an expert an expert-tier task; the manager has no item.
@@ -3495,6 +3499,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         parse_agent_rules(value)
     elif key == "agent_order":
         parse_agent_order(value)
+    elif key == "usage_list_hide":
+        parse_usage_list_hide(value)
     elif key in ("default_agent",) + tuple(f"agent_for.{r}" for r in AGENT_ROLES) and value:
         _check_agent_type(conn, value)
     elif key == "native_message":
@@ -3823,6 +3829,49 @@ def providers_text(entries):
 def parse_agent_order(value):
     """The adapter ids of agent_order (parse_providers), in order."""
     return [p["agent"] for p in parse_providers(value)]
+
+
+def parse_usage_list_hide(value):
+    """The usage_list_hide setting (#6856): comma-separated row keys ('hermes', 'antigravity:gemini-4-neon') hidden
+    from the bottom-left usage list. Each agent name is normalized to its adapter id; unknown agents are refused."""
+    out = []
+    for raw in (value or "").split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        agent_part, sep, model_part = s.partition(":")
+        name = agent_part.strip()
+        ad = _adapters().find(name)
+        if ad is None:
+            raise RiverError(f"usage_list_hide: unknown agent {name!r}; known: {', '.join(agent_types())}")
+        m = model_part.strip() if sep else ""
+        key = f"{ad.id}:{m}" if m else ad.id
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def usage_list_hidden(conn):
+    """Canonical row keys currently hidden from the bottom-left usage list (#6856)."""
+    return parse_usage_list_hide(setting(conn, "usage_list_hide"))
+
+
+def set_usage_list_show(conn, key, show, actor=None):
+    """Show (True) or hide (False) one row in the bottom-left usage list (#6856). Saves in usage_list_hide."""
+    keys = parse_usage_list_hide(key or "")
+    if len(keys) != 1:
+        raise RiverError("usage_list_show: name one agent or agent:model row")
+    canon = keys[0]
+    hidden = usage_list_hidden(conn)
+    if show:
+        hidden = [k for k in hidden if k != canon]
+    elif canon not in hidden:
+        hidden.append(canon)
+    if hidden:
+        config_set(conn, "usage_list_hide", ", ".join(hidden), actor=actor)
+    else:
+        config_unset(conn, "usage_list_hide", actor=actor)
+    return {"key": canon, "show": bool(show), "hidden": hidden}
 
 
 def _limit_adapter_id(agent_type):
@@ -25425,6 +25474,7 @@ def state(conn, closed=True):
             "WHERE closed_at IS NULL ORDER BY id DESC")],
         "agent_limits": agent_limits_list(conn),
         "providers": agent_providers(conn),
+        "usage_list_hide": usage_list_hidden(conn),
         "devices": device_list(conn),
     }
 

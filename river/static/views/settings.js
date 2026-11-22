@@ -13,6 +13,7 @@ import { loadAgents } from "../components/agents.js";
 import { modelChoices } from "../components/modelPick.js";
 import { effortsFor } from "../components/launchDialog.js";
 import { versionsHtml, wireVersions, onVersions, versionsNow } from "../components/agentUpdate.js";
+import { usageListSettingsHtml, wireUsageListSettings } from "../components/agentUsage.js";
 
 const AGENT_CLIS = /^(agy|aider|amp|claude|codex|copilot|cursor|goose|grok|hermes|opencode|pi)_/;
 const has = (...keys) => (k) => keys.includes(k);
@@ -21,7 +22,7 @@ export const GROUPS = [
   ["credentials", "Credentials", ""],
   ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
     (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
-      || has("launch_agents", "agent_rules", "agent_order", "agent_update_check", "agent_auto_update",
+      || has("launch_agents", "agent_rules", "agent_order", "usage_list_hide", "agent_update_check", "agent_auto_update",
              "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
              "prompt_wait", "stuck_after")(k)],
   ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
@@ -90,9 +91,10 @@ export function renderSettings() {
   $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
   $("#setSetupRow").classList.toggle("hidden", current !== "agents");
   $("#setProviders").classList.toggle("hidden", current !== "agents");
+  $("#setUsageList").classList.toggle("hidden", current !== "agents");
   $("#setVersions").classList.toggle("hidden", current !== "agents");
   $("#setDevices").classList.toggle("hidden", current !== "notifications");
-  if (current === "agents") { renderProviders(); renderVersions(); }
+  if (current === "agents") { renderProviders(); renderUsageList(); renderVersions(); }
   if (current === "notifications") renderDevices();
   const d = S.settings.defaults, o = S.settings.overrides, now = S.settings.now || {};  // now: a size limit's size (#5711)
   const keys = Object.keys(d).filter(k => groupOf(k) === current)
@@ -158,6 +160,12 @@ function renderVersions() {
   wireVersions(host, () => draw(versionsNow()));
   if (!versionsOff) versionsOff = onVersions(draw);
   draw(versionsNow());
+}
+function renderUsageList() {
+  const host = $("#setUsageList");
+  const html = usageListSettingsHtml(S);
+  if (host.dataset.sig !== html) { host.innerHTML = html; host.dataset.sig = html; }
+  wireUsageListSettings(host);
 }
 function renderProviders(force) {
   const host = $("#setProviders"), a = document.activeElement;

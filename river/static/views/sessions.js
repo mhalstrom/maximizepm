@@ -20,7 +20,7 @@ import { openBrowser } from "../components/browserTool.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
 import { contextMeter, openUsage } from "../components/usagePanel.js";
-import { limitRowHtml, openAgentUsage } from "../components/agentUsage.js";
+import { allUsageRows, limitRowHtml, openAgentUsage } from "../components/agentUsage.js";
 import { endButton, endSession } from "../components/endSession.js";
 import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
@@ -496,21 +496,21 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // Agent usage & limits (#6348): compact summary per agent above Cost. The providers of agent_order come first, in
   // launch order, each with its sessions against its limit (#6361); then the other agents with a usage reading. An
   // entry is an agent and its model (one agent can have an entry for each model group), with that model's usage. A
-  // click on a row opens the usage of its agent (#6387, agentUsage.js).
+  // click on a row opens the usage of its agent (#6387, agentUsage.js); hidden rows stay out of the list (#6856) with
+  // a link to show them again.
   function drawLimits() {
     const host = $("#sessLimits");
     if (!host) return;
-    const lims = (S && S.agent_limits) || [], provs = (S && S.providers) || [];
-    const byId = Object.fromEntries(lims.map(r => [r.agent_type, r]));
-    const rows = provs.map(p => {
-      const r = byId[p.agent] || { known: false, agent_type: p.agent };
-      return { ...r, label: p.name, limited: p.limited, remaining_pct: p.remaining_pct, prov: p,
-               // #6441: the reset of the entry's own model group, not the reset of the agent's row.
-               resets_at: p.limited ? p.resets_at : null, resets_text: p.limited ? p.resets_text : null };
-    }).concat(lims.filter(r => !provs.some(p => p.agent === r.agent_type)));
-    host.classList.toggle("hidden", !rows.length);
-    if (!rows.length) return;
-    putHtml(host, rows.map(r => limitRowHtml(r, byId[r.agent_type])).join(""));
+    const all = allUsageRows(S);
+    const visible = all.filter(r => !r.hidden), hiddenCount = all.length - visible.length;
+    host.classList.toggle("hidden", !all.length);
+    if (!all.length) return;
+    const byId = Object.fromEntries(((S && S.agent_limits) || []).map(r => [r.agent_type, r]));
+    const hiddenRow = hiddenCount ? `<div class="sl-lim-hidden">${button(
+      `${hiddenCount} hidden · Show`,
+      { cls: "plain t-s", data: { "usage-manage": "1" }, title: "Choose usage rows" }
+    )}</div>` : "";
+    putHtml(host, visible.map(r => limitRowHtml(r, byId[r.agent_type])).join("") + hiddenRow);
   }
 
   // The Sessions line of the list (#5886: with the browsers that run), from the same read as the rows (sessionsLine):
@@ -1160,8 +1160,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     }
     const br = t.closest("[data-brw-row]");
     if (br) { openBrowserRow(br.dataset.brwRow).then(() => setTab("browsers")).catch(() => {}); return true; }
+    if (t.closest("[data-usage-manage]")) { openListSettings("agents"); return true; }
     const au = t.closest("[data-agent-usage]");
-    if (au) { openAgentUsage(au.dataset.agentUsage); return true; }
+    if (au) { openAgentUsage(au.dataset.agentUsage, au.dataset.usageKey, au.dataset.usageLabel); return true; }
     if (t.closest("#sessSettings")) { openListSettings(); return true; }
     return false;
   }
