@@ -682,6 +682,99 @@ class Identity(Base):
             server.session_send(self.c, "dev", "! maxpm secret grant s --item 1", who="boss", manager=True)
             self.assertIsNone(vault.claim_bang("dev", ("secret", "grant", "s", "--item", "1")))
 
+    def test_cli_bang_ask_and_allow_deny_dialog_and_direct_post_refused(self):
+        """#6912: a CLI '!' command queues an Allow/Deny dialog (bang_ask); nothing runs until the person clicks Allow
+        (bang_decide, ONLY_PERSON). An agent POSTing bang_decide directly or running the hook from a script is refused."""
+        from river import rights, server
+        vault.clear_bangs()
+        self.addCleanup(vault.clear_bangs)
+        self.assertIs(rights.OPS["bang_decide"], rights.ONLY_PERSON)
+
+        # Agent dev queues a refused command via bang_ask_op (process tree confirms dev).
+        argv = ["secret", "grant", "devset", "--item", "6910"]
+        self.chain = [(930, 500, "Python", 60), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51002, 7766, "930")
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930):
+            q = server.OPS["bang_ask"](self.c, {"argv": argv, "cwd": "/tmp"}, "dev")
+            self.assertTrue(q["queued"])
+            ask_id = q["ask"]["id"]
+            self.assertEqual(q["ask"]["command"], "maxpm secret grant devset --item 6910")
+            # Queuing grants NOTHING: no bang allowance exists for dev.
+            self.assertIsNone(vault.claim_bang("dev", tuple(argv)))
+            self.assertEqual(vault.list_bang_asks(),
+                             [{"id": ask_id, "agent": "dev", "command": "maxpm secret grant devset --item 6910"}])
+
+            # Agent Bash call POSTing bang_decide directly to /api/action is refused (409, ONLY_PERSON).
+            raw = json.dumps({"op": "bang_decide", "actor": "dev",
+                              "args": {"id": ask_id, "allow": True}}).encode()
+            h = server.Handler.__new__(server.Handler)
+            h.path, h.client_address, h.rfile, out = "/api/action", ("127.0.0.1", 51002), io.BytesIO(raw), {}
+            h.server = mock.Mock(server_address=("127.0.0.1", 7766))
+            h.headers = {"Content-Length": str(len(raw)), "Host": "127.0.0.1:7766", "X-Maxpm-Pid": "930"}
+            h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+            h.do_POST()
+            self.assertEqual(out["code"], 409)
+            self.assertIn("refused", out["body"]["error"])
+            # Request is still pending (agent could not consume it).
+            self.assertEqual(len(vault.list_bang_asks()), 1)
+
+            # Direct call to bang_decide_op from an agent process is also refused by vault.session_of.
+            with self.assertRaisesRegex(RiverError, "only a person"):
+                server.OPS["bang_decide"](self.c, {"id": ask_id, "allow": True}, "dev")
+
+        # Person clicks Allow on the page: runs exact argv with agent env stripped, shell=False.
+        self.chain = [(700, 1, "login", 1)]
+        vault.PEER.value = vault.RELAY_PAGE
+        ran = {}
+
+        def fake_run(cmd, **kw):
+            ran["cmd"], ran["env"], ran["cwd"] = cmd, kw.get("env"), kw.get("cwd")
+            return mock.Mock(returncode=0, stdout="granted g1\n", stderr="")
+
+        with mock.patch("subprocess.run", fake_run), \
+                mock.patch.dict(os.environ, {"MAXPM_TOKEN": "tok", "MAXPM_AGENT": "dev", "CLAUDECODE": "1"}):
+            res = server.OPS["bang_decide"](self.c, {"id": ask_id, "allow": True}, "mark")
+        self.assertTrue(res["allowed"])
+        self.assertEqual(res["output"], "granted g1")
+        self.assertEqual(ran["cmd"][1:], ["-m", "river", *argv])
+        self.assertNotIn("MAXPM_TOKEN", ran["env"])
+        self.assertNotIn("MAXPM_AGENT", ran["env"])
+        self.assertNotIn("CLAUDECODE", ran["env"])
+        self.assertEqual(vault.list_bang_asks(), [])
+
+        # Person clicks Deny: runs nothing and removes the ask.
+        self.chain = [(930, 500, "Python", 60), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51002, 7766, "930")
+        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 930):
+            ask2 = server.OPS["bang_ask"](self.c, {"argv": argv}, "dev")["ask"]["id"]
+        vault.PEER.value = vault.RELAY_PAGE
+        with mock.patch("subprocess.run") as mrun:
+            res2 = server.OPS["bang_decide"](self.c, {"id": ask2, "allow": False}, "mark")
+            self.assertFalse(res2["allowed"])
+            mrun.assert_not_called()
+        self.assertEqual(vault.list_bang_asks(), [])
+
+        # Running maxpm report --hook claude from a script file records no bang allowance.
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+            tf.write(
+                "import io, json, os, sys\n"
+                "from river import cli\n"
+                "os.environ['MAXPM_AGENT'] = 'dev'\n"
+                "sys.stdin = io.StringIO(json.dumps({'hook_event_name': 'UserPromptSubmit', "
+                "'prompt': '! maxpm secret grant devset --item 6910'}))\n"
+                "sys.exit(cli.run(['report', '--hook', 'claude']))\n"
+            )
+            script_path = tf.name
+        self.addCleanup(lambda: os.path.exists(script_path) and os.unlink(script_path))
+        repo = str(Path(core.__file__).resolve().parent.parent)
+        r = subprocess.run([sys.executable, script_path], capture_output=True, text=True,
+                           env={**os.environ, "MAXPM_DB": str(core.db_path()), "PYTHONPATH": repo}, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(vault.claim_bang("dev", tuple(argv)))
+
 
 class CredentialsPanel(Base):
     """#5829: the Credentials panel of Settings reads names, levels, sets and grants in one GET, never a value; its

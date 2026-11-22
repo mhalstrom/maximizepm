@@ -100,7 +100,7 @@ READS = {"plugin list", "plugin show", "project show", "project list","canvas li
 # page action -> callers. The page acts as the person; a command that asks serve (cli.ask_server) has the rights of
 # the session that its processes prove (vault.session_of).
 OPS = {op: ANY for op in (
-    "accept", "activate", "answer", "backlog", "bang_claim", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
+    "accept", "activate", "answer", "backlog", "bang_ask", "bang_claim", "block", "browser", "browser_annotate", "browser_call", "browser_hand",
     "browser_input", "browser_secret", "browser_steps", "canvas_answer", "canvas_comment", "canvas_comments",
     "canvas_discard", "canvas_edit", "canvas_kit", "canvas_list", "canvas_open", "canvas_publish", "canvas_put",
     "canvas_accept", "canvas_edit_html", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
@@ -135,6 +135,7 @@ OPS.update({op: LEAD for op in (
     "agent_update", "agent_update_cancel", "agent_update_later", "agent_update_auto", "agent_update_check",
     "usage_list_show")})  # #6856: show or hide one row in the bottom-left usage list
 OPS.update({op: ONLY_PERSON for op in (
+    "bang_decide",  # #6912: Allow/Deny a CLI '!' command to run as the person
     "pipeline_token_add", "pipeline_token_make",  # #6148: a person saves a forge token, or asks a session to make it
     "device_remove",  # #6471: Remove a paired phone in Settings
     "dictate_audio", "dictate_start", "dictate_stop", "host_setup", "host_signin", "prompt_answer", "relay_connect",

@@ -6975,6 +6975,60 @@ def bang_claim_op(conn, a, who):
     return {"ok": True, "person": hit["person"] or vault._default_person(conn), "agent": name}
 
 
+_AGENT_ENV_STRIP = (
+    "MAXPM_TOKEN", "MAXPM_AGENT", "MAXPM_CHAT",
+    "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_SESSION_ID",
+    "CODEX_THREAD_ID", "CODEX_SANDBOX",
+    "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID",
+    "GROK_SESSION_ID", "COPILOT_SESSION_ID", "OPENCODE_SESSION_ID",
+    "PI_SESSION_ID", "HERMES_SESSION_ID", "CURSOR_AGENT", "GOOSE_SESSION_ID",
+)
+
+
+def bang_ask_op(conn, a, who):
+    """Queue a refused person-only maxpm command for the person's Allow/Deny dialog on the page (#6912). Grants
+    nothing on its own: the command runs only after the person clicks Allow (bang_decide)."""
+    from . import vault
+    name, _spid, _proc = _peer_session(conn)
+    if not name:
+        return {"queued": False, "ask": None}
+    row = vault.ask_bang(name, a.get("argv") or (), a.get("cwd"))
+    if row:
+        state_changed()
+    return {"queued": bool(row), "ask": row}
+
+
+def bang_decide_op(conn, a, who):
+    """The person's Allow or Deny on a queued '!' command dialog (#6912). Only a person (rights.ONLY_PERSON and
+    vault.session_of). Allow runs the exact maxpm argv directly as the person (shell=False, agent env stripped)."""
+    import subprocess
+    from . import vault
+    who_s = vault.session_of(conn, who)
+    if not who_s["person"]:
+        raise RiverError("only a person may allow or deny a command")
+    row = vault.pop_bang_ask(a.get("id"))
+    if not row:
+        raise RiverError("that command request expired or was already answered")
+    if not a.get("allow"):
+        state_changed()
+        return {"id": row["id"], "allowed": False, "command": row["command"]}
+    env = {k: v for k, v in os.environ.items() if k not in _AGENT_ENV_STRIP}
+    env["MAXPM_DB"] = str(core.db_path())
+    cwd = row["cwd"] if row["cwd"] and os.path.isdir(row["cwd"]) else None
+    try:
+        r = subprocess.run([sys.executable, "-m", "river", *row["argv"]],
+                           capture_output=True, text=True, timeout=30, env=env, cwd=cwd)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RiverError(f"command failed to run: {e}")
+    out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
+    if r.returncode != 0:
+        raise RiverError(err or out or f"command exited with code {r.returncode}")
+    state_changed()
+    return {"id": row["id"], "allowed": True, "command": row["command"], "exit": 0,
+            "output": (out.splitlines()[0] if out else "done")[:240]}
+
+
 def op_rights(conn, op, actor, page):
     """Why this caller may not run the page action op (river/rights.py, #5974), or None. The page acts as the person.
     A command that asks serve (cli.ask_server) has the rights of the session that the processes holding its connection
@@ -7084,8 +7138,10 @@ OPS = {
                                                      prompt=a.get("prompt"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
     # A person's '!' command in a session's chat (#6912): recorded only from the person's page (session_send) and
-    # claimed once by the command.
+    # claimed once by the command; CLI-typed '!' commands ask for Allow/Deny on the page (bang_ask / bang_decide).
     "bang_claim": bang_claim_op,
+    "bang_ask": bang_ask_op,
+    "bang_decide": bang_decide_op,
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,
     "ops_trigger_run": ops_trigger_run_op,
@@ -7363,6 +7419,8 @@ def page_state(closed, timing=None):
             # #5840, #6905: the credential and sign-in requests at the person: the page shows each as a modal over any tab
             st["signin_asks"] = [r[0] for r in conn.execute(
                 "SELECT id FROM secret_requests WHERE state='asked' ORDER BY id")]
+            from . import vault as _vault
+            st["bang_asks"] = _vault.list_bang_asks()  # #6912: CLI '!' commands waiting for Allow/Deny on the page
             from .routes import browser as browser_routes
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
             # #5879: how many browsers run now, for the Browsers row of the session list (its view reads the list)

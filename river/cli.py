@@ -3674,38 +3674,53 @@ def _run(args, conn):
     _token_self(conn, args)
     actor = args.actor
     for_other = _for_other(conn, actor, args.cmd)
-    _rights(conn, args, actor)  # the permission table (#5974)
-    actor = args.actor
-    _say_replaced(conn, args, actor)
-    # Escalation by state (#5976, mark 2026-11-15: the session does not set the priority): an agent's --blocked and
-    # --level of a message change nothing; its message escalates when it stops working (core.escalate_by_state).
-    if args.cmd != "secret" and (_inside_agent() or (actor and core._is_ai(conn, actor))):
-        if getattr(args, "blocked", None) is True:
-            args.blocked = False
-        if getattr(args, "level", None) in core.MESSAGE_LEVELS:
-            args.level = None
-    # #5975: a process that cannot write the queue skips the bookkeeping writes of a command (serve does them), and
-    # a write of the command itself ends in core.READONLY_REFUSAL.
-    if args.cmd not in ("go", "plan") and not (core.POLL and core.POLL.get("state")):  # a later poll: the wait's own
-        with core.unless_readonly():
-            core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
-    st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
-    if st and not args.json:
-        print(_stop_banner(actor, st), file=sys.stderr)
-    with core.unless_readonly():
-        _record_self(conn, actor, args.cmd, for_other)  # before done measures the item
-    changes = conn.total_changes
     try:
-        res = dispatch(conn, args, actor)
-    except RiverError:
-        # An event that occurred before the refusal still runs its hook.
+        _rights(conn, args, actor)  # the permission table (#5974)
+        actor = args.actor
+        _say_replaced(conn, args, actor)
+        # Escalation by state (#5976, mark 2026-11-15: the session does not set the priority): an agent's --blocked and
+        # --level of a message change nothing; its message escalates when it stops working (core.escalate_by_state).
+        if args.cmd != "secret" and (_inside_agent() or (actor and core._is_ai(conn, actor))):
+            if getattr(args, "blocked", None) is True:
+                args.blocked = False
+            if getattr(args, "level", None) in core.MESSAGE_LEVELS:
+                args.level = None
+        # #5975: a process that cannot write the queue skips the bookkeeping writes of a command (serve does them), and
+        # a write of the command itself ends in core.READONLY_REFUSAL.
+        if args.cmd not in ("go", "plan") and not (core.POLL and core.POLL.get("state")):  # a later poll: the wait's own
+            with core.unless_readonly():
+                core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
+        st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
+        if st and not args.json:
+            print(_stop_banner(actor, st), file=sys.stderr)
         with core.unless_readonly():
-            for line in _hook_result_lines(run_hooks(conn, actor)):
-                print(line, file=sys.stderr)
-        raise
-    except core.sqlite3.OperationalError as e:
-        if core.is_readonly(e):
-            raise RiverError(core.READONLY_REFUSAL) from None
+            _record_self(conn, actor, args.cmd, for_other)  # before done measures the item
+        changes = conn.total_changes
+        try:
+            res = dispatch(conn, args, actor)
+        except RiverError:
+            # An event that occurred before the refusal still runs its hook.
+            with core.unless_readonly():
+                for line in _hook_result_lines(run_hooks(conn, actor)):
+                    print(line, file=sys.stderr)
+            raise
+        except core.sqlite3.OperationalError as e:
+            if core.is_readonly(e):
+                raise RiverError(core.READONLY_REFUSAL) from None
+            raise
+    except RiverError as e:
+        msg = str(e)
+        if (_inside_agent() and args.cmd not in ("serve", "mcp", "wait", "report", "activity")
+                and ("only a person" in msg or "for a person" in msg or "never runs as a person" in msg)
+                and sys.argv[1:] and core.running_serve(conn)):
+            try:
+                q = ask_server(conn, "bang_ask", {"argv": sys.argv[1:], "cwd": os.getcwd()}, timeout=1, retries=0)
+                if isinstance(q, dict) and q.get("queued"):
+                    raise RiverError(msg + "\nMaximizePM opened an Allow/Deny dialog on the page for this command.") from None
+            except RiverError:
+                raise
+            except Exception:  # noqa: BLE001 - never hide the original refusal
+                pass
         raise
     if core.POLL and res is core.POLL_AGAIN_RESULT:  # #6008: nothing yet; the caller polls again, nothing printed
         return core.POLL_AGAIN

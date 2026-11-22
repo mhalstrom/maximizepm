@@ -286,7 +286,7 @@ async function refresh() {
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
-  signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
+  signinAsks(S.signin_asks, S.bang_asks);  // sign-ins, credentials (#5840, #6905), and CLI '!' commands (#6912)
   renderGraph(false); renderLog(false); deploy.renderDeploy(false); renderOperations(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();

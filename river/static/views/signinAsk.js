@@ -25,25 +25,54 @@ export async function openSignin(id) {
 }
 
 // Each refresh: the first request at the person that this page has not shown or closed opens the modal.
-export async function signinAsks(ids) {
-  const next = (ids || []).find(id => !later.has(id));
-  if (shown && !busy && !(ids || []).includes(shown)) { shown = null; shownSignin = false; dlg.close(); }  // answered elsewhere
-  if (next === undefined || shown !== null || reading || busy) return;
-  reading = true;
-  let data, r;
-  try {
-    data = await getJson("api/credentials");
-    r = (data.requests || []).find(x => x.id === next);
+export async function signinAsks(ids, bangAsks) {
+  const bangList = bangAsks || [];
+  if (shown && !busy) {
+    const gone = typeof shown === "string" && shown.startsWith("b:")
+      ? !bangList.some(b => `b:${b.id}` === shown)
+      : !(ids || []).includes(shown);
+    if (gone) { shown = null; shownSignin = false; dlg.close(); }  // answered elsewhere or expired
   }
-  catch (e) { return; }
-  finally { reading = false; }
-  if (!r) return;
-  shown = r.id;
-  shownSignin = (r.sites || []).length > 0;
-  draw(r, data.credentials || []);
+  if (shown !== null || reading || busy) return;
+  const next = (ids || []).find(id => !later.has(id));
+  if (next !== undefined) {
+    reading = true;
+    let data, r;
+    try {
+      data = await getJson("api/credentials");
+      r = (data.requests || []).find(x => x.id === next);
+    }
+    catch (e) { return; }
+    finally { reading = false; }
+    if (!r) return;
+    shown = r.id;
+    shownSignin = (r.sites || []).length > 0;
+    draw(r, data.credentials || []);
+    dlg.open();
+    const ok = host.querySelector("[data-signin-ok]");
+    if (ok) ok.focus();
+    return;
+  }
+  const nextBang = bangList.find(b => !later.has(`b:${b.id}`));
+  if (!nextBang) return;
+  shown = `b:${nextBang.id}`;
+  shownSignin = false;
+  drawBang(nextBang);
   dlg.open();
-  const ok = host.querySelector("[data-signin-ok]");
+  const ok = host.querySelector("[data-bang-ok]");
   if (ok) ok.focus();
+}
+
+function drawBang(b) {
+  host.querySelector(".box").innerHTML = `
+    <div class="signin-head"><h2 id="signinTitle">Allow command?</h2>${iconButton("✕", "Close", { data: { "signin-close": 1 } })}</div>
+    <div class="cred-req">
+      <div><b>${esc(b.agent)}</b> (or <code>!</code> in its terminal) asks to run as you:</div>
+      <pre class="tree">${esc(b.command)}</pre>
+      <div class="muted t-s">Allow runs this exact command as you once; Deny refuses it.</div>
+      <div class="actions">${button("Allow", { kind: "primary", data: { "bang-ok": b.id } })}
+        ${button("Deny", { data: { "bang-deny": b.id } })}</div>
+    </div>`;
 }
 
 function where(r) {
@@ -107,13 +136,42 @@ function allowedLine(res, count, isSignin) {
 }
 
 function setControlsDisabled(disabled) {
-  for (const el of host.querySelectorAll("input, button[data-signin-ok], button[data-signin-deny]")) el.disabled = disabled;
+  for (const el of host.querySelectorAll("input, button[data-signin-ok], button[data-signin-deny], button[data-bang-ok], button[data-bang-deny]")) el.disabled = disabled;
 }
 
 host.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   if (t.dataset.signinClose) return dlg.close();
+  const bangId = +(t.dataset.bangOk || t.dataset.bangDeny || 0);
+  if (bangId && !busy) {
+    busy = true;
+    setControlsDisabled(true);
+    try {
+      const allow = Boolean(t.dataset.bangOk);
+      const res = await act("bang_decide", { id: bangId, allow });
+      if (allow) {
+        const line = res && res.output ? `Allowed: ${res.output}` : "Allowed";
+        const actions = host.querySelector(".actions");
+        if (actions) actions.outerHTML = `<div class="signin-result" role="status" aria-live="polite" data-signin-result>${esc(line)}</div>`;
+        toast(line);
+        shown = null;
+        later.add(`b:${bangId}`);
+        closeTimer = setTimeout(() => { closeTimer = null; busy = false; dlg.close(); }, 1800);
+        return;
+      }
+      toast("Denied");
+    } catch (err) {
+      busy = false;
+      setControlsDisabled(false);
+      return;
+    }
+    busy = false;
+    shown = null;
+    later.add(`b:${bangId}`);
+    dlg.close();
+    return;
+  }
   const id = +(t.dataset.signinOk || t.dataset.signinDeny || 0);
   if (!id || busy) return;
   const only = [...host.querySelectorAll("input[data-signin-site]:checked")].map(i => i.value);

@@ -636,8 +636,13 @@ VERSION_NAME = re.compile(r"^\d+\.\d+\.\d+")
 # agent's own Bash calls stay refused even when they type the same text.
 BANG_TTL = 30.0
 BANG_CLAIMED_TTL = 15.0
+BANG_ASK_TTL = 300.0
+BANG_ASK_MAX = 20
+_BANG_ASK_DENY = frozenset({"serve", "mcp", "wait", "report", "activity"})
 _BANG_LOCK = threading.Lock()
 _BANGS = []
+_BANG_ASKS = []
+_BANG_ASK_NEXT = 0
 _CLI_BANG = None  # (argv_tuple, result_dict) cached for this CLI process
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _ENV_ARG_FLAGS = {"-u", "-C", "-S"}
@@ -717,11 +722,69 @@ def claim_bang(agent, argv, proc=None):
     return None
 
 
+def ask_bang(agent, argv, cwd=None, ttl=BANG_ASK_TTL):
+    """Queue a pending command approval for the person's Allow/Deny dialog (#6912). Does not grant anything until
+    the person clicks Allow in the page (server.bang_decide_op)."""
+    global _BANG_ASK_NEXT
+    import shlex
+    if not agent or not isinstance(argv, (list, tuple)) or not argv or len(argv) > 100:
+        return None
+    words = tuple(str(w) for w in argv if isinstance(w, str))
+    if len(words) != len(argv):
+        return None
+    cmd_word = next((w for w in words if not w.startswith("-")), "")
+    if not cmd_word or cmd_word in _BANG_ASK_DENY:
+        return None
+    now_m = time.monotonic()
+    exp = now_m + float(ttl)
+    command = shlex.join(["maxpm", *words])
+    with _BANG_LOCK:
+        _BANG_ASKS[:] = [e for e in _BANG_ASKS if e["expires"] > now_m]
+        for e in _BANG_ASKS:
+            if e["agent"] == agent and e["argv"] == words:
+                e["expires"] = exp
+                return {"id": e["id"], "agent": e["agent"], "command": e["command"], "argv": list(e["argv"]),
+                        "cwd": e["cwd"]}
+        if len(_BANG_ASKS) >= BANG_ASK_MAX:
+            _BANG_ASKS.pop(0)
+        _BANG_ASK_NEXT += 1
+        entry = {"id": _BANG_ASK_NEXT, "agent": agent, "argv": words, "command": command,
+                 "cwd": cwd if isinstance(cwd, str) else None, "expires": exp}
+        _BANG_ASKS.append(entry)
+    return {"id": entry["id"], "agent": entry["agent"], "command": entry["command"], "argv": list(entry["argv"]),
+            "cwd": entry["cwd"]}
+
+
+def list_bang_asks():
+    """The pending command approvals for the page's Allow/Deny dialog (#6912)."""
+    now_m = time.monotonic()
+    with _BANG_LOCK:
+        _BANG_ASKS[:] = [e for e in _BANG_ASKS if e["expires"] > now_m]
+        return [{"id": e["id"], "agent": e["agent"], "command": e["command"]} for e in _BANG_ASKS]
+
+
+def pop_bang_ask(ask_id):
+    """Remove and return one pending command approval by id, or None."""
+    try:
+        aid = int(ask_id)
+    except (TypeError, ValueError):
+        return None
+    now_m = time.monotonic()
+    with _BANG_LOCK:
+        _BANG_ASKS[:] = [e for e in _BANG_ASKS if e["expires"] > now_m]
+        for idx, e in enumerate(_BANG_ASKS):
+            if e["id"] == aid:
+                return _BANG_ASKS.pop(idx)
+    return None
+
+
 def clear_bangs():
-    """Reset the in-memory '!' allowances (tests)."""
-    global _CLI_BANG
+    """Reset the in-memory '!' allowances and pending approvals (tests)."""
+    global _CLI_BANG, _BANG_ASK_NEXT
     with _BANG_LOCK:
         _BANGS.clear()
+        _BANG_ASKS.clear()
+        _BANG_ASK_NEXT = 0
     _CLI_BANG = None
 
 
