@@ -6963,18 +6963,6 @@ def _peer_session(conn):
     return None, None, None
 
 
-def person_bang_op(conn, a, who):
-    """Record a person's '!' maxpm command from a UserPromptSubmit hook (#6912). The process tree must prove it came
-    from that session (not a sandboxed Bash call or another session)."""
-    from . import vault
-    name, _spid, _proc = _peer_session(conn)
-    want = a.get("agent")
-    if not name or (want and want != name):
-        return {"recorded": 0, "agent": name}
-    n = vault.record_bang(name, a.get("text") or "", person=vault._default_person(conn))
-    return {"recorded": n, "agent": name}
-
-
 def bang_claim_op(conn, a, who):
     """Consume one recorded '!' maxpm command for the session above this CLI process (#6912)."""
     from . import vault
@@ -7095,8 +7083,8 @@ OPS = {
     "start_session": lambda c, a, who: start_session(c, a.get("folder"), agent=a.get("agent"), actor=who,
                                                      prompt=a.get("prompt"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
-    # A person's '!' command in a session's chat (#6912): recorded by UserPromptSubmit and claimed once by the command.
-    "person_bang": person_bang_op,
+    # A person's '!' command in a session's chat (#6912): recorded only from the person's page (session_send) and
+    # claimed once by the command.
     "bang_claim": bang_claim_op,
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,

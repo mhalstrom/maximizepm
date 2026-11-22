@@ -619,53 +619,47 @@ class Identity(Base):
                 with self.assertRaisesRegex(RiverError, "only a person or the manager"):
                     vault.grant(self.c, "devset", "item", str(it), actor="dev")
 
-    def test_person_bang_set_change_and_server_ops_and_hook_guard(self):
-        """#6912: '! env -u MAXPM_TOKEN maxpm secret set ...' works through serve ops, and PreToolUse refuses an
-        agent's Bash tool from calling maxpm report --hook directly."""
+    def test_hook_route_removed_and_agent_cannot_forge_bang(self):
+        """#6912: UserPromptSubmit never records a person bang allowance, and no person_bang op exists for an agent to
+        POST directly."""
         from river import server
         vault.clear_bangs()
         self.addCleanup(vault.clear_bangs)
-        vault.BACKEND.put(self.c, "k2", b"v2")
-        self.c.execute("INSERT INTO secrets (name, created_at) VALUES ('k2', 'x')")
+        self.assertNotIn("person_bang", server.OPS)
+        # Running maxpm report --hook claude with a '!' prompt (e.g. from a script file) records no bang.
+        payload = json.dumps({"hook_event_name": "UserPromptSubmit",
+                              "prompt": "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2"})
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "dev"}), \
+                mock.patch("sys.stdin", io.StringIO(payload)):
+            self.assertEqual(cli.run(["report", "--hook", "claude"]), 0)
+        self.assertIsNone(vault.claim_bang("dev", ("secret", "set", "s2", "--add", "k2")))
 
-        # PreToolUse refuses an agent calling maxpm report --hook directly.
-        self.assertIsNotNone(core.hook_guard("echo '{}' | maxpm report --hook claude"))
-        self.assertIsNotNone(core.hook_guard("python3 -m river report --hook codex"))
-        self.assertIsNone(core.hook_guard("maxpm report --state working"))
+        # An agent calling session_send directly (without PAGE_TOKEN / as non-person) is refused by server.
+        raw = json.dumps({"op": "session_send", "actor": "dev",
+                          "args": {"agent": "dev", "text": "! maxpm secret grant s2 --item 1"}}).encode()
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.rfile, out = "/api/action", ("127.0.0.1", 61001), io.BytesIO(raw), {}
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        h.headers = {"Content-Length": str(len(raw)), "Host": "127.0.0.1:8765"}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_POST()
+        self.assertEqual(out["code"], 403)
+        self.assertIsNone(vault.claim_bang("dev", ("secret", "grant", "s2", "--item", "1")))
 
-        # UserPromptSubmit hook reports '!' text; person_bang_op records only when process tree proves that session.
-        rep = core.hook_report(self.c, "claude", {"hook_event_name": "UserPromptSubmit",
-                                                  "prompt": "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2"},
-                               {"MAXPM_AGENT": "dev"})
-        self.assertEqual(rep["bang"], "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2")
-
-        self.chain = [(910, 500, "Python", 30), (500, 1, "2.1.325", 111)]
-        vault.PEER.value = (51001, 7766, "910")
-        self.addCleanup(setattr, vault.PEER, "value", None)
-        self.addCleanup(setattr, vault.PEER, "argv", None)
-        self.addCleanup(setattr, vault.PEER, "bang", None)
-        with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 910):
-            # Another session's name is rejected.
-            self.assertEqual(server.OPS["person_bang"](self.c, {"agent": "other", "text": rep["bang"]}, "dev")["recorded"], 0)
-            # Same session records it.
-            self.assertEqual(server.OPS["person_bang"](self.c, {"agent": "dev", "text": rep["bang"]}, "dev")["recorded"], 1)
-
-        # CLI claims it once via bang_claim_op from pid 920; a second process 921 is refused.
+        # bang_claim_op works only for a bang recorded from the person's page (session_send), once per process.
+        vault.record_bang("dev", "! env -u MAXPM_TOKEN maxpm secret set s2 --add k2", person="mark")
         argv = ["secret", "set", "s2", "--add", "k2"]
         self.chain = [(920, 500, "Python", 40), (500, 1, "2.1.325", 111)]
+        vault.PEER.value = (51001, 7766, "920")
+        self.addCleanup(setattr, vault.PEER, "value", None)
         with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 920):
             r1 = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
             self.assertTrue(r1["ok"])
             self.assertEqual(r1["person"], "mark")
-            # Same CLI process can re-check (e.g. _rights + session_of).
-            r1b = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
-            self.assertTrue(r1b["ok"])
+            self.assertTrue(server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")["ok"])
         self.chain = [(921, 500, "Python", 50), (500, 1, "2.1.325", 111)]
         with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 921):
-            r2 = server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")
-            self.assertFalse(r2["ok"])
-
-        # Expired bang is refused.
+            self.assertFalse(server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")["ok"])
         vault.record_bang("dev", "! maxpm secret set s2 --add k2", person="mark", ttl=-1)
         with mock.patch("river.peer.holder", lambda lp, rp, hints=(): 921):
             self.assertFalse(server.OPS["bang_claim"](self.c, {"argv": argv}, "dev")["ok"])

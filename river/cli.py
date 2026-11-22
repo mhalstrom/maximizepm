@@ -3111,13 +3111,6 @@ def activity_command(stdin=None, agent_id="claude"):
             res["deliver"] = core.turn_end_messages(conn, res["agent"])
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
-        if res.get("bang") and res["agent"] and not in_sandbox():
-            from . import vault
-            if vault.bang_commands(res["bang"]):
-                try:
-                    ask_server(conn, "person_bang", {"agent": res["agent"], "text": res["bang"]}, timeout=1, retries=0)
-                except Exception:  # noqa: BLE001 - a hook must never fail the session
-                    pass
         if res["state"] == "idle" and not res.get("deliver") and core.pending_waits(conn, res["agent"]):
             # A message that the person sent during this turn waits (#5587): maxpm serve types it at the idle prompt.
             try:

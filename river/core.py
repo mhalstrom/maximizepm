@@ -19716,10 +19716,8 @@ def hook_report(conn, agent_id, payload, env=None):
                 remind = "MaximizePM: " + asked_line(agent, due) + ". If it still waits for the person, end your turn again."
     if answered:
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
-    bang = typed if (rep["event"] == "UserPromptSubmit" and isinstance(typed, str)
-                     and typed.lstrip().startswith("!")) else None
     return {"agent": agent, "event": rep["event"], "state": state, "prompt": typed is not None, "alert": alert,
-            "answered": answered, "remind": remind, **({"bang": bang} if bang else {})}
+            "answered": answered, "remind": remind}
 
 
 # The words that may come before the program of a shell command: env and its options, VAR=value, and wrappers.
