@@ -63,7 +63,8 @@ function pick(id, name, on) {
 function reqBox(r) {
   const task = r.task ? `${esc(r.covers)}: ${esc(r.task)}` : esc(r.covers);
   if (r.state === "open") {
-    return `<div class="cred-req is-open t-s"><b>${esc(r.asked_by)}</b> asks the manager for ${esc(r.set_name)} (${task})`
+    const what = r.set_name || (r.offered || []).join(", ") || "credentials";
+    return `<div class="cred-req is-open t-s"><b>${esc(r.asked_by)}</b> asks the manager for ${esc(what)} (${task})`
       + `${r.reason ? `: ${esc(r.reason)}` : ""}</div>`;
   }
   const offered = r.offered || [], ticked = new Set(r.ticked || []);

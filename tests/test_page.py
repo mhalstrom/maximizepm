@@ -2940,6 +2940,63 @@ try {
             self.assertTrue(r["tryShown"], (size, r))
             self.assertEqual(r["over"], [], (size, r))
 
+    def test_loose_secrets_allow_dialog_desktop_and_phone(self):
+        # #6905: refused loose secrets group into one Allow dialog at desktop and 390 px phone width; Allow grants
+        # them to the item so the session's secret use then works.
+        from unittest.mock import patch
+        from river import vault
+        c = core.connect()
+        try:
+            core.register(c, "mark", human=True)
+            with patch.object(vault, "BACKEND", vault.Files()), \
+                 patch.object(vault, "IDENTITY", lambda conn, actor: {"name": actor, "person": not actor or actor == "mark"}):
+                vault.put(c, "svc-key-1", b"secret-1", "mark")
+                vault.put(c, "svc-key-2", b"secret-2", "mark")
+                for n in ("svc-key-1", "svc-key-2"):
+                    with self.assertRaises(core.RiverError):
+                        vault.get(c, n, "ag", f"pipe: cmd {n}")
+        finally:
+            c.close()
+
+        driver = r'''
+const errors = window.__pageErrors;
+try {
+  await until(() => q("#signinDlg") && !q("#signinDlg").classList.contains("hidden") && q("#signinDlg [data-signin-ok]"), "allow dialog");
+  const title = q("#signinTitle").textContent.trim();
+  const checked = [...document.querySelectorAll('#signinDlg input[data-signin-site]:checked')].map(i => i.value);
+  const box = q("#signinDlg .box").getBoundingClientRect();
+  const over = box.right > window.innerWidth + 1;
+  q("#signinDlg [data-signin-ok]").click();
+  await until(() => q("#signinDlg").classList.contains("hidden"), "dialog closed after Allow");
+  post({ title, checked, over, errors });
+} catch (e) { post({ error: String(e && e.stack || e), errors }); }'''
+
+        for size in ("1280,900", "390,844"):
+            # Reset request to 'asked' before the second viewport run.
+            c = core.connect()
+            try:
+                if size == "390,844":
+                    c.execute("UPDATE secret_requests SET state='asked', decided_by=NULL, decided_at=NULL, chosen=NULL, "
+                              "set_id=NULL, grant_id=NULL")
+                    c.execute("DELETE FROM secret_grants")
+                    c.execute("DELETE FROM secret_sets")
+                    c.commit()
+            finally:
+                c.close()
+            with patch.object(vault, "BACKEND", vault.Files()), \
+                 patch.object(vault, "IDENTITY", lambda conn, actor: {"name": actor, "person": not actor or actor == "mark"}):
+                r = self.drive(driver, "/?as=mark", size=size)
+                self.assertEqual(r["errors"], [], (size, r))
+                self.assertEqual(r["title"], "Allow credentials?", (size, r))
+                self.assertEqual(r["checked"], ["svc-key-1", "svc-key-2"], (size, r))
+                self.assertFalse(r["over"], (size, r))
+                c = core.connect()
+                try:
+                    self.assertEqual(vault.get(c, "svc-key-1", "ag"), b"secret-1")
+                    self.assertEqual(vault.get(c, "svc-key-2", "ag"), b"secret-2")
+                finally:
+                    c.close()
+
 
 class PageAddresses(unittest.TestCase):
     """#4653: maxpm serve answers the page for the path of each view, with a <base> back to the page's root."""

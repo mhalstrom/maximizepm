@@ -158,13 +158,18 @@ def act(conn, a, who):
     if action == "request":
         if a.get("sites"):  # #5840: sign-ins from a session's browser, at the person at once
             return vault.signin_request(conn, a["sites"], a.get("source"), a.get("reason"), who, a.get("item"))
-        return vault.request(conn, name, a.get("reason"), who, a.get("item"))
+        return vault.request(conn, name, a.get("reason"), who, a.get("item"), secrets=a.get("secrets"))
     if action == "propose":
-        return vault.propose(conn, a.get("request"), a.get("offer") or [], a.get("tick") or [], a.get("reason"), who)
+        return vault.propose(conn, a.get("request"), a.get("offer"), a.get("tick"), a.get("reason"), who)
     if action == "approve" and vault._request(conn, a.get("request"))["sites"]:
         return approve_signins(conn, a, who)
     if action == "approve":
-        return vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"))
+        res = vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"))
+        always = [n for n in (a.get("always") or []) if n in res.get("chosen", [])]
+        if always and vault.session_of(conn, who)["person"]:
+            for n in always:
+                vault.set_ask(conn, n, "allow", who)
+        return res
     if action == "refuse":
         return vault.refuse(conn, a.get("request"), a.get("note"), who)
     if action == "requests":

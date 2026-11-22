@@ -827,6 +827,79 @@ class Requests(Base):
         rc, out = self.run_cli(["secret", "requests", "--all"])
         self.assertIn("r1 refused", out)
 
+    def test_refused_loose_secrets_group_into_one_request_for_the_item(self):
+        # #6905: refused loose secrets (in no set) create/group one request for the item, with no typed commands.
+        vault.put(self.c, "loose-1", b"val-1", None)
+        vault.put(self.c, "loose-2", b"val-2", None)
+        for n in ("loose-1", "loose-2"):
+            with self.assertRaises(RiverError) as e:
+                vault.get(self.c, n, "dev", f"pipe: cmd {n}")
+            self.assertNotIn("maxpm secret set", str(e.exception))
+            self.assertIn("request r1", str(e.exception))
+        reqs = vault.requests(self.c)["requests"]
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual((reqs[0]["request"], reqs[0]["state"], reqs[0]["set_name"]), ("r1", "asked", None))
+        self.assertEqual((reqs[0]["offered"], reqs[0]["ticked"]), (["loose-1", "loose-2"], ["loose-1", "loose-2"]))
+        self.assertEqual(reqs[0]["covers"], f"task #{self.iid}")
+        alerts = self.c.execute("SELECT body, read_at FROM messages WHERE kind='alert' AND to_agent='mark' ORDER BY id").fetchall()
+        self.assertEqual(len(alerts), 1)  # grouped into one alert, not two
+        self.assertIn("loose-1, loose-2", alerts[0]["body"])
+        self.assertIn("(request r1)", alerts[0]["body"])
+        self.assertNotIn("maxpm secret set", alerts[0]["body"])
+        self.assertIsNone(alerts[0]["read_at"])
+        # Allow makes the set and grants it to this item only, and marks the alert read.
+        a = vault.approve(self.c, "r1", ["loose-1", "loose-2"], actor="mark")
+        self.assertEqual((a["state"], a["chosen"]), ("granted", ["loose-1", "loose-2"]))
+        self.assertIsNotNone(self.c.execute("SELECT read_at FROM messages WHERE kind='alert' AND to_agent='mark'").fetchone()["read_at"])
+        self.assertEqual(vault.get(self.c, "loose-1", "dev"), b"val-1")
+        self.assertEqual(vault.get(self.c, "loose-2", "dev"), b"val-2")
+        # Another session on another task still has no access.
+        core.register(self.c, "dev2")
+        other = core.item_add(self.c, "site", "other task", actor="t")["id"]
+        core.claim(self.c, other, "dev2")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "loose-1", "dev2")
+        # Closing the item ends the grant.
+        core.done(self.c, self.iid, "ok", "dev")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "loose-1", "dev")
+
+    def test_request_loose_secrets_via_cli_and_propose(self):
+        # #6905: maxpm secret request names loose secrets; manager proposes; Allow grants and pipe works.
+        vault.put(self.c, "loose-a", b"alpha", None)
+        vault.put(self.c, "loose-b", b"beta", None)
+        rc, out = self.run_cli(["secret", "request", "loose-a", "loose-b", "--reason", "e2e test"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("r1 open: dev asks for loose-a, loose-b", out)
+        self.assertIn("maxpm secret propose r1 --offer loose-a,loose-b --tick loose-a,loose-b", self.last("manager-1"))
+        # Manager can propose without repeating --offer (uses the request's secrets).
+        rc, out = self.run_cli(["--as", "manager-1", "secret", "propose", "r1"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("checklist [x] loose-a, [x] loose-b", out)
+        # Allow via routes/secrets.py (same op as the page dialog), with 'Do not ask again' on loose-a.
+        from river.routes import secrets as routes_secrets
+        res = routes_secrets.act(self.c, {"action": "approve", "request": "r1", "only": ["loose-a", "loose-b"],
+                                          "always": ["loose-a"]}, "mark")
+        self.assertEqual((res["state"], res["chosen"]), ("granted", ["loose-a", "loose-b"]))
+        asks = {r["name"]: r["ask"] for r in vault.listing(self.c)["secrets"]}
+        self.assertEqual((asks["loose-a"], asks["loose-b"]), ("allow", "ask"))
+        # Now the session's secret pipe works.
+        rc, out = self.run_cli(["secret", "pipe", "loose-a", "--", sys.executable, "-c",
+                                "import sys; assert sys.stdin.read() == 'alpha'"])
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_cli(["secret", "pipe", "loose-b", "--", sys.executable, "-c",
+                                "import sys; assert sys.stdin.read() == 'beta'"])
+        self.assertEqual(rc, 0, out)
+
+    def test_refuse_loose_secret_request_names_secrets(self):
+        vault.put(self.c, "loose-x", b"x", None)
+        r = vault.request(self.c, "loose-x", "check", "dev")
+        self.assertEqual((r["state"], r["set_name"], r["offered"]), ("open", None, ["loose-x"]))
+        vault.refuse(self.c, r["request"], "not needed", actor="manager-1")
+        notice = self.last("dev", "notice")
+        self.assertIn("the secrets loose-x", notice)
+        self.assertNotIn("the set None", notice)
+
 
 if __name__ == "__main__":
     unittest.main()

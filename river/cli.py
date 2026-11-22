@@ -1442,10 +1442,10 @@ def build_parser(only=None):
                    help="change the site, account or 2-step only; ask for no password")
     x.add_argument("--project")
     x.add_argument("--note")
-    # Requests (#5834): a session asks; the manager grants a marked set or proposes a checklist; the person approves.
-    x = ses.add_parser("request", help="ask the manager for a set for your task: maxpm secret request <set> --reason; "
-                                       "or the person's sign-ins of sites: --signin <sites> --from <session>")
-    x.add_argument("name", nargs="?", help="the set")
+    # Requests (#5834, #6905): a session asks; the manager grants a marked set or proposes a checklist; the person approves.
+    x = ses.add_parser("request", help="ask for a set or named secrets for your task: maxpm secret request <set|secret...> "
+                                       "--reason; or the person's sign-ins of sites: --signin <sites> --from <session>")
+    x.add_argument("names", nargs="*", help="the set, or one or more secret names (space or comma separated)")
     x.add_argument("--signin", help="#5840: the sites whose sign-in you need, comma separated (google.com,"
                                     "cloudflare.com): the person gets a modal on the page, Allow or Deny")
     x.add_argument("--from", dest="source", help="with --signin: the session whose browser is signed in")
@@ -1455,8 +1455,8 @@ def build_parser(only=None):
     x.add_argument("--item", help="the task (default: the one you hold)")
     x = ses.add_parser("propose", help="the manager: put a request to the person as a checklist of credentials")
     x.add_argument("request", help="r12")
-    x.add_argument("--offer", required=True, help="the credentials to choose from, by name, comma separated")
-    x.add_argument("--tick", default="", help="the ones you expect the person to allow, comma separated")
+    x.add_argument("--offer", help="the credentials to choose from, by name, comma separated (default: the request's)")
+    x.add_argument("--tick", help="the ones you expect the person to allow, comma separated")
     x.add_argument("--reason", help="why (default: the session's reason)")
     x = ses.add_parser("approve", help="the person: allow the ticked credentials of a request (or --only your pick)")
     x.add_argument("request", help="r12")
@@ -6973,7 +6973,7 @@ def _secret_cmd(conn, a, actor):
             raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} {where}")
         return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc, "where": where,
                 "masked": prot["level"] != "open"}
-    if cmd in ("request", "propose", "approve", "refuse", "requests", "check"):  # #5834
+    if cmd in ("request", "propose", "approve", "refuse", "requests", "check"):  # #5834, #6905
         names = lambda s: [x.strip() for x in (s or "").split(",") if x.strip()]  # noqa: E731
         args = {"action": cmd, "name": getattr(a, "name", None), "request": getattr(a, "request", None)}
         if cmd == "request":
@@ -6984,15 +6984,22 @@ def _secret_cmd(conn, a, actor):
                 from . import browser
                 project = browser.project_of(conn, a.source_project, a.source)
                 args.update(sites=names(a.signin), source=f"{project}/{a.source}")
-            elif not a.name:
-                raise RiverError("name the set: maxpm secret request <set> --reason \"<why>\" (or --signin <sites> "
-                                 "--from <session>)")
+            else:
+                asked = [n for part in (a.names or []) for n in names(part)]
+                if not asked:
+                    raise RiverError("name the set or secrets: maxpm secret request <set|secret...> --reason \"<why>\" "
+                                     "(or --signin <sites> --from <session>)")
+                if len(asked) == 1:
+                    args["name"] = asked[0]
+                else:
+                    args["secrets"] = asked
         elif cmd == "approve" and vault._request(conn, a.request)["sites"]:
             # #5840: Allow of a sign-in request reads the cookies of a browser, which runs in maxpm serve
             return ask_server(conn, "secret", {**args, "only": names(a.only) if a.only is not None else None,
                                                "note": a.note}, actor=actor, timeout=30)
         elif cmd == "propose":
-            args.update(offer=names(a.offer), tick=names(a.tick), reason=a.reason)
+            args.update(offer=names(a.offer) if a.offer is not None else None,
+                        tick=names(a.tick) if a.tick is not None else None, reason=a.reason)
         elif cmd == "approve":
             args.update(only=names(a.only) if a.only is not None else None, note=a.note)
         elif cmd == "refuse":
@@ -7183,9 +7190,9 @@ def render_secret(a, res):
 def _request_line(r):
     """One request (#5834): its id, state, who asked for what, and the checklist."""
     marks = ", ".join(("[x] " if n in r["ticked"] else "[ ] ") + n for n in r["offered"])
-    # #5840: a request for sign-ins names its sites and the browser they come from, not a set
+    # #5840, #6905: a request for sign-ins names its sites and browser; loose secrets name their offered credentials
     what = (f"the person's sign-ins of {', '.join(r['sites'])} from the browser of {r['source']}" if r.get("sites")
-            else r["set_name"])
+            else r["set_name"] or ", ".join(r["offered"]) or "credentials")
     return (f"{r['request']} {r['state']}: {r['asked_by']} asks for {what} for {r['covers']}"
             + (f" ({r['reason']})" if r.get("reason") else "") + (f"; checklist {marks}" if marks else "")
             + (f"; allowed {', '.join(r['chosen'])}" if r["chosen"] else "")
