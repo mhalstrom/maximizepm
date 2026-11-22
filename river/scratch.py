@@ -23,15 +23,18 @@ with the change time of its folder (meta key META), so a pass walks it again onl
 scratchpads are listed at most once in SCAN_EVERY.
 """
 
+import fcntl
 import json
 import os
 import shutil
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 
 from . import core
 
 META = "scratch"
+TRIM_META = "scratch_trim"
 GRACE = timedelta(minutes=2)  # a session seen this recently, or a build folder this new, stays
 # A list of all scratchpads took 194 ms for 403 of them (2026-11-20); serve passes every 30 s, so that walk runs at
 # most once in SCAN_EVERY. The build folders under session_builds go at each pass.
@@ -138,18 +141,183 @@ def _mtime(p):
         return None
 
 
-def _load(conn):
-    r = conn.execute("SELECT value FROM meta WHERE key=?", (META,)).fetchone()
+def _load(conn, key=META):
+    r = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     try:
         return json.loads(r["value"]) if r else {}
     except ValueError:
         return {}
 
 
-def _save(conn, m):
+def _save(conn, m, key=META):
     with core.tx(conn):
         conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                     (META, json.dumps(m)))
+                     (key, json.dumps(m)))
+
+
+def _cargo_lock_held(target_dir):
+    """True when a cargo build holds a .cargo-lock (flock) inside target_dir."""
+    t = Path(target_dir)
+    candidates = []
+    for pattern in (".cargo-lock", "*/.cargo-lock", "*/*/.cargo-lock"):
+        try:
+            candidates.extend(t.glob(pattern))
+        except OSError:
+            continue
+    for lock_path in candidates:
+        if lock_path.is_symlink():
+            continue
+        try:
+            with open(lock_path, "rb") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return True
+                finally:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    return False
+
+
+def _ps_lines():
+    """Return [(pid, command)] from ps, or [] if unavailable."""
+    try:
+        r = subprocess.run(["ps", "-axo", "pid=,command="], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            out.append((int(parts[0]), parts[1]))
+    return out
+
+
+def _target_in_use(target_dir, ps_lines=None):
+    """True when a cargo build holds a lock in target_dir or a running process references it."""
+    if _cargo_lock_held(target_dir):
+        return True
+    needle = str(target_dir).rstrip(os.sep) + os.sep
+    own = os.getpid()
+    for pid, cmd in (ps_lines if ps_lines is not None else _ps_lines()):
+        if pid != own and needle in cmd:
+            return True
+    return False
+
+
+def _incremental_dirs(target_dir):
+    """Rebuildable incremental directories (debug/incremental*, release/incremental*) inside a Cargo target folder."""
+    out = []
+    for profile in ("debug", "release"):
+        pdir = target_dir / profile
+        if not pdir.is_dir() or pdir.is_symlink():
+            continue
+        try:
+            kids = list(pdir.iterdir())
+        except OSError:
+            continue
+        for sub in kids:
+            if sub.name.startswith("incremental") and sub.is_dir() and not sub.is_symlink():
+                out.append(sub)
+    return out
+
+
+def _trim_one_session(conn, session_dir, ps_lines, dry_run=False):
+    """Trim rebuildable incremental output inside one live session's build folder (#6821).
+    Live sessions reuse worktrees across items (e.g. wt-<old-id>/target for a new item), so a live session never
+    loses a whole target/ folder based on its worktree name; whole session build folders go only when the session
+    ends (sweep). Removes only debug/incremental* and release/incremental* inside Cargo target folders that are not
+    in use by a cargo lock or running process. Never removes source files, test data folders, databases, or symlinks.
+    Returns (paths, total_bytes)."""
+    from .space import tree_bytes
+    paths, total = [], 0
+
+    def remove_path(p):
+        nonlocal total
+        if not _inside(p, session_dir):
+            return
+        total += tree_bytes(p)
+        paths.append(str(p))
+        if not dry_run:
+            shutil.rmtree(p, ignore_errors=True)
+
+    try:
+        kids = sorted(session_dir.iterdir(), key=lambda x: x.name)
+    except OSError:
+        return paths, total
+
+    for c in kids:
+        if not c.is_dir() or c.is_symlink():
+            continue
+        if c.name == "target":
+            target_dir = c if _is_build(c) else None
+        else:
+            nested = c / "target"
+            target_dir = nested if (nested.is_dir() and not nested.is_symlink() and _is_build(nested)) else (
+                c if _is_build(c) else None)
+        if target_dir is not None and not _target_in_use(target_dir, ps_lines):
+            for inc in _incremental_dirs(target_dir):
+                remove_path(inc)
+    return paths, total
+
+
+def trim_session_builds(conn, dry_run=False, force=False):
+    """After a session finishes an item, trim rebuildable build output from its <session_builds>/<session>/ folder
+    (#6821, mark chose Trim on #6812). Runs once per session per newly closed item (or always when force=True, as
+    during a low-disk sweep). Returns {session: {"paths": [...], "bytes": b}} of what went."""
+    from .space import show_size
+    t = core.now()
+    root = build_root(conn)
+    try:
+        builds = [d for d in root.iterdir() if d.is_dir() and not d.is_symlink()] if root.is_dir() else []
+    except OSError:
+        return {}
+    state = _load(conn, TRIM_META)
+    seen = dict(state.get("trimmed") or {})
+    live_names = {d.name for d in builds}
+    memo = {k: v for k, v in seen.items() if k in live_names}
+    todo = []
+    for d in builds:
+        name = d.name
+        if not _known(conn, name) or _ended(conn, name, t):
+            continue
+        r = conn.execute("SELECT MAX(closed_at) AS last FROM items WHERE assignee=? AND status IN ('done','dropped') "
+                         "AND closed_at IS NOT NULL", (name,)).fetchone()
+        last_closed = r["last"] if r else None
+        if not force and (not last_closed or last_closed <= memo.get(name, "")):
+            continue
+        todo.append((d, name, last_closed))
+    if not todo:
+        if not dry_run and memo != seen:
+            _save(conn, {"trimmed": memo}, TRIM_META)
+        return {}
+    ps_lines = _ps_lines()
+    done = {}
+    for d, name, last_closed in todo:
+        paths, total = _trim_one_session(conn, d, ps_lines, dry_run=dry_run)
+        if last_closed:
+            memo[name] = last_closed
+        if paths:
+            done[name] = {"paths": paths, "bytes": total}
+    if dry_run:
+        return done
+    _save(conn, {"trimmed": memo}, TRIM_META)
+    for name, g in done.items():
+        n = len(g["paths"])
+        line = f"{name} trimmed: removed {n} build output folder{'s' if n != 1 else ''} ({show_size(g['bytes'])})"
+        with core.tx(conn):
+            core._event(conn, None, "maxpm", line)
+        print(f"builds: {line}", flush=True)
+    return done
 
 
 def sweep_item_targets(conn, dry_run=False):
@@ -261,5 +429,7 @@ def stop_line(name, g):
 
 
 def serve_pass(conn):
-    """One pass of the loop of maxpm serve: sweep."""
-    return sweep(conn)
+    """One pass of the loop of maxpm serve: sweep ended sessions and trim live sessions after done items."""
+    res = sweep(conn)
+    trim_session_builds(conn)
+    return res
