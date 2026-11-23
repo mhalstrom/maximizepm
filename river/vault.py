@@ -4,10 +4,11 @@ A vendor page shows a token once (a Google client secret, a Cloudflare API token
 and a later step of any session gives it to a target by that name: a command's stdin (wrangler secret put, gh secret
 set) or a line of a .env file. The value never goes to stdout, a reply, the queue's database, or a model's context.
 
-Where the values are: on macOS the login Keychain (service "MaximizePM", account = the name; through
-/usr/bin/security, so the Keychain's own rule lets that one program read them without a dialog). Elsewhere a folder
-beside the queue, secrets/, one file a name, mode 0600. The queue's database keeps only the names (table secrets) and
-who saved and used each one when (table secret_log).
+Where the values are: on macOS the login Keychain (service "MaximizePM", account = the name; through the signed
+MaximizePM Keychain helper so only it reads them without a dialog, falling back to /usr/bin/security when no signed
+helper is installed, such as an unsigned dev checkout). Elsewhere a folder beside the queue, secrets/, one file a
+name, mode 0600. The queue's database keeps only the names (table secrets) and who saved and used each one when
+(table secret_log).
 
 An agent's sandbox refuses the Keychain: the command then goes through maxpm serve (op "secret",
 routes/secrets.py), which runs outside it.
@@ -32,6 +33,13 @@ from .core import RiverError
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 SECURITY = "/usr/bin/security"
+CODESIGN = "/usr/bin/codesign"
+HELPER_NAME = "maxpm-keychain-helper"
+HELPER_IDENTIFIER = "com.maximizepm.keychain-helper"
+HELPER_TEAM_ID = "CWYV4R338W"
+HELPER_AUTHORITY_PREFIX = "Authority=Developer ID Application"
+HELPER_PATHS = None  # tests: iterable of candidate helper paths in place of bundled + ~/.maximizepm/bin
+HELPER_RUN = None    # tests: fn(argv, stdin=None) -> CompletedProcess for codesign and the helper
 SERVICE = "MaximizePM"
 MAX_BYTES = 64 * 1024  # a token, a key file, a certificate; not a folder of files
 BACKEND = None  # tests: an object with put(conn, name, data), get(conn, name), delete(conn, name); None: the platform's
@@ -49,11 +57,27 @@ def _queue_file(conn):
     return Path(row["file"] or core.db_path())
 
 
+def _helper_candidates():
+    """Where MaximizePM looks for the signed Keychain helper (#5837, #5838): bundled first, then terminal install."""
+    if HELPER_PATHS is not None:
+        return [Path(p) for p in HELPER_PATHS]
+    return [
+        Path(__file__).resolve().parent / "bin" / HELPER_NAME,
+        Path.home() / ".maximizepm" / "bin" / HELPER_NAME,
+    ]
+
+
 class Keychain:
-    """The macOS login Keychain, through /usr/bin/security. The value goes in on stdin (security -i, as hex), never
-    on a command line that ps shows. It is stored as 'b64:' + base64, so that -w prints it back exactly (a PEM key's
-    newlines, a certificate's bytes)."""
-    name = "keychain"
+    """The macOS login Keychain (#5837): through the signed MaximizePM Keychain helper so only it reads vault values
+    without a dialog (value on stdin, never argv; stored as 'b64:' + base64). Before each call, verifies the helper's
+    signature (codesign --verify --strict and Developer ID Application + TeamIdentifier + Identifier + hardened
+    runtime) and refuses any helper that fails. When no helper is installed (an unsigned dev checkout), says so in
+    name and keeps the /usr/bin/security path. Existing items made by /usr/bin/security are re-created under the
+    helper's own access list on read, put, or migrate(), and the old items go."""
+
+    @property
+    def name(self):
+        return "keychain" if self._find_helper() is not None else "keychain (no signed helper; using /usr/bin/security)"
 
     def service(self, conn):
         f = _queue_file(conn).expanduser().resolve()
@@ -66,13 +90,78 @@ class Keychain:
         except (OSError, subprocess.TimeoutExpired) as e:
             raise RiverError(f"the macOS Keychain did not answer ({e.__class__.__name__})")
 
+    def _exec(self, cmd, stdin=None):
+        if HELPER_RUN is not None:
+            return HELPER_RUN(cmd, stdin)
+        try:
+            return subprocess.run(cmd, input=stdin, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise RiverError(f"the macOS Keychain helper did not answer ({e.__class__.__name__})")
+
+    def _find_helper(self):
+        for p in _helper_candidates():
+            if p.exists() or p.is_symlink():
+                return p
+        return None
+
+    def _verify_helper(self, path):
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            raise RiverError(f"refused Keychain helper {path}: file is not executable")
+        r = self._exec([CODESIGN, "--verify", "--strict", str(path)])
+        if r.returncode != 0:
+            said = (r.stderr or b"").decode(errors="replace").strip()[:200]
+            raise RiverError(f"refused Keychain helper {path}: signature verification failed"
+                             + (f" ({said})" if said else ""))
+        r = self._exec([CODESIGN, "-dv", str(path)])
+        if r.returncode != 0:
+            raise RiverError(f"refused Keychain helper {path}: could not read its code signature")
+        info = ((r.stderr or b"") + b"\n" + (r.stdout or b"")).decode(errors="replace")
+        lines = [ln.strip() for ln in info.splitlines()]
+        ident = next((ln.split("=", 1)[1] for ln in lines if ln.startswith("Identifier=")), None)
+        if ident != HELPER_IDENTIFIER:
+            raise RiverError(f"refused Keychain helper {path}: unexpected signing identifier {ident or 'none'} "
+                             f"(expected {HELPER_IDENTIFIER})")
+        if not any(ln.startswith(HELPER_AUTHORITY_PREFIX) for ln in lines):
+            raise RiverError(f"refused Keychain helper {path}: not signed with a Developer ID Application certificate")
+        team = next((ln.split("=", 1)[1] for ln in lines if ln.startswith("TeamIdentifier=")), None)
+        if team != HELPER_TEAM_ID:
+            raise RiverError(f"refused Keychain helper {path}: wrong team ID {team or 'none'} "
+                             f"(expected {HELPER_TEAM_ID})")
+        if not any(re.match(r"^CodeDirectory\b.*flags=.*\(runtime\)", ln) for ln in lines):
+            raise RiverError(f"refused Keychain helper {path}: hardened runtime is not enabled")
+        return path
+
+    def _verified_helper(self):
+        path = self._find_helper()
+        return self._verify_helper(path) if path is not None else None
+
+    def _decode(self, name, raw):
+        if isinstance(raw, str):
+            raw = raw.encode()
+        if raw.startswith(b"b64:"):
+            try:
+                return base64.b64decode(raw[4:], validate=True)
+            except ValueError:  # binascii.Error: a value cut before #5840; its length only, never its text
+                raise RiverError(f"the Keychain holds a cut value of the secret {name} ({len(raw) - 4} base64 "
+                                 f"characters): save it again")
+        return raw  # put there by hand (Keychain Access): its bytes as they are
+
+    def _helper_put(self, helper, svc, account, payload):
+        return self._exec([str(helper), "put", svc, account], payload)
+
+    def _helper_get(self, helper, svc, account):
+        return self._exec([str(helper), "get", svc, account])
+
+    def _helper_delete(self, helper, svc, account):
+        return self._exec([str(helper), "delete", svc, account])
+
     # #5840: security -i cuts each line it reads at 4096 bytes (measured on macOS 26: a value of 3000 base64
     # characters came back as 2011), and the value goes on that line as hex. A browser sign-in (about 2 KB of base64)
     # was cut, and its read-back failed. A longer value is stored in parts of PART base64 characters: the item
     # <name> holds 'parts:<n>', and <name>#1 .. <name>#n hold the parts ('#' is in no secret's name).
     PART = 1200
 
-    def put(self, conn, name, data):
+    def _legacy_put(self, conn, name, data):
         b = base64.b64encode(data).decode()
         svc = self.service(conn)
         old = self._count(conn, name)
@@ -87,7 +176,7 @@ class Keychain:
             self._run(["-i"], "".join(f'delete-generic-password -s "{svc}" -a "{name}#{i}"\n'
                                       for i in range(keep + 1, old + 1)).encode())
         try:
-            back = self.get(conn, name)
+            back = self._legacy_get(conn, name)
         except RiverError:
             back = None
         if back != data:
@@ -104,7 +193,7 @@ class Keychain:
         out = self._raw(conn, name)
         return int(out[6:]) if out and out.startswith("parts:") and out[6:].isdigit() else 0
 
-    def get(self, conn, name):
+    def _legacy_get(self, conn, name):
         out = self._raw(conn, name)
         if out is None:
             return None
@@ -114,18 +203,154 @@ class Keychain:
             if not n or any(p is None or not p.startswith("b64:") for p in parts):
                 raise RiverError(f"the Keychain holds only part of the secret {name}: save it again")
             out = "b64:" + "".join(p[4:] for p in parts)
-        if out.startswith("b64:"):
-            try:
-                return base64.b64decode(out[4:], validate=True)
-            except ValueError:  # binascii.Error: a value cut before #5840; its length only, never its text
-                raise RiverError(f"the Keychain holds a cut value of the secret {name} ({len(out) - 4} base64 "
-                                 f"characters): save it again")
-        return out.encode()  # put there by hand (Keychain Access): its text as it is
+        return self._decode(name, out)
 
-    def delete(self, conn, name):
+    def _legacy_delete(self, conn, name):
         svc = self.service(conn)
         self._run(["-i"], "".join(f'delete-generic-password -s "{svc}" -a "{acct}"\n' for acct in
                                   [f"{name}#{i}" for i in range(1, self._count(conn, name) + 1)] + [name]).encode())
+
+    def _migrate_item(self, conn, helper, svc, name, data, legacy_parts):
+        """Re-create a legacy /usr/bin/security item under the helper's own access list and remove old items."""
+        dr = self._helper_delete(helper, svc, name)
+        if dr.returncode != 0:
+            said = (dr.stderr or b"").decode(errors="replace").strip()[:200]
+            raise RiverError(f"the macOS Keychain helper could not replace the legacy secret {name}"
+                             + (f": {said}" if said else ""))
+        payload = b"b64:" + base64.b64encode(data)
+        pr = self._helper_put(helper, svc, name, payload)
+        back = None
+        if pr.returncode == 0:
+            gr = self._helper_get(helper, svc, name)
+            if gr.returncode == 0:
+                try:
+                    back = self._decode(name, gr.stdout)
+                except RiverError:
+                    back = None
+        if pr.returncode != 0 or back != data:
+            try:
+                self._legacy_put(conn, name, data)  # keep the existing secret readable if migration fails
+            except RiverError:
+                pass
+            said = (pr.stderr or b"").decode(errors="replace").strip()[:200]
+            raise RiverError(f"the macOS Keychain helper refused the secret {name} while migrating it"
+                             + (f": {said}" if said else ""))
+        for i in range(1, legacy_parts + 1):
+            self._helper_delete(helper, svc, f"{name}#{i}")
+
+    def put(self, conn, name, data):
+        helper = self._verified_helper()
+        if helper is None:
+            return self._legacy_put(conn, name, data)
+        svc = self.service(conn)
+        payload = b"b64:" + base64.b64encode(data)
+        r = self._helper_put(helper, svc, name, payload)
+        legacy_parts = 0
+        rollback = None
+        if r.returncode != 0 and self._raw(conn, name) is not None:
+            # Existing item made by /usr/bin/security: delete it so the helper creates a new item under its own ACL.
+            legacy_parts = self._count(conn, name)
+            try:
+                rollback = self._legacy_get(conn, name)
+            except RiverError:
+                rollback = None
+            dr = self._helper_delete(helper, svc, name)
+            if dr.returncode == 0:
+                r = self._helper_put(helper, svc, name, payload)
+        back = None
+        if r.returncode == 0:
+            gr = self._helper_get(helper, svc, name)
+            if gr.returncode == 0:
+                try:
+                    back = self._decode(name, gr.stdout)
+                except RiverError:
+                    back = None
+        if r.returncode != 0 or back != data:
+            if rollback is not None:
+                try:
+                    self._legacy_put(conn, name, rollback)
+                except RiverError:
+                    pass
+            said = (r.stderr or b"").decode(errors="replace").strip()[:200]
+            raise RiverError("the macOS Keychain refused the secret: nothing was saved. The login keychain may be "
+                             "locked (unlock it in Keychain Access)" + (f"; helper said: {said}" if said else ""))
+        for i in range(1, legacy_parts + 1):
+            self._helper_delete(helper, svc, f"{name}#{i}")
+
+    def get(self, conn, name):
+        helper = self._verified_helper()
+        if helper is None:
+            return self._legacy_get(conn, name)
+        svc = self.service(conn)
+        r = self._helper_get(helper, svc, name)
+        if r.returncode == 0:
+            raw = r.stdout
+            if raw.startswith(b"parts:"):
+                tail = raw[6:].decode(errors="replace")
+                n = int(tail) if tail.isdigit() else 0
+                parts = [self._helper_get(helper, svc, f"{name}#{i}") for i in range(1, n + 1)]
+                if not n or any(p.returncode != 0 or not p.stdout.startswith(b"b64:") for p in parts):
+                    raise RiverError(f"the Keychain holds only part of the secret {name}: save it again")
+                raw = b"b64:" + b"".join(p.stdout[4:] for p in parts)
+            return self._decode(name, raw)
+        if r.returncode == 2:
+            return None
+        # Existing item made by /usr/bin/security: read via legacy path and migrate to the helper's access list.
+        legacy_parts = self._count(conn, name)
+        data = self._legacy_get(conn, name)
+        if data is None:
+            said = (r.stderr or b"").decode(errors="replace").strip()[:200]
+            raise RiverError(f"the macOS Keychain helper could not read the secret {name}"
+                             + (f": {said}" if said else ""))
+        self._migrate_item(conn, helper, svc, name, data, legacy_parts)
+        return data
+
+    def delete(self, conn, name):
+        helper = self._verified_helper()
+        if helper is None:
+            return self._legacy_delete(conn, name)
+        svc = self.service(conn)
+        r = self._helper_get(helper, svc, name)
+        parts = 0
+        if r.returncode == 0 and r.stdout.startswith(b"parts:"):
+            tail = r.stdout[6:].decode(errors="replace")
+            parts = int(tail) if tail.isdigit() else 0
+        elif r.returncode not in (0, 2):
+            parts = self._count(conn, name)
+        for acct in [f"{name}#{i}" for i in range(1, parts + 1)] + [name]:
+            dr = self._helper_delete(helper, svc, acct)
+            if dr.returncode != 0:
+                said = (dr.stderr or b"").decode(errors="replace").strip()[:200]
+                raise RiverError(f"the macOS Keychain helper could not delete the secret {name}"
+                                 + (f": {said}" if said else ""))
+
+    def migrate(self, conn):
+        """Re-create every existing /usr/bin/security vault item of conn under the signed helper's access list."""
+        helper = self._verified_helper()
+        if helper is None:
+            return {"migrated": [], "already": [], "skipped": [], "helper": False}
+        svc = self.service(conn)
+        accounts = []
+        for row in conn.execute("SELECT name, kind FROM secrets ORDER BY name"):
+            accounts.append(row["name"])
+            if row["kind"] == "signin":
+                accounts.append(row["name"] + TOTP_SUFFIX)
+        migrated, already, skipped = [], [], []
+        for acct in accounts:
+            r = self._helper_get(helper, svc, acct)
+            if r.returncode == 0:
+                already.append(acct)
+            elif r.returncode == 2:
+                skipped.append(acct)
+            else:
+                legacy_parts = self._count(conn, acct)
+                data = self._legacy_get(conn, acct)
+                if data is None:
+                    skipped.append(acct)
+                else:
+                    self._migrate_item(conn, helper, svc, acct, data, legacy_parts)
+                    migrated.append(acct)
+        return {"migrated": migrated, "already": already, "skipped": skipped, "helper": True}
 
 
 class Files:

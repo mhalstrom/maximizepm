@@ -88,6 +88,9 @@ class KeychainParts(Base):
         super().setUp()
         self.sec = FakeSecurity()
         self.k = vault.Keychain()
+        old_paths = vault.HELPER_PATHS
+        vault.HELPER_PATHS = ()
+        self.addCleanup(setattr, vault, "HELPER_PATHS", old_paths)
         p = mock.patch.object(vault.Keychain, "_run", lambda _self, args, stdin=None: self.sec(args, stdin))
         p.start()
         self.addCleanup(p.stop)
@@ -111,6 +114,238 @@ class KeychainParts(Base):
             self.k.get(self.c, "old")
         self.assertIn("a cut value of the secret old (1997 base64 characters): save it again", str(e.exception))
         self.assertNotIn("QUJD", str(e.exception))
+
+
+class FakeKeychainHelper:
+    """Fake codesign + signed Keychain helper sharing an item store with FakeSecurity (#5837).
+    Items record their owner ('helper' or 'security'): the helper reads/replaces only its own items (exit 1 on
+    legacy items, exit 2 when missing), while delete removes any item without an ACL check (as macOS Keychain does)."""
+
+    VALID_INFO = (
+        "Executable={path}\n"
+        f"Identifier={vault.HELPER_IDENTIFIER}\n"
+        "Format=Mach-O universal (x86_64 arm64)\n"
+        "CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=10+2 location=embedded\n"
+        "Authority=Developer ID Application: Example Corp (CWYV4R338W)\n"
+        "Authority=Developer ID Certification Authority\n"
+        "Authority=Apple Root CA\n"
+        f"TeamIdentifier={vault.HELPER_TEAM_ID}\n"
+    )
+
+    def __init__(self, sec):
+        self.sec = sec
+        self.owners = {}  # (svc, acct) -> 'helper' | 'security'
+        self.verify_rc = 0
+        self.verify_err = b""
+        self.info_rc = 0
+        self.info_text = None  # defaults to VALID_INFO
+        self.fail_put = False
+        self.corrupt_get = False
+        self.calls = []  # (cmd, stdin)
+
+    def mark_legacy(self):
+        for k in self.sec.items:
+            self.owners.setdefault(k, "security")
+
+    def __call__(self, cmd, stdin=None):
+        import subprocess
+        self.calls.append((list(cmd), stdin))
+        if cmd[0] == vault.CODESIGN:
+            if "--verify" in cmd:
+                return subprocess.CompletedProcess(cmd, self.verify_rc, b"", self.verify_err)
+            if "-dv" in cmd:
+                text = self.VALID_INFO.format(path=cmd[-1]) if self.info_text is None else self.info_text
+                return subprocess.CompletedProcess(cmd, self.info_rc, b"", text.encode())
+            raise AssertionError(cmd)
+        action, svc, acct = cmd[1], cmd[2], cmd[3]
+        key = (svc, acct)
+        self.mark_legacy()
+        if action == "put":
+            if self.fail_put:
+                return subprocess.CompletedProcess(cmd, 1, b"", b"keychain-helper: put failed (OSStatus -25308)\n")
+            if key in self.sec.items and self.owners.get(key) != "helper":
+                return subprocess.CompletedProcess(cmd, 1, b"", b"keychain-helper: put failed (OSStatus -25293)\n")
+            self.sec.items[key] = stdin.decode()
+            self.owners[key] = "helper"
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        if action == "get":
+            if key not in self.sec.items:
+                return subprocess.CompletedProcess(cmd, 2, b"", b"")
+            if self.owners.get(key) != "helper":
+                return subprocess.CompletedProcess(cmd, 1, b"", b"keychain-helper: get failed (OSStatus -25293)\n")
+            out = b"b64:AAAA" if self.corrupt_get else self.sec.items[key].encode()
+            return subprocess.CompletedProcess(cmd, 0, out, b"")
+        if action == "delete":
+            self.sec.items.pop(key, None)
+            self.owners.pop(key, None)
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        raise AssertionError(cmd)
+
+
+class KeychainHelper(Base):
+    """#5837: vault.Keychain uses the signed Keychain helper, checks its signature before each call, migrates
+    existing /usr/bin/security items, and keeps today's way when no signed helper is installed."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper_path = Path(self.dir.name) / vault.HELPER_NAME
+        self.helper_path.write_bytes(b"#!/bin/sh\n")
+        os.chmod(self.helper_path, 0o755)
+        self.sec = FakeSecurity()
+        self.sec_calls = []
+        self.fake = FakeKeychainHelper(self.sec)
+        self.k = vault.Keychain()
+        old_paths, old_run = vault.HELPER_PATHS, vault.HELPER_RUN
+        vault.HELPER_PATHS = (self.helper_path,)
+        vault.HELPER_RUN = self.fake
+        self.addCleanup(setattr, vault, "HELPER_PATHS", old_paths)
+        self.addCleanup(setattr, vault, "HELPER_RUN", old_run)
+        p = mock.patch.object(
+            vault.Keychain, "_run",
+            lambda _self, args, stdin=None: (self.sec_calls.append(args), self.sec(args, stdin))[1],
+        )
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_put_get_delete_use_only_the_signed_helper_with_stdin_and_readback(self):
+        self.assertEqual(self.k.name, "keychain")
+        self.assertIsNone(self.k.get(self.c, "missing"))
+        for data in (TOKEN, b"line1\nline2\n\x00\xff", os.urandom(60000)):
+            self.k.put(self.c, "pem", data)
+            self.assertEqual(self.k.get(self.c, "pem"), data)
+        # /usr/bin/security was never called.
+        self.assertEqual(self.sec_calls, [])
+        # Value went on stdin as b64:, never in argv.
+        put_calls = [(cmd, stdin) for cmd, stdin in self.fake.calls if len(cmd) > 1 and cmd[1] == "put"]
+        self.assertEqual(len(put_calls), 3)
+        for cmd, stdin in put_calls:
+            self.assertEqual(cmd[:2], [str(self.helper_path), "put"])
+            self.assertNotIn(TOKEN.decode(), " ".join(cmd))
+            self.assertTrue(stdin.startswith(b"b64:"))
+        self.k.delete(self.c, "pem")
+        self.assertIsNone(self.k.get(self.c, "pem"))
+        self.assertEqual(self.sec_calls, [])
+
+    def test_put_readback_mismatch_raises(self):
+        self.fake.corrupt_get = True
+        with self.assertRaises(RiverError) as e:
+            self.k.put(self.c, "k", TOKEN)
+        self.assertIn("refused the secret", str(e.exception))
+
+    def test_signature_is_verified_before_each_call_and_bad_helpers_are_refused(self):
+        self.k.put(self.c, "k", TOKEN)
+        verify_count = sum(1 for cmd, _ in self.fake.calls if cmd[0] == vault.CODESIGN and "--verify" in cmd)
+        self.assertEqual(verify_count, 1)
+        # Tampering or wrong team ID before the next call is caught on get (no caching, no security fallback).
+        cases = [
+            ("wrong team ID", {"info_text": FakeKeychainHelper.VALID_INFO.replace(vault.HELPER_TEAM_ID, "OTHER12345")}),
+            ("unexpected signing identifier", {"info_text": FakeKeychainHelper.VALID_INFO.replace(vault.HELPER_IDENTIFIER, "com.evil.helper")}),
+            ("Developer ID Application", {"info_text": f"Identifier={vault.HELPER_IDENTIFIER}\nSignature=adhoc\nTeamIdentifier=not set\nCodeDirectory v=20500 flags=0x10000(runtime)\n"}),
+            ("hardened runtime", {"info_text": FakeKeychainHelper.VALID_INFO.replace("flags=0x10000(runtime)", "flags=0x0(none)")}),
+            ("signature verification failed", {"verify_rc": 1, "verify_err": b"invalid signature"}),
+        ]
+        for expected_msg, attrs in cases:
+            for attr, val in attrs.items():
+                setattr(self.fake, attr, val)
+            with self.assertRaises(RiverError) as e:
+                self.k.get(self.c, "k")
+            self.assertIn(expected_msg, str(e.exception))
+            self.assertEqual(self.sec_calls, [])
+            self.fake.verify_rc, self.fake.verify_err, self.fake.info_text = 0, b"", None
+
+        os.chmod(self.helper_path, 0o644)
+        with self.assertRaises(RiverError) as e:
+            self.k.get(self.c, "k")
+        self.assertIn("not executable", str(e.exception))
+        self.assertEqual(self.sec_calls, [])
+
+    def test_no_signed_helper_says_so_and_keeps_security_way(self):
+        vault.HELPER_PATHS = ()
+        self.assertIn("no signed helper", self.k.name)
+        self.assertIn("/usr/bin/security", self.k.name)
+        self.k.put(self.c, "dev-tok", TOKEN)
+        self.assertEqual(self.k.get(self.c, "dev-tok"), TOKEN)
+        self.assertTrue(len(self.sec_calls) >= 2)
+        self.assertEqual(self.k.migrate(self.c)["helper"], False)
+        self.k.delete(self.c, "dev-tok")
+        self.assertIsNone(self.k.get(self.c, "dev-tok"))
+
+    def test_existing_security_items_migrate_on_get_put_and_delete(self):
+        svc = self.k.service(self.c)
+        # Seed legacy single-item and multi-part items using /usr/bin/security (no helper yet).
+        vault.HELPER_PATHS = ()
+        big = os.urandom(5000)
+        self.k.put(self.c, "old-small", TOKEN)
+        self.k.put(self.c, "old-big", big)
+        self.k.put(self.c, "old-replace", big)
+        self.k.put(self.c, "old-del", big)
+        self.fake.mark_legacy()
+        self.sec_calls.clear()
+
+        # Enable the signed helper.
+        vault.HELPER_PATHS = (self.helper_path,)
+        # 1. Lazy migration on get() for single and multi-part legacy items.
+        self.assertEqual(self.k.get(self.c, "old-small"), TOKEN)
+        self.assertEqual(self.k.get(self.c, "old-big"), big)
+        self.assertEqual(self.fake.owners[(svc, "old-small")], "helper")
+        self.assertEqual(self.fake.owners[(svc, "old-big")], "helper")
+        self.assertFalse(any(a.startswith("old-big#") for _s, a in self.sec.items))
+        # Subsequent reads use only the helper (zero /usr/bin/security calls).
+        self.sec_calls.clear()
+        self.assertEqual(self.k.get(self.c, "old-small"), TOKEN)
+        self.assertEqual(self.k.get(self.c, "old-big"), big)
+        self.assertEqual(self.sec_calls, [])
+
+        # 2. Replacing a legacy multi-part item via put() moves it to the helper and drops old parts.
+        self.k.put(self.c, "old-replace", b"new-val")
+        self.assertEqual(self.k.get(self.c, "old-replace"), b"new-val")
+        self.assertEqual(self.fake.owners[(svc, "old-replace")], "helper")
+        self.assertFalse(any(a.startswith("old-replace#") for _s, a in self.sec.items))
+
+        # 3. Deleting a legacy multi-part item removes all parts and the main item.
+        self.k.delete(self.c, "old-del")
+        self.assertFalse(any(a == "old-del" or a.startswith("old-del#") for _s, a in self.sec.items))
+
+    def test_failed_migration_restores_legacy_item(self):
+        vault.HELPER_PATHS = ()
+        self.k.put(self.c, "precious", TOKEN)
+        self.fake.mark_legacy()
+        vault.HELPER_PATHS = (self.helper_path,)
+        self.fake.fail_put = True
+        with self.assertRaises(RiverError) as e:
+            self.k.get(self.c, "precious")
+        self.assertIn("while migrating", str(e.exception))
+        # Secret was restored in /usr/bin/security so nothing was lost.
+        self.fake.fail_put = False
+        vault.HELPER_PATHS = ()
+        self.assertEqual(self.k.get(self.c, "precious"), TOKEN)
+
+    def test_bulk_migrate_converts_all_legacy_secrets_including_totp(self):
+        svc = self.k.service(self.c)
+        vault.HELPER_PATHS = ()
+        big = os.urandom(4500)
+        self.k.put(self.c, "tok", TOKEN)
+        self.k.put(self.c, "cookies", big)
+        self.k.put(self.c, "gh", b"pw")
+        self.k.put(self.c, "gh" + vault.TOTP_SUFFIX, b"JBSWY3DPEHPK3PXP")
+        self.fake.mark_legacy()
+        for name, kind in (("tok", "token"), ("cookies", "cookies"), ("gh", "signin"), ("already", "token"), ("gone", "token")):
+            self.c.execute("INSERT INTO secrets (name, created_at, kind) VALUES (?, '2026-11-23T00:00:00Z', ?)", (name, kind))
+        vault.HELPER_PATHS = (self.helper_path,)
+        self.k.put(self.c, "already", b"ok")
+
+        res = self.k.migrate(self.c)
+        self.assertTrue(res["helper"])
+        self.assertEqual(sorted(res["migrated"]), ["cookies", "gh", "gh#totp", "tok"])
+        self.assertEqual(res["already"], ["already"])
+        self.assertEqual(res["skipped"], ["gone"])
+        for acct in ("tok", "cookies", "gh", "gh#totp", "already"):
+            self.assertEqual(self.fake.owners[(svc, acct)], "helper")
+        self.assertFalse(any(a.startswith("cookies#") for _s, a in self.sec.items))
+        self.sec_calls.clear()
+        self.assertEqual(self.k.get(self.c, "cookies"), big)
+        self.assertEqual(self.k.get(self.c, "gh" + vault.TOTP_SUFFIX), b"JBSWY3DPEHPK3PXP")
+        self.assertEqual(self.sec_calls, [])
 
 
 class Vault(Base):
