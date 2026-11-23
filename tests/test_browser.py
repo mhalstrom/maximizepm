@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import chrome, timing
+from tests import chrome, own_sleep, timing
 from river import browser, cli, core, server
 from river.core import RiverError
 from river.routes import browser as routes
@@ -747,7 +747,7 @@ class Watch(Base):
         if watched:
             b.watched = __import__("time").time()
         self.sleeps = []
-        p = mock.patch.object(browser.time, "sleep", lambda s: self.sleeps.append(s))
+        p = mock.patch.object(browser.time, "sleep", own_sleep(self.sleeps.append))
         p.start()
         self.addCleanup(p.stop)
         return b, sent
@@ -810,6 +810,25 @@ class Watch(Base):
         browser.type_text(b, "x" * 400, who="ag1")
         self.assertLessEqual(sum(self.sleeps), browser.TYPE_MAX + 0.01)
         self.assertEqual(len(browser.drawn(b)["typed"]["text"]), browser.TYPED_KEEP)
+
+    def test_other_threads_sleeps_are_not_recorded_as_typing_sleeps(self):
+        """#6971: Watch.fake patches time.sleep for the test's own thread only, so background threads do not spin
+        or add their sleeps to self.sleeps."""
+        b, _ = self.fake()
+        def other():
+            time.sleep(0.05)
+        t = threading.Thread(target=other)
+        t.start()
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(self.sleeps, [])
+        t2 = threading.Thread(target=other)
+        t2.start()
+        browser.type_text(b, "x" * 400, who="ag1")
+        t2.join(5)
+        self.assertFalse(t2.is_alive())
+        self.assertLessEqual(sum(self.sleeps), browser.TYPE_MAX + 0.01)
+        self.assertNotIn(0.05, self.sleeps)
 
     def test_a_secret_field_shows_dots_and_its_text_is_never_kept(self):
         b, sent = self.fake()
