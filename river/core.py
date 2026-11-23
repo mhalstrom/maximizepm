@@ -16475,12 +16475,297 @@ def _is_wrapper_proc(cmd):
     return False
 
 
+def _is_mcp_command(cmd):
+    """True for MCP server processes (stdio children of an agent that write nothing to a terminal by design, #6974).
+    Matches known MCP server binaries, scripts, packages, and subcommands without matching test runners or shell tools."""
+    import shlex
+    if not cmd:
+        return False
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        base = os.path.basename(tok).lstrip("-").lower()
+        if base in ("exec", "env", "nohup", "nice") or ("=" in tok and not tok.startswith("-")):
+            i += 1
+            continue
+        break
+    tokens = tokens[i:]
+    if not tokens:
+        return False
+    prog = os.path.basename(tokens[0]).lstrip("-").lower()
+    if prog in ("mcp", "fastmcp") or prog.startswith(("mcp-", "mcp_")) or prog.endswith(("-mcp", "_mcp")) \
+            or "mcp-server" in prog or "mcp_server" in prog:
+        return True
+    if prog in ("maxpm", "claude", "codex") and len(tokens) > 1 and tokens[1].lower() == "mcp":
+        return True
+    runtimes = ("node", "bun", "deno", "tsx", "ts-node", "npx", "pnpm", "yarn", "npm",
+                "python", "python3", "uv", "uvx", "ruby", "perl")
+    if prog not in runtimes and not prog.startswith("python3."):
+        return False
+    lower_tokens = [t.lower() for t in tokens[1:]]
+    if "--test" in lower_tokens or (prog in ("npm", "pnpm", "yarn", "bun") and any(t == "test" for t in lower_tokens)):
+        return False
+    for idx, tok in enumerate(tokens[1:]):
+        lt = tok.lower()
+        if lt in ("pytest", "unittest", "jest", "vitest", "mocha"):
+            return False
+        if lt == "-m" and idx + 2 < len(tokens):
+            mod = tokens[idx + 2].lower()
+            if mod in ("pytest", "unittest"):
+                return False
+            if mod == "mcp" or mod.endswith(".mcp") or mod.startswith(("mcp.", "mcp_", "fastmcp")) \
+                    or "mcp_server" in mod or "mcp-server" in mod:
+                return True
+        if lt in ("--mcp", "--mcp-server"):
+            return True
+        if "/mcp/" in lt or "modelcontextprotocol" in lt or "fastmcp" in lt or "@playwright/mcp" in lt:
+            return True
+        if tok.startswith("-"):
+            continue
+        base = os.path.basename(lt)
+        if "@" in base and not base.startswith("@"):
+            base = base.split("@", 1)[0]
+        stem = re.sub(r"\.(mjs|cjs|js|mts|ts|py|rb|sh)$", "", base)
+        if stem.startswith(("test_", "test-")) or stem.endswith(("_test", "-test", ".test", ".spec")):
+            continue
+        if stem == "mcp" or stem.startswith(("mcp-", "mcp_")) or stem.endswith(("-mcp", "_mcp")) \
+                or "mcp-server" in stem or "mcp_server" in stem:
+            return True
+    return False
+
+
+STDIO_PIPE_CHECK = None  # tests: (pid, ppid) -> bool
+CPU_RUNNER = None        # tests: (pids) -> {pid: float_seconds} or ps output text
+NET_RUNNER = None        # tests: (pids) -> bool or lsof -F tnT output text
+CPU_ACTIVE_DELTA = 1.0   # seconds of cumulative subtree CPU progress that counts as active work (#6974)
+
+
+def _parse_lsof_stdio_pipes(text):
+    """True when lsof -F ft output shows both fd 0 (stdin) and fd 1 (stdout) are PIPEs."""
+    fds = {}
+    cur = None
+    for line in (text or "").splitlines():
+        if not line:
+            continue
+        tag, val = line[0], line[1:]
+        if tag == "f":
+            cur = val
+        elif tag == "t" and cur in ("0", "1"):
+            fds[cur] = val
+    return fds.get("0") == "PIPE" and fds.get("1") == "PIPE"
+
+
+def _has_stdio_pipe_to_parent(pid, ppid):
+    """True when a non-shell child process has both stdin (fd 0) and stdout (fd 1) connected via pipes (MCP / stdio
+    servers, #6974). Uses /proc on Linux and lsof on macOS. Skipped when SHELL_RUNNER is mocked unless STDIO_PIPE_CHECK
+    is set."""
+    if STDIO_PIPE_CHECK is not None:
+        return bool(STDIO_PIPE_CHECK(pid, ppid))
+    if SHELL_RUNNER is not None:
+        return False
+    if sys.platform.startswith("linux"):
+        try:
+            fd0 = os.readlink(f"/proc/{int(pid)}/fd/0")
+            fd1 = os.readlink(f"/proc/{int(pid)}/fd/1")
+        except OSError:
+            return False
+        if not (fd0.startswith("pipe:[") and fd1.startswith("pipe:[")):
+            return False
+        try:
+            parent_targets = {os.readlink(f"/proc/{int(ppid)}/fd/{f}")
+                              for f in os.listdir(f"/proc/{int(ppid)}/fd")}
+        except OSError:
+            return True
+        return fd0 in parent_targets and fd1 in parent_targets
+    import subprocess
+    try:
+        r = subprocess.run(["lsof", "-w", "-n", "-P", "-a", "-p", str(int(pid)), "-d", "0,1", "-F", "ft"],
+                           capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _parse_lsof_stdio_pipes(r.stdout or "")
+
+
+def _parse_timeout_duration(tok):
+    """Parse a GNU timeout duration ('90m', '5400', '1.5h', '2d') into seconds, or None if not a valid duration."""
+    m = re.match(r"^(\d+(?:\.\d+)?)([smhd]?)$", (tok or "").strip())
+    if not m:
+        return None
+    mult = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return float(m.group(1)) * mult
+
+
+def _cmd_has_timeout_wrapper(cmd):
+    """True when a command string runs under an explicit non-zero timeout/gtimeout wrapper (#6974).
+    'timeout 0 ...' disables the timeout in GNU timeout and returns False."""
+    import shlex
+    if not cmd:
+        return False
+    for seg in re.split(r"(?:&&|\|\||[;|])", cmd):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            tokens = seg.split()
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            base = os.path.basename(tok).lstrip("-").lower()
+            if base in ("exec", "env", "nohup", "nice", "caffeinate") or ("=" in tok and not tok.startswith("-")):
+                i += 1
+                if base == "caffeinate":
+                    while i < len(tokens) and tokens[i].startswith("-"):
+                        flag = tokens[i]
+                        i += 1
+                        if flag in ("-t", "-w") and i < len(tokens):
+                            i += 1
+                continue
+            break
+        if i >= len(tokens):
+            continue
+        prog = os.path.basename(tokens[i]).lstrip("-").lower()
+        if prog not in ("timeout", "gtimeout"):
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j].startswith("-"):
+            opt = tokens[j]
+            if opt == "--":
+                j += 1
+                break
+            if opt in ("-k", "--kill-after", "-s", "--signal"):
+                j += 2
+                continue
+            j += 1
+        if j >= len(tokens):
+            continue
+        dur = _parse_timeout_duration(tokens[j])
+        if dur is not None and dur > 0:
+            return True
+    return False
+
+
+def _has_explicit_timeout(cmd, label=None, subtree_cmds=()):
+    """True when a command or any process in its subtree runs under an explicit non-zero timeout/gtimeout wrapper."""
+    for text in (label, cmd, *subtree_cmds):
+        if text and _cmd_has_timeout_wrapper(text):
+            return True
+    return False
+
+
+def _cpu_seconds(text):
+    """Parse ps time=/cputime= ('M:SS.cc', 'HH:MM:SS', 'D-HH:MM:SS') into float seconds."""
+    s = (text or "").strip()
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = int(d)
+    parts = s.split(":")
+    if len(parts) == 2:
+        return days * 86400 + int(parts[0]) * 60 + float(parts[1])
+    if len(parts) == 3:
+        return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    raise ValueError(text)
+
+
+def process_cpu_seconds(pids):
+    """{pid: cumulative_cpu_seconds} for the given PIDs, or None when unavailable (#6974)."""
+    pids = [int(p) for p in pids if int(p) > 0]
+    if not pids:
+        return {}
+    if CPU_RUNNER is not None:
+        res = CPU_RUNNER(pids)
+        if isinstance(res, dict) or res is None:
+            return res
+        text = res
+    elif SHELL_RUNNER is not None:
+        return None
+    else:
+        import subprocess
+        try:
+            text = subprocess.run(
+                ["ps", "-o", "pid=,time=", "-p", ",".join(str(p) for p in pids)],
+                capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    out = {}
+    for line in (text or "").splitlines():
+        f = line.split()
+        if len(f) < 2:
+            continue
+        try:
+            out[int(f[0])] = _cpu_seconds(f[1])
+        except ValueError:
+            continue
+    return out
+
+
+def _parse_lsof_active_network(text):
+    """True when lsof -F tnT output shows an active non-loopback network connection (ESTABLISHED/SYN_SENT/etc. TCP,
+    or connected UDP/QUIC). Listening sockets and loopback sockets do not count as active external network use."""
+    active_states = {"ESTABLISHED", "SYN_SENT", "SYN_RCVD", "FIN_WAIT_1", "FIN_WAIT_2"}
+
+    def _is_active(rec):
+        if rec.get("t") not in ("IPv4", "IPv6"):
+            return False
+        name = rec.get("n") or ""
+        if "->" not in name:
+            return False
+        peer = name.split("->", 1)[1]
+        if peer.startswith(("127.", "[::1]:", "localhost:")):
+            return False
+        st = rec.get("st")
+        return st is None or st in active_states
+
+    rec = {}
+    for line in (text or "").splitlines():
+        if not line:
+            continue
+        tag, val = line[0], line[1:]
+        if tag in ("p", "f"):
+            if _is_active(rec):
+                return True
+            rec = {}
+        elif tag == "t":
+            rec["t"] = val
+        elif tag == "n":
+            rec["n"] = val
+        elif tag == "T" and val.startswith("ST="):
+            rec["st"] = val[3:]
+    return _is_active(rec)
+
+
+def process_has_network(pids):
+    """True when any process in pids holds an active non-loopback network connection (#6974)."""
+    pids = [int(p) for p in pids if int(p) > 0]
+    if not pids:
+        return False
+    if NET_RUNNER is not None:
+        res = NET_RUNNER(pids)
+        return res if isinstance(res, bool) else _parse_lsof_active_network(res)
+    if SHELL_RUNNER is not None:
+        return False
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["lsof", "-w", "-n", "-P", "-a", "-p", ",".join(str(p) for p in pids), "-i", "-F", "tnT"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _parse_lsof_active_network(r.stdout or "")
+
+
 def session_child_commands(text, pids, t=None, server_grace=None):
     """{agent: [{"pid", "label", "cmd", "started", "age"}]} from one ps listing: running child commands under each
     agent CLI process (works for Claude Code, Codex, agy, and direct child processes, #6497).
-    Skips the agent CLI itself, MaximizePM waits/hooks, caffeinate, and helper/MCP servers started within
-    server_grace of the agent CLI (while still descending through helpers/wrappers like agy's language_server or
-    sandbox-exec to find commands spawned under them). Oldest first."""
+    Skips the agent CLI itself, MaximizePM waits/hooks, caffeinate, MCP servers (known commands or stdio pipe children,
+    #6974), and helper servers started within server_grace of the agent CLI (while still descending through helpers/
+    wrappers like agy's language_server or sandbox-exec to find commands spawned under them). Oldest first."""
     t = t or now()
     grace_s = (CLI_SERVERS_GRACE if server_grace is None else server_grace).total_seconds()
     children, info = _parse_ps_tree(text, t)
@@ -16502,18 +16787,22 @@ def session_child_commands(text, pids, t=None, server_grace=None):
                 continue
             slabel = _shell_label(cmd)
             if slabel is not None:
-                if not _is_ignored_command(slabel):
+                if not _is_ignored_command(slabel) and not _is_mcp_command(slabel):
                     found.append({"pid": pid, "label": slabel, "cmd": cmd, "started": iso(rec["started"]),
                                   "age": rec["age"]})
                 continue  # this shell is the command root; do not report its children separately
             if _is_wrapper_proc(cmd):
                 stack.extend(reversed(children.get(pid, ())))
                 continue
+            if _is_mcp_command(cmd):
+                continue  # MCP server and its children (e.g. a browser): never a hanging command (#6974)
             # A non-shell process started right after the agent CLI (MCP server, agy language_server): not a command
             # itself, but descend into its children so commands spawned under it are found.
             if grace_s > 0 and (root_age - rec["age"]) <= grace_s:
                 stack.extend(reversed(children.get(pid, ())))
                 continue
+            if _has_stdio_pipe_to_parent(pid, rec["ppid"]):
+                continue  # stdio server child of the agent (e.g. MCP server started late): not a session command (#6974)
             label = cmd if len(cmd) <= SHELL_LABEL else cmd[:SHELL_LABEL - 1] + "…"
             found.append({"pid": pid, "label": label, "cmd": cmd, "started": iso(rec["started"]), "age": rec["age"]})
         out[name] = sorted(found, key=lambda s: (s["started"], s["pid"]))

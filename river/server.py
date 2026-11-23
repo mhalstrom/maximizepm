@@ -4143,11 +4143,14 @@ def watch_commands(conn, grace=5.0, sleep=None, server_grace=None):
     if not text:
         return {"hanging": core.hanging_commands(conn), "warned": [], "killed": []}
     t = core.now()
+    children, info = core._parse_ps_tree(text, t)
     running = core.session_child_commands(text, pids, t, server_grace=server_grace)
     for a in [a for a in CMD_HANG if a not in running or not running[a]]:
         del CMD_HANG[a]
     hanging_out, warned, killed = {}, [], []
     for agent, cmds in sorted(running.items()):
+        cmds = [c for c in cmds if not core._has_explicit_timeout(
+            c["cmd"], c["label"], [info[p]["cmd"] for p in core.subtree_pids(children, c["pid"]) if p in info])]
         if not cmds:
             CMD_HANG.pop(agent, None)
             continue
@@ -4166,11 +4169,24 @@ def watch_commands(conn, grace=5.0, sleep=None, server_grace=None):
             pane_text = ""
         st = CMD_HANG.get(agent)
         if not st or st["pid"] != cmd["pid"] or st["screen"] != pane_text:
+            tree = core.subtree_pids(children, cmd["pid"])
             CMD_HANG[agent] = {"pid": cmd["pid"], "cmd": cmd["label"], "screen": pane_text,
-                               "quiet_since": t, "warned_at": None, "started": cmd["started"]}
+                               "quiet_since": t, "warned_at": None, "started": cmd["started"],
+                               "cpu_base": core.process_cpu_seconds(tree) or {}}
             continue
         quiet = t - st["quiet_since"]
         if quiet < after:
+            continue
+        tree = core.subtree_pids(children, cmd["pid"])
+        cpu_now = core.process_cpu_seconds(tree)
+        cpu_active = (cpu_now is not None and
+                      sum(max(0.0, sec - st["cpu_base"].get(p, 0.0)) for p, sec in cpu_now.items())
+                      >= core.CPU_ACTIVE_DELTA)
+        if cpu_active or core.process_has_network(tree):
+            st["quiet_since"] = t
+            st["warned_at"] = None
+            if cpu_now is not None:
+                st["cpu_base"] = cpu_now
             continue
         held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                             "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()

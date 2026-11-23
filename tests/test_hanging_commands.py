@@ -211,6 +211,161 @@ class HangingCommandsUnitTests(unittest.TestCase):
         self.assertIn("agy-9a49: ended child command PID 3002 (npm test); signaled 2 processes, SIGKILLed 1",
                       out.getvalue())
 
+    def test_mcp_servers_excluded_even_when_started_late(self):
+        core.register(self.c, "inbox-design")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=1000, host=? WHERE name='inbox-design'", (core.this_host(),))
+        ps = _ps_lines([
+            (1000, 1, "50:00", "claude --model opus"),
+            # MCP servers started well past CLI_SERVERS_GRACE (60s), including a child browser under the MCP server
+            (12199, 1000, "30:00", "node /Users/mark/Projects/toolscaled-test-browser/mcp/mcp.mjs"),
+            (12200, 12199, "29:55", "/Applications/Chromium.app/Contents/MacOS/Chromium --headless"),
+            (12201, 1000, "28:00", "npx -y @modelcontextprotocol/server-filesystem /tmp"),
+            (12202, 1000, "27:00", "uvx mcp-server-sqlite --db /tmp/a.db"),
+            (12203, 1000, "26:00", "python3 -m river.mcp"),
+            (12204, 1000, "25:00", "maxpm mcp"),
+        ])
+        got = core.session_child_commands(ps, {"inbox-design": 1000}, self.clock())
+        self.assertEqual(got["inbox-design"], [])
+
+        # Test runners and git commands mentioning "mcp" are NOT treated as MCP servers
+        self.assertFalse(core._is_mcp_command("pytest tests/test_mcp.py"))
+        self.assertFalse(core._is_mcp_command("python3 -m pytest tests/test_mcp.py"))
+        self.assertFalse(core._is_mcp_command("node --test test/mcp.test.js"))
+        self.assertFalse(core._is_mcp_command('git commit -m "fix mcp server"'))
+
+        # watch_commands must not warn, kill, or offer kill-command in manager findings
+        with mock.patch.object(core, "SHELL_RUNNER", lambda: ps), \
+             mock.patch.object(server, "agent_terminals", lambda c: {}):
+            server.watch_commands(self.c)
+            self.clock.advance(minutes=30)
+            r = server.watch_commands(self.c)
+            self.assertEqual((r["warned"], r["killed"], r["hanging"]), ([], [], {}))
+            f = core.manager_findings(self.c)
+            self.assertEqual(f["hanging_commands"], [])
+            self.assertNotIn("kill-command", "\n".join(cli._findings_lines(f, "maxpm")))
+
+    def test_stdio_pipe_child_excluded_from_watch_commands(self):
+        self.assertTrue(core._parse_lsof_stdio_pipes("p123\nf0\ntPIPE\nf1\ntPIPE\nf2\ntCHR\n"))
+        self.assertFalse(core._parse_lsof_stdio_pipes("p123\nf0\ntCHR\nf1\ntPIPE\n"))
+        self.assertFalse(core._parse_lsof_stdio_pipes("p123\nf0\ntREG\nf1\ntPIPE\n"))
+
+        core.register(self.c, "exp-1")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=4000, host=? WHERE name='exp-1'", (core.this_host(),))
+        ps = _ps_lines([
+            (4000, 1, "50:00", "claude --model opus"),
+            # Unknown binary name started late, but communicates over stdio pipes with the agent
+            (4100, 4000, "30:00", "node /opt/custom/browser-bridge.js"),
+        ])
+        with mock.patch.object(core, "SHELL_RUNNER", lambda: ps), \
+             mock.patch.object(core, "STDIO_PIPE_CHECK", lambda pid, ppid: (pid, ppid) == (4100, 4000)), \
+             mock.patch.object(server, "agent_terminals", lambda c: {}):
+            self.assertEqual(core.session_child_commands(ps, {"exp-1": 4000}, self.clock())["exp-1"], [])
+            server.watch_commands(self.c)
+            self.clock.advance(minutes=30)
+            r = server.watch_commands(self.c)
+            self.assertEqual((r["warned"], r["killed"], r["hanging"]), ([], [], {}))
+
+    def test_explicit_timeout_wrapper_not_hanging(self):
+        self.assertTrue(core._has_explicit_timeout("timeout 90m ./release-mac.sh"))
+        self.assertTrue(core._has_explicit_timeout("/opt/homebrew/bin/gtimeout -k 30s 2h ./release.sh"))
+        self.assertTrue(core._has_explicit_timeout("cd ~/proj && env FOO=1 timeout --foreground 90m ./release.sh"))
+        self.assertFalse(core._has_explicit_timeout("timeout 0 npm test"))
+        self.assertFalse(core._has_explicit_timeout("node --test test/wrangler.test.js --test-timeout=0"))
+
+        core.register(self.c, "toolscaled-local-2d61")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=55000, host=? WHERE name='toolscaled-local-2d61'", (core.this_host(),))
+        ps = _ps_lines([
+            (55000, 1, "60:00", "claude --model opus"),
+            (55816, 55000, "25:00", "/bin/zsh -c source /tmp/snap && eval 'timeout 90m ./release-mac.sh' < /dev/null"),
+            (55817, 55816, "25:00", "timeout 90m ./release-mac.sh"),
+            (55818, 55817, "25:00", "/bin/bash ./release-mac.sh"),
+        ])
+        with mock.patch.object(core, "SHELL_RUNNER", lambda: ps), \
+             mock.patch.object(server, "agent_terminals", lambda c: {}):
+            server.watch_commands(self.c)
+            self.clock.advance(minutes=30)
+            r = server.watch_commands(self.c)
+            self.assertEqual((r["warned"], r["killed"], r["hanging"]), ([], [], {}))
+            f = core.manager_findings(self.c)
+            self.assertEqual(f["hanging_commands"], [])
+
+    def test_active_descendant_cpu_resets_hang_timer(self):
+        self.assertAlmostEqual(core._cpu_seconds("0:01.23"), 1.23)
+        self.assertAlmostEqual(core._cpu_seconds("12:34.56"), 754.56)
+        self.assertAlmostEqual(core._cpu_seconds("01:02:03"), 3723.0)
+        self.assertAlmostEqual(core._cpu_seconds("1-00:00:05"), 86405.0)
+
+        core.register(self.c, "builder-1")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=6000, host=? WHERE name='builder-1'", (core.this_host(),))
+        ps = _ps_lines([
+            (6000, 1, "60:00", "claude"),
+            (6001, 6000, "25:00", "/bin/zsh -c ./build-all.sh"),
+            (6002, 6001, "25:00", "rustc --crate-name app"),
+        ])
+        cpu_out = ["6001 0:00.10\n6002 0:05.00\n"]
+        with mock.patch.object(core, "SHELL_RUNNER", lambda: ps), \
+             mock.patch.object(core, "CPU_RUNNER", lambda pids: cpu_out[0]), \
+             mock.patch.object(server, "agent_terminals", lambda c: {}):
+            server.watch_commands(self.c)
+            # 20m pass with no pane output, but rustc used 3.5s of CPU -> NOT hanging
+            cpu_out[0] = "6001 0:00.10\n6002 0:08.50\n"
+            self.clock.advance(minutes=20)
+            r1 = server.watch_commands(self.c)
+            self.assertEqual((r1["warned"], r1["killed"], r1["hanging"]), ([], [], {}))
+
+            # Now CPU freezes for 20m -> warns
+            self.clock.advance(minutes=20)
+            r2 = server.watch_commands(self.c)
+            self.assertEqual(r2["warned"], ["builder-1"])
+
+            # CPU resumes during the 5m grace window -> clears warning, does NOT kill
+            cpu_out[0] = "6001 0:00.10\n6002 0:11.00\n"
+            self.clock.advance(minutes=5)
+            r3 = server.watch_commands(self.c)
+            self.assertEqual((r3["warned"], r3["killed"], r3["hanging"]), ([], [], {}))
+
+    def test_active_descendant_network_resets_hang_timer(self):
+        # Active remote TCP / connected UDP counts; LISTEN, loopback, and CLOSE_WAIT do not
+        self.assertTrue(core._parse_lsof_active_network(
+            "p7002\nf5\ntIPv4\nn10.0.0.5:54321->17.253.144.10:443\nTST=ESTABLISHED\n"))
+        self.assertTrue(core._parse_lsof_active_network(
+            "p7002\nf6\ntIPv6\nn[2001:db8::1]:54321->[2620:149:a44::1]:443\n"))
+        self.assertFalse(core._parse_lsof_active_network(
+            "p7002\nf5\ntIPv4\nn*:8787\nTST=LISTEN\n"))
+        self.assertFalse(core._parse_lsof_active_network(
+            "p7002\nf5\ntIPv4\nn127.0.0.1:54321->127.0.0.1:8787\nTST=ESTABLISHED\n"))
+        self.assertFalse(core._parse_lsof_active_network(
+            "p7002\nf5\ntIPv6\nn[::1]:54321->[::1]:8787\nTST=ESTABLISHED\n"))
+        self.assertFalse(core._parse_lsof_active_network(
+            "p7002\nf5\ntIPv4\nn10.0.0.5:54321->17.253.144.10:443\nTST=CLOSE_WAIT\n"))
+
+        core.register(self.c, "notary-1")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=7000, host=? WHERE name='notary-1'", (core.this_host(),))
+        ps = _ps_lines([
+            (7000, 1, "60:00", "claude"),
+            (7001, 7000, "25:00", "/bin/zsh -c ./release-mac.sh"),
+            (7002, 7001, "25:00", "xcrun notarytool submit app.dmg --wait"),
+        ])
+        net_out = ["p7002\nf5\ntIPv4\nn10.0.0.5:54321->17.253.144.10:443\nTST=ESTABLISHED\n"]
+        with mock.patch.object(core, "SHELL_RUNNER", lambda: ps), \
+             mock.patch.object(core, "NET_RUNNER", lambda pids: net_out[0]), \
+             mock.patch.object(server, "agent_terminals", lambda c: {}):
+            server.watch_commands(self.c)
+            self.clock.advance(minutes=25)
+            r1 = server.watch_commands(self.c)
+            self.assertEqual((r1["warned"], r1["killed"], r1["hanging"]), ([], [], {}))
+
+            # Once the remote connection is gone (only loopback/nothing left), 20m later it warns
+            net_out[0] = "p7002\nf5\ntIPv4\nn127.0.0.1:54321->127.0.0.1:8787\nTST=ESTABLISHED\n"
+            self.clock.advance(minutes=20)
+            r2 = server.watch_commands(self.c)
+            self.assertEqual(r2["warned"], ["notary-1"])
+
 
 class FakeAgentRealProcessTests(unittest.TestCase):
     """Real subprocess tests: a fake agent with a sleeping child (and an unrelated sibling process)."""
