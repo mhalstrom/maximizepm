@@ -18000,13 +18000,12 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None, cho
             raise RiverError(f"item {item_id} is held by {it['assignee']}; ask them, or release it first")
         closed_at = iso(now())
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
-                     "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
-                     "WHERE id=?", (status, closed_at, output, it["id"]))
+                     "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, decision=NULL, "
+                     "choice=?, output=COALESCE(?, output) "
+                     "WHERE id=?", (status, closed_at, choice, output, it["id"]))
         # Record the result back on any trigger events handled by this item (#6627).
         conn.execute("UPDATE trigger_events SET result=?, result_at=?, result_status=? WHERE item_id=?",
                      (output or note or status, closed_at, status, it["id"]))
-        if choice is not None:
-            conn.execute("UPDATE items SET choice=? WHERE id=?", (choice, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
         unneeded = _close_check(conn, it, status, output, note) if it["kind"] == "work" else []
         if it["kind"] == "deploy":
@@ -19198,7 +19197,8 @@ def reopen(conn, item_id, actor=None):
         it = _item(conn, item_id)
         if it["status"] not in CLOSED_STATES:
             raise RiverError(f"item {item_id} is {it['status']}, not closed")
-        conn.execute("UPDATE items SET status='open', closed_at=NULL, assignee=NULL WHERE id=?", (it["id"],))
+        conn.execute("UPDATE items SET status='open', closed_at=NULL, assignee=NULL, decision=NULL, choice=NULL "
+                     "WHERE id=?", (it["id"],))
         conn.execute("DELETE FROM close_checks WHERE closed_id=?", (it["id"],))  # the next close checks again
         _event(conn, it["id"], actor, "reopened")
     return item_show(conn, item_id)

@@ -7717,6 +7717,55 @@ class NeedsYouDialog(Base):
         self.assertIn("replied on", self.notices()[0])
         self.assertIn("already done", self.notices()[0])
 
+    def test_close_and_reopen_clear_item_decision_and_choice(self):
+        # #6961: closing (done or drop) clears items.decision, and reopening clears both decision and choice
+        # so an old question card does not show again when the item becomes ready again (#5613).
+        i = core.item_add(self.c, "a", "Verify identity for Apple", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=i, actor="mark", question="Upload your passport, then reply here.")
+        core.TOKEN_AGENT.set(None)
+        self.assertEqual(core.item_show(self.c, i)["decision"]["question"], "Upload your passport, then reply here.")
+        closed = core.done(self.c, i, "already done", actor="mark")
+        self.assertIsNone(closed["decision"])
+        self.assertIsNone(core.item_show(self.c, i)["decision"])
+        reopened = core.reopen(self.c, i, actor="you-1")
+        self.assertIsNone(reopened["decision"])
+        self.assertIsNone(reopened["choice"])
+        ev = [e for e in core.needs_you(self.c, "mark") if e["item_id"] == i][0]
+        self.assertIsNone(ev["decision"])
+
+        # Done with a choice records the choice and clears decision; reopen clears the old choice too.
+        j = core.item_add(self.c, "a", "Decide banner color", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=j, actor="mark", options=["Red: warm", "Blue: cool"], recommend="Red",
+                     question="Which color?")
+        core.TOKEN_AGENT.set(None)
+        done_j = core.done(self.c, j, None, actor="mark", choice="Red")
+        self.assertEqual(done_j["choice"], "Red")
+        self.assertIsNone(done_j["decision"])
+        reopened_j = core.reopen(self.c, j, actor="you-1")
+        self.assertIsNone(reopened_j["decision"])
+        self.assertIsNone(reopened_j["choice"])
+
+        # Drop clears decision too.
+        k = core.item_add(self.c, "a", "Approve draft", doer="human", actor="mark")["id"]
+        self.as_session("you-1")
+        core.forward(self.c, item=k, actor="mark", question="Approve this draft?")
+        core.TOKEN_AGENT.set(None)
+        dropped_k = core.drop(self.c, k, actor="mark", note="not needed")
+        self.assertIsNone(dropped_k["decision"])
+        self.assertIsNone(dropped_k["choice"])
+
+        # Legacy closed item that still has decision/choice in the database: reopen clears both.
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET decision=?, choice=? WHERE id=?",
+                           (json.dumps({"question": "Old question", "options": []}), "Red", k))
+        reopened_k = core.reopen(self.c, k, actor="you-1")
+        self.assertIsNone(reopened_k["decision"])
+        self.assertIsNone(reopened_k["choice"])
+        ev_k = [e for e in core.needs_you(self.c, "mark") if e["item_id"] == k][0]
+        self.assertIsNone(ev_k["decision"])
+
 
 class QuestionHold(Base):
     """#5307: mark, 2026-11-11: worker questions that he had settled opened 'Waits for you' on his page; 'these sorts
