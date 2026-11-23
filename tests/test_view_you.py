@@ -48,16 +48,13 @@ class PageMessages(unittest.TestCase):
         h.do_GET()
         return out["code"], out["body"]
 
-    def test_offer_split_give_and_inbox(self):
-        offer = self.op("offer", "bo", item=self.big, body="I can take the tests")
+    def test_inbox_shows_sent_message_without_marking_read(self):
+        msg = self.op("send", "bo", kind="note", item=self.big, to="ag", body="I can take the tests")
         code, body = self.get("/api/inbox?agent=ag")
-        self.assertEqual((code, [m["id"] for m in body["messages"]]), (200, [offer["id"]]))
+        self.assertEqual((code, [m["id"] for m in body["messages"]]), (200, [msg["id"]]))
         self.assertTrue(body["messages"][0]["unread"])  # the page only looks
-        res = self.op("split", "ag", id=self.big, titles=["tests", " ", "docs"])
-        self.assertEqual(len(res["split_into"]), 2)
-        self.assertEqual(core.message_show(self.c, offer["id"])["state"], "accepted")
-        self.op("give", "ag", id=self.big, to="bo")
-        self.assertEqual(core._item(self.c, self.big)["assignee"], "bo")
+        for removed in ("offer", "give", "split"):
+            self.assertNotIn(removed, server.OPS)
 
     def test_every_route_answers_this_computer_only(self):
         # maxpm serve has no sign-in. A page of another site whose name is made to point at 127.0.0.1 (DNS

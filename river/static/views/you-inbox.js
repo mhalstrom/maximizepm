@@ -36,10 +36,7 @@ function inboxCell(m) {
   if (m.kind === "question" && open)
     acts = `<span class="ib-pair"><input id="ans-${m.id}" placeholder="your answer">` + button("Answer", { kind: "primary", data: { ib: "answer", msg: m.id } }) + `</span>`;
   else if (m.kind === "offer" && open) {
-    const mine = it && it.assignee === me;
-    acts = (mine ? button(`Give #${m.item_id} to ${esc(m.from_agent)}`, { kind: "primary", data: { ib: "give", msg: m.id, id: m.item_id, to: m.from_agent } })
-        + `\n        <span class="ib-pair"><input id="split-${m.id}" placeholder="smaller pieces, separated by ;">` + button("Split", { data: { ib: "split", msg: m.id, id: m.item_id } }) + `</span>` : "")
-      + `<span class="ib-pair"><input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } }) + `</span>`;
+    acts = `<span class="ib-pair"><input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } }) + `</span>`;
   } else {
     const pushed = m.kind === "alert" && it && it.status === "open" && it.reserved_for === me && it.reserved_until;
     if (pushed) acts += button(`Accept #${it.id}`, { kind: "primary", data: { ib: "accept", id: it.id } })
@@ -93,8 +90,6 @@ async function inboxAction(t) {
   const what = t.dataset.ib, msg = +t.dataset.msg, id = +t.dataset.id, val = (p) => ($("#" + p + "-" + msg) || {}).value?.trim();
   try {
     if (what === "answer") { const body = val("ans"); if (!body) return toast("Write the answer first", true); await act("answer", { msg, body }); toast("Answered"); }
-    if (what === "give") { await act("give", { id, to: t.dataset.to }); toast(`Gave #${id} to ${t.dataset.to}`); }
-    if (what === "split") { const titles = (val("split") || "").split(";").map(x => x.trim()).filter(Boolean); if (!titles.length) return toast("Write the smaller pieces, separated by ;", true); await act("split", { id, titles }); toast(`Split #${id} into ${titles.length}`); }
     if (what === "decline") { await act("decline_message", { msg, note: val("dec") || undefined }); toast("Declined"); }
     if (what === "accept") { await act("accept", { id }); toast(`#${id} is yours`); }
     if (what === "decline-push") { await act("decline", { id }); toast(`Handed #${id} back`); }

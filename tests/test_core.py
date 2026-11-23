@@ -1762,7 +1762,8 @@ class Usage(Base):
     def test_holds_follow_every_change_of_holder(self):
         x = self.add("a", "x")
         core.claim(self.c, x, "ag")
-        core.give(self.c, x, "ag2", actor="ag")
+        core.release(self.c, x, actor="ag")
+        core.claim(self.c, x, "ag2")
         core.release(self.c, x, actor="ag2")
         core.claim(self.c, x, "ag")
         core.done(self.c, x, "ok", "ag")
@@ -1947,13 +1948,10 @@ class Ship(Base):
 
 class Plan(Base):
     def test_plan_says_the_planner_role_is_gone(self):
-        # #4978, mark: 'get rid of planner'. maxpm plan stays only as a notice (CLAUDE.md files still name it).
+        # #4978, #5981: the planner role and its old `maxpm plan` alias are gone.
         from river import cli
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
-            self.assertEqual(cli.run(["plan"]), 0)
-        self.assertIn("There is no planner role", out.getvalue())
-        self.assertIn("maxpm guide manager, section Writing tasks", out.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.parse_args(["plan"])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.run(["guide", "planner"])
         self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text(encoding="utf-8"))
@@ -2419,8 +2417,6 @@ class GoalOwners(Base):
         core.done(self.c, a, "ok", "ag")
         with self.assertRaisesRegex(RiverError, r"handoff of goal checkout is missing; you finished #%d" % a):
             core.goal_release(self.c, "checkout", "ag")
-        with self.assertRaisesRegex(RiverError, "--no-handoff"):
-            core.goal_give(self.c, "checkout", "bo", "ag")
         with self.assertRaisesRegex(RiverError, "owned by ag, who keeps its handoff"):
             core.goal_handoff(self.c, "checkout", "my view", "bo")
         with self.assertRaisesRegex(RiverError, "empty"):
@@ -2428,7 +2424,8 @@ class GoalOwners(Base):
         core.goal_handoff(self.c, "checkout", "Stripe test keys in .env.\nLeft: receipts.", "ag")
         self.assertIsNone(core.goal_show(self.c, "checkout")["handoff_due"])
         # The next session on the goal's items reads it; the owner's briefing shows it too.
-        core.goal_give(self.c, "checkout", "bo", "ag")
+        core.goal_release(self.c, "checkout", "ag")
+        core.goal_own(self.c, "checkout", "bo")
         g = self.go("bo")
         self.assertEqual((g["role"], g["item"]["id"]), ("owner", b))
         out = io.StringIO()
@@ -2533,8 +2530,6 @@ class GoalOwners(Base):
         core.done(self.c, x, "shipped", "mk")
         notes = [m["body"] for m in core.inbox(self.c, "ag") if m["kind"] == "notice"]
         self.assertEqual([n.split(" #")[0] for n in notes], ["bo added", "mk claimed", "mk finished"])
-        core.goal_give(self.c, "g1", "cy", "ag")
-        self.assertEqual(core.goal_show(self.c, "g1")["owner"], "cy")
 
     def test_goal_frees_when_owner_is_away(self):
         core.goal_add(self.c, "shop", "g1", actor="t")
@@ -2559,19 +2554,6 @@ class GoalClaim(Base):
 
     def left(self, when):
         return core.parse_iso(when) - core.now()
-
-    def test_owner_can_give_a_goal_item_and_the_other_agent_claims_it(self):
-        core.goal_own(self.c, "g1", "ag")
-        core.register(self.c, "cy")
-        core.give(self.c, self.x, "bo", "ag")
-        it = core._item(self.c, self.x)
-        self.assertEqual((it["reserved_for"], it["reserved_by"]), ("bo", "ag"))
-        self.assertIsNotNone(it["reserved_until"])  # it comes back to the goal if bo does not take it
-        with self.assertRaisesRegex(RiverError, "reserved for bo"):
-            core.claim(self.c, self.x, "cy")
-        self.assertEqual(core.claim(self.c, self.x, "bo")["assignee"], "bo")
-        with self.assertRaisesRegex(RiverError, "not yours to give"):
-            core.give(self.c, self.loose, "bo", "cy")  # nobody's goal item: nothing to give
 
     def test_a_goal_item_pushed_to_another_agent_can_be_accepted(self):
         core.goal_own(self.c, "g1", "ag")
@@ -2858,21 +2840,13 @@ class KeepRelease(Base):
             core.item_add(self.c, "a", t, actor="bo", blocks=other)
         self.assertEqual(core._item(self.c, other)["late_prereqs"], 0)
 
-    def test_hold_expiry_releases_with_notice_and_keep_restores(self):
+    def test_hold_expiry_releases_with_notice(self):
         n = core.item_add(self.c, "a", "fix", actor="ag", blocks=self.p, mode="keep")["id"]
         self.c.execute("UPDATE items SET hold_expires_at=? WHERE id=?", (core.iso(core.now() - timedelta(minutes=1)), self.p))
         core.activity(self.c, "bo")
         self.assertEqual(core._item(self.c, self.p)["status"], "open")
         self.assertIsNone(core._item(self.c, n)["reserved_for"])
         self.assertEqual([m["kind"] for m in core.inbox(self.c, "ag")], ["notice"])
-        core.keep(self.c, self.p, "ag")
-        self.assertEqual(core._item(self.c, self.p)["status"], "held")
-        self.assertEqual(core._item(self.c, n)["reserved_for"], "ag")
-        core.release(self.c, self.p, actor="ag")
-        self.assertIsNone(core._item(self.c, n)["reserved_for"])
-        core.claim(self.c, n, "bo")
-        with self.assertRaises(RiverError):
-            core.keep(self.c, self.p, "ag")  # bo holds the prerequisite now
 
     def test_wait_on_a_person_ends_after_human_wait_max(self):
         core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
@@ -4072,41 +4046,6 @@ class OfferGiveSplit(Base):
         self.page = core.item_add(self.c, "a", "Privacy page", blocks=self.goal, actor="t")["id"]
         core.claim(self.c, self.page, "bo")
 
-    def test_offer_split_then_helper_takes_a_piece(self):
-        o = core.offer(self.c, "I can take the draft", self.page, actor="ag")
-        self.assertEqual((o["kind"], o["to_agent"]), ("offer", "bo"))
-        res = core.split(self.c, self.page, ["draft text", "address"], "bo")
-        self.assertEqual(core._item(self.c, self.page)["status"], "held")
-        self.assertEqual(core.message_show(self.c, o["id"])["state"], "accepted")
-        got = core.next_item(self.c, unblocks=self.goal, claim=True, actor="ag")
-        self.assertIn(got[0]["id"], res["split_into"])
-        core.done(self.c, got[0]["id"], "drafted", "ag")
-        other = [n for n in res["split_into"] if n != got[0]["id"]][0]
-        core.done(self.c, other, "found", "t")
-        st = core._item(self.c, self.page)
-        self.assertEqual((st["status"], st["assignee"]), ("in_progress", "bo"))
-
-    def test_give_moves_the_lease_and_accepts_the_offer(self):
-        o = core.offer(self.c, "let me", self.page, actor="ag")
-        with self.assertRaises(RiverError):
-            core.give(self.c, self.page, "ag", "ag")
-        core.give(self.c, self.page, "ag", "bo")
-        it = core._item(self.c, self.page)
-        self.assertEqual((it["assignee"], it["status"]), ("ag", "in_progress"))
-        self.assertEqual(core.message_show(self.c, o["id"])["state"], "accepted")
-        with self.assertRaises(RiverError):
-            core.give(self.c, self.page, "ag", "bo")  # not bo's any more
-
-    def test_decline_offer_and_offer_refusals(self):
-        o = core.offer(self.c, "let me", self.page, actor="ag")
-        with self.assertRaises(RiverError):
-            core.decline_message(self.c, o["id"], "no", "ag")  # not for ag
-        core.decline_message(self.c, o["id"], "almost done", "bo")
-        self.assertEqual(core.message_show(self.c, o["id"])["state"], "declined")
-        self.assertTrue(any("almost done" in m["body"] for m in core.inbox(self.c, "ag")))
-        with self.assertRaises(RiverError):
-            core.offer(self.c, "x", self.goal, actor="ag")  # nobody holds it
-
 
 class SessionLinks(Base):
     """A notification opens the session of the agent that asked or added the item, when it has a web link."""
@@ -5041,12 +4980,6 @@ class ReleaseReview(Base):
                 f()
         core.wait(self.c, self.dir.name, "rev", step="0s", sleep=lambda s: None)
         self.assertIsNone(core.waiting_agent_for(self.c, "site", self.review))
-        # A session that holds a task now (a give moved it there) is used too.
-        y = self.add("site", "given work")
-        core.register(self.c, "fresh")
-        core.claim(self.c, y, "ops")
-        core.give(self.c, y, "fresh", actor="ops")
-        self.assertIn(f"held #{y}", core.reviewer_refusal(self.c, core._item(self.c, self.review), "fresh"))
         # A new session takes the review; after it, the session takes any work, but none of the review's fixes
         # (#5932, p100): it reviews the release again after them.
         core.register(self.c, "rev2")
@@ -5938,8 +5871,6 @@ class Models(Base):
         with self.assertRaisesRegex(RiverError, "pick another model"):
             core.launch_target(self.c, item=x, model="claude-opus-5-5", actor="mark")
         core.claim(self.c, x, "strong")
-        with self.assertRaisesRegex(RiverError, "give #%d to weak" % x):
-            core.give(self.c, x, "weak", "strong")
         self.assertEqual(core._item(self.c, x)["assignee"], "strong")
         core.release(self.c, x, "strong")
         core.push(self.c, x, "strong", None, "mark")  # a session whose model fits
@@ -6464,10 +6395,6 @@ class GoalLeases(Base):
         core.claim(self.c, busy, "ops")
         core.claim(self.c, dep, "ops")
         self.assertEqual(core.item_show(self.c, dep)["assignee"], "ops")
-        # give: the same rule for the one who receives
-        core.claim(self.c, self.add("site", "x's work"), "x")
-        with self.assertRaisesRegex(RiverError, r"max_leases 1"):
-            core.give(self.c, busy, "x", "ops")
 
 
 class AgentQueue(Base):
@@ -6505,9 +6432,8 @@ class AgentQueue(Base):
         later = self.add("a", "later", 3)
         blocker = self.add("a", "blocker", 3)
         waits = self.add("a", "waits", 3, after=[blocker])
-        for i in (waits, other, later):
+        for i in (waits, later, other):
             core.queue_add(self.c, "s1", i, actor="mark")
-        core.queue_move(self.c, "s1", later, before=other, actor="mark")
         self.assertEqual([e["item"] for e in core.queue_list(self.c, "s1")["entries"]], [waits, later, other])
         with self.assertRaisesRegex(RiverError, "already in the queue of s1"):
             core.queue_add(self.c, "s2", later, actor="mark")
@@ -11300,7 +11226,7 @@ class Activity(Base):
             for text in ('{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID, "not json", ""):
                 with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out), \
                         mock.patch.object(core, "agent_process", lambda: (None, None)):
-                    self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
+                    self.assertEqual(cli.run(["report", "--hook", "claude"]), 0)  # never fails the session, prints nothing
             self.assertEqual(out.getvalue(), "")
         self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "report:idle")
 
@@ -11374,7 +11300,7 @@ class Activity(Base):
                 mock.patch.object(core, "pid_alive", lambda pid: pid == 4242), contextlib.redirect_stdout(io.StringIO()):
             for text in ('{"hook_event_name": "PostToolUse", "session_id": "%s"}' % self.SID, stop, stop):
                 with mock.patch.object(sys, "stdin", io.StringIO(text)):
-                    cli.run(["activity"])
+                    cli.run(["report", "--hook", "claude"])
         row = self.c.execute("SELECT pid, pid_cmd, host FROM agents WHERE name='w'").fetchone()
         self.assertEqual((row["pid"], row["pid_cmd"], row["host"]), (4242, "claude --name w", core.this_host()))
         self.assertEqual(len(calls), 1)  # not on a tool call, and not again while that process runs
@@ -16321,8 +16247,8 @@ class Replaced(Base):
     def test_replaced_commands_are_named_and_said(self):
         from river import cli
         k = core.replaced_key
-        self.assertEqual([k("next", None), k("queue add", None), k("goal own", None), k("heartbeat", None)],
-                         ["next", "queue add", "goal own", "heartbeat"])
+        self.assertEqual([k("claim", None), k("queue add", None), k("goal own", None), k("heartbeat", None)],
+                         ["claim", "queue add", "goal own", "heartbeat"])
         self.assertEqual([k("goal show", None), k("queue", None), k("add", None), k("", None)], [None] * 4)
         core.project_add(self.c, "web", path=self.dir.name)
         core.register(self.c, "w")
@@ -16339,18 +16265,36 @@ class Replaced(Base):
     def test_replaced_uses_count_runs_by_session_and_token(self):
         from river import cli
         t = core.iso(core.now())
-        rows = [("next", '["--as", "w", "next"]', "s1", 1), ("next", '["next"]', "s2", None),
+        rows = [("heartbeat", '["--as", "w", "heartbeat"]', "s1", 1), ("heartbeat", '["heartbeat"]', "s2", None),
                 ("queue add", '["queue", "add", "w", "3"]', "s3", None), ("show", '["show", "3"]', "s1", 1)]
         for cmd, words, session, token in rows:
             self.c.execute("INSERT INTO runs(at, session, actor, pid, cwd, cmd, words, exit, ms, token) "
                            "VALUES (?,?,?,?,?,?,?,?,?,?)", (t, session, "w", 1, "/", cmd, words, 0, 3, token))
         got = {r["command"]: (r["runs"], r["token"], r["sessions"]) for r in core.replaced_uses(self.c)["replaced"]}
-        self.assertEqual((got["next"], got["queue add"], got["--as"], got["claim"]),
+        self.assertEqual((got["heartbeat"], got["queue add"], got["--as"], got["claim"]),
                          ((2, 1, 2), (1, 0, 1), (1, 1, 1), (0, 0, 0)))
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            cli.render_runs(core.replaced_uses(self.c))
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            self.assertEqual(cli.run(["runs", "--replaced"]), 0)
         self.assertIn("Replaced commands, last 7d", out.getvalue())
+
+    def test_zero_use_replaced_commands_are_gone(self):
+        """#5981: commands with 0 token runs in 7d are removed; keep --close and next [-n] stay."""
+        from river import cli, server
+        for words in (["offer", "hi", "--item", "1"], ["give", "1", "--to", "bo"], ["split", "1", "a"],
+                      ["plan"], ["activity"], ["queue", "move", "w", "1", "--before", "2"],
+                      ["goal", "give", "g", "--to", "bo"], ["keep", "1"],
+                      ["next", "--claim"], ["next", "--mine"], ["next", "--near", "1"], ["next", "--unblocks", "1"]):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cli.parse_args(words)
+        a = cli.parse_args(["keep", "1", "--close", "2", "--note", "still needed"])
+        self.assertEqual((a.cmd, a.id, a.close), ("keep", 1, 2))
+        a = cli.parse_args(["next", "--project", "web", "-n", "5"])
+        self.assertEqual((a.cmd, a.project, a.limit), ("next", "web", 5))
+        for k in ("offer", "give", "split", "plan", "queue move", "goal give", "goal take", "keep", "next"):
+            self.assertNotIn(k, core.REPLACED)
+        for op in ("offer", "give", "split"):
+            self.assertNotIn(op, server.OPS)
 
     def test_unused_commands_move_and_goal_edit_are_gone_and_the_page_keeps_its_actions(self):
         """#5991 (mark 2026-11-15): commands that sessions no longer use go. The page's arrows and goal buttons

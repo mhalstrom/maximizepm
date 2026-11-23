@@ -5,9 +5,10 @@ description: Take, do, and hand back work items from the MaximizePM queue (the `
 
 # MaximizePM: working from the queue
 
-The queue holds projects, items, and the dependencies between them. You pick
-the area where you already hold context; inside it, `maxpm next` returns the
-most important item that is ready (nothing it waits on is open).
+The queue holds projects, items, and the dependencies between them. Each session
+that `maxpm serve` starts has a token (identifying it automatically) and a
+scope (the project, goal, release, target, or task list it works on). `maxpm go`
+gives you the next ready task in your scope.
 
 ## Who does what
 
@@ -35,83 +36,38 @@ most important item that is ready (nothing it waits on is open).
 
 ## Fastest start
 
-Run `maxpm go` in the project folder and follow the briefing. It names you,
-gives you a task when there is one, and ends with the command to run next. Its
-first line names what you do (WORKER; OWNER of a goal you hold; REVIEWER;
-DEPLOYER; EXPERT) or IDLE: nothing for you now, and why. Pass `--as <your-name>` on
-every later command. When the briefing asks, record your Claude Code session
-name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
-prints `This session is <name> [<ref>]`, and names can repeat, so keep the ref), so
-people and agents can message your session directly. After `maxpm done`, run `maxpm --as <your-name> go` again
-at once, in the same turn: do not stop to report between items. By default
-(`auto_continue tree`) go then gives you only the tasks of your own tree: the
-open tasks linked to what you held in this session (what they wait on and
-unblock, what was found during them, the same goal), so your context helps;
-other work goes to a new session. When go gives
-you no item (role IDLE), run `maxpm --as <your-name> wait`. In Claude Code, run
-it as a background command (`run_in_background`) and end your turn: a message
-that a person or a session types to you then reaches you at once, and the
-harness wakes you when the wait prints. After such a talk, end your turn with
-the wait running again (start it only when the last one ended). In a CLI with
-no background commands (Codex, Pi), run it in the foreground with a 10-minute
-limit; when a person types to you while it runs, it ends with MESSAGE: answer
-the text, then run wait again. A blocking wait costs no tokens, and it keeps you available for new
-work. It prints WORK (run go), no work yet (run wait again), "This wait
-ended" (do nothing for it), or END: no work came within `wait_max` (45m,
-counted again from a person's last prompt), MaximizePM unregistered you, and
-you stop. After each item, end in `maxpm wait`, never at your prompt. Stop also when you need the user (file a human item first; see
-below); then report everything you finished. A person turns this off with
-`maxpm config set auto_continue off` (`on`: any ready work after each task). MaximizePM never types into your terminal
-(except the answer to a question you wait for at your prompt, below):
-when you sit idle at your prompt, `maxpm serve` gives new work or an answer for
-you to a fresh session, and ends you after `idle_end` (15m) with nothing in hand.
+Run `maxpm go` in the project folder and follow the briefing. Your session
+token identifies you (no `--as`, `register`, `session`, or `heartbeat`), and
+your scope decides what work you take. The first line names your role (WORKER,
+REVIEWER, DEPLOYER, EXPERT) or IDLE: nothing ready in your scope, and why.
 
-## Identity (by hand)
+After `maxpm done`, run `maxpm go` again at once, in the same turn: do not stop
+to report between items. When `go` gives you no item (role IDLE), run
+`maxpm wait`. In Claude Code, run it as a background command
+(`run_in_background`) and end your turn: messages reach you at once, and the
+harness wakes you when `wait` prints. In a CLI with no background commands
+(Codex, Pi), run it in the foreground with a 10-minute limit; when a person
+types to you while it runs, it ends with MESSAGE: answer the text, then run
+`wait` again.
 
-A session that `maxpm serve` starts has a token: it needs no `register`, no
-`--as`, no `heartbeat`, and its scope gives it its work. The commands that
-tokens and scopes replace still work, and say so when they run (#6029). A
-session that a person started in a terminal has no token: it uses them.
-
-Register once, then name yourself on every command:
-
-```
-maxpm register <session-name> --note "what you are working on"
-export MAXPM_AGENT=<session-name>        # or pass --as <session-name>
-```
-
-A person registers with `--human`.
-
-Declare the model your session runs, once: `maxpm --as <you> go --model <model>`
-(or `MAXPM_MODEL=<model>`). MaximizePM then gives you only items whose
-`--min-model`/`--max-model` limits allow your model, and says what it skipped.
-An item's recommended model and effort (`model:` in the briefing) are advice:
-work at that effort; a different model may still take it. An item for another
-agent type (`agent codex` while you run in Claude Code) is skipped; MaximizePM reads
-your type from your CLI's environment.
+`maxpm wait` costs no tokens and returns WORK (run `go`), a new scope (run
+`go`), a message, STOP, no work yet (run `wait` again), "This wait ended" (do
+nothing for it), or END (no work came within `wait_max`, 45m, and you stop).
+After each item, end in `maxpm wait`, never at your prompt. Stop also when you
+need the user (file a human item first; see below); then report what you
+finished. When you sit idle at your prompt, `maxpm serve` ends you after
+`idle_end` (15m) with nothing in hand.
 
 ## Work loop
 
-1. Choose your area and take an item. `maxpm project list` shows what each
-   project covers; `maxpm project show <name>` shows who works there and what
-   is ready.
-   - `maxpm next --project <name> --claim`: the project you know
-   - `maxpm next --mine --claim`: next to what you claimed or finished before
-     (linked items first, then the same projects)
-   - `maxpm next --near <id> --claim`: items linked to one you just worked on, closest first
-   - `maxpm next --unblocks <id> --claim`: something that unblocks your blocked item
-   - `maxpm next --claim`: anything, most important first
-   Leave out `--claim` to look first. Add `-n 5` to see five.
-2. `maxpm show <id>` for the notes, what it waits on, and what it unblocks.
-   `maxpm show <id> --brief` prints a few lines: no history, long text cut.
-   The item has no short title (the go briefing says `short: none yet`): write
-   one now, `maxpm edit <id> --short "<about 6 plain words>"`: the pages show it.
+1. Run `maxpm go`: it claims the most important ready item in your scope.
+2. `maxpm show <id>` for the notes, what it waits on, and what it unblocks
+   (`--brief` prints a few lines). If the item has no short title (`short: none
+   yet`), write one now: `maxpm edit <id> --short "<about 6 plain words>"`.
    Then, and at each new step, say what you do for your row on the Sessions
    tab: `maxpm now "<about 10 plain words>"` (no ids, file names, or commands).
-3. Do the work. A session that `maxpm serve` started (it has a token) keeps its
-   lease while its process runs: no heartbeat. Any other session renews it with
-   each `maxpm` command; after 30 minutes without one, run `maxpm heartbeat`.
-   A loop that only renews the lease is not work.
+3. Do the work. Your session token keeps your lease alive while your process
+   runs: never run a heartbeat loop.
 4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>" --changed "<the same for a person: plain words>"`.
    Add the proof of the result: `--test "<the test command>" --result "<its last line>"`, and for a
    visible change `--shot <screenshot or short video>` (or `--shot canvas:<name>`). The commits that name
@@ -184,71 +140,26 @@ your type from your CLI's environment.
    only. Run `maxpm release <review-id> --author "<your commits>"`: MaximizePM
    gives you this review no more, and another session takes it.
 
-## Owning a goal
+## Goals
 
-A goal is an outcome in a project, with a test for "done when". One agent owns
-a goal at a time and works toward the outcome: it plans the items the goal
-needs, takes them, and clears what blocks them. Goals are optional; items
-without a goal stay in the normal queue.
+A goal is an outcome in a project with a test for "done when". Goals are
+optional; items without a goal stay in the project queue. The manager assigns
+goal work through session scopes (`goal:<name>`).
 
-- `maxpm go` never forces a goal on you. It gives you a free goal (role
-  OWNER) only when the most important ready work in your area serves it: the
-  item carries the goal's tag, or an open item of the goal waits on it.
-  `maxpm goal own <name>` takes a goal by hand, and `maxpm go --role owner`
-  takes the highest-ranked goal nobody owns. `maxpm goal list` shows the
-  open goals, their owners, and progress.
-- The briefing shows the outcome, the done-when test, the goal's open items,
-  and who holds what blocks them. Then go gives you, in order: a ready item of
-  the goal; an item outside the goal that unblocks it; or, when the goal has
-  no open items, the question whether done-when holds.
-- Plan as you go: `maxpm add "<title>"` tags the item with the goal you own, when the item is in that goal's project.
-  Add `--no-goal` for a fix you find in passing that serves no goal, or
-  `--goal <name>` (repeatable) to name the goals.
-- Coordinate with other owners: `maxpm note|ask|alert --goal <name> "<text>"`
-  and `maxpm offer "<text>" --goal <name>` reach the owner of that goal.
-  You get a notice when another agent adds, claims, or finishes an item of
-  your goal.
-- When the last open item of a goal closes, MaximizePM asks whether done-when
-  holds: the reply of `done` or `drop` asks you when you own the goal, and a
-  notice asks the owner when another session closed it. A goal with no owner
-  (shared, or its owner's claim ran out) goes to the manager.
+- `maxpm goal list` shows open goals and progress; `maxpm goal show <name>`
+  shows the outcome, done-when test, handoff, and items.
+- Tag new items for a goal with `--goal <name>` (or `--no-goal` for an
+  unrelated fix).
+- Keep the goal's handoff current after each task of it:
+  `maxpm goal handoff <name> --file <path>` (what the goal is, decisions so
+  far, files that matter, what is left). MaximizePM keeps every version
+  (`--versions`, `--version N`), and the next session reads it in its briefing.
+- A sub-goal (`maxpm goal add <project> <name> --parent <goal>`) splits a large
+  goal; its sessions read the parent's handoff first. A goal with open
+  sub-goals is not complete until they are.
 - When done-when holds: `maxpm goal done <name> --result "<one line>"`.
   MaximizePM refuses while tagged items are open; finish them, untag them
-  (`maxpm edit <id> --untag <name>`), or add `--drop-open`. Then run
-  `maxpm go --role owner` to take the next free goal, or `maxpm go` for the
-  most important ready work.
-- Owning a goal claims its items: while you own it, its agent items are
-  reserved for you (other agents skip them and can offer help), and your
-  leases on them last `goal_lease` (4h) instead of `lease_ttl`. A person's
-  items in the goal stay on the person's list. Each maxpm command renews the
-  claim; `maxpm goal own <name> --lease 6h` picks another length.
-- Your goal's items, the items they wait on, and the deploy items of a target
-  you own count against `goal_max_leases` (3), apart from `max_leases` (1).
-  So you can take an urgent prerequisite of your goal while you hold other work.
-- Keep the goal's handoff current: after each item of the goal, run
-  `maxpm goal handoff <name> --file <path>` (or the text): what the goal is,
-  the decisions so far, the files that matter, and what is left. MaximizePM
-  keeps every version (`--versions`, `--version N`). The go briefing of the
-  next owner, and of any session that starts on an item of the goal, shows it.
-- Stop owning: `maxpm goal release <name>`, or `maxpm goal give <name> --to <agent>`.
-  Both refuse while the handoff is older than your last finished item of the
-  goal; write it first, or give the reason: `--no-handoff "<why>"`.
-  After `goal_lease` without a command the goal is free again, its items are
-  open to every agent, and you get a notice. The goal is also free when your
-  session is gone or ends.
-- A sub-goal (`maxpm goal add <project> <name> --parent <goal>`, one level,
-  same project) splits a large goal: its owner and its sessions read the
-  parent's handoff, then the sub-goal's own. A goal with open sub-goals is not
-  complete until they are.
-- A shared goal has no owner (`maxpm goal list` shows "shared: no owner"). A
-  person or a manager decided that several agents work on it at the same time.
-  `maxpm go` never makes you its owner, `maxpm goal own` refuses, and its
-  items are normal work for every agent. Take them with `maxpm go`, and tag
-  an item you add for it: `maxpm add "<title>" --goal <name>`.
-  A shared goal has no owner who keeps its handoff, so you do: when you
-  finish a task of it, bring the handoff up to date (`maxpm goal handoff
-  <name> --file <path>`: what your task changed, the decisions, what is left).
-  The next session on the goal reads it in its go briefing.
+  (`maxpm edit <id> --untag <name>`), or add `--drop-open`.
 
 ## Adding work
 
@@ -321,7 +232,7 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
     `maxpm replanned <id>`.
   - `--release` (the default): it is large or better for someone else. Your
     item goes back to the queue, waiting on the new one. Run `maxpm go` again.
-  `maxpm keep <id>` holds a released item again; `maxpm release <id>` ends a hold.
+  `maxpm release <id>` ends a hold.
 - Something this item needs first is in the queue already (another item, or
   the release that carries it): add the link, do not only name it in a note:
   `maxpm dep <your-id> --on <other-id> --release`. Your item goes back to the
@@ -340,11 +251,10 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
   freeze, quiet time while a release gate runs) does not block your item, and
   `maxpm blocked` is not for it: the next item meets the same limit. Do the
   parts that do not need the limited thing and commit them. Then keep the
-  item and wait for the manager's word that the limit ended:
-  `maxpm inbox --wait` in the foreground (start it again when it ends with
-  nothing; each start renews your lease). Then finish the item. Take no other
-  item that needs the same thing. Do not ask the user, and do not ask the
-  manager if the limit ended: the manager tells every session.
+  item and wait for the manager's word that the limit ended (`maxpm wait`).
+  Then finish the item. Take no other item that needs the same thing. Do not
+  ask the user, and do not ask the manager if the limit ended: the manager
+  tells every session.
 
 ## When you need the user
 
@@ -457,9 +367,6 @@ Take it off their list, with the reason; they get one notice and can undo it:
 - `maxpm takeover <id> --note "<how you will do it>"`: it becomes your item.
 - `maxpm done <id> --note "<why it is no longer needed>"` or `maxpm drop <id> --note "..."`.
 
-`maxpm claim` refuses a person's item for an agent, so the user is never
-bypassed without a notice.
-
 ## Showing the user a page: canvases
 
 To show the user a plan, a report, a chart, or a draft page, make a canvas: a page that MaximizePM keeps on
@@ -547,7 +454,7 @@ this"): `maxpm expert request "<what it does>" --model <m> --for <person>
 --context "<what it reads, its rules, where its output goes>"`, not an alert in
 free text. It adds the expert-tier task (found during your item) and alerts the
 manager with the line that starts it as an expert; go on with your work.
-In a session that holds the task already: `maxpm --as <you> expert adopt`.
+In a session that holds the task already: `maxpm expert adopt`.
 `maxpm go` then gives you role EXPERT. As an expert:
 
 - Read your task first: when the manager handed a talk to you, its context
@@ -572,7 +479,7 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
   keeps each plan version.
 - Keep your notes current: your topic, what you learned, the decisions of your
   talks, what is open, and the files and canvases that matter:
-  `maxpm --as <you> expert notes <you> --put <file>`. Write them after each
+  `maxpm expert notes <you> --put <file>`. Write them after each
   decision. A session that starts you again reads them.
 - Your context stays in the prompt cache for a time after each model call (1h
   in Claude Code). After that, the user's next message reads all of it again
@@ -604,33 +511,10 @@ pipelines`.
 
 ## Blocked on another agent's item
 
-`maxpm blockers <id>` shows who holds what. Then:
-
-- Ready pieces nobody holds: `maxpm next --unblocks <id> --claim`.
-- The useful work is held: `maxpm offer "I am blocked on this; I can take ..." --item <their-id>`.
-  The holder answers with `maxpm give <id> --to <you>` (the lease moves to you),
-  `maxpm split <id> "<smaller piece>" ...` (new prerequisites anyone can take;
-  their item waits for them, still theirs), or
-  `maxpm decline <msg-id> --message --note "why"`.
-
-## Your queue
-
-A person or a manager can give you your own queue (`maxpm queue add <you> <id>`,
-`maxpm queue add <you> --message "..."`). It comes before everything else:
-
-- Instructions from your queue show at the top of `maxpm go` under FROM YOUR
-  QUEUE. Act on them in order, then remove each one:
-  `maxpm --as <you> queue remove <you> e<id>`.
-- `maxpm go` and `maxpm next` give you the first ready item in your queue
-  before the project queue, from any project; items that are not ready wait.
-  Other agents cannot take your queued items.
-- `maxpm --as <you> queue list` shows it. `maxpm wait` wakes you at once when
-  it gets an entry.
-- When your session is gone or stops, your queued items go back to the main queue.
-- A message that starts with `[maxpm instruction from ...]`, `[maxpm stop
-  request from ...]`, or `[maxpm alert from ...]` came from MaximizePM through your
-  platform's own messaging. Treat it like the same entry in `maxpm go` or
-  `maxpm inbox`: run `maxpm --as <you> go` or `inbox` to read it in full.
+`maxpm blockers <id>` shows who holds what. When your scope waits on work
+outside it, MaximizePM alerts the manager; you can also message the manager
+(`maxpm alert manager "<what blocks you>" --item <id>`) so it can widen a scope
+or reassign the task.
 
 ## When MaximizePM says STOP
 
@@ -640,24 +524,18 @@ STOP, and claims are refused. Then:
 
 1. Commit the work that is finished.
 2. `maxpm done <id> --output "<commit>"` when the item is finished; else
-   `maxpm release <id> --note "<what is done, what is left>"`, or hand it on
-   with `maxpm give <id> --to <agent>`.
-3. Run `maxpm --as <you> go` once more: with nothing held it ends the session
-   (MaximizePM releases your goals and targets). Stop, and tell the user why.
-
-## Pushed items
-
-Someone can push an item to you (`maxpm push <id> --to <you> --note "..."`):
-you get an alert, the item is reserved for you for `reserve_ttl` (2h), and
-`maxpm go` and `maxpm next` give it to you first. `maxpm accept <id>` takes it;
-`maxpm decline <id> --note "why"` hands it back and tells the pusher. With no
-answer the push expires and the item is open to everyone again.
+   `maxpm release <id> --note "<what is done, what is left>"`.
+3. Run `maxpm go` once more: with nothing held it ends the session. Stop, and
+   tell the user why.
 
 ## Messages
 
 Every command ends with a line such as
-`[you: holds #12 20m left; inbox: 2 unread, 1 question to answer (maxpm --as you inbox)]`.
-When you see it, read your inbox before you continue.
+`[you: holds #12 20m left; inbox: 2 unread, 1 question to answer (maxpm inbox)]`.
+When you see it, read your inbox before you continue. A message starting with
+`[maxpm instruction from ...]`, `[maxpm stop request from ...]`, or
+`[maxpm alert from ...]` came from MaximizePM through your platform's
+messaging: run `maxpm go` or `maxpm inbox` to read it in full.
 A push (`git push`, `gh pr merge`) or a `maxpm launch` waits while you have an
 unread alert or an item that someone blocked (setting `push_guard`): MaximizePM
 refuses the command and names the alert. Read it, do what it says, then run
@@ -667,16 +545,12 @@ the command again only when it still applies.
   Add `--all` for read ones, `--peek` to leave them unread.
 - Between tasks, `maxpm wait` returns for work, a message, a stop or a new
   scope: you poll nothing. While you work, MaximizePM delivers messages into
-  your session (`native_message`); without that, `maxpm inbox --wait` in the
-  background waits for the next one.
+  your session (`native_message`).
 - `maxpm answer <msg-id> "<text>"`: answer a question. The asker gets it.
 - Shortcuts: `maxpm alert <agent> "<text>" --item <id>` (work they probably need),
   `maxpm ask <agent> "<text>"`, `maxpm note <agent> "<text>"`. Instead of an agent:
   `--holder-of <id>` (whoever holds that item), or for `ask`, `--file <path>`
   (every agent whose held items touch it). `maxpm note "<text>"` alone sets your status.
-- An alert to you: `maxpm accept <msg-id> --message` claims its item now, or,
-  while you hold other work, keeps it reserved for you until after that.
-  `maxpm decline <msg-id> --message --note "why"` says no. The sender hears either way.
 - When an item you hold waits on another one and that one is done, MaximizePM sends you a notice.
 - `maxpm send question|alert|note "<text>" --to <agent>`: to one agent.
   Use `--item <id>` instead of `--to` to reach whoever holds that item
@@ -690,8 +564,8 @@ example when your lease expired.
 
 A message to the manager waits for its next beat (within 50 minutes). It
 wakes the manager at once when you stop working after you sent it: you run
-`maxpm wait` or `inbox --wait`, end your turn, release or block its item, or
-your session ends. You set no priority yourself.
+`maxpm wait`, end your turn, release or block its item, or your session ends.
+You set no priority yourself.
 
 ## Policies
 

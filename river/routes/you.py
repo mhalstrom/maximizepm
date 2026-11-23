@@ -81,8 +81,6 @@ OPS = {
     "message_read": lambda c, a, who: server._message_read(c, int(a["msg"])),
     "send": lambda c, a, who: core.send(c, a["kind"], a["body"], a.get("to"), a.get("item"), a.get("reply"), who,
                                         a.get("level"), bool(a.get("blocked"))),
-    "give": lambda c, a, who: core.give(c, int(a["id"]), a["to"], who),
-    "split": lambda c, a, who: core.split(c, int(a["id"]), [t for t in a["titles"] if t.strip()], who),
     "queue_add": lambda c, a, who: core.queue_add(c, a["agent"], a.get("id"), a.get("message"), bool(a.get("first")),
                                                   a.get("before"), who),
     "tmux_tidy": lambda c, a, who: server.tmux_tidy(c),

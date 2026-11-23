@@ -7135,7 +7135,6 @@ OPS = {
     # #6009: maxpm review pass ran its review command in the reviewer's folder; serve records the result.
     "review_record": lambda c, a, who: core.review_record(c, int(a["id"]), a.get("output"), who, a.get("ran"),
                                                           a.get("reviewed"), a.get("rev")),
-    "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
     "setup_block": lambda c, a, who: setup_block(c, a["path"], a.get("move")),
     "setup_maxpm_cmd": lambda c, a, who: install_command(),
     "setup_tmux": lambda c, a, who: install_tmux(),

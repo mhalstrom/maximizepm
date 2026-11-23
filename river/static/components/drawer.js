@@ -39,15 +39,6 @@ function treeText(n, prefix = "", last = true, root = true) {
   return out;
 }
 
-// Offer help to whoever holds a piece of the blocker tree.
-function offerHelpHtml(it, me) {
-  const held = [];
-  (function walk(n, root) { if (!root && n.assignee && n.assignee !== me && ["in_progress", "held"].includes(n.status)) held.push(n); n.children.forEach(c => walk(c, false)); })(it.tree, true);
-  if (!held.length || ["done", "dropped"].includes(it.status)) return "";
-  return `<div style="margin-top:6px">${held.map(n => `<div class="actions"><span class="muted">#${n.id} held by ${esc(n.assignee)}</span>
-      <input id="offer-${n.id}" placeholder="I am blocked on this; I can take …" style="flex:1"><button class="btn" data-offer="${n.id}">Offer help</button></div>`).join("")}</div>`;
-}
-
 // Open an agent session on this item (server open_agent_on): with the person on a person's item,
 // on what blocks an item that waits, or Dispatch on a ready item.
 function agentButton(it, S) {
@@ -130,7 +121,7 @@ export function itemDrawerHtml(it, { S, me }) {
       ${it.waits_on_detail.map(w => `<div><span class="link" data-open="${w.id}" title="${esc(w.title)}">#${w.id} ${esc(shortTitle(w))}</span> <span class="muted">(${w.status})</span> <span class="link" data-undep="${w.id}">remove</span></div>`).join("") || '<div class="muted">nothing</div>'}
       <div class="actions" style="margin-top:6px"><input id="dDep" placeholder="ids, e.g. 4, 9" style="width:140px"><button class="btn" data-do="dep">Add</button></div>
     </div>
-    <div class="sec"><h4>Blocker tree</h4><div class="tree">${esc(treeText(it.tree))}</div>${offerHelpHtml(it, me)}</div>
+    <div class="sec"><h4>Blocker tree</h4><div class="tree">${esc(treeText(it.tree))}</div></div>
     <div class="sec"><h4>Messages</h4>
       ${(it.messages || []).map(m => msgLine(m)).join("") || '<div class="muted">none</div>'}
       <div class="actions" style="margin-top:6px"><select id="dMsgKind"><option value="note">note</option><option value="question">question</option><option value="alert">alert</option></select>

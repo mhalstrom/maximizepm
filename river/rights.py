@@ -25,7 +25,7 @@ COMMANDS = {
     "canvas": {"*": ANY},
     "realquicksite": {"status": ANY, "connect": ONLY_PERSON, "disconnect": ONLY_PERSON},
     "secret": {"*": ANY},  # each credential has its own levels and grants (river/vault.py)
-    "goal": {"add": ANY, "list": ANY, "show": ANY, "own": ANY, "give": ANY, "release": ANY,
+    "goal": {"add": ANY, "list": ANY, "show": ANY, "own": ANY, "release": ANY,
              "base": ANY, "handoff": ANY, "done": ANY,
              "share": ANY},  # goal_edit lets only a person, the manager, or the goal's owner change it (#6168)
     "schedule": {"*": ANY},
@@ -66,25 +66,25 @@ COMMANDS = {
     "show": ANY, "notify": {"*": ANY, "setup": ONLY_PERSON, "on": LEAD, "off": LEAD}, "prompt": ANY, "needs-you": ANY, "status": ANY,
     "usage": ANY, "runs": ANY, "health": ANY, "log": ANY, "next": ANY, "init": ANY, "go": ANY,
     "manage": ANY,  # becoming the manager: may_manage (serve made this session the manager, or a person)
-    "plan": ANY, "launch": ANY, "workspace": ANY,
+    "launch": ANY, "workspace": ANY,
     "expert": {"start": LEAD, "request": ANY, "adopt": ANY, "end": LEAD, "list": ANY, "fresh": LEAD, "notes": ANY},
     "view": ANY, "stop": LEAD, "interrupt": LEAD, "pause": LEAD, "resume": LEAD, "relay": LEAD,
     "approve": LEAD,  # #6282: the manager answers a session's prompt that it holds for the person
     "approval": ANY,  # the acting session names the person's yes (#5957); the function checks the yes itself
     "scope": {"*": LEAD, "show": ANY},
-    "queue": {"add": LEAD, "list": ANY, "remove": ANY, "move": LEAD},
+    "queue": {"add": LEAD, "list": ANY, "remove": ANY},
     "claim": ANY, "done": ANY, "wait": ANY, "cleanup": ANY, "check": ANY, "ship": ANY, "review": ANY,
     # add: a session adds the rule that the user states in its chat (the worker guide, section Policies)
     "policy": {"list": ANY, "show": ANY, "add": ANY, "edit": LEAD, "retire": LEAD},
     "release": ANY, "drop": ANY, "takeover": ANY, "reopen": ANY, "backlog": ANY, "activate": LEAD, "prio": ANY,
-    "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY, "offer": ANY,
-    "give": ANY, "split": ANY, "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
+    "dep": ANY, "push": ANY, "accept": ANY, "alert": ANY, "ask": ANY, "decline": ANY,
+    "keep": ANY, "undep": ANY, "blocked": ANY, "unblock": ANY, "replanned": ANY,
     "blockers": ANY, "send": ANY, "answer": ANY, "forward": ANY, "withdraw": ANY, "release-changes": ONLY_PERSON, "inbox": ANY, "thread": ANY,
     "register": ANY, "session": ANY, "unregister": ANY, "now": ANY, "note": ANY, "who": ANY, "link": ANY, "heartbeat": ANY,
     "report": ANY, "capacity": ANY, "host": ONLY_PERSON, "agent-login": ONLY_PERSON, "phone": ONLY_PERSON,
     "config": {"get": ANY, "set": LEAD, "unset": LEAD},
     "serve": ANY,  # serve --restart: sessions run it after a commit (AGENTS.md)
-    "skills": ANY, "activity": ANY, "db": ANY, "mcp": ANY, "connect": ANY, "guide": ANY, "setup-agent": ANY,
+    "skills": ANY, "db": ANY, "mcp": ANY, "connect": ANY, "guide": ANY, "setup-agent": ANY,
 }
 
 # The commands that change nothing: a command inside an agent with no name (no token, no --as) may run only these.
@@ -92,7 +92,7 @@ READS = {"plugin list", "plugin show", "project show", "project list","canvas li
          "ops list", "ops show", "ops history", "target show", "target list", "target report", "artifacts", "search", "duplicates",
          "list", "show", "needs-you", "status", "usage", "runs", "health", "log", "next", "prompt", "workspace list",
          "expert list", "scope show", "queue list", "policy list", "policy show", "blockers", "thread", "who", "link",
-         "capacity", "config get", "db path", "guide", "report", "activity", "view", "cleanup", "browser status",
+         "capacity", "config get", "db path", "guide", "report", "view", "cleanup", "browser status",
          "pipeline list", "pipeline show", "pipeline history", "pipeline run", "pipeline version", "pipeline item",
          "pipeline plugins", "pipeline audit", "pipeline runs", "pipeline triggers", "pipeline holding", "pipeline keys", "pipeline permissions",
          "runner list", "runner runs", "runner log"}
@@ -104,13 +104,13 @@ OPS = {op: ANY for op in (
     "browser_input", "browser_secret", "browser_steps", "canvas_answer", "canvas_comment", "canvas_comments",
     "canvas_discard", "canvas_edit", "canvas_kit", "canvas_list", "canvas_open", "canvas_publish", "canvas_put",
     "canvas_accept", "canvas_edit_html", "canvas_reject", "card_share", "canvas_reply", "canvas_resolve", "canvas_section", "canvas_send", "canvas_show", "claim", "decline",
-    "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "give", "goal_add",
+    "decline_message", "dep_add", "dep_remove", "deploy_now", "dispatch_item", "done", "drop", "goal_add",
     "goal_done", "goal_own", "goal_release", "item_add", "item_edit", "item_reply", "launch_agent", "message_read", "move",
-    "next_claim", "offer", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_playbook_edit", "ops_repair",
+    "next_claim", "open_agent_on", "open_needs_you", "ops_add", "ops_beat", "ops_pause", "ops_playbook_edit", "ops_repair",
     "ops_run", "ops_trigger_run", "ops_trial", "pending_deliver", "pending_send_now", "prio", "push", "push_cancel", "queue_remove",
     "register", "release", "release_check", "reopen", "replanned", "restart", "review_mark", "review_record",
     "review_send",
-    "run_hooks", "secret", "send", "serve_restart", "serve_status", "split", "start_session", "unblock",
+    "run_hooks", "secret", "send", "serve_restart", "serve_status", "start_session", "unblock",
     "usage_read",  # #6387: a reading of an agent's usage, in a hidden window of its own
     "pipeline_fix", "pipeline_correct",
     "pipeline_operators", "pipeline_emergency",  # #6145: the functions check a person, or the pipeline's operators

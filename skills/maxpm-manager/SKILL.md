@@ -1,6 +1,6 @@
 ---
 name: maxpm-manager
-description: Run the MaximizePM manager session (the `maxpm manage` command): plan with the user, launch agents, fill agent queues, stop stuck agents and agents that wait too long, change launch settings, and give release targets to another agent. Use when the user says "manage" in a project that uses MaximizePM, or asks you to keep the other agents working together.
+description: Run the MaximizePM manager session (the `maxpm manage` command): plan with the user, launch agents, set session scopes, stop stuck agents and agents that wait too long, change launch settings, and give release targets to another agent. Use when the user says "manage" in a project that uses MaximizePM, or asks you to keep the other agents working together.
 ---
 
 # MaximizePM: the manager
@@ -20,15 +20,14 @@ review and an operational task always start in a new session.
 
 ## Start
 
-Run `maxpm manage` and follow the briefing. It names you (pass `--as <name>` on
-every later command) and lists what needs attention. One manager is active at a
-time: a second `maxpm manage` names the active one and refuses. To replace it,
-`maxpm manage --takeover "<why>"`; the old manager is told.
+Run `maxpm manage` and follow the briefing. Your session token identifies you
+(no `--as`), and the briefing lists what needs attention. One manager is active
+at a time; a takeover happens on the page.
 
 ## The loop
 
 1. Read NEEDS ATTENTION in the briefing and act on each line (below).
-2. Start `maxpm --as <you> manage --watch` as a background command (Claude
+2. Start `maxpm manage --watch` as a background command (Claude
    Code: `run_in_background` with no time limit, or one above
    `manage_quiet_every`, 4h; in a foreground shell with a 10-minute limit, add
    `--step 9m`). It is your only watcher. You are async (#5977): the watch
@@ -72,23 +71,23 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
 
 Stop when the user tells you to, and tell the user what you did. When the
 watch prints STOP REQUESTED (the person ended you on the page, or ran
-`maxpm stop`), start no watch again: run `maxpm --as <you> go` once, which
+`maxpm stop`), start no watch again: run `maxpm go` once, which
 ends the session, and tell the user.
 
 ## What to do for each finding
 
 - **STUCK agent** (its process ended, or it is away or gone while it holds
-  items or has queued items): `maxpm stop <agent> --reason "..."`. If it does
+  items): `maxpm stop <agent> --reason "..."`. If it does
   not end and its items block others, ask the user first; only with their yes,
   `maxpm stop <agent> --kill --reason "..."` (uncommitted work in its folder is
   lost). A session whose process ended with no stop while it held an item, a
   goal or a target comes back by itself: `maxpm serve` resumes its chat in a
   tmux pane within a minute (setting `revive_sessions`) and sends you a notice.
   Stop it only when it ended on purpose.
-- **LEASE RAN OUT** on an item: its session stopped mid-item. Queue it for an
-  agent (`maxpm queue add <agent> <id>`), or launch one for it
+- **LEASE RAN OUT** on an item: its session stopped mid-item. Add it to a
+  session's scope (`maxpm scope widen <agent> tasks:<id>`), or launch one for it
   (`maxpm launch --item <id>`). The taker checks what is done first.
-- **WAITS TOO LONG**: give it work from its area (`maxpm queue add <agent> <id>`),
+- **WAITS TOO LONG**: give it a scope (`maxpm scope set <agent> ...`),
   or stop it (`maxpm stop <agent> --reason "no work"`) so it does not hold a slot.
 - **NO AGENT in a project** with ready work: `maxpm launch --project <name>`
   (`--dry-run` first when unsure). Pick the model and effort from the items
@@ -198,7 +197,7 @@ ends the session, and tell the user.
   `maxpm expert start <name> --item <id>` (or `--topic "..." --model <m>` when
   no task exists). A plain `maxpm add` and `maxpm launch --item` of a task
   without `--tier expert` starts a worker (#5036); a session started so is made
-  an expert in its chat: `maxpm --as <name> expert adopt`.
+  an expert in its chat: `maxpm expert adopt`.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
   user (its terminal may wait on a prompt; for an agent in tmux the user reads
   and answers it with the agent's Terminal button on the page, and only a
@@ -301,7 +300,7 @@ ends the session, and tell the user.
 - **A limit of the machine** (a full disk, no builds, a push freeze, quiet
   time during a release gate): tell every session one time when it starts and
   one time when it ends. Workers keep their items, do the parts that do not
-  need the limited thing, and wait in `maxpm inbox --wait` for your word.
+  need the limited thing, and wait in `maxpm wait` for your word.
   They do not ask you if it ended, so say it to each of them.
 - **A session asks for a secret** (an alert from maxpm: a refused use, or a
   request `r<id>` with its reason): the person sets each credential to "Ask
@@ -321,7 +320,7 @@ ends the session, and tell the user.
      every click; ask the person for none of them.
   2. Only when a step needs the person (a new password, a passkey, a phone
      code, a robot check): leave the browser at that step and ask once, with
-     `maxpm ask --blocked`. Name the site, the account and the step ("Google
+     `maxpm ask`. Name the site, the account and the step ("Google
      asks for your passkey"), and give the link from the alert: it opens that
      browser at that step on the page, on a computer or a phone.
   3. A new password the person types there becomes the sign-in's new password
@@ -353,10 +352,6 @@ ends the session, and tell the user.
   Refused: a release a session worked on, a goal that another session's scope holds. A session that
   `maxpm serve` starts gets the scope of what it starts for (#6028): an item's task, a target's deploys, a
   release's review, the project of an item to unblock; after that task it waits for your next scope.
-- `maxpm queue add <agent> <id> [--first|--before <id>]`, `maxpm queue add <agent> --message "..."`,
-  `maxpm queue list|move|remove`: an agent's own queue comes before the project queue. Scopes replace the
-  queue (#5981): prefer `maxpm scope widen <agent> tasks:<id>`; `maxpm runs --replaced` counts the use of
-  the replaced commands.
 - `maxpm note|alert|ask <agent> "..."`: messages (they also go through the
   agent platform's own messaging when MaximizePM knows it).
 - `maxpm stop <agent> --reason "..."`: a request; the agent commits, releases, and ends.

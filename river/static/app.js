@@ -371,8 +371,6 @@ document.addEventListener("click", async (e) => {
   const row = t.closest(".row"); if (row) return openDrawer(+row.dataset.id);
   if (t.id === "dClose") return closeDrawer();
   if (t.dataset.do) return drawerAction(t.dataset.do);
-  if (t.dataset.offer) { const n = +t.dataset.offer, body = $("#offer-" + n).value.trim(); if (!body) return toast("Say what you can take", true);
-    return act("offer", { item: n, body }).then(() => toast(`Offer sent to the holder of #${n}`)).catch(() => {}); }
   if (t.dataset.undep) { await act("dep_remove", { id: openItem, on: [+t.dataset.undep] }).catch(() => {}); return openDrawer(openItem, true); }
   if (t.dataset.tab && TABS.includes(t.dataset.tab)) return setTab(t.dataset.tab);  // only a tab of the page (#4652)
 });

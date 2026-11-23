@@ -618,7 +618,7 @@ def _say_replaced(conn, args, actor):
     replacement; --as only when the session has a token (without one it still needs it)."""
     if getattr(args, "json", False) or not (_inside_agent() or (actor and core._is_ai(conn, actor))):
         return
-    key = getattr(args, "replaced", None)
+    key = getattr(args, "_replaced_key", None)
     if key:
         print(f"maxpm: '{key}' is replaced by {core.REPLACED[key]}; it still works until sessions stop using it "
               f"(#5981)", file=sys.stderr)
@@ -1565,10 +1565,6 @@ def build_parser(only=None):
                        "are reserved for you"); x.add_argument("name")
     x.add_argument("--lease", help="how long the claim lasts without a maxpm command, and your leases on its "
                    "items (default: the goal_lease setting, 4h)")
-    x = gls.add_parser("give", help="hand a goal you own to another agent"); x.add_argument("name")
-    x.add_argument("--to", required=True)
-    x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
-                   help="give it although the handoff is older than your last finished item of the goal")
     x = gls.add_parser("release", help="stop owning a goal"); x.add_argument("name")
     x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
                    help="release it although the handoff is older than your last finished item of the goal")
@@ -2446,12 +2442,8 @@ def build_parser(only=None):
     x = sub.add_parser("log", help="completed work: done items with output, who, and when, by day")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
 
-    x = sub.add_parser("next", help="the next ready item from the area you choose")
+    x = sub.add_parser("next", help="the next ready item(s) in the queue")
     x.add_argument("--project", help="one project, or a comma list")
-    x.add_argument("--unblocks", help="prerequisites of this item id or project")
-    x.add_argument("--near", help="items linked to these item ids (comma list), closest first")
-    x.add_argument("--mine", action="store_true", help="items linked to what you claimed or finished before, then your projects")
-    x.add_argument("--claim", action="store_true", help="take it")
     x.add_argument("--limit", "-n", type=int, default=1)
     x.add_argument("--model", default=os.environ.get("MAXPM_MODEL"),
                    help="the model this session runs (default $MAXPM_MODEL): skip items whose limits exclude it")
@@ -2482,10 +2474,6 @@ def build_parser(only=None):
     x.add_argument("--takeover", metavar="REASON", help="take over from the active manager")
     x.add_argument("--watch", action="store_true", help="block until an escalation, the beat (manage_every; manage_quiet_every in quiet time), or enough waiting messages and findings (manage_wake_count) need the manager; run it in the background")
     x.add_argument("--step", help="with --watch: return after this long at most (a foreground shell: below its time limit)")
-    x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
-                   help="a chat app session with no folder (default $MAXPM_CHAT=1)")
-    x = sub.add_parser("plan", help="the planner role is gone (#4978): says where planning happens now")
-    x.add_argument("--project", help="project name(s) to focus on (default: this folder's, else all)")
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
 
@@ -2637,8 +2625,6 @@ def build_parser(only=None):
     x = qs.add_parser("list", help="an agent's queue (default: yours)"); x.add_argument("agent", nargs="?")
     x = qs.add_parser("remove", help="take an item (12) or an instruction (e5) out of a queue")
     x.add_argument("agent"); x.add_argument("ref")
-    x = qs.add_parser("move", help="move an item in a queue"); x.add_argument("agent"); x.add_argument("id", type=int)
-    x.add_argument("--before", type=int); x.add_argument("--after", type=int)
     x = sub.add_parser("claim", help="take one ready item by id"); x.add_argument("id", type=int)
     x = sub.add_parser("done", help="finish an item"); x.add_argument("id", type=int); x.add_argument("--output")
     x.add_argument("--changed", help="what changed, one plain line for a person: no ids, no file names, no flags "
@@ -2765,21 +2751,13 @@ def build_parser(only=None):
                        "with it (default: from its first word; a question: decide)")
         if kind == "ask":
             x.add_argument("--file", help="ask every agent whose held items touch this file")
-    x = sub.add_parser("decline", help="hand a pushed item back, or with --message say no to an offer or alert")
+    x = sub.add_parser("decline", help="hand a pushed item back, or with --message say no to an alert")
     x.add_argument("id", type=int); x.add_argument("--note")
-    x.add_argument("--message", action="store_true", help="the id is a message (an offer or alert), not an item")
-    x = sub.add_parser("offer", help="offer help to the agent that holds an item you are blocked on")
-    x.add_argument("text"); x.add_argument("--item", type=int, required=True); x.add_argument("--to", help="default: its holder")
-    x.add_argument("--goal", help="send the offer to the owner of this goal instead")
-    x = sub.add_parser("give", help="hand an item you hold (or that is reserved for you) to another agent")
-    x.add_argument("id", type=int); x.add_argument("--to", required=True)
-    x = sub.add_parser("split", help="add smaller prerequisites anyone can take; your item waits for them, still yours")
-    x.add_argument("id", type=int); x.add_argument("titles", nargs="+"); x.add_argument("--doer", default="any", choices=core.DOERS)
-    x = sub.add_parser("keep", help="hold an item again while you do its open prerequisites; with --close, keep an "
-                       "item that the close check of an item listed (it is still needed)")
-    x.add_argument("id", type=int, nargs="?", help="the item (with --close and no id: every item that check lists)")
-    x.add_argument("--close", type=int, metavar="CLOSED_ID", help="the closed item whose close check listed it")
-    x.add_argument("--note", help="with --close: why it is still needed")
+    x.add_argument("--message", action="store_true", help="the id is a message (an alert), not an item")
+    x = sub.add_parser("keep", help="keep an item that the close check of a closed item listed (it is still needed)")
+    x.add_argument("id", type=int, nargs="?", help="the item (with no id: every item that check lists)")
+    x.add_argument("--close", type=int, required=True, metavar="CLOSED_ID", help="the closed item whose close check listed it")
+    x.add_argument("--note", help="why it is still needed")
     x = sub.add_parser("undep", help="remove waits or conflict links"); x.add_argument("id", type=int); x.add_argument("--on", type=int, nargs="+", required=True)
     x = sub.add_parser("blocked", help="record a blocker outside the queue, optionally until a time")
     x.add_argument("id", type=int); x.add_argument("--reason")
@@ -3020,8 +2998,6 @@ def build_parser(only=None):
     x.add_argument("--dir", default="~/.claude/skills", help="skills folder (default ~/.claude/skills)")
     x.add_argument("--copy", action="store_true", help="copy the files instead of linking them")
     x.add_argument("--force", action="store_true", help="replace a folder that is not a link (your edits there are lost)")
-    sub.add_parser("activity", help="the old name of maxpm report --hook claude (the hook files of sessions that "
-                                    "started before #5183 run it)")
     db = sub.add_parser("db", help="where the queue database is")
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
@@ -3376,8 +3352,6 @@ def _record_hook_process(conn, name):
 
 def run(argv=None):
     words = sys.argv[1:] if argv is None else list(argv)
-    if words[:1] == ["activity"]:
-        return activity_command()  # first: a hook runs on every tool call, so it skips the parser and the briefing
     if words[:2] == ["report", "--hook"] and len(words) == 3:
         return activity_command(agent_id=words[2])
     if words[:2] == ["report", "--wake"] and len(words) == 3:
@@ -3450,7 +3424,7 @@ def _run_words(words, rec):
         subs = [getattr(args, k) for k in sorted(vars(args)) if k.endswith("cmd") and k != "cmd"
                 and isinstance(getattr(args, k), str)]
         rec["cmd"] = " ".join([args.cmd, *subs[:1]])
-    args.replaced = core.replaced_key(rec.get("cmd"), words) if args.cmd else None  # #6029
+    args._replaced_key = core.replaced_key(rec.get("cmd"), words) if args.cmd else None  # #6029
     if args.cmd is None:
         print(QUICKSTART)
         return 0
@@ -3687,7 +3661,7 @@ def _run(args, conn):
                 args.level = None
         # #5975: a process that cannot write the queue skips the bookkeeping writes of a command (serve does them), and
         # a write of the command itself ends in core.READONLY_REFUSAL.
-        if args.cmd not in ("go", "plan") and not (core.POLL and core.POLL.get("state")):  # a later poll: the wait's own
+        if args.cmd != "go" and not (core.POLL and core.POLL.get("state")):  # a later poll: the wait's own
             with core.unless_readonly():
                 core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
         st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
@@ -3710,7 +3684,7 @@ def _run(args, conn):
             raise
     except RiverError as e:
         msg = str(e)
-        if (_inside_agent() and args.cmd not in ("serve", "mcp", "wait", "report", "activity")
+        if (_inside_agent() and args.cmd not in ("serve", "mcp", "wait", "report")
                 and ("only a person" in msg or "never runs as a person" in msg
                      or "is for a person" in msg or "is for the person" in msg)
                 and sys.argv[1:] and core.running_serve(conn)):
@@ -5049,8 +5023,6 @@ def dispatch(conn, a, actor):
             return core.goal_own(conn, a.name, actor, a.lease)
         if g == "share":
             return core.goal_edit(conn, a.name, actor=actor, shared=not a.off)
-        if g == "give":
-            return core.goal_give(conn, a.name, a.to, actor, a.no_handoff)
         if g == "release":
             return core.goal_release(conn, a.name, actor, a.no_handoff)
         if g == "handoff":
@@ -5175,7 +5147,6 @@ def dispatch(conn, a, actor):
             return core.queue_list(conn, a.agent or actor)
         if a.qcmd == "remove":
             return core.queue_remove(conn, a.agent, a.ref, actor)
-        return core.queue_move(conn, a.agent, a.id, a.before, a.after, actor)
     if c == "pipeline":
         return _pipeline_cmd(conn, a, actor)
     if c == "runner":
@@ -5383,8 +5354,6 @@ def dispatch(conn, a, actor):
         core.set_native(conn, res["agent"], *core.native_from_env(conn, os.environ))
         _record_process(conn, res["agent"])
         return res
-    if c == "plan":
-        return {"plan_removed": True}
     if c == "manage":
         if a.watch:
             if not actor:
@@ -5407,7 +5376,7 @@ def dispatch(conn, a, actor):
                 core.set_agent_model(conn, actor, a.model)
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
         skipped = []
-        res = core.next_item(conn, a.project, a.unblocks, a.claim, actor, a.limit, a.near, a.mine, a.model, skipped)
+        res = core.next_item(conn, a.project, None, False, actor, a.limit, None, False, a.model, skipped)
         if skipped and not a.json:
             print(f"skipped for your model {a.model or core.agent_model(conn, actor)} or agent type "
                   f"{core.session_type(conn, actor)} (min/max model limits, the item's agent):",
@@ -5499,12 +5468,7 @@ def dispatch(conn, a, actor):
     if c == "dep":
         return core.dep_add(conn, a.id, a.on, actor, a.kind, a.mode)
     if c == "keep":
-        if a.close is not None:
-            return core.close_keep(conn, a.close, a.id, a.note, actor)
-        if a.id is None or a.note:
-            raise RiverError("name the item: maxpm keep <id>; or keep what a close check listed: "
-                             "maxpm keep <id> --close <closed id> --note \"<why it is still needed>\"")
-        return core.keep(conn, a.id, actor)
+        return core.close_keep(conn, a.close, a.id, a.note, actor)
     if c == "push":
         if a.cancel:
             return core.cancel_push(conn, a.id, actor)
@@ -5529,12 +5493,6 @@ def dispatch(conn, a, actor):
         if a.message:
             return core.decline_message(conn, a.id, a.note, actor)
         return core.decline(conn, a.id, a.note, actor)
-    if c == "offer":
-        return core.offer(conn, a.text, a.item, a.to, actor, a.goal)
-    if c == "give":
-        return core.give(conn, a.id, a.to, actor)
-    if c == "split":
-        return core.split(conn, a.id, a.titles, actor, a.doer)
     if c == "undep":
         return core.dep_remove(conn, a.id, a.on, actor)
     if c == "blocked":
@@ -5797,15 +5755,6 @@ def render_status(res):
         print(" -", adv["text"])
 
 
-PLAN_GONE = """There is no planner role in MaximizePM (mark, 2026-11-10: 'get rid of planner').
-Planning happens in the talk and during the work:
-  - Directing the agents and planning with the user: the manager (maxpm manage).
-  - A long design talk: an expert (maxpm expert start), which writes the tasks at its end.
-  - Work you find while you work: maxpm add "<title>" --found-during <id>.
-How to write a good task (dependencies, priorities, context, the backlog): maxpm guide manager, section Writing tasks.
-To take work instead: maxpm go"""
-
-
 def _release_step(x, r):
     """The step of an unpushed or untagged finding of a target with a release cadence, whose next release can start
     (#6045): that release sends the commits out, not a bare push."""
@@ -6036,7 +5985,7 @@ def render_manage(b):
             f"  experts: a talk that becomes a long talk about one topic goes to an expert: one line to the user, then "
             f"{r} expert start <name> --topic \"...\" --summary-file <path> [--canvas C] [--source S] --session {me}. "
             "The task holds the talk so far; you do no long design talk in your own context.",
-            f"  queues:  {r} queue add <agent> <id> [--first] | --message \"...\";  queue list|move|remove",
+            f"  scopes:  {r} scope set|widen|narrow|end <agent> <part>...;  scope show [<agent>]",
             f"  message: {r} note|alert|ask <agent> \"...\"",
             f"  stop:    {r} stop <agent> --reason \"...\"   (stuck, or waited longer than wait_too_long {b['wait_too_long']})",
             f"  kill:    {r} stop <agent> --kill --reason \"...\"   emergency only, and only after the user says yes",
@@ -9461,9 +9410,6 @@ def render(a, res):
             print("  not moved (it would make a loop): " + ", ".join(m["skipped"]))
         _print_show(res)
         return
-    if c == "plan":
-        print(PLAN_GONE)
-        return
     if c == "manage":
         return render_manage(res)
     if c == "add" and isinstance(res, dict) and "tries" in res and "look" in res:  # #5996
@@ -9983,8 +9929,8 @@ def render(a, res):
                 recent = f", +{p['done_in_window']} in the {window}" if res["since"] else ""
                 print(f"  {p['project']:<{w}}  {bar} {pct:>3}%  {p['done']}/{p['total']} done{recent}")
         return
-    if c in ("offer", "decline") and "kind" in res and "body" in res:
-        print(f"{'sent' if c == 'offer' else 'declined'} #{res['id']} {res['kind']}" + (f" to {res['to_agent']}" if c == "offer" else ""))
+    if c == "decline" and "kind" in res and "body" in res:
+        print(f"declined #{res['id']} {res['kind']}")
         return
     if c == "send" or (c in ("alert", "ask", "note") and isinstance(res, list)):
         for m in res if isinstance(res, list) else [res]:

@@ -3129,15 +3129,12 @@ REPLACED = {
     "register": "the token of a session that maxpm serve starts", "session": "the token of the session",
     "unregister": "the end of the session (maxpm serve unregisters it)",
     "heartbeat": "the token: a live session keeps its lease (#5979)",
-    "claim": _SCOPED, "next": _SCOPED, "keep": _SCOPED, "push": "maxpm scope widen <agent> tasks:<id>",
-    "accept": _SCOPED, "decline": _SCOPED, "offer": "a message to the manager, who widens a scope",
-    "give": "maxpm scope (the manager moves the task)", "split": "maxpm add ... --blocks <id>",
-    "plan": "nothing (an old alias)",
-    "queue add": "maxpm scope widen|set", "queue list": "maxpm scope show", "queue move": "maxpm scope set",
+    "claim": _SCOPED, "push": "maxpm scope widen <agent> tasks:<id>",
+    "accept": _SCOPED, "decline": _SCOPED,
+    "queue add": "maxpm scope widen|set", "queue list": "maxpm scope show",
     "queue remove": "maxpm scope narrow",
     "goal own": "maxpm scope set <agent> goal:<name>", "goal release": "maxpm scope narrow|end",
-    "goal give": "maxpm scope set <agent> goal:<name>", "goal take": "maxpm scope set <agent> goal:<name>",
-}  # move and goal edit are gone (#5991)
+}  # move and goal edit (#5991), goal take (#5994), offer/give/split/plan/activity/queue move/goal give/keep-hold/next-variants (#5981) are gone
 
 
 def replaced_key(cmd, words):
@@ -5848,25 +5845,6 @@ def _release_goals(conn, agent, why):
     for g in conn.execute("SELECT name FROM goals WHERE owner=?", (agent,)).fetchall():
         conn.execute("UPDATE goals SET owner=NULL, owner_expires_at=NULL, owner_lease=NULL WHERE name=?", (g["name"],))
         _event(conn, None, "maxpm", f"goal {g['name']} released: {why}")
-
-
-def goal_give(conn, name, to, actor=None, no_handoff=None):
-    """Hand a goal you own to another agent; they get a notice."""
-    with tx(conn):
-        g = _goal(conn, name)
-        if g["owner"] != actor:
-            raise RiverError(f"goal {name} is " + (f"owned by {g['owner']}" if g["owner"] else "not owned")
-                             + "; only its owner gives it")
-        rec = _agent(conn, to)
-        if to == actor:
-            raise RiverError("you own it already")
-        _handoff_refusal(conn, g, "give", no_handoff, actor)
-        ttl = parse_duration(setting(conn, "goal_lease", agent=to))
-        conn.execute("UPDATE goals SET owner=?, owner_expires_at=?, owner_lease=NULL WHERE id=?",
-                     (rec["name"], iso(now() + ttl), g["id"]))
-        _event(conn, None, actor, f"gave goal {name} to {to}")
-        _send(conn, "notice", actor, f"{actor} gave you goal {name}: {g['outcome']} (maxpm goal show {name})", to=to)
-    return goal_show(conn, name)
 
 
 def goal_owner(conn, name):
@@ -12618,36 +12596,6 @@ def _prereq_mode(conn, parent, new, actor, mode):
         _unhold(conn, parent, actor, "released: new prerequisites " + ", ".join(f"#{r}" for r in new))
 
 
-def keep(conn, item_id, actor=None):
-    """Turn a release back into a hold: own the parent again and reserve its free open prerequisites."""
-    if not actor:
-        raise RiverError("keeping needs an agent name: set MAXPM_AGENT or pass --as <name>")
-    with tx(conn):
-        _sweep(conn)
-        p = _item(conn, item_id)
-        if p["status"] == "held" and p["assignee"] == actor:
-            return item_show(conn, item_id)
-        if p["status"] not in ("open", "in_progress") or (p["assignee"] and p["assignee"] != actor):
-            raise RiverError(f"#{item_id} is {p['status']}" + (f" by {p['assignee']}" if p["assignee"] else "")
-                             + "; only an open item, or one you hold, can be kept")
-        prereqs = _open_prereqs(conn, item_id)
-        if not prereqs:
-            raise RiverError(f"#{item_id} waits on nothing open; claim it instead: maxpm claim {item_id}")
-        taken = [r for r in conn.execute(
-            f"SELECT id, assignee, reserved_for FROM items WHERE id IN ({','.join('?' * len(prereqs))})", prereqs)
-            if (r["assignee"] and r["assignee"] != actor) or (r["reserved_for"] and r["reserved_for"] != actor)]
-        if taken:
-            raise RiverError("refused: " + ", ".join(f"#{r['id']} is taken by {r['assignee'] or r['reserved_for']}"
-                                                    for r in taken) + f"; #{item_id} stays open")
-        limit = int(setting(conn, "keep_prereq_limit", item_id=item_id, agent=actor))
-        if len(prereqs) > limit:
-            raise RiverError(f"refused: #{item_id} has {len(prereqs)} open prerequisites, more than keep_prereq_limit "
-                             f"{limit}. Plan it instead: split the work, or let other agents take the prerequisites")
-        _agent(conn, actor)
-        _hold(conn, item_id, actor, prereqs)
-    return item_show(conn, item_id)
-
-
 def push(conn, item_id, to, note=None, actor=None):
     """Reserve an open item for one agent and alert it. It expires after reserve_ttl if nobody answers."""
     with tx(conn):
@@ -12706,109 +12654,6 @@ def decline(conn, item_id, note=None, actor=None):
             _send(conn, "notice", actor, f"{actor} declined #{it['id']} {it['title']}" + (f": {note}" if note else "")
                   + "; it is open to every agent again", to=it["reserved_by"], item_id=it["id"])
     return item_show(conn, item_id)
-
-
-def offer(conn, body, item, to=None, actor=None, goal=None):
-    """Offer help to the agent that holds an item you are blocked on (design 7.5 step 4)."""
-    if not actor:
-        raise RiverError("offering needs an agent name: set MAXPM_AGENT or pass --as <name>")
-    if goal is not None and to is None:
-        to = goal_owner(conn, goal)
-    with tx(conn):
-        it = _item(conn, item)
-        to = to or it["assignee"] or it["reserved_for"]
-        if not to:
-            raise RiverError(f"nobody holds #{item}; take it yourself: maxpm claim {item} (or maxpm next --unblocks {item} --claim)")
-        if to == actor:
-            raise RiverError("you hold it yourself")
-        _agent(conn, to)
-        mid = _send(conn, "offer", actor, body.strip(), to=to, item_id=it["id"])
-        _event(conn, it["id"], actor, f"offer #{mid} to {to}")
-        conn.execute("UPDATE messages SET body=body || ? WHERE id=?", (
-            f"\n(answer: maxpm give <id> --to {actor}   or: maxpm split {it['id']} \"<smaller piece>\" ...   "
-            f"or: maxpm decline {mid} --message --note \"why\")", mid))
-    return message_show(conn, mid)
-
-
-def _accept_offers(conn, holder, helper, t):
-    conn.execute("UPDATE messages SET state='accepted', read_at=COALESCE(read_at, ?), closed_at=? "
-                 "WHERE kind='offer' AND state='open' AND to_agent=? AND from_agent=?", (t, t, holder, helper))
-
-
-def _goal_holder(conn, item_id):
-    """Who owns an open goal of an open agent item right now (its items are reserved for them), or None."""
-    it = _item(conn, item_id)
-    if it["status"] != "open" or it["doer"] == "human":
-        return None
-    g = conn.execute("SELECT g.owner FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? "
-                     "AND g.status='open' AND g.owner IS NOT NULL AND g.owner_expires_at >= ? ORDER BY g.rank LIMIT 1",
-                     (item_id, iso(now()))).fetchone()
-    return g["owner"] if g else None
-
-
-def give(conn, item_id, to, actor=None):
-    """Hand an item you hold (or that is reserved for you) to another agent; the lease moves with it."""
-    with tx(conn):
-        _sweep(conn)
-        it = _item(conn, item_id)
-        rec = _agent(conn, to)
-        if to == actor:
-            raise RiverError("you already have it")
-        _refuse_model_to(conn, it, to, "give")
-        t = now()
-        if it["assignee"] == actor and it["status"] in ("in_progress", "held"):
-            if rec["role"] == "planner":
-                raise RiverError(f"{to} is a planner session and takes no work")
-            n, limit, key = _lease_room(conn, it["id"], to, ("in_progress",))
-            if it["status"] == "in_progress" and n >= limit:
-                raise RiverError(f"refused: {to} already holds {n} item(s) ({key} {limit}); they can release one first")
-            ttl = _lease_for(conn, it["id"], to)
-            if it["status"] == "in_progress":
-                conn.execute("UPDATE items SET assignee=?, claimed_at=?, lease_expires_at=? WHERE id=?",
-                             (to, iso(t), iso(t + ttl), it["id"]))
-            else:
-                conn.execute("UPDATE items SET assignee=?, hold_expires_at=? WHERE id=?",
-                             (to, iso(_hold_until(conn, it["id"], to, t)), it["id"]))
-                for r in _open_prereqs(conn, it["id"]):
-                    conn.execute("UPDATE items SET reserved_for=? WHERE id=? AND reserved_for=?", (to, r, actor))
-        elif it["reserved_for"] == actor and it["status"] == "open":
-            conn.execute("UPDATE items SET reserved_for=? WHERE id=?", (to, it["id"]))
-        elif it["status"] == "open" and not it["reserved_for"] and _goal_holder(conn, it["id"]) == actor:
-            # A goal owner hands on one of the goal's items: it is reserved for the other agent like a push,
-            # and comes back to the goal when they do not take it within reserve_ttl.
-            ttl = parse_duration(setting(conn, "reserve_ttl", item_id=it["id"], agent=to))
-            conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
-                         (to, iso(t + ttl), actor, it["id"]))
-        else:
-            raise RiverError(f"#{item_id} is not yours to give (" + (f"{it['status']} by {it['assignee']}" if it["assignee"]
-                             else f"reserved for {it['reserved_for']}" if it["reserved_for"] else it["status"]) + ")")
-        _event(conn, it["id"], actor, f"given to {to}")
-        _accept_offers(conn, actor, to, iso(t))
-        _send(conn, "notice", actor, f"{actor} gave you #{it['id']} {it['title']}; it is yours now "
-              f"(maxpm show {it['id']})", to=to, item_id=it["id"])
-    return item_show(conn, item_id)
-
-
-def split(conn, item_id, titles, actor=None, doer="any"):
-    """Add smaller prerequisites anyone can take; if you hold the item it waits for them, still yours."""
-    if not titles:
-        raise RiverError("give at least one title for a smaller piece")
-    with tx(conn):
-        it = _item(conn, item_id)
-        pname = _project_name(conn, it["project_id"])
-    new = [item_add(conn, pname, t, it["priority"], "", doer, (), actor, found_during=None)["id"] for t in titles]
-    with tx(conn):
-        for n in new:
-            _dep_add(conn, it["id"], n, actor)
-            _event(conn, n, actor, f"split from #{it['id']}")
-        cur = _item(conn, item_id)
-        if cur["assignee"] == actor and cur["status"] in ("in_progress", "held"):
-            _hold(conn, it["id"], actor, [])
-        conn.execute("UPDATE messages SET state='accepted', closed_at=? WHERE kind='offer' AND state='open' "
-                     "AND to_agent=? AND item_id=?", (iso(now()), actor, it["id"]))
-    res = item_show(conn, item_id)
-    res["split_into"] = new
-    return res
 
 
 def accept_message(conn, msg_id, actor=None):
@@ -15084,24 +14929,6 @@ def queue_remove(conn, agent, ref, actor=None):
             _event(conn, None, actor, f"stop of {agent} withdrawn")
         _event(conn, r["item_id"], actor, f"removed from the queue of {agent}" if r["item_id"] else
                f"queue {agent}: {r['kind']} e{r['id']} removed")
-    return queue_list(conn, agent)
-
-
-def queue_move(conn, agent, item, before=None, after=None, actor=None):
-    why = may_change_queue(conn, actor, agent)
-    if why:
-        raise RiverError(f"refused: {why}")
-    if (before is None) == (after is None):
-        raise RiverError("give --before <id> or --after <id>")
-    with tx(conn):
-        r = _queue_entry(conn, agent, item)
-        if r["item_id"] is None:
-            raise RiverError("instructions come first, in the order they were added; move items only")
-        conn.execute("DELETE FROM queue_entries WHERE id=?", (r["id"],))
-        pos = _queue_pos(conn, agent, before=before, after=after)
-        conn.execute("INSERT INTO queue_entries(id,agent,pos,item_id,kind,added_by,created_at) VALUES (?,?,?,?,'item',?,?)",
-                     (r["id"], agent, pos, r["item_id"], r["added_by"], r["created_at"]))
-        _event(conn, r["item_id"], actor, f"moved in the queue of {agent}")
     return queue_list(conn, agent)
 
 
