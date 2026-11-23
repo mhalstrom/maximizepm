@@ -11362,7 +11362,7 @@ class PushGuard(Base):
 
     def setUp(self):
         super().setUp()
-        core.project_add(self.c, "shop")
+        core.project_add(self.c, "shop", result_look="push_first")
         core.register(self.c, "boss")
         core.register(self.c, "w")
         self.item = self.add("shop", "Fix the build")
@@ -11426,6 +11426,70 @@ class PushGuard(Base):
         self.assertEqual((got["hookEventName"], got["permissionDecision"]), ("PreToolUse", "deny"))
         self.assertIn("Do not push yet", got["permissionDecisionReason"])
         self.assertEqual(set(agents.get("claude").read_hook({"hook_event_name": "PreToolUse"})), set(agents.HOOK_REPORT_KEYS))
+
+    def test_ask_first_refuses_worker_and_deployer_push_to_default_branch_not_manager_or_person(self):
+        repo = os.path.realpath(os.path.join(self.dir.name, "localapp"))
+        os.makedirs(repo)
+        def git(*args):
+            subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.test", *args],
+                           capture_output=True, text=True, check=True)
+        git("init", "-q", "-b", "main")
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("one\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        core.project_add(self.c, "localapp", path=repo, result_look="ask_first")
+        core.register(self.c, "wk")
+        core.register(self.c, "dep")
+        core.register(self.c, "mgr")
+        core.register(self.c, "mark", human=True)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='worker' WHERE name='wk'")
+            self.c.execute("UPDATE agents SET role='deployer' WHERE name='dep'")
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        it = self.add("localapp", "Build feature")
+        core.claim(self.c, it, "wk")
+
+        # Worker on main: every push to default branch and gh pr merge is refused with rule and next step.
+        for cmd in ("git push", "git push origin", "git push origin main", "git push origin HEAD",
+                    "git push origin HEAD:main", "git push origin +HEAD:refs/heads/main",
+                    "git push --all", "git push --delete origin main", "git push origin :main",
+                    f"git -C {repo} push origin main", f"cd {repo} && git push origin HEAD:main",
+                    "gh pr merge 12"):
+            why = core.push_guard(self.c, "wk", cmd)
+            self.assertIsNotNone(why, cmd)
+            self.assertIn("push_guard", why, cmd)
+            self.assertIn("result_look ask_first", why, cmd)
+            self.assertIn("maxpm done", why, cmd)
+            self.assertIn("manager reviews and pushes", why, cmd)
+
+        # Non-default branches, tags, and dry-run stay allowed.
+        for cmd in ("git push origin feature-x", "git push origin HEAD:feature-x",
+                    "git push origin HEAD:refs/heads/feature-x", "git push --dry-run origin main",
+                    "git push -n origin main", "git push origin --tags", "git push origin refs/tags/v1.0"):
+            self.assertIsNone(core.push_guard(self.c, "wk", cmd), cmd)
+
+        # On a non-default branch, plain git push / HEAD push is allowed, but explicit HEAD:main is still refused.
+        git("checkout", "-q", "-b", "feat/work")
+        for cmd in ("git push", "git push origin", "git push origin HEAD", "git push -u origin feat/work"):
+            self.assertIsNone(core.push_guard(self.c, "wk", cmd), cmd)
+        for cmd in ("git push origin HEAD:main", "git push origin main"):
+            self.assertIsNotNone(core.push_guard(self.c, "wk", cmd), cmd)
+        git("checkout", "-q", "main")
+
+        # Deployer is also refused; manager and person are not refused.
+        for cmd in (f"git -C {repo} push origin main", f"git -C {repo} push origin HEAD:main",
+                    f"cd {repo} && gh pr merge 12"):
+            self.assertIsNotNone(core.push_guard(self.c, "dep", cmd), cmd)
+            self.assertIsNone(core.push_guard(self.c, "mgr", cmd), cmd)
+            self.assertIsNone(core.push_guard(self.c, "mark", cmd), cmd)
+
+        # Switching project to push_first allows the worker push again.
+        core.config_set(self.c, "result_look", "push_first", project="localapp")
+        self.assertIsNone(core.push_guard(self.c, "wk", "git push origin HEAD:main"))
+        self.assertIsNone(core.push_guard(self.c, "wk", "gh pr merge 12"))
 
 
 class TmuxGuard(Base):

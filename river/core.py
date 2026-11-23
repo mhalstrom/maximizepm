@@ -19913,6 +19913,211 @@ def hook_guard(command):
     return None
 
 
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+_GIT_PUSH_VALUE_OPTS = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
+
+
+def _default_branch_names(root, remote=None):
+    """The repository's default branch name(s) as a set (e.g. {'main'}), or {'main', 'master'} when no repo is known."""
+    from . import review
+    if not root:
+        return {"main", "master"}
+    if remote and remote != "origin":
+        out = review.git(root, "rev-parse", "--abbrev-ref", f"{remote}/HEAD")
+        if out and out.strip() and out.strip() != f"{remote}/HEAD":
+            ref = out.strip()
+            return {ref.split("/", 1)[1] if ref.startswith(f"{remote}/") else ref}
+    ref = review.main_ref(root)
+    if not ref:
+        return {"main", "master"}
+    if "/" in ref and ref.startswith("origin/"):
+        return {ref.split("/", 1)[1]}
+    return {ref}
+
+
+def _push_targets_default(args, root):
+    """If a git push argument list pushes to the repo's default branch, return that branch name; else None."""
+    from . import review
+    pos, all_branches, tags_only, has_repo, i, end_opts = [], False, False, False, 0, False
+    while i < len(args):
+        w = args[i]
+        if not end_opts and w == "--":
+            end_opts = True
+            i += 1
+            continue
+        if not end_opts and w.startswith("-"):
+            if w in ("-n", "--dry-run"):
+                return None
+            if w in ("--all", "--branches", "--mirror"):
+                all_branches = True
+            elif w == "--tags":
+                tags_only = True
+            elif w == "--repo" or w.startswith("--repo="):
+                has_repo = True
+            if w in _GIT_PUSH_VALUE_OPTS:
+                i += 2
+                continue
+            i += 1
+            continue
+        pos.append(w)
+        i += 1
+    remote = None if has_repo or not pos else pos[0]
+    refspecs = pos if has_repo else pos[1:]
+    defaults = _default_branch_names(root, remote)
+    default_label = next(iter(sorted(defaults)))
+    if all_branches:
+        return default_label
+    if tags_only and not refspecs:
+        return None
+    cur = None
+    cur_loaded = False
+
+    def current_branch():
+        nonlocal cur, cur_loaded
+        if not cur_loaded:
+            cur_loaded = True
+            out = review.git(root, "symbolic-ref", "--short", "HEAD") if root else None
+            cur = out.strip() if out and out.strip() else None
+        return cur
+
+    if not refspecs:
+        if not root:
+            return default_label
+        b = current_branch()
+        return b if b in defaults else None
+    for spec in refspecs:
+        s = spec.lstrip("+")
+        if ":" in s:
+            _, dst = s.split(":", 1)
+            if not dst:
+                continue
+            if dst.startswith("refs/heads/"):
+                dst = dst[len("refs/heads/"):]
+            elif dst.startswith("refs/"):
+                continue
+            elif dst in ("HEAD", "@"):
+                dst = current_branch()
+        else:
+            if s.startswith("refs/heads/"):
+                dst = s[len("refs/heads/"):]
+            elif s.startswith("refs/"):
+                continue
+            elif s in ("HEAD", "@"):
+                dst = current_branch()
+            else:
+                dst = s
+        if dst in defaults:
+            return dst
+    return None
+
+
+def _ask_first_push_held(conn, agent, command):
+    """Under result_look ask_first, refuse git push / gh pr merge to the default branch from a non-manager AI session
+    (#6985). The manager role and a person are not refused; pushing a non-default branch stays allowed."""
+    a = conn.execute("SELECT kind, role FROM agents WHERE name=?", (agent,)).fetchone()
+    if not a or a["kind"] == "human" or a["role"] == "manager":
+        return None
+    from . import review
+    base_folder = None
+    base_loaded = False
+
+    def session_folder():
+        nonlocal base_folder, base_loaded
+        if not base_loaded:
+            base_loaded = True
+            base_folder = review.folder_of(conn, agent)
+        return base_folder
+
+    held = None
+    held_loaded = False
+
+    def held_project():
+        nonlocal held, held_loaded
+        if not held_loaded:
+            held_loaded = True
+            it = _held_item(conn, agent)
+            if it:
+                held = conn.execute("SELECT id, name, path FROM projects WHERE id=?", (it["project_id"],)).fetchone()
+        return held
+
+    def project_for_folder(folder):
+        root = review.repo_root(folder) if folder else None
+        if root:
+            names = projects_for_dir(conn, root)
+            if names:
+                hp = held_project()
+                if hp and hp["name"] in names:
+                    return hp, root
+                return _project(conn, names[0]), root
+            hp = held_project()
+            if hp and not hp["path"]:
+                return hp, root
+            return None, root
+        return held_project(), None
+
+    cd_dir = None
+    for words in _shell_commands(command):
+        i = 0
+        while i < len(words) and (words[i] in _RUN_WRAPPERS or words[i].startswith("-")
+                                  or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[i])):
+            i += 2 if words[i] in ("-u", "-C", "-S") else 1
+        if i >= len(words):
+            continue
+        base = os.path.basename(words[i])
+        if base == "cd":
+            target = next((w for w in words[i + 1:] if not w.startswith("-")), None)
+            if target:
+                t = os.path.expanduser(target)
+                prev = cd_dir or session_folder()
+                cd_dir = t if os.path.isabs(t) else (os.path.join(prev, t) if prev else t)
+            continue
+        if base == "gh":
+            rest = [w for w in words[i + 1:] if not w.startswith("-")]
+            if len(rest) >= 2 and rest[0] == "pr" and rest[1] == "merge":
+                folder = cd_dir or session_folder()
+                proj, root = project_for_folder(folder)
+                if proj and setting(conn, "result_look", project_id=proj["id"]) == "ask_first":
+                    branch = next(iter(sorted(_default_branch_names(root))))
+                    return (f"MaximizePM refuses this merge (push_guard): project {proj['name']} has result_look "
+                            f"ask_first, so a worker session does not merge into {branch}. Commit your changes, "
+                            f"run maxpm done, and the manager reviews and pushes.")
+            continue
+        if base != "git":
+            continue
+        j = i + 1
+        git_dir = cd_dir
+        while j < len(words) and words[j].startswith("-"):
+            opt = words[j]
+            if opt == "-C" and j + 1 < len(words):
+                d = os.path.expanduser(words[j + 1])
+                prev = git_dir or session_folder()
+                git_dir = d if os.path.isabs(d) else (os.path.join(prev, d) if prev else d)
+                j += 2
+                continue
+            if opt.startswith("-C") and len(opt) > 2:
+                d = os.path.expanduser(opt[2:])
+                prev = git_dir or session_folder()
+                git_dir = d if os.path.isabs(d) else (os.path.join(prev, d) if prev else d)
+                j += 1
+                continue
+            if opt in _GIT_GLOBAL_VALUE_OPTS:
+                j += 2
+                continue
+            j += 1
+        if j >= len(words) or words[j] != "push":
+            continue
+        folder = git_dir or session_folder()
+        proj, root = project_for_folder(folder)
+        if not proj or setting(conn, "result_look", project_id=proj["id"]) != "ask_first":
+            continue
+        branch = _push_targets_default(words[j + 1:], root)
+        if branch:
+            return (f"MaximizePM refuses this push (push_guard): project {proj['name']} has result_look ask_first, "
+                    f"so a worker session does not push to {branch}. Commit your changes, run maxpm done, and the "
+                    f"manager reviews and pushes. Pushing to a non-default branch is allowed.")
+    return None
+
+
 def push_guard(conn, agent, command):
     """Why MaximizePM refuses this shell command of the agent now, or None (#5381). A command that matches the setting
     push_guard (a push, gh pr merge, a launch) waits while the agent has an unread alert (it may say 'stop', 'do not
@@ -19921,8 +20126,11 @@ def push_guard(conn, agent, command):
     pat = setting(conn, "push_guard", agent=agent)
     if not pat or not command or not re.search(pat, command):
         return None
-    # review_at push (#5855): a git push or a PR merge waits until the person approves the session's HEAD.
+    # result_look ask_first (#6985) and review_at push (#5855): check git push / gh pr merge.
     if re.search(r"\bgit\b[^|;&\n]*\bpush\b|\bgh\s+pr\s+merge\b", command):
+        ask_held = _ask_first_push_held(conn, agent, command)
+        if ask_held:
+            return ask_held
         from . import review
         held = review.push_held(conn, agent, command)
         if held:

@@ -158,6 +158,7 @@ class Answers(Base):
             review.send(self.c, [], agent="dev", actor="mark")
 
     def test_push_waits_for_approve_when_the_project_says_so(self):
+        core.config_set(self.c, "result_look", "push_first", project="app")
         cmd = "git push origin HEAD"
         self.assertIsNone(core.push_guard(self.c, "dev", cmd))  # review_at off
         core.config_set(self.c, "review_at", "push", project="app")
