@@ -157,20 +157,35 @@ class Update(Base):
         au._started["checked"] = True
         core.register(self.c, "mark", human=True)
 
+    def add_session(self, name, pid, agent_type="codex"):
+        core.register(self.c, name)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, host=?, agent_type=? WHERE name=?",
+                           (pid, core.this_host(), agent_type, name))
+
     def test_update_waits_for_running_sessions_holds_new_starts_then_updates_and_tests(self):
         au.request(self.c, "codex", "mark")
         native = self.pkg / "node_modules/@openai/codex-darwin-arm64/vendor/codex"
         native.parent.mkdir(parents=True)
         native.write_text("")
-        self.ps = [f"node {self.bins['codex']} exec hello", f"{native} --sandbox x", "codex resume 1", "/bin/zsh -l",
-                   "node /elsewhere/bin/codex exec", "python3 /x/bin/maxpm go codex"]  # another install, no codex
+        self.add_session("codex-1", 2000)
+        self.add_session("codex-2", 2010)
+        self.ps = [
+            (2000, 100, f"node {self.bins['codex']} exec hello"),
+            (2001, 2000, f"{native} --sandbox x"),  # child of codex-1
+            (2010, 100, "codex resume 1"),
+            (2020, 100, "/bin/zsh -l"),
+            (2030, 100, "node /elsewhere/bin/codex exec"),  # another install
+            (2040, 100, "python3 /x/bin/maxpm go codex"),  # not codex
+            (9721, 1, f"{self.bins['codex']} resume stray"),  # outside MaximizePM sessions (#6968)
+        ]
         self.assertEqual(au.serve_pass(self.c), [])
         r = self.row()
         self.assertEqual((r["update"]["state"], r["update"]["waits"], r["dialog"]), ("queued", 3, False))
         self.assertIn("waits to update", au.hold(self.c, "codex"))
         with self.assertRaisesRegex(RiverError, "Codex waits to update"):
             core.pick_provider(self.c, "codex", explicit=True)
-        self.ps = []  # the session ended
+        self.ps = [(9721, 1, f"{self.bins['codex']} resume stray")]  # MaximizePM sessions ended; stray stays
         self.assertEqual(au.serve_pass(self.c), ["codex"])
         r = self.row()
         self.assertEqual((r["installed"], r["update"]["state"], r["newer"]), ("0.171.0", "done", False))
@@ -182,6 +197,44 @@ class Update(Base):
         self.assertIsNone(au.hold(self.c, "codex"))
         self.assertIn("updated Codex 0.159.1 -> 0.171.0",
                       self.c.execute("SELECT change FROM events ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+
+    def test_update_ignores_processes_outside_maximizepm_sessions(self):
+        # #6968: a leftover agy process from a live test (pid 9721, in a temporary maxpm-live-agy-6863 folder) must
+        # not hold a queued Antigravity update forever when no real MaximizePM session owns it.
+        p = self.root / "brew/Caskroom/antigravity-cli/1.5.14,6000/wrap/agy"
+        p.parent.mkdir(parents=True)
+        p.write_text("")
+        native = p.parent / "antigravity"
+        native.write_text("")
+        self.bins["agy"] = str(p)
+        au.change(self.c, lambda d: d["agents"].setdefault("antigravity", {}).update(
+            installed="1.5.14", latest="1.5.15", how="cask", package="antigravity-cli", path=str(p)))
+        ver = {"agy": "1.5.14"}
+
+        def run(argv, timeout, cwd):
+            self.ran.append(argv)
+            if argv[-1] == "--version":
+                return 0, f"agy {ver['agy']}"
+            if argv[1:] == ["upgrade", "--cask", "antigravity-cli"]:
+                ver["agy"] = "1.5.15"
+                return 0, "upgraded"
+            return 0, "OK"
+        au.RUN = run
+        self.ps = [(9721, 1, f"{native} -i go --settings {{\"trustedWorkspaces\":[\"/tmp/maxpm-live-agy-6863\"]}}")]
+        au.request(self.c, "antigravity", "mark")
+        self.assertEqual(au.serve_pass(self.c), ["antigravity"])
+        self.assertEqual(self.row("antigravity")["update"]["state"], "done")
+
+    def test_update_waits_for_newly_launched_tmux_session_before_pid_is_recorded(self):
+        # A MaximizePM session just launched in tmux (agents.pid is still NULL) still holds the update via its pane PID.
+        core.register(self.c, "codex-new")
+        self.ps = [(5000, 1, "/bin/zsh"), (5001, 5000, f"{self.bins['codex']} resume x")]
+        au.request(self.c, "codex", "mark")
+        with mock.patch.object(server, "TMUX_RUNNER", lambda *a, **k: ""), \
+             mock.patch.object(server, "agent_terminals", return_value={"codex-new": "%9"}), \
+             mock.patch.object(server, "pane_process", return_value={"pid": 5000}):
+            self.assertEqual(au.serve_pass(self.c), [])
+        self.assertEqual((self.row()["update"]["state"], self.row()["update"]["waits"]), ("queued", 1))
 
     def test_a_failed_smoke_test_puts_the_old_version_back_and_adds_a_task(self):
         core.project_add(self.c, "shop")
@@ -257,7 +310,11 @@ class Update(Base):
     def test_a_wait_past_its_limit_while_no_session_works_adds_a_task_and_keeps_waiting(self):
         # mark 2026-11-20: 'this also should have a timer so if its waiting for the test we open a task to investigate'.
         core.project_add(self.c, "shop")
-        self.ps = [f"{self.bins['codex']} resume x"]  # a person's own session, not one of MaximizePM
+        core.register(self.c, "manager-1")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='manager-1'")
+        self.add_session("codex-idle", 3001)
+        self.ps = [(3001, 100, f"{self.bins['codex']} resume x")]
         au.request(self.c, "codex", "mark")
         au.serve_pass(self.c)
         u = self.row()["update"]
@@ -270,7 +327,9 @@ class Update(Base):
         self.assertEqual(u["state"], "queued")  # it still updates when the session ends
         it = core.item_show(self.c, u["task"])
         self.assertIn("min it waits for 1 process of Codex while no MaximizePM session of Codex works", it["title"])
-        self.assertIn(f"The processes it waits for:\n{self.bins['codex']} resume x", it["context"])
+        self.assertIn(f"The processes it waits for:\npid 3001: {self.bins['codex']} resume x", it["context"])
+        mgr_msgs = core.inbox(self.c, "manager-1", mark_read=False)
+        self.assertTrue(any(f"pid 3001: {self.bins['codex']} resume x" in m["body"] for m in mgr_msgs), mgr_msgs)
         au.serve_pass(self.c)
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE title LIKE 'Investigate%'").fetchone()[0], 1)
         self.ps = []
@@ -278,7 +337,8 @@ class Update(Base):
         self.assertEqual(self.row()["update"]["state"], "done")
 
     def test_a_working_session_holds_the_clock_of_the_wait(self):
-        self.ps = [f"{self.bins['codex']} resume x"]
+        self.add_session("codex-busy", 3002)
+        self.ps = [(3002, 100, f"{self.bins['codex']} resume x")]
         au.request(self.c, "codex", "mark")
         au.serve_pass(self.c)
         old = self.row()["update"]["idle_from"] - au.LIMIT["queued"] - 1
@@ -354,7 +414,8 @@ class Update(Base):
         self.assertEqual(self.row()["update"]["person_item"], r["update"]["person_item"])  # no second item
 
     def test_cancel_takes_back_a_queued_update(self):
-        self.ps = [f"{self.bins['codex']} resume x"]
+        self.add_session("codex-cancel", 3003)
+        self.ps = [(3003, 100, f"{self.bins['codex']} resume x")]
         au.request(self.c, "codex", "mark")
         au.serve_pass(self.c)
         au.cancel(self.c, "codex", "mark")

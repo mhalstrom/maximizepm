@@ -324,21 +324,69 @@ def update_argv(ad, inst, version=None):
 # Who runs the agent now
 # ---------------------------------------------------------------------------------------------------------------
 
-def _procs():
-    """[(pid, args)] of every process here; the pid is None for a line of the PS hook with no pid."""
+def _procs_tree():
+    """[(pid, ppid, args)] of every process here; pid/ppid is None for a PS hook entry without them."""
     if PS is not None:
-        return [p if isinstance(p, tuple) else (None, p) for p in PS()]
+        out = []
+        for p in PS():
+            if not isinstance(p, tuple):
+                out.append((None, None, p))
+            elif len(p) == 2:
+                out.append((p[0], None, p[1]))
+            else:
+                out.append((p[0], p[1], p[2]))
+        return out
     try:
-        lines = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True,
+        lines = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True,
                                timeout=10).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return []
     out = []
     for line in lines:
-        pid, _, args = line.strip().partition(" ")
-        if pid.isdigit():
-            out.append((int(pid), args.strip()))
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            out.append((int(parts[0]), int(parts[1]), parts[2].strip()))
     return out
+
+
+def _procs():
+    """[(pid, args)] of every process here; the pid is None for a line of the PS hook with no pid."""
+    return [(pid, args) for pid, _, args in _procs_tree()]
+
+
+def _session_pids(conn, tree):
+    """The PIDs of MaximizePM's own AI sessions on this host and every process below them (#6968): a leftover agent
+    process from a live test or another terminal outside MaximizePM does not belong to any session here and must not
+    hold a queued update forever."""
+    host = core.this_host()
+    rows = conn.execute(
+        "SELECT name, pid, host FROM agents WHERE kind='ai' AND (pid IS NULL OR host=?)",
+        (host,),
+    ).fetchall()
+    roots = {int(r["pid"]) for r in rows if r["pid"] and r["host"] == host}
+    if any(r["pid"] is None for r in rows):
+        from . import server
+        if server.TMUX_RUNNER is not None or server._tmux_cmd():
+            terminals = server.agent_terminals(conn)
+            for r in rows:
+                if r["pid"] is None and r["name"] in terminals:
+                    p = server.pane_process(conn, r["name"])
+                    if p and p.get("pid"):
+                        roots.add(int(p["pid"]))
+    if not roots:
+        return set()
+    children = {}
+    for pid, ppid, _ in tree:
+        if pid is not None and ppid is not None:
+            children.setdefault(ppid, []).append(pid)
+    owned, todo = set(), list(roots)
+    while todo:
+        pid = todo.pop()
+        if pid in owned:
+            continue
+        owned.add(pid)
+        todo.extend(children.get(pid, ()))
+    return owned
 
 
 def _service(ad, args):
@@ -362,21 +410,33 @@ def _root(inst):
     return os.path.dirname(real)
 
 
-def running(ad, inst, procs=None):
+def running(ad, inst, procs=None, conn=None):
     """How many sessions of this install of the agent's program run on this computer now (sessions_of)."""
-    return len(sessions_of(ad, inst, procs))
+    return len(sessions_of(ad, inst, procs, conn=conn))
 
 
-def sessions_of(ad, inst, procs=None, services=False):
-    """The processes [(pid, args)] of this install of the agent's program that run on this computer now: its
-    sessions, MaximizePM's or a person's own; with services, only its background servers (_service), which no session
-    count holds. A program that runs on node, bun or Python counts by its script. A program named
-    with no folder counts when its name is the agent's (PATH finds this install); one with a folder counts when it is
-    inside this install: a second install of the same CLI elsewhere (9 Codex sessions of /opt/homebrew while a test
-    install in a temporary folder updated, 2026-11-20) does not hold this one's update."""
+def sessions_of(ad, inst, procs=None, services=False, conn=None):
+    """The processes [(pid, args)] of this install of the agent's program that run on this computer now. With conn (and
+    not services), only processes belonging to MaximizePM's own sessions on this host (_session_pids, #6968), so a
+    stray process from a live test or another terminal does not block an update. With services, only its background
+    servers (_service), which no session count holds. A program that runs on node, bun or Python counts by its script.
+    A program named with no folder counts when its name is the agent's (PATH finds this install); one with a folder
+    counts when it is inside this install: a second install of the same CLI elsewhere (9 Codex sessions of
+    /opt/homebrew while a test install in a temporary folder updated, 2026-11-20) does not hold this one's update."""
     exe, root = ad.describe["exe"], _root(inst)
+    if procs is None:
+        tree = _procs_tree()
+    else:
+        tree = [(p[0], p[1], p[2]) if isinstance(p, tuple) and len(p) == 3
+                else (p[0], None, p[1]) if isinstance(p, tuple)
+                else (None, None, p) for p in procs]
+    owned = _session_pids(conn, tree) if (conn is not None and not services) else None
+    if owned is not None and not owned:
+        return []
     out = []
-    for pid, line in _procs() if procs is None else procs:
+    for pid, _, line in tree:
+        if owned is not None and (pid is None or pid not in owned):
+            continue
         if _service(ad, line) != services:
             continue
         words = line.split()[:2]
@@ -781,6 +841,13 @@ def _late(conn, aid, a, u, since, what, procs=()):
     task = _investigate(conn, ad, inst, u.get("old") or a.get("installed"), u.get("target") or a.get("latest"),
                         failure, "\n".join(procs) or None, u.get("step"), shown="The processes it waits for")
     _set(conn, aid, task=task, late=failure)
+    if task and procs:
+        m = core.active_manager(conn)
+        if m:
+            with core.tx(conn):
+                core._send(conn, "alert", "maxpm",
+                           f"Update of {ad.label} {failure} (task #{task}): {'; '.join(procs[:5])}"[:1000],
+                           to=m, item_id=task)
     return task
 
 
@@ -825,7 +892,7 @@ def serve_pass(conn):
         if ad is None or inst is None:
             _set(conn, aid, state="failed", message="the program is not installed here")
             continue
-        procs = sessions_of(ad, inst)
+        procs = sessions_of(ad, inst, conn=conn)
         n = len(procs)
         if n:
             t, fields = time.time(), {}
@@ -838,7 +905,7 @@ def serve_pass(conn):
                 u = _set(conn, aid, state="queued", **fields)
             _late(conn, aid, a, u, u.get("idle_from"),
                   f"waits for {n} process{'es' if n > 1 else ''} of {ad.label} while no MaximizePM session of "
-                  f"{ad.label} works", [args for _, args in procs])
+                  f"{ad.label} works", [f"pid {pid}: {args}" if pid is not None else args for pid, args in procs])
             continue
 
         def claim(d, aid=aid):

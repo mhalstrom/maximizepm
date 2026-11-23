@@ -93,6 +93,29 @@ def until(what, fn, name, limit):
     return None
 
 
+def tx(*args):
+    r = subprocess.run(["bash", os.path.join(HERE, "tx.sh"), T, *args], capture_output=True, text=True, timeout=30)
+    return r.stdout
+
+
+def cleanup_session(name):
+    """Stop any leftover tmux pane of this test session in the test tmux server so no agent process stays behind (#6968)."""
+    if not name:
+        return
+    try:
+        out = tx("list-panes", "-a", "-F", "#{pane_id}\t#{@maxpm_agent}")
+    except (OSError, subprocess.SubprocessError):
+        return
+    for line in out.splitlines():
+        pane_id, _, agent = line.partition("\t")
+        if pane_id and agent.strip() == name:
+            try:
+                tx("kill-pane", "-t", pane_id)
+                log("CLEANUP killed leftover pane", pane_id, "for", name)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
 # 1. maxpm launch (Dispatch)
 if os.environ.get("FOLLOW"):
     NAME = os.environ["FOLLOW"]
@@ -111,36 +134,39 @@ else:
     NAME = m.group(1)
 log("session", NAME, "model, agent type:", db("SELECT model, agent_type FROM agents WHERE name=?", NAME))
 
-# 2-4. maxpm go names it; it claims and closes its item (the history, so a claim between two looks counts too)
-until("maxpm go ran", lambda: db("SELECT 1 FROM agents WHERE name=? AND go_seen IS NOT NULL", NAME), NAME, 300)
-until("claimed", lambda: db("SELECT at FROM events WHERE item_id=? AND actor=? AND change LIKE 'claimed%'", ITEM, NAME),
-      NAME, 300)
-until("done", lambda: db("SELECT output FROM items WHERE id=? AND status='done'", ITEM), NAME, 600)
-folder = (db("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?", ITEM) or [[None]])[0][0]
-if folder:
-    log("git log:", subprocess.run(["git", "-C", folder, "log", "--all", "--oneline", "-3"], capture_output=True,
-                                   text=True).stdout.replace("\n", " | "))
-log("history:", db("SELECT substr(at, 12, 8), actor, substr(change, 1, 90) FROM events WHERE item_id=? ORDER BY at", ITEM))
+try:
+    # 2-4. maxpm go names it; it claims and closes its item (the history, so a claim between two looks counts too)
+    until("maxpm go ran", lambda: db("SELECT 1 FROM agents WHERE name=? AND go_seen IS NOT NULL", NAME), NAME, 300)
+    until("claimed", lambda: db("SELECT at FROM events WHERE item_id=? AND actor=? AND change LIKE 'claimed%'", ITEM, NAME),
+          NAME, 300)
+    until("done", lambda: db("SELECT output FROM items WHERE id=? AND status='done'", ITEM), NAME, 600)
+    folder = (db("SELECT p.path FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?", ITEM) or [[None]])[0][0]
+    if folder:
+        log("git log:", subprocess.run(["git", "-C", folder, "log", "--all", "--oneline", "-3"], capture_output=True,
+                                       text=True).stdout.replace("\n", " | "))
+    log("history:", db("SELECT substr(at, 12, 8), actor, substr(change, 1, 90) FROM events WHERE item_id=? ORDER BY at", ITEM))
 
-# 5. maxpm wait
-until("waits (maxpm wait)", lambda: db("SELECT waiting_since FROM agents WHERE name=? AND waiting_since IS NOT NULL",
-                                       NAME), NAME, 300)
+    # 5. maxpm wait
+    until("waits (maxpm wait)", lambda: db("SELECT waiting_since FROM agents WHERE name=? AND waiting_since IS NOT NULL",
+                                           NAME), NAME, 300)
 
-# 6. a message reaches it
-q("register", "tester", "--human")
-sent = q("--as", "tester", "send", "question", "--to", NAME,
-         "Test message: answer it with maxpm answer and the text 'pong', then wait again.")
-log("SENT", sent.splitlines()[0] if sent else "")
-mid = re.search(r"#(\d+)", sent)
-if mid:
-    mid = int(mid.group(1))
-    until("message answered", lambda: db("SELECT body FROM messages WHERE reply_to=? AND from_agent=?", mid, NAME),
-          NAME, 360)
-    log("message:", db("SELECT state, read_at, delivered_via, native_status FROM messages WHERE id=?", mid))
+    # 6. a message reaches it
+    q("register", "tester", "--human")
+    sent = q("--as", "tester", "send", "question", "--to", NAME,
+             "Test message: answer it with maxpm answer and the text 'pong', then wait again.")
+    log("SENT", sent.splitlines()[0] if sent else "")
+    mid = re.search(r"#(\d+)", sent)
+    if mid:
+        mid = int(mid.group(1))
+        until("message answered", lambda: db("SELECT body FROM messages WHERE reply_to=? AND from_agent=?", mid, NAME),
+              NAME, 360)
+        log("message:", db("SELECT state, read_at, delivered_via, native_status FROM messages WHERE id=?", mid))
 
-# 7. maxpm stop ends it: its row leaves the queue (serve finishes a stop of a session idle at its prompt)
-st = q("--as", "tester", "stop", NAME, "--reason", "end of the end-to-end test run")
-log("STOP", st.splitlines()[0] if st else "")
-CARDS.clear()
-until("session ended", lambda: not db("SELECT 1 FROM agents WHERE name=?", NAME), None, 420)
-log("END")
+    # 7. maxpm stop ends it: its row leaves the queue (serve finishes a stop of a session idle at its prompt)
+    st = q("--as", "tester", "stop", NAME, "--reason", "end of the end-to-end test run")
+    log("STOP", st.splitlines()[0] if st else "")
+    CARDS.clear()
+    until("session ended", lambda: not db("SELECT 1 FROM agents WHERE name=?", NAME), None, 420)
+    log("END")
+finally:
+    cleanup_session(NAME)
