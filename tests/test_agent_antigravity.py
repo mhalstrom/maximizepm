@@ -318,7 +318,33 @@ class Chat(unittest.TestCase):
         # transcript.jsonl (the fallback) holds '"\\"touch made.txt\\""'; the detail is the same.
         d = {"step_index": 10, "type": "PLANNER_RESPONSE", "tool_calls": [
             {"name": "run_command", "args": {"CommandLine": "\"touch made.txt\"", "WaitMsBeforeAsync": "5000"}}]}
-        self.assertEqual(antigravity.parse_chat_line(d)[0][0]["detail"], "touch made.txt")
+        entry = antigravity.parse_chat_line(d)[0][0]
+        self.assertEqual(entry["detail"], "touch made.txt")
+        self.assertEqual(entry["text"], "run_command: touch made.txt")
+
+    def test_thinking_shows_as_assistant_text_when_a_step_has_no_content(self):
+        # #6941: agy's intermediate PLANNER_RESPONSE steps put the model's reasoning in 'thinking' and leave
+        # 'content' empty; the chat shows that reasoning before the tool calls while keeping the turn working.
+        step = {"step_index": 5, "type": "PLANNER_RESPONSE", "created_at": "2026-11-23T00:10:00Z",
+                "thinking": "Checking the parser before editing it.",
+                "tool_calls": [{"name": "read_file", "args": {"Path": "/tmp/a.py"}}]}
+        entries, turn = antigravity.parse_chat_line(step)
+        self.assertEqual(turn, "working")
+        self.assertEqual([e["role"] for e in entries], ["assistant", "tool"])
+        self.assertEqual(entries[0]["text"], "Checking the parser before editing it.")
+        self.assertEqual(entries[1]["text"], "read_file: /tmp/a.py")
+        # Thinking alone with no content or tool calls still keeps the turn working (not idle).
+        thinking_only = {"step_index": 6, "type": "PLANNER_RESPONSE", "created_at": "2026-11-23T00:10:01Z",
+                         "thinking": "Still planning."}
+        entries, turn = antigravity.parse_chat_line(thinking_only)
+        self.assertEqual((turn, len(entries), entries[0]["role"], entries[0]["text"]),
+                         ("working", 1, "assistant", "Still planning."))
+        # A final reply with both thinking and content shows the reply and ends the turn.
+        final = {"step_index": 7, "type": "PLANNER_RESPONSE", "created_at": "2026-11-23T00:10:02Z",
+                 "thinking": "Internal reasoning.", "content": "Done."}
+        entries, turn = antigravity.parse_chat_line(final)
+        self.assertEqual((turn, len(entries), entries[0]["role"], entries[0]["text"]),
+                         ("idle", 1, "assistant", "Done."))
 
 
 class IdleAfterStop(Home):

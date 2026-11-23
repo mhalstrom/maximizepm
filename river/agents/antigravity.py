@@ -504,11 +504,18 @@ def _args(tc):
     return out
 
 
+def _s():
+    """river.sessions, imported when first used: core imports the adapters while it loads, before sessions can."""
+    from .. import sessions
+    return sessions
+
+
 def parse_chat_line(d):
     """(entries, turn) of one step of the transcript. USER_INPUT: the person's prompt (the text in <USER_REQUEST>);
-    PLANNER_RESPONSE: the model's text and its tool calls; GENERIC from the model: the result of a tool call (status
-    ERROR: a failed or refused call, its error); SYSTEM_MESSAGE with the Stop hook's reason: an event with the text
-    that MaximizePM brought in at the turn's end (agy's own reminders to the model are no entries).
+    PLANNER_RESPONSE: the model's text (or its thinking when it wrote no content, #6941) and its tool calls; GENERIC
+    from the model: the result of a tool call (status ERROR: a failed or refused call, its error); SYSTEM_MESSAGE with
+    the Stop hook's reason: an event with the text that MaximizePM brought in at the turn's end (agy's own reminders
+    to the model are no entries).
     The turn: working after a prompt, a tool call and a result; idle after a reply with text and no tool call, or an
     ERROR_MESSAGE (an interrupted or failed turn, #6261)."""
     if not isinstance(d, dict):
@@ -520,23 +527,29 @@ def parse_chat_line(d):
         said = (m.group(1) if m else content).strip()
         return ([{"at": at, "role": "user", "text": said}] if said else []), "working"
     if kind == "PLANNER_RESPONSE":
-        out = []
+        out, s = [], _s()
         said = d.get("content").strip() if isinstance(d.get("content"), str) else ""
+        thought = d.get("thinking").strip() if isinstance(d.get("thinking"), str) else ""
+        if thought and not said:
+            out.append({"at": at, "role": "assistant", "text": s._clip(thought, s.TEXT_MAX)})
         if said:
-            out.append({"at": at, "role": "assistant", "text": said})
+            out.append({"at": at, "role": "assistant", "text": s._clip(said, s.TEXT_MAX)})
         calls = [tc for tc in d.get("tool_calls") or () if isinstance(tc, dict)]
         for n, tc in enumerate(calls):
             args = _args(tc)
-            out.append({"at": at, "role": "tool", "text": tc.get("name", ""),
-                        "id": _call_id(step, n) if step is not None else "", "name": tc.get("name", ""),
-                        "detail": _detail(args)})
+            name = tc.get("name", "")
+            detail = _detail(args)
+            line = f"{name}: {s._clip(' '.join(detail.split()), s.TOOL_MAX)}" if detail else name
+            out.append({"at": at, "role": "tool", "text": line,
+                        "id": _call_id(step, n) if step is not None else "", "name": name,
+                        "detail": s._clip(detail, s.DETAIL_MAX)})
         return out, ("working" if calls or not said else "idle")
     if kind == "GENERIC" and d.get("source") == "MODEL":
         error = d.get("status") == "ERROR"
         text = d.get("error") if error and isinstance(d.get("error"), str) else d.get("content")
         text = _STAMPS.sub("", text if isinstance(text, str) else "").strip()
-        return [{"at": at, "role": "result", "text": text, "for": f"s{step}" if step is not None else "",
-                 "error": error}], "working"
+        return [{"at": at, "role": "result", "text": _s()._clip(text, _s().DETAIL_MAX),
+                 "for": f"s{step}" if step is not None else "", "error": error}], "working"
     if kind == "ERROR_MESSAGE":
         return [], "idle"
     if kind == "SYSTEM_MESSAGE":
