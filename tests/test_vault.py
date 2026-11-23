@@ -426,9 +426,20 @@ class Identity(Base):
         self.c.execute("UPDATE agents SET pid=500, pid_start=111, host=? WHERE name='dev'", (core.this_host(),))
         self.c.execute("UPDATE agents SET pid=600, pid_start=222, host=? WHERE name='other'", (core.this_host(),))
         self.chain = None
-        p = mock.patch("river.peer.chain", lambda pid: self.chain)
-        p.start()
-        self.addCleanup(p.stop)
+        # #6970: keep process-table probes off the host's real processes (outside a sandbox, report --hook runs
+        # _record_hook_process -> pid_alive / find_agent_process / proc_tty, which overwrote dev's fake pid 500).
+        for target, fn in (
+            ("river.peer.chain", lambda pid: self.chain),
+            ("river.peer.holder", lambda lp, rp, hints=(): None),
+            ("river.peer.lookable", lambda lp, rp: False),
+            ("river.core.pid_alive", lambda pid: False),
+            ("river.core.find_agent_process", lambda conn, name, start=None, env=None: (None, None)),
+            ("river.core.proc_info", lambda pid: None),
+            ("river.core.proc_tty", lambda pid: None),
+        ):
+            p = mock.patch(target, fn)
+            p.start()
+            self.addCleanup(p.stop)
 
     def who(self, actor):
         return vault.session_of(self.c, actor)
@@ -633,6 +644,8 @@ class Identity(Base):
                 mock.patch("sys.stdin", io.StringIO(payload)):
             self.assertEqual(cli.run(["report", "--hook", "claude"]), 0)
         self.assertIsNone(vault.claim_bang("dev", ("secret", "set", "s2", "--add", "k2")))
+        self.assertEqual(tuple(self.c.execute("SELECT pid, pid_start FROM agents WHERE name='dev'").fetchone()),
+                         (500, 111))
 
         # An agent calling session_send directly (without PAGE_TOKEN / as non-person) is refused by server.
         raw = json.dumps({"op": "session_send", "actor": "dev",
