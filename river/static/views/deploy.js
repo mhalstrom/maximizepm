@@ -30,8 +30,9 @@ export const PARTS = [["pipelines", "Releases"], ["agents", "Agents"], ["runners
   ["where", "Live"], ["accounts", "Accounts"], ["audit", "Audit"]];
 export const PAGE_TABS = [["stages", "Stages"], ["versions", "Versions"], ["triggers", "Triggers"],
   ["emergency", "Emergency"], ["audit", "Audit"]];
-// A deploy target's page (#6486): its first screen is the release (views/release.js); More opens these, and the tab
-// row shows only while one of them is open.
+// A deploy target's page (#6486, #6942): its first screen shows the stages graph at top with the Next release bar,
+// then the release steps and tests (views/release.js); More opens History, Controls (target hooks and past releases)
+// and Audit, and the tab row shows only while one of them is open.
 export const TARGET_TABS = [["stages", "Release"], ["versions", "History"], ["controls", "Controls"], ["audit", "Audit"]];
 
 // What Deploy shows: a part, or the page of one pipeline and its tab. The address sets it (fromUrl), and a click.

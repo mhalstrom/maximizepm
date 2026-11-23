@@ -75,7 +75,7 @@ function rulesLine(t) {
 // the top of the pipeline's page (views/pipeline.js headControls), not on this card; Release now has its own button
 // there.
 export function deployButtons(name) {
-  const t = (S.targets || []).find(x => x.name === name);
+  const t = ((S && S.targets) || []).find(x => x.name === name);
   if (!t || (t.release && t.release.waits) || !(t.pending || []).some(d => d.status === "open" && d.ships.length)) return "";
   return `<span class="rel-acts">${agentStart(S.launch_agents, [
     { label: "Deploy now", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now" },

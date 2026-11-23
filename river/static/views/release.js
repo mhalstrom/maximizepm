@@ -1,12 +1,10 @@
-// The first screen of a deploy target's page in Deploy (#6486, mark 2026-11-20: 'the deploy process here ... look
-// like garbage and makes no sense', 'I can't figure out how to use it'). It answers, from the top: what the next
-// release ships and when it goes out by itself (Release now); how the release that runs, or the last one, goes, step
-// by step as the deploy hook prints them ('::step' lines), with its GitHub release, or the step that failed and its
-// fix task; and the GitHub tests of the branch that goes out. The graph of stages and transitions, the history and
-// the audit log are behind More (views/deploy.js tabs Controls, History, Audit). Words: the table of canvas
-// deploy-text-audit that mark approved (#6503): a label is one to three words, a state is a word and a time.
-// Reads: D from GET api/pipeline/<target> (river/pipeline/targets.py default_pipeline: latest, checks, release) and
-// the target's release plan in S.targets (release: ships, until, early, running).
+// The release steps and branch tests of a deploy target's page in Deploy (#6486, #6942), drawn under the stages graph
+// and Next release bar (views/pipeline.js): how the release that runs, or the last one, goes, step by step as the
+// deploy hook prints them ('::step' lines), with its GitHub release, or the step that failed and its fix task; the
+// GitHub tests of the branch that goes out; and the More row (History, Controls, Audit, Release with agent). Words:
+// the table of canvas deploy-text-audit that mark approved (#6503): a label is one to three words, a state is a word
+// and a time. Reads: D from GET api/pipeline/<target> (river/pipeline/targets.py default_pipeline: latest, checks,
+// release) and the target's release plan in S.targets.
 import { esc, ago } from "../lib.js";
 import { button } from "../components/button.js";
 import { S } from "../page.js";
@@ -19,8 +17,6 @@ const clock = (n) => {
 };
 // A time that runs: pipeline.js tick() counts each [data-pl-tick] in #plBody every second.
 const runFor = (iso) => `<span data-pl-tick="${esc(iso)}">${clock((Date.now() - Date.parse(iso)) / 1000)}</span>`;
-// The browser's time zone and a 24-hour clock (#6206).
-const when = (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const st = (s, word) => `<span class="pl-st ${esc(s || "none")}">● ${esc(word || s || "")}</span>`;
 const link = (data, text) => `<span class="link" ${data}>${esc(text)}</span>`;
 const task = (id, text) => link(`data-open="${id}"`, text || `#${id}`);
@@ -72,35 +68,19 @@ function stepRow(x) {
     <span class="muted t-s">${t}</span>${note}</li>`;
 }
 
-// The release that runs now, or the last one (D.latest).
-function lastCard(D) {
+// The release that runs now, or the last one (D.latest). showApprove: false when the Next bar above already holds Approve.
+function lastCard(D, showApprove = true) {
   const L = D.latest;
-  if (!L) return `<section class="pl-card rl-card"><h3>Last release</h3><div class="muted t-m">No releases yet.</div></section>`;
+  if (!L) return `<section class="pl-card rl-card" id="rlLast"><h3>Last release</h3><div class="muted t-m">No releases yet.</div></section>`;
   const list = steps(L), S0 = stateOf(L, list);
   const title = S0.s === "running" ? "Releasing" : L.status === "done" ? "Last release" : "This release";
   const links = [github(L.url), report(L.deploy), L.fix ? task(L.fix.id, `Fix #${L.fix.id}`) : ""].filter(Boolean).join(" · ");
-  const yes = S0.yes ? button("Approve", { kind: "primary", data: { "pl-yes": S0.yes.item, dep: L.deploy, ver: L.tag || "" }, title: "Approve" })
+  const yes = showApprove && S0.yes ? button("Approve", { kind: "primary", data: { "pl-yes": S0.yes.item, dep: L.deploy, ver: L.tag || "" }, title: "Approve" })
     + button("Details", { data: { "dp-card": S0.yes.item }, title: "Details" }) : "";
   return `<section class="pl-card rl-card" id="rlLast"><div class="rl-head"><h3>${title}${L.tag ? ` <span class="pl-ver">${esc(L.tag)}</span>` : ""}</h3>
       ${st(S0.s, S0.word)}<span class="spacer"></span>${yes}</div>
     <div class="t-s rl-links">${links}</div>
     ${list.length ? `<ol class="rl-steps">${list.map(stepRow).join("")}</ol>` : ""}</section>`;
-}
-
-// What the next release ships, when it goes out by itself, and Release now.
-function nextCard(D) {
-  const T = targetOf(D), P = (T && T.release) || {}, R = D.release, L = D.latest;
-  const n = R ? R.tasks : (P.ships || []).length, dep = R ? R.deploy : P.deploy;
-  if (!n || !dep) return `<section class="pl-card rl-card" id="rlNext"><div class="rl-head"><h3>Next release</h3></div>
-    <div class="muted t-m">No tasks queued.</div></section>`;
-  const waitsFix = L && L.deploy === dep && L.fix;
-  const due = waitsFix ? `waits for ${task(L.fix.id, "fix #" + L.fix.id)}`
-    : R && R.until ? `next by itself ${esc(when(R.until))}`
-    : R && R.running ? `after ${task(R.running, "#" + R.running)}`
-    : P.early || !P.cadence ? "starting" : "";
-  const go = R ? button("Release now", { kind: "primary", data: { relnow: D.name }, title: "Release now" }) : "";
-  return `<section class="pl-card rl-card rl-next" id="rlNext"><div class="rl-head"><h3>Next release</h3><span class="spacer"></span>${go}</div>
-    <div class="t-m">${plural(n, "task")} · ${report(dep)}${due ? ` · ${due}` : ""}</div></section>`;
 }
 
 // The GitHub tests of the branch that goes out (D.checks): its last run, red with its fix task when it failed.
@@ -121,7 +101,7 @@ function testsCard(D) {
 }
 
 // More: the rest of a target's page, one quiet row.
-function moreRow(D) {
+export function moreRow(D) {
   const b = (text, data) => button(text, { cls: "plain", data, title: text });
   return `<div class="pl-opts t-s rl-more"><span class="muted">More</span>${b("History", { "dp-tab": "versions" })}${b("Controls", { "dp-tab": "controls" })}
     ${b("Audit", { "dp-tab": "audit" })}${D.release ? b("Release with agent", { relagent: D.name }) : ""}</div>`;
@@ -143,12 +123,6 @@ export function depsControl(D) {
   return go + line;
 }
 
-function depsCard(D) {
-  const c = depsControl(D);
-  return c ? `<section class="pl-card rl-card" id="rlDeps"><div class="rl-head"><h3>Dependencies</h3><span class="spacer"></span></div>
-    <div class="t-m">${c}</div></section>` : "";
-}
-
-export function releasePage(D) {
-  return `<div class="rl">${nextCard(D)}${depsCard(D)}${lastCard(D)}${testsCard(D)}${moreRow(D)}</div>`;
+export function releaseDetails(D, showApprove = false) {
+  return `<div class="rl">${lastCard(D, showApprove)}${testsCard(D)}</div>`;
 }

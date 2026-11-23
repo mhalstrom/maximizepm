@@ -317,8 +317,6 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="web-prod"]'), "Deploy: the target web-prod");
   q('#dpList [data-dp-open="web-prod"]').click();
-  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
-  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plRow [data-pl-stage="watch"]'), "the stages of web-prod");
   q('#plRow [data-pl-stage="watch"]').click();
   await until(() => q("#plDetail .pl-checks"), "the checks of the watch");
@@ -386,8 +384,6 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
-  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plRow [data-pl-stage="deploy"]'), "the stages");
   const tops = [...document.querySelectorAll('#plRow .pl-stage .pl-name')].map(e => Math.round(e.getBoundingClientRect().top));
   const kind = q('#plRow [data-pl-stage="deploy"] .pl-kind');
@@ -471,26 +467,34 @@ try {
   const separate = !!q('#dpList [data-dp-open="web-checks"]');
   history.replaceState(null, "", "/deploy/pipeline/web-checks");
   dispatchEvent(new PopStateEvent("popstate"));
-  await until(() => q('#rlLast [data-pl-yes]'), "the release card's Approve");
-  const b = q('#rlLast [data-pl-yes]').getBoundingClientRect();
-  const out = { last: q("#rlLast").textContent.replace(/\s+/g, " "), tests: (q("#rlTests") || {}).textContent || "",
+  await until(() => q('.pl-next [data-pl-yes]') && q('#plRow [data-pl-stage]'), "the stages graph and Next bar Approve");
+  const b = q('.pl-next [data-pl-yes]').getBoundingClientRect();
+  const graphTop = q('#plRow').getBoundingClientRect().top, nextTop = q('.pl-next').getBoundingClientRect().top,
+    lastTop = q('#rlLast').getBoundingClientRect().top;
+  const out = { next: q(".pl-next").textContent.replace(/\s+/g, " "), last: q("#rlLast").textContent.replace(/\s+/g, " "),
+    tests: (q("#rlTests") || {}).textContent || "",
+    waits: [...document.querySelectorAll(".pl-waits")].map(e => e.dataset.plStage || e.dataset.plArrow),
     inView: b.bottom <= innerHeight && b.right <= innerWidth, deploy: !!q('[data-deploy]'),
-    tabs: !q("#plTabs").classList.contains("hidden"), graph: !!q("#plRow"), separate, address: location.pathname };
-  q('#rlLast [data-pl-yes]').click();
+    tabs: !q("#plTabs").classList.contains("hidden"), graph: !!q("#plRow [data-pl-stage]"),
+    order: graphTop < nextTop && nextTop < lastTop, separate, address: location.pathname };
+  q('.pl-next [data-pl-yes]').click();
   await until(() => q('#plAskDlg:not(.hidden) [data-pl-askgo]'), "the confirm");
   out.confirm = q("#plAskDlg").textContent.replace(/\s+/g, " ");
   q('#plAskDlg [data-pl-askgo]').click();
-  await until(() => !q('#rlLast [data-pl-yes]'), "the yes is given");
+  await until(() => !q('.pl-next [data-pl-yes]'), "the yes is given");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         for size in ("1920,1080", "390,844"):
             r = self.drive(driver, "/", size=size)
+            self.assertIn("Approve", r["next"], r)
             self.assertIn("waiting for approval", r["last"], r)
-            self.assertIn("Approve", r["last"], r)
+            self.assertEqual(r["waits"], ["approval"], r)
             self.assertIn("Tests (main)", r["tests"], r)
             self.assertTrue(r["inView"], r)  # no scroll
             self.assertFalse(r["deploy"], r)  # never around the yes
-            self.assertFalse(r["tabs"] or r["graph"], r)  # the first screen has no tab row and no graph
+            self.assertFalse(r["tabs"], r)  # the first screen has no tab row
+            self.assertTrue(r["graph"], r)  # #6942: the stages graph is at the top of every target page
+            self.assertTrue(r["order"], r)  # stages graph above Next bar above release steps
             self.assertFalse(r["separate"], r)
             self.assertEqual(r["address"], "/deploy/pipeline/toolscaled-prod", r)
             self.assertIn(f"Approve release #{dep}", r["confirm"], r)
@@ -529,19 +533,20 @@ try {
   const out = { banner: q('.dp-banner [data-relnow]').closest(".dp-banner").textContent.replace(/\s+/g, " "),
     separate: !!q('#dpList [data-dp-open="app"]'), parts: q("#dpParts").textContent.replace(/\s+/g, " ") };
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q('#rlNext [data-relnow]'), "the Next release card's Release now");
-  const b = q('#rlNext [data-relnow]').getBoundingClientRect();
-  out.next = q("#rlNext").textContent.replace(/\s+/g, " ");
+  await until(() => q('.pl-next [data-relnow]') && q('#plRow [data-pl-stage]'), "the stages graph and Next bar Release now");
+  const b = q('.pl-next [data-relnow]').getBoundingClientRect();
+  out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
+  out.graphAbove = q('#plRow').getBoundingClientRect().top < q('.pl-next').getBoundingClientRect().top;
+  out.next = q(".pl-next").textContent.replace(/\s+/g, " ");
   out.last = q("#rlLast").textContent.replace(/\s+/g, " ");
   out.head = q("#dpHead").textContent.replace(/\s+/g, " ").trim();
   out.inView = b.bottom <= innerHeight && b.right <= innerWidth;
-  q('#rlNext [data-relnow]').click();
+  q('.pl-next [data-relnow]').click();
   await until(() => q('#relNowDlg:not(.hidden) [data-relgo]'), "the dialog");
   out.dlg = q("#relNowDlg").textContent.replace(/\s+/g, " ");
   q('#relNowDlg [data-relclose]').click();
   q('.rl-more [data-dp-tab="controls"]').click();
-  await until(() => q('#dpStages [data-pl-stage]'), "Controls: the graph");
-  out.steps = [...document.querySelectorAll('#dpStages [data-pl-stage]')].map(e => e.dataset.plStage);
+  await until(() => q('#plTabs button'), "Controls tab row");
   out.tabs = [...document.querySelectorAll('#plTabs button')].map(e => e.textContent.trim());
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
@@ -550,6 +555,7 @@ try {
             self.assertIn("toolscaled-prod: 1 task · next in", r["banner"], r)
             self.assertFalse(r["separate"], r)
             self.assertIn("Releases", r["parts"], r)
+            self.assertTrue(r["graphAbove"], r)  # #6942: stages graph at top above Next release bar
             self.assertIn("Next release", r["next"], r)
             self.assertIn("1 task · Report · next by itself", r["next"], r)
             self.assertIn("Last release v1.2.0", r["last"], r)
@@ -579,13 +585,13 @@ try {
         })();'''
         driver = r'''
 try {
-  await until(() => q("#rlNext"), "the target release page");
+  await until(() => q("#plRow [data-pl-stage]") && q("#rlLast"), "the target release page");
   const drewBeforeState = !window.__stateResolved;
   await until(() => window.__stateResolved, "api/state");
   await sleep(100);
   post({
     drewBeforeState,
-    next: q("#rlNext").textContent.replace(/\s+/g, " "),
+    graph: [...document.querySelectorAll("#plRow [data-pl-stage]")].map(e => e.dataset.plStage),
     body: q("#plBody").textContent.replace(/\s+/g, " "),
     errors: window.__pageErrors,
   });
@@ -593,8 +599,7 @@ try {
         r = self.drive(driver, "/deploy/pipeline/toolscaled-prod", size="1500,900", before=before)
         self.assertTrue(r["drewBeforeState"], r)
         self.assertEqual(r["errors"], [], r)
-        self.assertIn("Next release", r["next"], r)
-        self.assertIn("1 task", r["next"], r)
+        self.assertIn("deploy", r["graph"], r)
         self.assertIn("No releases yet.", r["body"], r)
 
     def test_a_running_release_is_the_next_bar_and_the_page_says_little(self):
@@ -623,10 +628,10 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q("#rlLast .rl-step.running"), "the running step");
+  await until(() => q("#rlLast .rl-step.running") && q("#plRow [data-pl-stage]"), "the running step");
   const steps = () => [...q("#rlLast").querySelectorAll(".rl-step")].map(e => e.textContent.replace(/\s+/g, " ").trim());
   const out = { last: q("#rlLast").textContent.replace(/\s+/g, " "), steps: steps(),
-    buttons: [...q("#plBody").querySelectorAll("#rlNext button, #rlLast button")].length,
+    buttons: [...q("#plBody").querySelectorAll(".pl-next button, #rlLast button")].length,
     note: q("#plNote").textContent.replace(/\s+/g, " ").trim() };
   await sleep(1500);
   out.steps2 = steps();
@@ -694,8 +699,6 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="toolscaled-prod"]'), "Deploy: the target");
   q('#dpList [data-dp-open="toolscaled-prod"]').click();
-  await until(() => q('.rl-more [data-dp-tab="controls"]'), "the release page's More");  // #6486: the graph is Controls
-  q('.rl-more [data-dp-tab="controls"]').click();
   await until(() => q('#plDetail .pl-gantt .pl-seg.running'), "the running step");
   const g = q("#plDetail .pl-gantt"); g.__kept = 1;
   const seg = () => q('#plDetail .pl-gantt [data-pl-k^="1|test"] .pl-seg');
@@ -1069,7 +1072,7 @@ try {
   q('nav button[data-tab="deploy"]').click();
   await until(() => q('#dpList [data-dp-open="prod"]') && location.pathname === "/deploy", "Deploy: the target prod as a pipeline");
   q('#dpList [data-dp-open="prod"]').click();
-  await until(() => q("#rlNext") && location.pathname === "/deploy/pipeline/prod", "Deploy > prod: its release page");
+  await until(() => q("#plRow [data-pl-stage]") && q("#rlLast") && location.pathname === "/deploy/pipeline/prod", "Deploy > prod: its stages graph and release page");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="goals"]').click();
   await until(() => q('#goalCards [data-goalcard="launch"]') && q("#goalCards").textContent.includes("Done when: it answers"), "Plan > Goals: launch with its done-when");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="done"]').click();

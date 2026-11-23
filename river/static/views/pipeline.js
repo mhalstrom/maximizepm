@@ -19,13 +19,13 @@ import { field, input, select, textarea, actions } from "../components/form.js";
 import { stageMarks } from "./agents.js";
 import { holdingCardHtml, holdingDetail } from "./holding.js";
 import { deployButtons } from "./targets.js";
-import { releasePage, targetOf, depsControl } from "./release.js";
+import { releaseDetails, moreRow, targetOf, depsControl } from "./release.js";
 
 const V = { shown: false, name: null, data: null, run: null, stage: null, arrow: null, tab: "stages", filter: "failed" };
-// The tabs that this view draws: stages (a target's first screen, views/release.js; a pipeline's graph), versions,
-// and controls (a target's graph of stages and transitions, behind More: #6486).
+// The tabs that this view draws: stages (the stages graph, with the release steps and tests below it for a target:
+// #6942), versions, and controls (a target's hooks and past releases, behind More: #6486).
 const OWN_TABS = ["stages", "versions", "controls"];
-const graphTab = () => V.tab === "controls" || (V.tab === "stages" && !(V.data && V.data.default));
+const graphTab = () => V.tab === "stages" || V.tab === "controls";
 let sig = "", runSig = "";
 const WORD = { passed: "passed", running: "running", failed: "failed", queued: "waiting", skipped: "skipped",
   cancelled: "cancelled", stopped: "stopped", error: "error", none: "no run" };
@@ -97,10 +97,12 @@ const draftLink = (r) => r && /^https:\/\//.test(r.draft || "")
 export function releaseButton(D) {
   if (!D.default || !D.controls) return "";
   // D is the pipeline page's data (its approval stage's last run) or a row of the Deploy list (its waits).
-  const item = D.waits ? (D.waits[0] || {}).item : (yesRun(D) || {}).yes || null;
+  const yr = D.waits ? null : yesRun(D);
+  const item = D.waits ? (D.waits[0] || {}).item : (yr || {}).yes || null;
   const dep = ((D.stages.find(s => s.name === "deploy") || {}).last_run || {}).item;
+  const ver = (yr && yr.version) || (D.latest && D.latest.tag) || "";
   // #6193: the yes in place (one confirm, then done on the person's approval item as them); the card for its details.
-  if (item) return button("Approve", { kind: "primary", data: { "pl-yes": item, dep: dep || "" }, title: "Approve" })
+  if (item) return button("Approve", { kind: "primary", data: { "pl-yes": item, dep: dep || "", ver }, title: "Approve" })
     + button("Details", { data: { "dp-card": item }, title: "Details" });
   const r = D.release;
   return r ? button("Release now", { kind: "primary", data: { relnow: D.name, relshow: "1" },
@@ -231,7 +233,7 @@ function draw() {
   $("#plNote").innerHTML = (words || hold ? `<div class="pl-bar"><span>${words}</span><span class="spacer"></span>${hold}</div>` : "")
     + (D.held_reason ? `<div class="pl-banner">Held by ${esc(D.held_by || "a person")}: ${esc(D.held_reason)}</div>` : "");
   const bars = $("#plDetail .pl-gantt");  // #6210: the step bars stay, patched in place
-  $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : graphTab() ? stagesView(D) : releasePage(D);
+  $("#plBody").innerHTML = V.tab === "versions" ? versionsView(D) : stagesView(D);
   const fresh = $("#plDetail .pl-gantt");
   if (bars && fresh && sameSteps(bars, fresh)) { fresh.replaceWith(bars); syncGantt(bars, fresh); }
   if (graphTab()) fit();
@@ -346,13 +348,15 @@ function stagesView(D) {
   if (!D.stages.length) return empty("No stages.");
   const L = layout(D.stages);
   const row = L.branched ? branchedRow(D.stages, L) : D.stages.map((s, i) => arrowEl(s, i) + stageCard(s)).join("");
-  // #6486: a target's graph is behind More (Controls); its first screen (views/release.js) names the next step and
-  // what is live, and its account is on Deploy > Accounts.
+  // #6942: on every target page the stages graph is first under the header with the Next release bar (#6189, #6193),
+  // followed by the release step list and main Tests (#6486), then the selected stage detail and recent runs.
   return `${tokenBanner(D)}<div class="pl-scroll" id="plScroll"><div class="pl-row${L.branched ? " pl-grid" : ""}" id="plRow">${row}</div></div>
-    ${D.default ? "" : nextBar(D)}
+    ${nextBar(D)}
+    ${D.default && V.tab === "stages" ? releaseDetails(D, !D.controls) : ""}
     <div class="pl-card" id="plDetail">${detail()}</div>
     <div id="plStageRuns"></div>
-    ${D.default ? "" : envTable(D)}`;
+    ${D.default ? "" : envTable(D)}
+    ${D.default && V.tab === "stages" ? moreRow(D) : ""}`;
 }
 
 // Branches and joins (#6142, Decision 9): the place of each stage. Its column is the longest way from the first stage;
@@ -1046,4 +1050,4 @@ $("#dpStages").addEventListener("click", (e) => {
   if (t.dataset.plCopy && V.run && V.run.prompt) copyText(V.run.prompt).then(() => toast("Copied the prompt"));
 });
 $("#dpStages").addEventListener("scroll", (e) => { if (e.target.id === "plScroll") fade(); }, true);
-window.addEventListener("resize", () => { if (V.shown && V.tab === "stages") fit(); });
+window.addEventListener("resize", () => { if (V.shown && graphTab()) fit(); });
