@@ -3,6 +3,11 @@
 // (identity "-"). Here electron-builder finds the Developer ID certificate that CSC_LINK holds, signs every program
 // of the app with the hardened runtime and entitlements.mac.plist, signs the .dmg files, and notarizes and staples
 // the app when APPLE_API_KEY (the path of the .p8 file), APPLE_API_KEY_ID and APPLE_API_ISSUER are set.
+//
+// mac.signIgnore (inherited from package.json) skips river/bin/maxpm-keychain-helper (#5838): desktop-release.yml
+// signs it first with its fixed identifier (com.maximizepm.keychain-helper), hardened runtime, and no extra
+// entitlements so its Keychain ACL stays valid across releases while electron-builder seals and notarizes it with
+// the app.
 const base = require("./package.json").build;
 
 const mac = { ...base.mac, hardenedRuntime: true };

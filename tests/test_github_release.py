@@ -669,5 +669,41 @@ class Script(unittest.TestCase):
         self.assertIsNone(self.origin_ref(f"refs/heads/maxpm/deps/v1.3.1-{deps_pin[:8]}"))
 
 
+class DownloadsKeychainHelper(unittest.TestCase):
+    def test_missing_checks_keychain_helper_only_when_manifest_names_it(self):
+        import downloads
+        orig_gh_json, orig_gh = downloads.gh_json, downloads.gh
+        try:
+            assets = [
+                {"name": "MaximizePM-1.6.0-arm64.dmg"},
+                {"name": "MaximizePM-1.6.0-x64.dmg"},
+                {"name": "MaximizePM-1.6.0-code.tar.gz"},
+                {"name": "manifest.json"},
+            ]
+            downloads.gh_json = lambda *a: {"tagName": "v1.6.0", "url": "https://example/v1.6.0",
+                                            "isDraft": False, "targetCommitish": "0" * 40, "assets": list(assets)}
+            # Older release manifest without keychain_helper still passes.
+            downloads.gh = lambda *a: json.dumps({"version": "1.6.0",
+                                                  "code": {"name": "MaximizePM-1.6.0-code.tar.gz"}})
+            gone, _ = downloads.missing("v1.6.0")
+            self.assertEqual(gone, [])
+
+            # New release manifest naming keychain_helper fails when asset is missing and passes when attached.
+            kh_name = "MaximizePM-1.6.0-keychain-helper-macos.tar.gz"
+            downloads.gh = lambda *a: json.dumps({
+                "version": "1.6.0",
+                "code": {"name": "MaximizePM-1.6.0-code.tar.gz"},
+                "keychain_helper": {"name": kh_name, "identifier": "com.maximizepm.keychain-helper"},
+            })
+            gone, _ = downloads.missing("v1.6.0")
+            self.assertEqual(gone, [f"no {kh_name}"])
+
+            assets.append({"name": kh_name})
+            gone, _ = downloads.missing("v1.6.0")
+            self.assertEqual(gone, [])
+        finally:
+            downloads.gh_json, downloads.gh = orig_gh_json, orig_gh
+
+
 if __name__ == "__main__":
     unittest.main()

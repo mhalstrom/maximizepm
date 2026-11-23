@@ -94,6 +94,9 @@ def missing(tag, draft=None, sha=None):
             code = (m.get("code") or {}).get("name")
             if code != f"MaximizePM-{version}-code.tar.gz":
                 out.append(f"manifest.json names the code archive {code!r}")
+            kh = m.get("keychain_helper")
+            if isinstance(kh, dict) and kh.get("name") and kh["name"] not in names:
+                out.append(f"no {kh['name']}")
     return out, rel.get("url") or ""
 
 

@@ -1,8 +1,28 @@
 /*
- * Build with clang -mmacosx-version-min=12.0 -Wno-deprecated-declarations
- * -framework Security -framework CoreFoundation keychain-helper.c
- * -o keychain-helper. Keep the Developer ID
- * team and signing identifier (com.maximizepm.keychain-helper) stable.
+ * Build with desktop/scripts/build-keychain-helper.sh (universal arm64 + x86_64,
+ * -mmacosx-version-min=12.0, -framework Security -framework CoreFoundation).
+ * Keep the Developer ID team (CWYV4R338W) and signing identifier
+ * (com.maximizepm.keychain-helper) stable across every release, with hardened
+ * runtime and no extra entitlements.
+ *
+ * Where MaximizePM keeps the signed helper (#5838, #5837):
+ *   - Desktop app and app code updates: river/bin/maxpm-keychain-helper
+ *     (inside MaximizePM.app/Contents/Resources/river-app/river/bin/ or
+ *      ~/.maximizepm/app/versions/<version>/river/bin/).
+ *   - Terminal installs (git or pip): ~/.maximizepm/bin/maxpm-keychain-helper,
+ *     downloaded from the GitHub release asset
+ *     MaximizePM-<version>-keychain-helper-macos.tar.gz and verified against
+ *     manifest.json's keychain_helper.sha256 before unpacking.
+ *
+ * Verification before use (river/vault.py):
+ *   1. codesign --verify --strict <helper> exits 0.
+ *   2. codesign -dv <helper> (stderr) reports:
+ *        Identifier=com.maximizepm.keychain-helper
+ *        Authority=Developer ID Application: ...
+ *        TeamIdentifier=CWYV4R338W
+ *        CodeDirectory ... flags=...(runtime)
+ *   Refuse any helper that fails verification, is ad-hoc signed, or has
+ *   another identifier or team ID.
  *
  * Usage: keychain-helper put|get|delete SERVICE ACCOUNT.
  * put reads a nonempty value to EOF, get writes exact bytes, and delete

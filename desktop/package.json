@@ -72,6 +72,9 @@
       "hardenedRuntime": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist",
+      "signIgnore": [
+        "river/bin/maxpm-keychain-helper$"
+      ],
       "extendInfo": {
         "NSMicrophoneUsageDescription": "MaximizePM uses the microphone when you dictate a message."
       }

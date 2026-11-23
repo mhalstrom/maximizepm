@@ -103,6 +103,11 @@ jobs:
           lipo -create "$RUNNER_TEMP/dictate-arm64" "$RUNNER_TEMP/dictate-x64" -output river/bin/maxpm-dictate
           codesign --force --sign - river/bin/maxpm-dictate
           lipo -info river/bin/maxpm-dictate
+      - name: The Keychain helper (#5838, #5839), for Apple silicon and Intel, into river/bin, which the app bundles
+        run: |
+          mkdir -p river/bin
+          desktop/scripts/build-keychain-helper.sh build river/bin/maxpm-keychain-helper
+          lipo -info river/bin/maxpm-keychain-helper
       - name: Build the .dmg files (signed and notarized with the signing secrets, else signed ad hoc)
         working-directory: desktop
         env:
@@ -124,6 +129,10 @@ jobs:
           echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           echo "SIGNED=1" >> "$GITHUB_ENV"
+          # Sign the Keychain helper with its fixed identifier (com.maximizepm.keychain-helper) and hardened runtime
+          # before electron-builder packages it; signIgnore keeps this signature intact while electron-builder seals
+          # and notarizes it inside MaximizePM.app (#5838).
+          ./scripts/build-keychain-helper.sh sign ../river/bin/maxpm-keychain-helper "$RUNNER_TEMP/cert.p12"
           # electron-builder imports the certificate into a keychain of its own, signs, notarizes and staples.
           CSC_LINK="$RUNNER_TEMP/cert.p12" CSC_KEY_PASSWORD="$APPLE_CERT_PASSWORD" CSC_IDENTITY_AUTO_DISCOVERY=true \
             APPLE_API_KEY="$RUNNER_TEMP/AuthKey.p8" npm run dist:signed
@@ -138,10 +147,14 @@ jobs:
         run: |
           for a in out/mac*/"MaximizePM.app"; do
             codesign --verify --deep --strict "$a" && echo "signature OK: $a"
+            helper="$a/Contents/Resources/river-app/river/bin/maxpm-keychain-helper"
             if [ "$SIGNED" = 1 ]; then
               codesign -dv "$a" 2>&1 | grep -q "^Authority=Developer ID Application" || { echo "not signed with the Developer ID: $a"; exit 1; }
+              ./scripts/build-keychain-helper.sh verify --signed "$helper"
               xcrun stapler validate "$a"
               spctl --assess --type execute -vv "$a"
+            else
+              ./scripts/build-keychain-helper.sh verify "$helper"
             fi
           done
           if [ "$SIGNED" = 1 ]; then for d in out/*.dmg; do xcrun stapler validate "$d"; spctl --assess --type open --context context:primary-signature -vv "$d"; done; fi
@@ -170,8 +183,17 @@ jobs:
           [ -f "$app/skills/maxpm/SKILL.md" ] || { echo "the app carries no agent guides"; exit 1; }
           cp -R "$app/skills" "$d/skills"
           [ -x "$d/river/bin/maxpm-dictate" ] || { echo "the dictation helper is missing"; exit 1; }
+          [ -x "$d/river/bin/maxpm-keychain-helper" ] || { echo "the keychain helper is missing"; exit 1; }
           tar -C "$RUNNER_TEMP/code" -czf "desktop/out/MaximizePM-$v-code.tar.gz" "maximizepm-$v"
-          node desktop/scripts/manifest.js "$v" "desktop/out/MaximizePM-$v-code.tar.gz" > desktop/out/manifest.json
+          # Standalone signed Keychain helper asset for terminal installs (git/pip, #5838), taken from the built and
+          # notarized app bundle so its CDHash matches the notarized app.
+          helper_asset="desktop/out/MaximizePM-$v-keychain-helper-macos.tar.gz"
+          tar -C "$app/river/bin" -czf "$helper_asset" maxpm-keychain-helper
+          team_id=""
+          if [ "$SIGNED" = 1 ]; then
+            team_id=$(codesign -dv "$app/river/bin/maxpm-keychain-helper" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
+          fi
+          node desktop/scripts/manifest.js "$v" "desktop/out/MaximizePM-$v-code.tar.gz" "$helper_asset" "$team_id" > desktop/out/manifest.json
           [ "$(jq -r .shell desktop/out/manifest.json)" = "$(cat desktop/build/shell-id.txt)" ] || { echo "the shell id differs from the app's"; exit 1; }
           cat desktop/out/manifest.json
       - name: The code archive passes the start check of an Update, with the app's own Python
@@ -186,6 +208,7 @@ jobs:
           path: |
             desktop/out/*.dmg
             desktop/out/*-code.tar.gz
+            desktop/out/*-keychain-helper-macos.tar.gz
             desktop/out/manifest.json
           if-no-files-found: error
   # The x64 .dmg is built on an Apple silicon runner; run it on an Intel Mac before it is published.
@@ -222,9 +245,26 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/app" ../dmg/*-x64.dmg
           app="$RUNNER_TEMP/app/MaximizePM.app"
           codesign --verify --deep --strict "$app" && echo "signature OK"
+          helper="$app/Contents/Resources/river-app/river/bin/maxpm-keychain-helper"
           if codesign -dv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+            ./scripts/build-keychain-helper.sh verify --signed "$helper"
             xcrun stapler validate "$app" && spctl --assess --type execute -vv "$app"
+          else
+            ./scripts/build-keychain-helper.sh verify "$helper"
           fi
+          # Verify the standalone Keychain helper release asset for terminal installs on Intel too (#5838).
+          mkdir -p "$RUNNER_TEMP/helper-asset"
+          tar -C "$RUNNER_TEMP/helper-asset" -xzf ../dmg/*-keychain-helper-macos.tar.gz
+          if codesign -dv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+            ./scripts/build-keychain-helper.sh verify --signed "$RUNNER_TEMP/helper-asset/maxpm-keychain-helper"
+          else
+            ./scripts/build-keychain-helper.sh verify "$RUNNER_TEMP/helper-asset/maxpm-keychain-helper"
+          fi
+          set +e
+          "$RUNNER_TEMP/helper-asset/maxpm-keychain-helper" >/dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" = 64 ] || { echo "standalone keychain helper exited $rc on usage check, expected 64"; exit 1; }
           file "$app/Contents/MacOS/MaximizePM" "$app/Contents/Resources/river-app/python/bin/python3"
           MAXPM_DB="$RUNNER_TEMP/q.db" node -e '
             const { startRiver } = require("./server");
