@@ -962,7 +962,9 @@ class Waiting(TmuxBase):
 
     def test_no_text_goes_to_a_shell(self):
         """#5904: a text from the card goes to the pane only while its agent runs there."""
-        import time
+        # Keep using Claude Code's adapter after it exits. The fake pane's tty can also belong to a real process.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
         # The agent ends at the Esc that should open its input box: the text does not follow it into the shell.
         self.pane["screen"] = PERMISSION.replace("3. No, and tell Claude what to do differently (esc)", "3. No")
         sig = self.cards()[0]["waiting"][0]["sig"]
@@ -971,7 +973,7 @@ class Waiting(TmuxBase):
         def runner(a):
             out = fake(a)
             if a[0] == "send-keys" and a[-1] == "Escape":
-                self.pane.update(running="zsh", started=str(int(time.time())))
+                self.pane.update(running="zsh", started=str(int(core.now().timestamp())))
             return out
         server.TMUX_RUNNER = runner
         with self.assertRaisesRegex(core.RiverError, "no longer runs in its terminal after Escape"):
