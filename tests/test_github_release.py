@@ -92,7 +92,21 @@ FAKE_GH = textwrap.dedent('''\
     elif a[:2] == ["release", "download"]:
         v = st.get("manifest") or a[2][1:]
         print(json.dumps({"version": v, "code": {"name": "MaximizePM-%s-code.tar.gz" % v}}))
+    elif a[:2] == ["release", "create"]:
+        tag = a[2]
+        old = rels.get(tag)
+        if old and not old["draft"]:
+            sys.exit("published already")
+        rels[tag] = {"draft": "--draft" in a, "sha": flag("--target")}
+        save()
+    elif a[:2] == ["release", "upload"]:
+        tag = a[2]
+        if tag not in rels:
+            sys.exit("release not found")
     elif a[:2] == ["release", "edit"]:
+        if "--target" in a:
+            rels[a[2]]["sha"] = flag("--target")
+            save()
         if "--notes-file" in a:
             open(os.path.join(home, "notes.md"), "w").write(open(flag("--notes-file")).read())
         if "--draft=false" in a:
@@ -171,12 +185,37 @@ class Script(unittest.TestCase):
         # The fake gh (FAKE_GH) answers from gh.json; 'release edit' keeps the notes in notes.md.
         bin_ = os.path.join(self.tmp, "bin")
         self.gh_log = os.path.join(self.tmp, "gh.log")
+        self.build_log = os.path.join(self.tmp, "build.log")
         _write(os.path.join(bin_, "gh"), f"#!{sys.executable}\n" + FAKE_GH, stat.S_IXUSR)
         _write(os.path.join(bin_, "maxpm"), f'#!/bin/sh\nprintf "%s|" "$@" >> {self.tmp}/maxpm.log\n'
                f"echo >> {self.tmp}/maxpm.log\ncat {self.tmp}/report.json\n", stat.S_IXUSR)
+        _write(os.path.join(bin_, "release-local.sh"), textwrap.dedent(f'''\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            echo "$*" >> "{self.build_log}"
+            tag="" sha=""
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --tag) tag="$2"; shift 2 ;;
+                --sha) sha="$2"; shift 2 ;;
+                *) shift ;;
+              esac
+            done
+            run_state="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("run", "success"))' "{self.tmp}/gh.json")"
+            if [ "$run_state" != "success" ]; then
+              echo "fake release-local: build failed ($run_state)" >&2
+              exit 1
+            fi
+            "$GH" release create "$tag" --draft --target "$sha" --title "MaximizePM $tag"
+            '''), stat.S_IXUSR)
         _write(os.path.join(self.tmp, "report.json"), json.dumps(REPORT))
         self.github()
-        self.env.update({"GH": os.path.join(bin_, "gh"), "MAXPM_BIN": os.path.join(bin_, "maxpm"), "FAKE_GH": self.tmp})
+        self.env.update({
+            "GH": os.path.join(bin_, "gh"),
+            "MAXPM_BIN": os.path.join(bin_, "maxpm"),
+            "RELEASE_BUILD_SCRIPT": os.path.join(bin_, "release-local.sh"),
+            "FAKE_GH": self.tmp,
+        })
 
     def github(self, **state):
         """What the fake GitHub answers: run success|failure|none, missing (asset names), manifest (a version),
@@ -235,8 +274,10 @@ class Script(unittest.TestCase):
         self.assertEqual(self.origin_ref("refs/heads/main"), head)
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))  # the tag comes after the yes
         self.assertEqual(self.releases(), {"v1.4.0": {"draft": True, "sha": head}})
+        with open(self.build_log, encoding="utf-8") as f:
+            self.assertIn(f"--tag v1.4.0 --sha {head}", f.read())
         with open(self.gh_log, encoding="utf-8") as f:
-            self.assertIn(f"workflow run desktop-release.yml --ref main -f tag=v1.4.0 -f sha={head}", f.read())
+            self.assertNotIn("workflow run", f.read())
         for path, line in (("pyproject.toml", 'version = "1.4.0"'), ("river/__init__.py", '__version__ = "1.4.0"')):
             with open(os.path.join(self.repo, path), encoding="utf-8") as f:
                 self.assertIn(line, f.read())
@@ -250,14 +291,10 @@ class Script(unittest.TestCase):
             notes = f.read()
         self.assertTrue(notes.startswith("MaximizePM 1.4.0 ships 4 tasks."), notes)
         self.assertIn("MaximizePM-1.4.0-arm64.dmg", notes)
-        steps = ["check", "version", "commit", "test", "push", "build", "build-checks", "build-mac", "build-mac-intel",
-                 "build-publish", "draft", "notes"]
+        steps = ["check", "version", "commit", "test", "push", "build", "draft", "notes"]
         for name in steps:
             self.assertIn(f"::step end {name} passed ", r.stdout)
         self.assertEqual(self.steps(r.stdout), steps)
-        # Each job of the build names its link, which the pipeline shows on the step.
-        self.assertIn("::step end build-mac passed at=2026-11-19T10:09:00Z "
-                      "https://github.example/actions/runs/7/job/mac", r.stdout)
         # The last lines: what the person approves (they go on the person's item).
         tail = r.stdout.rstrip().splitlines()[-6:]
         self.assertEqual(tail[0], "github-release: v1.4.0 is prepared and waits for your yes. Nothing is public yet.")
@@ -287,39 +324,34 @@ class Script(unittest.TestCase):
         self.assertIn("GitHub has no draft of v1.3.0", r.stdout)
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
 
-    def test_a_failed_build_stops_the_release_with_the_runs_link_and_makes_no_tag(self):
+    def test_a_failed_build_stops_the_release_and_makes_no_tag(self):
         self.github(run="failure")
         r = self.run_script()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("::step end build-mac failed ", r.stdout)
-        self.assertIn("::step end build-publish skipped ", r.stdout)
-        self.assertIn("the build of v1.4.0 ended failure (failed: mac): https://github.example/actions/runs/7", r.stdout)
+        self.assertIn("::step end build failed ", r.stdout)
+        self.assertIn("the draft build of v1.4.0 failed", r.stdout)
         self.assertIn("nothing is public", r.stdout)
         self.assertNotIn("::step start notes", r.stdout)
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
         self.assertEqual(self.releases(), {})
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "notes.md")))
 
-    def test_a_failed_github_test_job_is_a_note_and_the_release_goes_on(self):
-        # #6499: the unit tests on GitHub failed (v1.5.0: one flaky test), the .dmg files were built: the release
-        # asks for the yes on its draft, and the failure is a note on its step and in the output.
-        self.github(run="success", checks="failure")
-        r = self.run_script()
-        self.assertEqual(r.returncode, 76, r.stdout + r.stderr)
+    def test_downloads_watch_treats_failed_github_test_job_as_report_only(self):
+        # #6499: downloads.py watch (still kept for manual desktop-release.yml runs) treats a failed checks job as
+        # report-only and writes it to --noted.
+        script = os.path.join(ROOT, "scripts", "release", "downloads.py")
+        sha = self.git("rev-parse", "HEAD")
+        self.github(run="success", checks="failure", built={"tag": "v1.4.0", "sha": sha, "at": "2026-11-19T10:00:00Z"})
+        noted = os.path.join(self.tmp, "noted")
+        r = subprocess.run([sys.executable, script, "watch", "--tag", "v1.4.0", "--sha", sha,
+                            "--wait", "0", "--poll", "0", "--noted", noted],
+                           cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("::step end build-checks failed at=2026-11-19T10:09:00Z "
                       "https://github.example/actions/runs/7/job/checks report only: the release goes on", r.stdout)
         self.assertIn("::step end build-publish passed", r.stdout)
-        self.assertIn("the build of v1.4.0 passed: https://github.example/actions/runs/7; note: the GitHub job checks "
-                      "failed (https://github.example/actions/runs/7/job/checks), report only", r.stdout)
-        with open(os.path.join(self.tmp, "maxpm.log"), encoding="utf-8") as f:
-            adds = [line for line in f if line.startswith("-q|add|")]
-        self.assertEqual(len(adds), 1, adds)
-        self.assertTrue(adds[0].startswith("-q|add|maximizepm|Fix the GitHub job checks that failed in the build of "
-                                           "v1.4.0|--found-during|6047|--context|The job checks of the workflow "
-                                           "desktop-release failed at "), adds[0])
-        self.assertIn("https://github.example/actions/runs/7/job/checks", adds[0])
-        self.assertEqual(self.releases()["v1.4.0"]["draft"], True)
-        self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
+        with open(noted, encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), "checks https://github.example/actions/runs/7/job/checks")
 
     def test_a_missing_download_or_a_wrong_manifest_stops_the_release(self):
         for state, words in ((dict(missing=["MaximizePM-1.4.0-x64.dmg"]), "no MaximizePM-1.4.0-x64.dmg"),
@@ -488,17 +520,17 @@ class Script(unittest.TestCase):
         self.assertEqual(self.releases(), {"v1.4.0": {"draft": True, "sha": raised}})
         self.assertIsNone(self.origin_ref("refs/tags/v1.4.0"))
 
-    def test_a_build_that_did_not_start_builds_again_with_no_second_raise(self):
-        self.github(run="none")  # the draft build has not started within the wait
+    def test_a_failed_build_retries_with_no_second_raise(self):
+        self.github(run="none")  # the draft build fails
         r = self.run_script()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("the build of v1.4.0 did not start (no run of desktop-release.yml for v1.4.0", r.stdout)
+        self.assertIn("the draft build of v1.4.0 failed", r.stdout)
         head = self.git("rev-parse", "HEAD")
         self.assertEqual(self.origin_ref("refs/heads/main"), head)
         self.github()
         r = self.run_script()
         self.assertEqual(r.returncode, 76, r.stdout)
-        self.assertIn("::step end build-publish passed", r.stdout)
+        self.assertIn("::step end build passed", r.stdout)
         self.assertEqual(self.git("rev-parse", "HEAD"), head)  # the same version, no second commit
         self.assertEqual(self.releases(), {"v1.4.0": {"draft": True, "sha": head}})
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "notes.md")))
@@ -565,8 +597,10 @@ class Script(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", f"{commit}^"), deps_pin)
         self.assertIsNone(self.origin_ref("refs/tags/v1.3.1"))
         self.assertEqual(self.releases(), {"v1.3.1": {"draft": True, "sha": commit}})
+        with open(self.build_log, encoding="utf-8") as f:
+            self.assertIn(f"--tag v1.3.1 --sha {commit}", f.read())
         with open(self.gh_log, encoding="utf-8") as f:
-            self.assertIn(f"workflow run desktop-release.yml --ref {build_ref} -f tag=v1.3.1 -f sha={commit}", f.read())
+            self.assertNotIn("workflow run", f.read())
         self.assertIn("not on main", r.stdout)
         self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
 

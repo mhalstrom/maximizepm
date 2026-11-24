@@ -149,7 +149,7 @@ jobs:
             codesign --verify --deep --strict "$a" && echo "signature OK: $a"
             helper="$a/Contents/Resources/river-app/river/bin/maxpm-keychain-helper"
             if [ "$SIGNED" = 1 ]; then
-              codesign -dv "$a" 2>&1 | grep -q "^Authority=Developer ID Application" || { echo "not signed with the Developer ID: $a"; exit 1; }
+              codesign -dvv "$a" 2>&1 | grep -q "^Authority=Developer ID Application" || { echo "not signed with the Developer ID: $a"; exit 1; }
               ./scripts/build-keychain-helper.sh verify --signed "$helper"
               xcrun stapler validate "$a"
               spctl --assess --type execute -vv "$a"
@@ -246,7 +246,7 @@ jobs:
           app="$RUNNER_TEMP/app/MaximizePM.app"
           codesign --verify --deep --strict "$app" && echo "signature OK"
           helper="$app/Contents/Resources/river-app/river/bin/maxpm-keychain-helper"
-          if codesign -dv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+          if codesign -dvv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
             ./scripts/build-keychain-helper.sh verify --signed "$helper"
             xcrun stapler validate "$app" && spctl --assess --type execute -vv "$app"
           else
@@ -255,7 +255,7 @@ jobs:
           # Verify the standalone Keychain helper release asset for terminal installs on Intel too (#5838).
           mkdir -p "$RUNNER_TEMP/helper-asset"
           tar -C "$RUNNER_TEMP/helper-asset" -xzf ../dmg/*-keychain-helper-macos.tar.gz
-          if codesign -dv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+          if codesign -dvv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
             ./scripts/build-keychain-helper.sh verify --signed "$RUNNER_TEMP/helper-asset/maxpm-keychain-helper"
           else
             ./scripts/build-keychain-helper.sh verify "$RUNNER_TEMP/helper-asset/maxpm-keychain-helper"

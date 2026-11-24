@@ -50,12 +50,9 @@
 #             fail, nothing is pushed; main keeps the version commit, and the next run releases that version with no
 #             second raise
 #   push      git push origin <commit>:refs/heads/main (no tag)
-#   build     starts the workflow desktop-release for the commit (gh workflow run, with tag and sha); each of its jobs
-#             is a step build-<job> (checks, mac, mac-intel, publish) with its link (scripts/release/downloads.py
-#             watch; RELEASE_WAIT seconds, default 60 minutes, within deploy_timeout 2h). The run makes a DRAFT GitHub
-#             release: nothing is public. A failed job stops the release with the run's link, except the job checks
-#             (the unit tests on GitHub): it reports only, as a note on its step and a fix item in RELEASE_PROJECT
-#             (default maximizepm), and the test step above is the gate (#6499, mark 2026-11-20)
+#   build     builds, signs, notarizes, staples and verifies the macOS downloads on this Mac
+#             (desktop/scripts/release-local.sh) and uploads them to a DRAFT GitHub release: nothing is public (#7014).
+#             .github/workflows/desktop-release.yml stays for manual use when GitHub Actions are available
 #   draft     the draft of vX.Y.Z is made from the commit and has both .dmg files, the code archive and manifest.json
 #   notes     gh release edit of the draft with the notes from maxpm target report <deploy id>
 #             (scripts/release/release_notes.py: the report's summary, or before it is written the 'changed' line of
@@ -74,7 +71,7 @@
 # tag is out and its release is still a draft (the publish failed), a new run asks for the yes on that draft again.
 #
 # For the tests (tests/test_github_release.py): GH (the gh command), MAXPM_BIN (the maxpm command), RELEASE_TEST_CMD
-# (the test command), RELEASE_WAIT and RELEASE_POLL (seconds).
+# (the test command), RELEASE_BUILD_SCRIPT (the local release build script, default desktop/scripts/release-local.sh).
 #
 # The body is functions that bash reads whole before main runs, and the last line exits: the fast-forward of main can
 # change this file.
@@ -105,12 +102,11 @@ main() {
 
   local gh="${GH:-gh}" maxpm="${MAXPM_BIN:-$tree/bin/maxpm}"
   local test_cmd="${RELEASE_TEST_CMD:-python3 -m unittest discover -s tests -t .}"
-  local wait_s="${RELEASE_WAIT:-3600}" poll="${RELEASE_POLL:-30}"
+  local build_script="${RELEASE_BUILD_SCRIPT:-$tree/desktop/scripts/release-local.sh}"
   local deploy="${MAXPM_DEPLOY:-}" approved="${MAXPM_APPROVED:-}" remote=origin
   local release_kind="${MAXPM_RELEASE_KIND:-code}" deps_base="${MAXPM_DEPS_BASE:-}"
   local build_ref=""
   local step="" scratch="" wt="" HOOK_YES=76
-  local project="${RELEASE_PROJECT:-maximizepm}"
   if [ -z "$bump" ]; then
     [ "$release_kind" = deps ] && bump=patch || bump=minor
   fi
@@ -122,12 +118,6 @@ main() {
   step_end() {  # step_end passed|failed|skipped
     [ -n "$step" ] && echo "::step end $step $1 at=$(date -u +%FT%TZ)"
     step=""
-  }
-  fix_item() {  # fix_item <title> <context>: a failure that does not stop the release becomes a fix item (#6499)
-    local found=()
-    [ -n "$deploy" ] && found=(--found-during "$deploy")
-    "$maxpm" -q add "$project" "$1" ${found[@]+"${found[@]}"} --context "$2" \
-      || echo "github-release: could not add the fix item '$1'; the release goes on"
   }
   cleanup() {
     if [ -n "$wt" ] && [ -d "$wt" ]; then
@@ -470,9 +460,7 @@ PY
 
   # ---- push: main (code) or temporary deps branch (deps); the tag comes after the person's yes
   step_start push deploy
-  local workflow_ref=main
   if [ "$release_kind" = deps ]; then
-    workflow_ref="$build_ref"
     git push --quiet "$remote" "$commit:refs/heads/$build_ref" || fail "git push $remote $build_ref failed (never forced)"
     echo "github-release: pushed dependency release $commit to $remote $build_ref (main untouched)"
   else
@@ -481,22 +469,13 @@ PY
   fi
   step_end passed
 
-  # ---- build: the workflow desktop-release builds the downloads of the commit into a draft release
+  # ---- build: build, sign, notarize, verify and upload the downloads on this Mac into a draft release (#7014)
   step_start build build
-  local since
-  since="$(date -u -v-2M +%FT%TZ 2>/dev/null || date -u -d '2 minutes ago' +%FT%TZ)"
-  "$gh" workflow run desktop-release.yml --ref "$workflow_ref" -f "tag=v$new" -f "sha=$commit" >/dev/null \
-    || fail "gh workflow run desktop-release.yml for v$new at $commit failed"
-  echo "github-release: started the draft build of v$new at $commit"
-  step_end passed
-  python3 "$here/downloads.py" watch --tag "v$new" --sha "$commit" --since "$since" --wait "$wait_s" --poll "$poll" \
-    --noted "$scratch/noted" \
+  echo "github-release: building signed draft of v$new at $commit locally ($build_script)"
+  GH="$gh" MAXPM_BIN="$maxpm" bash "$build_script" --tag "v$new" --sha "$commit" \
     || fail "the draft build of v$new failed; nothing is public. Fix the build: the next run of this hook builds again"
-  local job job_url
-  while read -r job job_url; do  # a GitHub job that reports only failed: a fix item, and the release goes on (#6499)
-    fix_item "Fix the GitHub job $job that failed in the build of v$new" \
-      "The job $job of the workflow desktop-release failed at $commit: $job_url. It reports only, so the release went on (mark 2026-11-20)."
-  done < <(cat "$scratch/noted" 2>/dev/null)
+  echo "github-release: built and uploaded the draft of v$new at $commit"
+  step_end passed
 
   # ---- draft
   step_start draft check

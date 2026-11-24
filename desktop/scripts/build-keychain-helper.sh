@@ -95,7 +95,7 @@ cmd_verify() {
   codesign --verify --strict -v "$binary"
 
   local info
-  info=$(codesign -dv "$binary" 2>&1)
+  info=$(codesign -dvv "$binary" 2>&1)
   if ! printf '%s\n' "$info" | grep -qx "Identifier=$IDENTIFIER"; then
     echo "unexpected keychain helper identifier (expected $IDENTIFIER):" >&2
     printf '%s\n' "$info" >&2
