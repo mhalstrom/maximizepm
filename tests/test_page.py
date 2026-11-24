@@ -3009,6 +3009,84 @@ try {
                 finally:
                     c.close()
 
+    def test_approve_for_manager_in_future_sets_allow_only_for_ticked_and_shows_in_credentials(self):
+        """#7018: in the credential approval dialog (desktop and 390px phone), 'Approve, and let the manager approve
+        these in the future' grants and sets ask='allow' only for ticked credentials; unticked stays 'ask'; the
+        Credentials row shows 'manager approves' and can be set back to Ask."""
+        from unittest.mock import patch
+        from river import vault
+        c = core.connect()
+        try:
+            core.register(c, "mark", human=True)
+            iid = core._held_item(c, "ag")["id"]
+            with patch.object(vault, "BACKEND", vault.Files()), \
+                 patch.object(vault, "IDENTITY", lambda conn, actor: {"name": actor, "person": not actor or actor == "mark"}):
+                vault.put(c, "fut-key-1", b"secret-1", "mark")
+                vault.put(c, "fut-key-2", b"secret-2", "mark")
+                for n in ("fut-key-1", "fut-key-2"):
+                    with self.assertRaises(core.RiverError):
+                        vault.get(c, n, "ag", f"pipe: cmd {n}")
+        finally:
+            c.close()
+
+        driver = r'''
+const errors = window.__pageErrors;
+try {
+  await until(() => q("#signinDlg") && !q("#signinDlg").classList.contains("hidden") && q("#signinDlg [data-signin-future]"), "future button");
+  const btnText = q("#signinDlg [data-signin-future]").textContent.trim();
+  const box = q("#signinDlg .box").getBoundingClientRect();
+  const over = box.right > window.innerWidth + 1;
+  // Untick fut-key-2 so only fut-key-1 is approved and allowed for the manager.
+  const cb2 = q('#signinDlg input[data-signin-site][value="fut-key-2"]');
+  cb2.click();
+  q("#signinDlg [data-signin-future]").click();
+  await until(() => q("#signinDlg [data-signin-result]"), "result line");
+  const result = q("#signinDlg [data-signin-result]").textContent.trim();
+  await until(() => q("#signinDlg").classList.contains("hidden"), "dialog closed");
+  // Open Settings > Credentials and verify the 'manager approves' chip and setting it back to Ask.
+  q("#settingsBtn").click();
+  await until(() => q('select[data-cred-ask="fut-key-1"]'), "cred row");
+  const credHtml = q("#credList").textContent;
+  const sel1 = q('select[data-cred-ask="fut-key-1"]');
+  const sel2 = q('select[data-cred-ask="fut-key-2"]');
+  const beforeVals = [sel1.value, sel2.value];
+  sel1.value = "ask";
+  sel1.dispatchEvent(new Event("change", { bubbles: true }));
+  await until(() => q('select[data-cred-ask="fut-key-1"]').value === "ask" && !q("#credList").textContent.includes("manager approves"), "reset to ask");
+  post({ btnText, over, result, hasBadge: credHtml.includes("manager approves"), beforeVals, errors });
+} catch (e) { post({ error: String(e && e.stack || e), errors }); }'''
+
+        for size in ("1280,900", "390,844"):
+            c = core.connect()
+            try:
+                if size == "390,844":
+                    c.execute("UPDATE secret_requests SET state='asked', decided_by=NULL, decided_at=NULL, chosen=NULL, "
+                              "set_id=NULL, grant_id=NULL")
+                    c.execute("DELETE FROM secret_grants")
+                    c.execute("DELETE FROM secret_sets")
+                    c.execute("UPDATE secrets SET ask='ask'")
+                    c.commit()
+            finally:
+                c.close()
+            with patch.object(vault, "BACKEND", vault.Files()), \
+                 patch.object(vault, "IDENTITY", lambda conn, actor: {"name": actor, "person": not actor or actor == "mark"}):
+                r = self.drive(driver, "/?as=mark", size=size)
+                self.assertEqual(r["errors"], [], (size, r))
+                self.assertEqual(r["btnText"], "Approve, and let the manager approve these in the future", (size, r))
+                self.assertFalse(r["over"], (size, r))
+                self.assertIn("manager approves in the future", r["result"], (size, r))
+                self.assertTrue(r["hasBadge"], (size, r))
+                self.assertEqual(r["beforeVals"], ["allow", "ask"], (size, r))
+                c = core.connect()
+                try:
+                    self.assertEqual(vault.get(c, "fut-key-1", "ag"), b"secret-1")
+                    with self.assertRaises(core.RiverError):
+                        vault.get(c, "fut-key-2", "ag")
+                    asks = {x["name"]: x["ask"] for x in vault.listing(c)["secrets"]}
+                    self.assertEqual((asks["fut-key-1"], asks["fut-key-2"]), ("ask", "ask"))
+                finally:
+                    c.close()
+
 
 class PageAddresses(unittest.TestCase):
     """#4653: maxpm serve answers the page for the path of each view, with a <base> back to the page's root."""

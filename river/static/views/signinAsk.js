@@ -98,6 +98,7 @@ function draw(r, allCreds) {
         <div class="muted t-s">From ${where(r)}. Its browser opens these sites signed in as you, without a password.</div>
         <div class="cred-picks">${rows}</div>
         <div class="actions">${button("Allow", { kind: "primary", data: { "signin-ok": r.id } })}
+          ${button("Approve, and let the manager approve these in the future", { data: { "signin-future": r.id } })}
           ${button("Deny", { data: { "signin-deny": r.id } })}</div>
       </div>`;
     return;
@@ -120,23 +121,25 @@ function draw(r, allCreds) {
       <div class="cred-picks">${rows}</div>
       ${more.length ? `<details class="t-s"><summary>More credentials</summary><div class="cred-picks">${moreRows}</div></details>` : ""}
       <div class="actions">${button("Allow", { kind: "primary", data: { "signin-ok": r.id } })}
+        ${button("Approve, and let the manager approve these in the future", { data: { "signin-future": r.id } })}
         ${button("Deny", { data: { "signin-deny": r.id } })}</div>
     </div>`;
 }
 
 // #6916: one clear result line shown inside the dialog after Allow, before it closes.
-function allowedLine(res, count, isSignin) {
+function allowedLine(res, count, isSignin, future) {
   const unit = isSignin ? (count === 1 ? "sign-in" : "sign-ins") : (count === 1 ? "key" : "keys");
   const target = res && res.item_id ? `#${res.item_id}` : (res && res.scope !== "agent" && res.covers ? res.covers : "");
   const who = res && res.asked_by ? res.asked_by : "";
-  if (target && who) return `Allowed: ${count} ${unit} for ${target}, session ${who}`;
-  if (who) return `Allowed: ${count} ${unit} for session ${who}`;
-  if (target) return `Allowed: ${count} ${unit} for ${target}`;
-  return `Allowed: ${count} ${unit}`;
+  const suffix = future ? " (manager approves in the future)" : "";
+  if (target && who) return `Allowed: ${count} ${unit} for ${target}, session ${who}${suffix}`;
+  if (who) return `Allowed: ${count} ${unit} for session ${who}${suffix}`;
+  if (target) return `Allowed: ${count} ${unit} for ${target}${suffix}`;
+  return `Allowed: ${count} ${unit}${suffix}`;
 }
 
 function setControlsDisabled(disabled) {
-  for (const el of host.querySelectorAll("input, button[data-signin-ok], button[data-signin-deny], button[data-bang-ok], button[data-bang-deny]")) el.disabled = disabled;
+  for (const el of host.querySelectorAll("input, button[data-signin-ok], button[data-signin-future], button[data-signin-deny], button[data-bang-ok], button[data-bang-deny]")) el.disabled = disabled;
 }
 
 host.addEventListener("click", async (e) => {
@@ -172,17 +175,19 @@ host.addEventListener("click", async (e) => {
     dlg.close();
     return;
   }
-  const id = +(t.dataset.signinOk || t.dataset.signinDeny || 0);
+  const future = Boolean(t.dataset.signinFuture);
+  const approve = Boolean(t.dataset.signinOk || t.dataset.signinFuture);
+  const id = +(t.dataset.signinOk || t.dataset.signinFuture || t.dataset.signinDeny || 0);
   if (!id || busy) return;
   const only = [...host.querySelectorAll("input[data-signin-site]:checked")].map(i => i.value);
-  if (t.dataset.signinOk && !only.length) return toast(shownSignin ? "Tick the sites to allow, or press Deny" : "Tick the credentials to allow, or press Deny", true);
+  if (approve && !only.length) return toast(shownSignin ? "Tick the sites to allow, or press Deny" : "Tick the credentials to allow, or press Deny", true);
   const always = [...host.querySelectorAll("input[data-signin-always]:checked")].map(i => i.value).filter(s => only.includes(s));
   busy = true;
   setControlsDisabled(true);
   try {
-    if (t.dataset.signinOk) {
-      const res = await act("secret", { action: "approve", request: id, only, always });
-      const line = allowedLine(res, only.length, shownSignin);
+    if (approve) {
+      const res = await act("secret", { action: "approve", request: id, only, always, future });
+      const line = allowedLine(res, only.length, shownSignin, future);
       const actions = host.querySelector(".actions");
       if (actions) actions.outerHTML = `<div class="signin-result" role="status" aria-live="polite" data-signin-result>${esc(line)}</div>`;
       toast(line);

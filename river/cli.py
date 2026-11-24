@@ -1461,6 +1461,8 @@ def build_parser(only=None):
     x = ses.add_parser("approve", help="the person: allow the ticked credentials of a request (or --only your pick)")
     x.add_argument("request", help="r12")
     x.add_argument("--only", help="exactly these credentials, comma separated")
+    x.add_argument("--future", action="store_true",
+                   help="also let the manager approve the ticked credentials in the future (a person only)")
     x.add_argument("--note")
     x = ses.add_parser("refuse", help="no grant for a request")
     x.add_argument("request", help="r12")
@@ -6980,12 +6982,12 @@ def _secret_cmd(conn, a, actor):
         elif cmd == "approve" and vault._request(conn, a.request)["sites"]:
             # #5840: Allow of a sign-in request reads the cookies of a browser, which runs in maxpm serve
             return ask_server(conn, "secret", {**args, "only": names(a.only) if a.only is not None else None,
-                                               "note": a.note}, actor=actor, timeout=30)
+                                               "future": a.future, "note": a.note}, actor=actor, timeout=30)
         elif cmd == "propose":
             args.update(offer=names(a.offer) if a.offer is not None else None,
                         tick=names(a.tick) if a.tick is not None else None, reason=a.reason)
         elif cmd == "approve":
-            args.update(only=names(a.only) if a.only is not None else None, note=a.note)
+            args.update(only=names(a.only) if a.only is not None else None, future=a.future, note=a.note)
         elif cmd == "refuse":
             args.update(note=a.note)
         elif cmd == "requests":
@@ -7069,7 +7071,8 @@ def render_secret(a, res):
               + ("; its value is masked as *** in the output)" if res["masked"] else ")"))
     elif cmd in ("request", "propose", "approve", "refuse"):
         print(_request_line(res) + (f"; sent to {res['to']}" if res.get("to") else "")
-              + (f"; grant {res['grant']}" if res.get("grant") else ""))
+              + (f"; grant {res['grant']}" if res.get("grant") else "")
+              + ("; manager may approve these in the future" if res.get("future_allowed") else ""))
         if cmd == "request" and res.get("sites") and res.get("item_id"):  # #5840: do not wait at the prompt (p154)
             print(f"next: commit what is done, then maxpm blocked {res['item_id']} --reason \"waits for request "
                   f"{res['request']}\": that releases the item, the person's Allow ends the block, and the "

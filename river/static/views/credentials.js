@@ -79,6 +79,7 @@ function reqBox(r) {
     ${more.length ? `<details class="t-s"><summary>More credentials</summary><div class="cred-picks">`
       + more.map(n => pick(r.id, n, false)).join("") + `</div></details>` : ""}
     <div class="actions">${button("OK", { kind: "primary", data: { "req-ok": r.id } })}
+      ${button("Approve, and let the manager approve these in the future", { data: { "req-future": r.id } })}
       ${button("Refuse", { data: { "req-refuse": r.id } })}</div>
   </div>`;
 }
@@ -90,6 +91,7 @@ function credRow(r) {
   const asks = ASKS.map(([v, text]) => `<option value="${v}"${v === (r.ask || "ask") ? " selected" : ""}>${text}</option>`).join("");
   return `<div class="cred">
     <div class="cred-main"><b>${esc(r.name)}</b> ${chip("c-p", esc(KIND[r.kind] || r.kind || "token"))}
+      ${r.ask === "allow" ? chip("c-ready", "manager approves", "Manager approves requests") : ""}
       ${(r.sets || []).map(s => chip("c-goal", esc(s), "In this set")).join(" ")}
       ${r.fail_why ? chip("c-human", "sign-in failed", "Last sign-in failed") : ""}
       <div class="muted t-s">${where ? where + " · " : ""}${used}${r.fail_why ? " · " + esc(r.fail_why) : ""}</div></div>
@@ -176,9 +178,9 @@ async function editClick(t) {
   return false;
 }
 
-// #5842 (mark 2026-11-14): one plain setting per credential. Ask me: the person answers each request for it (the
-// checklist or the sign-in modal). Allow without asking: the manager grants it with no question.
-const ASKS = [["ask", "Ask me"], ["allow", "Allow without asking"]];
+// #5842, #7018: one plain setting per credential. Ask me: the person answers each request for it (the
+// checklist or the sign-in modal). Manager approves: the manager grants it with no question.
+const ASKS = [["ask", "Ask me"], ["allow", "Manager approves"]];
 
 function setRow(s) {
   const grants = (C.grants || []).filter(g => g.set === s.name);
@@ -299,14 +301,16 @@ panel.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   if (await editClick(t)) return;  // #5849: Change password, Sign in again
-  if (t.dataset.reqOk || t.dataset.reqRefuse) {  // #5833: the person's answer to a checklist
-    const id = +(t.dataset.reqOk || t.dataset.reqRefuse);
+  if (t.dataset.reqOk || t.dataset.reqFuture || t.dataset.reqRefuse) {  // #5833, #7018: the person's answer to a checklist
+    const future = Boolean(t.dataset.reqFuture);
+    const approve = Boolean(t.dataset.reqOk || t.dataset.reqFuture);
+    const id = +(t.dataset.reqOk || t.dataset.reqFuture || t.dataset.reqRefuse);
     const only = [...panel.querySelectorAll(`input[data-req-pick="${id}"]:checked`)].map(i => i.value);
-    if (t.dataset.reqOk && !only.length) return toast("Tick the credentials to allow, or press Refuse", true);
+    if (approve && !only.length) return toast("Tick the credentials to allow, or press Refuse", true);
     try {
-      if (t.dataset.reqOk) {
-        await act("secret", { action: "approve", request: id, only });
-        toast(`Allowed ${only.join(", ")}`);
+      if (approve) {
+        await act("secret", { action: "approve", request: id, only, future });
+        toast(future ? `Allowed ${only.join(", ")} (manager approves in the future)` : `Allowed ${only.join(", ")}`);
       } else {
         await act("secret", { action: "refuse", request: id });
         toast("Refused");

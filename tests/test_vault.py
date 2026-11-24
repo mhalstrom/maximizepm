@@ -1493,6 +1493,52 @@ class Requests(Base):
         res_loose2 = vault.approve(self.c, r_loose2["request"], ["loose-1", "loose-2"], actor="mark")
         self.assertEqual(res_loose2["set"], f"{res_loose1['set']}-2")
 
+    def test_approve_future_sets_allow_only_for_ticked_and_propose_grants_later(self):
+        # #7018: 'Approve, and let the manager approve these in the future' (CLI --future and op approve future=True)
+        # grants the ticked credentials and sets ask='allow' only for them; an unticked one stays 'ask'; an agent or
+        # the manager cannot set allow; a later propose for the allowed credential grants at once, logged.
+        from river.routes import secrets as routes_secrets
+        r = vault.request(self.c, "stripe-live", "billing", "dev")
+        vault.propose(self.c, r["request"], ["stripe-key", "stripe-webhook"], ["stripe-key"], actor="manager-1")
+        # Neither a worker nor the manager can approve with future=True or always=[...].
+        for who in ("dev", "manager-1"):
+            with self.assertRaises(RiverError) as e:
+                vault.approve(self.c, r["request"], ["stripe-key"], actor=who, future=True)
+            self.assertIn("only a person may change when a credential is asked for", str(e.exception))
+            with self.assertRaises(RiverError) as e:
+                routes_secrets.act(self.c, {"action": "approve", "request": r["request"],
+                                            "only": ["stripe-key"], "always": ["stripe-key"]}, who)
+            self.assertIn("only a person may change when a credential is asked for", str(e.exception))
+        # The person approves via CLI --future: grants stripe-key and sets only stripe-key to allow.
+        rc, out = self.run_cli(["--as", "mark", "secret", "approve", r["request"], "--future"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("manager may approve these in the future", out)
+        asks = {x["name"]: x["ask"] for x in vault.listing(self.c)["secrets"]}
+        self.assertEqual((asks["stripe-key"], asks["stripe-webhook"]), ("allow", "ask"))
+        self.assertEqual(vault.get(self.c, "stripe-key", "dev"), b"v-stripe-key")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "stripe-webhook", "dev")
+        # Later request for stripe-key: manager's propose grants at once with no alert to mark, and logs the grant.
+        core.register(self.c, "dev2")
+        iid2 = core.item_add(self.c, "site", "second task", actor="t")["id"]
+        core.claim(self.c, iid2, "dev2")
+        mark_alerts_before = self.c.execute(
+            "SELECT COUNT(*) FROM messages WHERE kind='alert' AND to_agent='mark'").fetchone()[0]
+        r2 = vault.request(self.c, ["stripe-key"], "more billing", "dev2")
+        p2 = vault.propose(self.c, r2["request"], ["stripe-key"], ["stripe-key"], actor="manager-1")
+        self.assertEqual((p2["state"], p2["chosen"], p2["decided_by"]), ("granted", ["stripe-key"], "manager-1"))
+        self.assertIsNone(p2["to"])
+        mark_alerts_after = self.c.execute(
+            "SELECT COUNT(*) FROM messages WHERE kind='alert' AND to_agent='mark'").fetchone()[0]
+        self.assertEqual(mark_alerts_after, mark_alerts_before)
+        self.assertEqual(vault.get(self.c, "stripe-key", "dev2"), b"v-stripe-key")
+        self.assertIn(f"granted by manager-1: {p2['grant']}", "\n".join(vault.grant_summary(self.c)))
+        # A later request that includes the unticked stripe-webhook still asks mark.
+        r3 = vault.request(self.c, ["stripe-key", "stripe-webhook"], "both", "dev2")
+        p3 = vault.propose(self.c, r3["request"], ["stripe-key", "stripe-webhook"],
+                           ["stripe-key", "stripe-webhook"], actor="manager-1")
+        self.assertEqual((p3["state"], p3["to"]), ("asked", "mark"))
+
 
 if __name__ == "__main__":
     unittest.main()

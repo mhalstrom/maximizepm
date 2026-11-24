@@ -110,13 +110,18 @@ def approve_signins(conn, a, who):
     wrong = [s for s in pick if s not in r["sites"]]
     if wrong:
         raise RiverError(f"{', '.join(wrong)}: not asked in {r['request']} (it asks for {', '.join(r['sites'])})")
+    future = bool(a.get("future"))
     if not vault.session_of(conn, who)["person"]:
+        if future or (a.get("always") or []):
+            vault._person_only(conn, who, "change when a credential is asked for")
         asked = [s for s in pick if not vault.free_signin(conn, s)]
         if asked:  # vault.approve refuses anyone but the manager; for the manager, name the sites that ask
             vault._person_only(conn, who, f"allow the sign-ins of {', '.join(asked)} (Ask me)")
         return {**vault.approve(conn, r["id"], [vault.free_signin(conn, s) for s in pick], who, a.get("note")),
                 "saved": []}
     always = {vault.norm_site(s) for s in (a.get("always") or []) if s.strip()}
+    if future:
+        always |= set(pick)
     project, _, session = (r["source"] or "").partition("/")
     if not conn.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
         raise RiverError(f"request {r['request']} names no project of a browser: ask again with --from")
@@ -139,7 +144,10 @@ def approve_signins(conn, a, who):
                                         who)["secret"])
         if site in always:
             vault.set_ask(conn, names[-1], "allow", who)
-    return {**vault.approve(conn, r["id"], names, who, a.get("note")), "saved": names}
+    out = {**vault.approve(conn, r["id"], names, who, a.get("note")), "saved": names}
+    if future:
+        out["future_allowed"] = list(names)
+    return out
 
 
 def act(conn, a, who):
@@ -164,9 +172,13 @@ def act(conn, a, who):
     if action == "approve" and vault._request(conn, a.get("request"))["sites"]:
         return approve_signins(conn, a, who)
     if action == "approve":
-        res = vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"))
-        always = [n for n in (a.get("always") or []) if n in res.get("chosen", [])]
-        if always and vault.session_of(conn, who)["person"]:
+        future = bool(a.get("future"))
+        raw_always = [n for n in (a.get("always") or []) if n]
+        if raw_always and not vault.session_of(conn, who)["person"]:
+            vault._person_only(conn, who, "change when a credential is asked for")
+        res = vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"), future=future)
+        if not future:
+            always = [n for n in raw_always if n in res.get("chosen", [])]
             for n in always:
                 vault.set_ask(conn, n, "allow", who)
         return res

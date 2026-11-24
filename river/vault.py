@@ -1767,6 +1767,13 @@ def propose(conn, rid, offered=None, ticked=None, reason=None, actor=None):
     if not people:
         raise RiverError("no person is registered to ask (maxpm register <name> --human)")
     reason = (reason or r["reason"] or "").strip()
+    if ticked and _all_allow(conn, ticked):
+        with core.tx(conn):
+            conn.execute("UPDATE secret_requests SET proposed_by=?, proposed_at=?, offered=?, ticked=?, reason=? "
+                         "WHERE id=?", (who["name"], core.iso(core.now()), json.dumps(offered), json.dumps(ticked),
+                                        reason, r["id"]))
+        res = approve(conn, r["id"], ticked, actor=who["name"], note=reason or None)
+        return {**res, "to": None}
     with core.tx(conn):
         conn.execute("UPDATE secret_requests SET state='asked', proposed_by=?, proposed_at=?, offered=?, ticked=?, "
                      "reason=? WHERE id=?", (who["name"], core.iso(core.now()), json.dumps(offered), json.dumps(ticked),
@@ -1809,13 +1816,16 @@ def _new_set_name(conn, r):
     return name
 
 
-def approve(conn, rid, chosen=None, actor=None, note=None):
+def approve(conn, rid, chosen=None, actor=None, note=None, future=False):
     """The person's OK: grants the chosen credentials (default: the ticked ones) to the request's scope. When the
     chosen credentials are exactly an existing set, grants that set with no new set; otherwise creates a set named
     from the item (#6916). A person; or the manager, when the person allows each chosen credential without asking
-    (#5842)."""
+    (#5842). With future=True (a person only, #7018), also sets each chosen credential to ask='allow' so the manager
+    may approve future requests for them without asking."""
     import json
     who = session_of(conn, actor)
+    if future and not who["person"]:
+        _person_only(conn, actor, "change when a credential is asked for")
     r = _request(conn, rid)
     if r["state"] not in ("open", "asked"):
         raise RiverError(f"request r{r['id']} is {r['state']}")
@@ -1851,7 +1861,7 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
                      "(SELECT id FROM secret_sets WHERE name=?), grant_id=?, note=COALESCE(?, note) WHERE id=?",
                      (actor, at, json.dumps(pick), name, g["id"], note, r["id"]))
         _close_request_alerts(conn, r["id"], at)
-        for to in {r["asked_by"], r["proposed_by"]} - {None}:
+        for to in {r["asked_by"], r["proposed_by"]} - {None, actor}:
             core._send(conn, "notice", "maxpm", f"{actor or 'the person'} allowed {', '.join(pick)} for request "
                        f"r{r['id']} ({g['covers']}): run the command again", to=to, item_id=r["item_id"])
         # #5840: the session released its task and blocked it on this request (policy p154: it does not wait at its
@@ -1862,7 +1872,15 @@ def approve(conn, rid, chosen=None, actor=None, note=None):
             conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, "
                          "blocked_set_by=NULL WHERE id=?", (r["item_id"],))
             core._event(conn, r["item_id"], actor, f"outside blocker cleared: request r{r['id']} allowed")
-    return {**request_info(conn, _request(conn, rid)), "grant": g["grant"], "set": name}
+    future_allowed = []
+    if future:
+        for n in pick:
+            set_ask(conn, n, "allow", actor)
+            future_allowed.append(n)
+    out = {**request_info(conn, _request(conn, rid)), "grant": g["grant"], "set": name}
+    if future_allowed:
+        out["future_allowed"] = future_allowed
+    return out
 
 
 def refuse(conn, rid, note=None, actor=None):
